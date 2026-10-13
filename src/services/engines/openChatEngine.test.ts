@@ -4520,6 +4520,7 @@ describe('openChatEngine.onMessageCommitted', () => {
       && (event.payload as { eventType?: string }).eventType === 'world_influence_rule_evaluated'
     ));
     expect(ruleEval).toBeTruthy();
+    expect(ruleEval?.summary).toBe('世界影响规则词面诊断：命中 3/3');
     expect((ruleEval?.payload as { matchedRuleIds?: string[] }).matchedRuleIds).toEqual([
       'comfort_first',
       'urgent_calendar_first',

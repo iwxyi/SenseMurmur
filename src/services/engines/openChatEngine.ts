@@ -2202,7 +2202,7 @@ async function onMessageCommitted(params: {
         return createRuntimeEventV2({
           conversationId: params.conversation.id,
           kind: 'action_resolution',
-          summary: `世界影响规则执行：命中 ${matchedRuleIds.length}/${worldInfluence.activeRuleIds.length}`,
+          summary: `世界影响规则词面诊断：命中 ${matchedRuleIds.length}/${worldInfluence.activeRuleIds.length}`,
           actorIds: [publicMessage.senderId],
           visibility: 'derived_public',
           payload: {

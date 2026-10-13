@@ -147,37 +147,6 @@ function resolveWorldDrivenCandidateCreatedAt(chat: GroupChat, actorId: string, 
   return Math.max(updatedAt, Math.min(now - 5 * 60_000, updatedAt + offlineWindowMs + offsetMs));
 }
 
-function readWorldInfluenceBias(chat: GroupChat, actorId: string, now = Date.now()) {
-  const latest = (chat.runtimeEventsV2 || [])
-    .slice()
-    .reverse()
-    .find((event) => {
-      if (event.kind !== 'action_resolution') return false;
-      if ((event.actorIds || [])[0] !== actorId) return false;
-      if (now - event.createdAt > 2 * 60 * 60_000) return false;
-      const payload = event.payload as { eventType?: string };
-      return payload.eventType === 'world_influence_rule_evaluated';
-    });
-  if (!latest) {
-    return {
-      comfortBoost: 0,
-      scheduleBoost: 0,
-      restraintPenalty: 0,
-    };
-  }
-  const payload = latest.payload as {
-    matchedRuleIds?: string[];
-    unmetRuleIds?: string[];
-  };
-  const matched = new Set(payload.matchedRuleIds || []);
-  const unmet = new Set(payload.unmetRuleIds || []);
-  return {
-    comfortBoost: matched.has('comfort_first') ? 0.05 : 0,
-    scheduleBoost: matched.has('urgent_calendar_first') || matched.has('calendar_conflict_clarify_first') ? 0.06 : 0,
-    restraintPenalty: unmet.has('low_pressure_restraint') ? 0.04 : 0,
-  };
-}
-
 function readActionCooldownNextSuggestedAt(
   chat: GroupChat,
   actorId: string,
@@ -1207,20 +1176,8 @@ async function buildWorldDrivenCandidate(
   if (!canPrivateMessage && !canAskFollowup && !canCheckIn && !canReactMoment && !canPostMoment && !canStatus && !canInviteActivity && !canCalendarReminder) {
     return { candidate: null };
   }
-  const bias = readWorldInfluenceBias(chat, attention.actorId, now);
   const baseConfidence = attention.attentionScore * (1 - attention.restraint * 0.35);
-  const confidence = Math.max(
-    0.72,
-    Math.min(
-      0.95,
-      baseConfidence
-        + (eventKind === 'check_in' ? bias.comfortBoost : 0)
-        + (eventKind === 'status_update' ? bias.scheduleBoost : 0)
-        - (eventKind === 'social_outing' ? bias.scheduleBoost * 0.5 : 0)
-        - (eventKind === 'post_moment' ? bias.scheduleBoost * 0.45 : 0)
-        - ((eventKind === 'check_in' || eventKind === 'social_outing' || eventKind === 'post_moment') ? bias.restraintPenalty : bias.restraintPenalty * 0.5)
-    ),
-  );
+  const confidence = Math.max(0.72, Math.min(0.95, baseConfidence));
   const relatedCharacters = characters.filter((item) => item.id !== attention.actorId && chat.memberIds.includes(item.id));
   const companionshipSeeds = eventKind === 'post_moment' && actor
     ? buildCompanionshipArtifactSeeds({

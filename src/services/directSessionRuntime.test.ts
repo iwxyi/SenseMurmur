@@ -1537,7 +1537,10 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     expect((worldCandidate?.payload as { activityType?: string }).activityType).toBe('日程提醒');
   });
 
-  it('boosts world-driven check_in confidence from comfort_first influence evaluation', async () => {
+  it.each([
+    { matchedRuleIds: ['comfort_first'], unmetRuleIds: [] },
+    { matchedRuleIds: [], unmetRuleIds: ['low_pressure_restraint'] },
+  ])('keeps world-driven check_in confidence independent of lexical diagnostics %j', async (diagnostics) => {
     const now = Date.now();
     const baseChat = {
       ...buildChatWithEvents([
@@ -1576,8 +1579,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
         visibility: 'derived_public',
         payload: {
           eventType: 'world_influence_rule_evaluated',
-          matchedRuleIds: ['comfort_first'],
-          unmetRuleIds: [],
+          ...diagnostics,
         },
       } as RuntimeEventV2],
     };
@@ -1607,10 +1609,11 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     expect(influencedCandidate).toBeTruthy();
     const baseConfidence = (baseCandidate?.payload as { confidence?: number }).confidence || 0;
     const influencedConfidence = (influencedCandidate?.payload as { confidence?: number }).confidence || 0;
-    expect(influencedConfidence).toBeGreaterThan(baseConfidence);
+    expect(influencedConfidence).toBe(baseConfidence);
+    expect(influencedCandidate?.payload).toEqual(baseCandidate?.payload);
   });
 
-  it('boosts world-driven status_update confidence from urgent_calendar_first influence evaluation', async () => {
+  it('keeps world-driven status_update confidence independent of lexical diagnostics', async () => {
     const now = Date.now();
     const baseChat = {
       ...buildChatWithEvents([
@@ -1691,7 +1694,8 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     expect(influencedCandidate).toBeTruthy();
     const baseConfidence = (baseCandidate?.payload as { confidence?: number }).confidence || 0;
     const influencedConfidence = (influencedCandidate?.payload as { confidence?: number }).confidence || 0;
-    expect(influencedConfidence).toBeGreaterThan(baseConfidence);
+    expect(influencedConfidence).toBe(baseConfidence);
+    expect(influencedCandidate?.payload).toEqual(baseCandidate?.payload);
   });
 
   it('does not call an extra model arbitration request for proactive-care candidates', async () => {
