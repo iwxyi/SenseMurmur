@@ -108,6 +108,116 @@ describe('characterPresence', () => {
     expect(result.characterPatches[0].patch.presence?.lastAwayAt).toBe(1000);
   });
 
+  function ongoingActivity() {
+    const started = applyPresenceUpdateToTransition({ chat, transition, now: 1000,
+      message: message({ content: '一起去探路，三个时辰回来。', metadata: { activityUpdate: {
+        title: '探路', kind: 'travel', status: 'in_progress', startsNow: true,
+        durationMinutes: 180, participantIds: ['b'], availability: 'away', evidenceText: '一起去探路',
+      } } }),
+    });
+    const id = 'actor-activity-m1';
+    const source = { ...chat, ...started.chatPatch, runtimeEventsV2: [...started.chatPatch.runtimeEventsV2!, {
+      id: 'accepted', conversationId: chat.id, kind: 'calendar_item_patch' as const,
+      createdAt: 2000, actorIds: ['b'], visibility: 'public' as const,
+      payload: { calendarItemId: id, addParticipantStates: { b: 'going' } },
+    }] };
+    const character = { id: 'a', ...started.characterPatches[0].patch } as AICharacter;
+    return { id, source, character, started };
+  }
+
+  it.each([undefined, ['a', 'b']])('preserves timing and accepted participants on a location update: %j', (participantIds) => {
+    const { id, source, character } = ongoingActivity();
+    const now = 1000 + 60 * 60_000;
+    const result = applyPresenceUpdateToTransition({ chat: source, characters: [character], transition, now,
+      message: message({ id: 'location', content: '还在探路，到了城南。', metadata: { activityUpdate: {
+        calendarItemId: id, title: '探路', kind: 'travel', status: 'in_progress',
+        participantIds, availability: 'away', locationHint: '城南', evidenceText: '到了城南',
+      } } }),
+    });
+    const item = projectWorldCalendar([{ ...source, ...result.chatPatch }], [], { now }).items[0];
+    expect(item).toMatchObject({ startAt: 1000, endAt: 1000 + 180 * 60_000, durationMinutes: 180,
+      participantIds: ['a', 'b'], participantStates: { a: 'going', b: 'going' }, locationHint: '城南' });
+    expect(result.characterPatches[0].patch.presence).toMatchObject({
+      unavailableUntil: 1000 + 180 * 60_000, lastAwayAt: 1000,
+    });
+  });
+
+  it('updates remaining time from now and keeps the linked absence window aligned', () => {
+    const { id, source, character } = ongoingActivity();
+    const now = 1000 + 60 * 60_000;
+    const result = applyPresenceUpdateToTransition({ chat: source, characters: [character], transition, now,
+      message: message({ id: 'remaining', content: '还要两个时辰。', metadata: { activityUpdate: {
+        calendarItemId: id, title: '探路', kind: 'travel', status: 'in_progress',
+        durationMinutes: 120, evidenceText: '还要两个时辰',
+      } } }),
+    });
+    const item = projectWorldCalendar([{ ...source, ...result.chatPatch }], [], { now }).items[0];
+    expect(item).toMatchObject({ startAt: 1000, endAt: now + 120 * 60_000, durationMinutes: 120 });
+    expect(result.characterPatches[0].patch.presence).toMatchObject({ status: 'away',
+      unavailableUntil: item.endAt, lastAwayAt: 1000 });
+  });
+
+  it('honors an explicit new start instead of preserving the original time', () => {
+    const { id, source } = ongoingActivity();
+    const now = 1000 + 60 * 60_000;
+    const result = applyPresenceUpdateToTransition({ chat: source, transition, now,
+      message: message({ id: 'reschedule', content: '明日再出发。', metadata: { activityUpdate: {
+        calendarItemId: id, title: '探路', kind: 'travel', status: 'planned', startAt: now + 24 * 60 * 60_000,
+        durationMinutes: 90, evidenceText: '明日再出发',
+      } } }),
+    });
+    const item = projectWorldCalendar([{ ...source, ...result.chatPatch }], [], { now }).items[0];
+    expect(item).toMatchObject({ status: 'planned', startAt: now + 24 * 60 * 60_000,
+      endAt: now + (24 * 60 + 90) * 60_000, participantStates: { a: 'going', b: 'going' } });
+    expect(result.characterPatches).toEqual([]);
+  });
+
+  it.each(['completed', 'cancelled'] as const)('preserves an activity history when it is %s', (status) => {
+    const { id, source, character } = ongoingActivity();
+    const now = 1000 + 60 * 60_000;
+    const result = applyPresenceUpdateToTransition({ chat: source, characters: [character], transition, now,
+      message: message({ id: 'finish', content: '探路结束了。', metadata: { activityUpdate: {
+        calendarItemId: id, title: '探路', kind: 'travel', status, evidenceText: '探路结束了',
+      } } }),
+    });
+    const item = projectWorldCalendar([{ ...source, ...result.chatPatch }], [], { now }).items[0];
+    expect(item).toMatchObject({ status, startAt: 1000, endAt: now,
+      participantStates: { a: 'going', b: 'going' } });
+    expect(result.characterPatches[0].patch.presence?.status).toBe('online');
+  });
+
+  it('reads activity state already accumulated in the current transition', () => {
+    const { id, started } = ongoingActivity();
+    const result = applyPresenceUpdateToTransition({ chat, transition: started, now: 5000,
+      message: message({ id: 'second-bubble', content: '到了城南。', metadata: { activityUpdate: {
+        calendarItemId: id, title: '探路', kind: 'travel', status: 'in_progress',
+        locationHint: '城南', evidenceText: '到了城南',
+      } } }),
+    });
+    const item = projectWorldCalendar([{ ...chat, ...result.chatPatch }], [], { now: 5000 }).items[0];
+    expect(item).toMatchObject({ startAt: 1000, endAt: 1000 + 180 * 60_000,
+      participantStates: { a: 'going', b: 'invited' }, locationHint: '城南' });
+  });
+
+  it('bounds a new absence during an existing activity without a known end', () => {
+    const started = applyPresenceUpdateToTransition({ chat, transition, now: 1000,
+      message: message({ content: '正在修器械。', metadata: { activityUpdate: {
+        title: '修器械', kind: 'preparation', status: 'in_progress', availability: 'online',
+        evidenceText: '正在修器械',
+      } } }),
+    });
+    const now = 60_000;
+    const result = applyPresenceUpdateToTransition({ chat: { ...chat, ...started.chatPatch }, transition, now,
+      message: message({ id: 'away', content: '先不聊了。', metadata: { activityUpdate: {
+        calendarItemId: 'actor-activity-m1', title: '修器械', kind: 'preparation', status: 'in_progress',
+        availability: 'away', evidenceText: '先不聊了',
+      } } }),
+    });
+    const item = projectWorldCalendar([{ ...chat, ...result.chatPatch }], [], { now }).items[0];
+    expect(item).toMatchObject({ startAt: 1000, endAt: now + 30 * 60_000 });
+    expect(result.characterPatches[0].patch.presence?.unavailableUntil).toBe(item.endAt);
+  });
+
   it('closes the previous interval when the speaker starts a different activity', () => {
     const character = { id: 'a', presence: { status: 'away', updatedAt: 1000, calendarItemId: 'trip', unavailableUntil: 100_000 } } as AICharacter;
     const result = applyPresenceUpdateToTransition({ chat, characters: [character], transition, now: 5000,

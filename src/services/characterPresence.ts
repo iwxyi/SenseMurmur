@@ -2,6 +2,7 @@ import type { AICharacter, CharacterPresenceState } from '../types/character';
 import type { DriverMessageCommitTransition, GroupChat } from '../types/chat';
 import type { Message, MessageActivityUpdate, MessagePresenceUpdate } from '../types/message';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
+import { projectWorldCalendar } from './worldRuntimeProjection';
 
 const MIN_AWAY_MINUTES = 3;
 const MAX_AWAY_MINUTES = 30 * 24 * 60;
@@ -73,16 +74,34 @@ export function applyPresenceUpdateToTransition(params: {
   if (validActivity && params.chat) {
     patch = null;
     // Only the speaker's own activity records can be updated through this channel.
-    const existing = validActivity.calendarItemId && params.chat.runtimeEventsV2?.find((event) => (
-      (event.payload as Record<string, unknown>).calendarItemId === validActivity.calendarItemId
+    const currentEvents = new Map((params.transition.chatPatch.runtimeEventsV2 || params.chat.runtimeEventsV2 || []).map((event) => [event.id, event]));
+    params.transition.chatRuntimeDelta?.runtimeEventsV2?.upserts.forEach((event) => currentEvents.set(event.id, event));
+    const currentChat = { ...params.chat, runtimeEventsV2: [...currentEvents.values()] };
+    const ownedEvent = validActivity.calendarItemId && currentChat.runtimeEventsV2.find((event) => (
+      event.kind === 'calendar_item_patch'
+      && (!event.visibility || event.visibility === 'public')
+      && (event.payload as Record<string, unknown>).calendarItemId === validActivity.calendarItemId
       && event.actorIds?.includes(params.message.senderId)
     ));
-    if (validActivity.calendarItemId && !existing && speaker?.presence?.calendarItemId !== validActivity.calendarItemId) return params.transition;
+    if (validActivity.calendarItemId && !ownedEvent && speaker?.presence?.calendarItemId !== validActivity.calendarItemId) return params.transition;
+    const existing = validActivity.calendarItemId
+      ? projectWorldCalendar([currentChat], params.characters || [], { now }).items.find((item) => item.id === calendarItemId)
+      : undefined;
+    const linkedPresence = speaker?.presence?.calendarItemId === calendarItemId ? speaker.presence : undefined;
     const startAt = validActivity.startsNow ? now : validActivity.startAt
-      ?? (validActivity.status === 'in_progress' ? now : undefined);
+      ?? existing?.startAt ?? (validActivity.status === 'in_progress' ? linkedPresence?.updatedAt ?? now : undefined);
+    const needsAwayWindow = validActivity.availability === 'away' && existing?.endAt == null
+      && linkedPresence?.unavailableUntil == null && validActivity.durationMinutes === undefined;
     const durationMinutes = validActivity.durationMinutes
-      ?? (validActivity.availability === 'away' ? 30 : undefined);
-    const endAt = startAt !== undefined && durationMinutes !== undefined ? startAt + durationMinutes * 60_000 : undefined;
+      ?? existing?.durationMinutes ?? (needsAwayWindow ? 30 : undefined);
+    // An ongoing activity's explicit duration describes the time remaining from this update.
+    const timingChanged = validActivity.startsNow || validActivity.startAt !== undefined || validActivity.durationMinutes !== undefined;
+    const durationOrigin = validActivity.status === 'in_progress' && !validActivity.startsNow && validActivity.startAt === undefined
+      && validActivity.durationMinutes !== undefined ? now : startAt;
+    const endAt = timingChanged || !existing
+      ? durationOrigin !== undefined && durationMinutes !== undefined ? durationOrigin + durationMinutes * 60_000 : undefined
+      : existing.endAt ?? linkedPresence?.unavailableUntil
+        ?? (needsAwayWindow && durationMinutes !== undefined ? now + durationMinutes * 60_000 : undefined);
     const isCurrent = validActivity.status === 'in_progress' && startAt !== undefined && startAt <= now
       && (endAt === undefined || endAt > now);
     const participantIds = Array.from(new Set([params.message.senderId,
@@ -90,17 +109,24 @@ export function applyPresenceUpdateToTransition(params: {
     addEvent(`actor-activity-event-${params.message.id}`, {
       calendarItemId, title: validActivity.title, kind: validActivity.kind,
       status: validActivity.status === 'in_progress' && !isCurrent ? 'planned' : validActivity.status,
-      participantIds, participantStates: Object.fromEntries(participantIds.map((id) => [id, id === params.message.senderId ? 'going' : 'invited'])),
+      ...(existing ? {
+        addParticipantIds: participantIds,
+        addParticipantStates: Object.fromEntries(participantIds.map((id) => [id,
+          id === params.message.senderId ? 'going' : existing.participantStates[id] || 'invited'])),
+      } : {
+        participantIds, participantStates: Object.fromEntries(participantIds.map((id) => [id, id === params.message.senderId ? 'going' : 'invited'])),
+      }),
       startAt, endAt: validActivity.status === 'completed' || validActivity.status === 'cancelled' ? now : endAt,
       durationMinutes, timeHint: validActivity.timeHint, locationHint: validActivity.locationHint,
       availabilityByActor: validActivity.availability ? { [params.message.senderId]: validActivity.availability } : undefined,
       evidenceText: validActivity.evidenceText,
     }, validActivity.title);
-    if (isCurrent && validActivity.availability) {
-      patch = { presence: { status: validActivity.availability, activity: validActivity.title,
-        unavailableUntil: validActivity.availability === 'away' ? endAt : undefined,
+    const availability = validActivity.availability ?? (timingChanged ? linkedPresence?.status : undefined);
+    if (isCurrent && availability) {
+      patch = { presence: { status: availability, activity: validActivity.title,
+        unavailableUntil: availability === 'away' ? endAt : undefined,
         updatedAt: now, sourceMessageId: params.message.id, calendarItemId,
-        locationHint: validActivity.locationHint } };
+        locationHint: validActivity.locationHint ?? existing?.locationHint ?? linkedPresence?.locationHint } };
     }
     if ((validActivity.status === 'completed' || validActivity.status === 'cancelled')
       && speaker?.presence?.calendarItemId === calendarItemId) {
@@ -125,7 +151,9 @@ export function applyPresenceUpdateToTransition(params: {
     }, '角色已结束此前活动');
   }
   if (patch?.presence) {
-    patch.presence.lastAwayAt = patch.presence.status === 'away' ? now : lastAwayAt;
+    patch.presence.lastAwayAt = patch.presence.status === 'away'
+      ? speaker?.presence?.status === 'away' && speaker.presence.calendarItemId === patch.presence.calendarItemId ? lastAwayAt : now
+      : lastAwayAt;
   }
   if (!patch && !events.length) return params.transition;
   const characterPatches = [...params.transition.characterPatches];
