@@ -477,6 +477,33 @@ describe('scheduler speaker scoring', () => {
     expect(candidates.map((candidate) => candidate.characterId)).toEqual(['c']);
   });
 
+  it('opens rotation after both sides of a directed exchange have spoken', () => {
+    const now = Date.now();
+    const characters = [
+      buildCharacter('a', '甲'),
+      buildCharacter('b', '乙'),
+      buildCharacter('c', '丙', {
+        personality: { openness: 70, extroversion: 55, agreeableness: 55, neuroticism: 45, humor: 55, creativity: 60, assertiveness: 60, empathy: 60 },
+        behavior: { proactivity: 35, aggressiveness: 20, humorIntensity: 20, empathyLevel: 45, summarizing: 25, offTopic: 10 },
+      }),
+    ];
+    const messages = [
+      buildMessage({ id: 'm1', senderId: 'a', content: '乙，你先说。', timestamp: now - 20_000 }),
+      buildMessage({ id: 'm2', senderId: 'b', content: '我说完了。', timestamp: now - 10_000 }),
+    ];
+    const candidates = calculateWeights(
+      characters,
+      messages,
+      {}, 1, 0,
+      { targetIds: ['a'], primaryTargetId: 'a', sourceSpeakerId: 'b', sourceMessageId: 'm2', unmetTurns: 1, strength: 'soft' },
+      { ...buildChat(), memberIds: ['a', 'b', 'c'] },
+      { source: 'conversation_reply', beatType: 'answer', targetActorIds: ['a'], pressure: 0.82, reason: '待回应' },
+    );
+
+    expect(candidates.map((candidate) => candidate.characterId)).toEqual(['c']);
+    expect(candidates[0]?.scoreBreakdown?.reasons).toContain('unspoken_member');
+  });
+
   it('keeps the pending responder without treating unspoken rotation as pressure', () => {
     const now = Date.now();
     const latest = buildMessage({ id: 'm3', senderId: 'a', senderName: '甲', content: '乙，那你的规矩是什么？', timestamp: now - 5_000 });

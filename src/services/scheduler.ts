@@ -101,7 +101,10 @@ function collapseGeneratedBubbleTurns(messages: Message[]) {
 function hasTwoActorExchangeLoop(recentAiMessages: Message[], sourceSpeakerId?: string | null, targetId?: string | null) {
   if (!sourceSpeakerId || !targetId || sourceSpeakerId === targetId) return false;
   const recent = recentAiMessages.slice(-4);
-  if (recent.length < 3) return false;
+  // A directed two-person exchange is already a loop after both sides have
+  // taken a turn. Waiting for a third turn lets the same pair monopolize a
+  // three-person room before rotation can intervene.
+  if (recent.length < 2) return false;
   const pair = new Set([sourceSpeakerId, targetId]);
   return recent.every((message) => pair.has(message.senderId))
     && recent.some((message) => message.senderId === sourceSpeakerId)
@@ -258,6 +261,7 @@ export function resolvePendingReplyContext(characters: AICharacter[], recentMess
     sourceMessage: Message;
     targetIds: string[];
     explicitTargetIds: string[];
+    replyWorthyTargetIds: string[];
     unmetTurns: number;
   }> = [];
   for (let sourceIndex = recentWindow.length - 1; sourceIndex >= 0; sourceIndex -= 1) {
@@ -294,6 +298,7 @@ export function resolvePendingReplyContext(characters: AICharacter[], recentMess
       sourceMessage,
       targetIds: unresolvedTargets,
       explicitTargetIds: explicit.filter((targetId) => unresolvedTargets.includes(targetId)),
+      replyWorthyTargetIds: getReplyWorthyInteractionTargetIds(candidate, characters).filter((targetId) => unresolvedTargets.includes(targetId)),
       unmetTurns: countUnmetTurns(recentAiMessages, unresolvedTargets[0], sourceMessage.id),
     });
   }
@@ -302,7 +307,7 @@ export function resolvePendingReplyContext(characters: AICharacter[], recentMess
   const selected = pending.filter((item) => item.explicitTargetIds.length && item.unmetTurns >= 2).at(-1)
     || pending[0];
   if (!selected) return null;
-  const { sourceMessage, targetIds, explicitTargetIds } = selected;
+  const { sourceMessage, targetIds, explicitTargetIds, replyWorthyTargetIds } = selected;
 
   const primaryTargetId = explicitTargetIds.find((targetId) => targetIds.includes(targetId)) || targetIds[0] || null;
   if (!primaryTargetId) return null;
@@ -326,7 +331,8 @@ export function resolvePendingReplyContext(characters: AICharacter[], recentMess
     sourceSpeakerId: sourceMessage.senderId,
     sourceMessageId: sourceMessage.id,
     unmetTurns,
-    strength: explicitTargetIds.includes(primaryTargetId) || repeatedAddressingCount >= 2 || unmetTurns >= 2 ? 'strong' : 'soft',
+    strength: explicitTargetIds.includes(primaryTargetId) || replyWorthyTargetIds.includes(primaryTargetId)
+      || repeatedAddressingCount >= 2 || unmetTurns >= 2 ? 'strong' : 'soft',
   };
 }
 
@@ -386,6 +392,15 @@ export function calculateWeights(
     pendingReplyContext?.primaryTargetId,
   );
   const twoActorDominance = hasTwoActorDominance(recentAiTurns);
+  const directedPairDominance = Boolean(
+    chat?.type === 'group'
+      && directorIntent?.source !== 'user_message'
+      && recentAiTurns.length >= 2
+      && directorIntent?.targetActorIds.length === 2
+      && directorIntent.targetActorIds.includes(recentAiTurns.at(-1)?.senderId || '')
+      && directorIntent.targetActorIds.includes(recentAiTurns.at(-2)?.senderId || '')
+      && recentAiTurns.at(-1)?.senderId !== recentAiTurns.at(-2)?.senderId,
+  );
 
   const cooldownDuration = baseCooldownMs / speed;
   const recentText = buildSchedulerTopicText(recentMessages, directorIntent);
@@ -459,7 +474,7 @@ export function calculateWeights(
         && recentCount === 0
         && recentAiTurns.length >= Math.min(2, speakableCharacters.length - 1)
         && !forcedUserGuidanceActorIds.length
-        && (pendingTwoActorLoop || twoActorDominance)
+        && (pendingTwoActorLoop || twoActorDominance || directedPairDominance)
         ? (pendingReplyContext?.primaryTargetId ? ((pendingTwoActorLoop || twoActorDominance) ? 0.38 : 0.08) : 0.22)
         : 0;
       const conflictBias = getConflictSpeakerBias(char, conflictContext, lastSpeakerId);
@@ -608,6 +623,7 @@ export function calculateWeights(
       const hasExternalPressure = Boolean(
         forcedUserGuidanceActorIds.includes(char.id)
         || pendingReplyBoost
+        || (unspokenMemberBias > 0 && (pendingReplyContext?.strength === 'soft' || directedPairDominance))
         || conflictBias
         || directorBias.bias
         || guidanceFloorGuardianBias
@@ -674,10 +690,11 @@ export function calculateWeights(
     && speakableCharacters.length >= 3
     // Model-derived reply debt is a soft cue. After a two-person loop it must
     // yield once to a willing absent member; explicit user addressing remains hard.
-    && (!pendingReplyContext || pendingTwoActorLoop || twoActorDominance)
+    && (!pendingReplyContext
+      || (pendingReplyContext.strength === 'soft' && (pendingTwoActorLoop || twoActorDominance || directedPairDominance)))
     && !forcedUserGuidanceActorIds.length
     && !hasHardUserAddress
-    && (pendingTwoActorLoop || twoActorDominance)
+    && (pendingTwoActorLoop || twoActorDominance || directedPairDominance)
     ? new Set(speakableCharacters
       .filter((character) => (recentSpeakCounts[character.id] || 0) === 0)
       .map((character) => character.id))

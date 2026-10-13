@@ -318,6 +318,38 @@ describe('turnDirective', () => {
     expect(prompt).not.toContain('Active target: 陈越');
   });
 
+  it('projects structured room atmosphere into ordinary group turns without assigning a speaker', () => {
+    const directive = buildTurnDirective({
+      chat: chat({ worldState: {
+        ...DEFAULT_CONVERSATION_WORLD_STATE,
+        structuredRoomState: {
+          heat: 72,
+          cohesion: -28,
+          topicDrift: 24,
+          dominantThread: ['rui', 'chen'],
+          alliances: [['rui', 'chen']],
+          conflictPairs: [['rui', 'chen']],
+          pileOnTarget: 'chen',
+          silencedActors: ['rui'],
+        },
+      } }),
+      speaker: character('rui', '瑞瑞'),
+      members: [character('rui', '瑞瑞'), character('chen', '陈越')],
+      messages: [message()],
+      styleProfile: 'casual_room',
+      intent,
+      innerLife,
+      conversationMovePlan: movePlan,
+      turnPlan,
+    });
+    const prompt = buildTurnDirectivePrompt(directive);
+    expect(prompt).toContain('Room atmosphere:');
+    expect(prompt).toContain('房间气氛偏紧');
+    expect(prompt).toContain('陈越正承受多人注意');
+    expect(prompt).toContain('not a speaking order');
+    expect(prompt).not.toContain('必须由');
+  });
+
   it('keeps planning labels out of the visible dialogue contract', () => {
     const prompt = buildTurnDirectivePrompt({
       roomStyle: 'casual',

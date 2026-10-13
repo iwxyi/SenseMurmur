@@ -1014,6 +1014,49 @@ describe('chatEngine streaming preview', () => {
     expect(prompt).not.toContain('Reply obligation');
   });
 
+  it('projects structured room atmosphere into the final ordinary-group model prompt', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({
+      content: '屋里静了一瞬，没人接着刚才的话说。',
+      interactionHints: null,
+      socialEventHints: null,
+      conflictFocus: null,
+    }));
+    const source = buildCharacter('source', '甲');
+    const target = buildCharacter('target', '乙');
+    const chat = buildChat({
+      memberIds: ['source', 'target'],
+      worldState: {
+        ...DEFAULT_CONVERSATION_WORLD_STATE,
+        structuredRoomState: {
+          heat: 72,
+          cohesion: 18,
+          topicDrift: 64,
+          dominantThread: ['source', 'target'],
+          alliances: [['source', 'target']],
+          conflictPairs: [['source', 'target']],
+          pileOnTarget: 'target',
+          silencedActors: ['source'],
+        },
+      },
+    });
+
+    await generateSpeakerMessage({
+      chat,
+      speaker: target,
+      characters: [source, target],
+      messages: [buildAiMessage('source', '甲', '你刚才那句还没说完。', 1)],
+      apiConfig: buildProfiles(),
+    });
+
+    const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
+    expect(prompt).toContain('Room atmosphere:');
+    expect(prompt).toContain('话题正在发散');
+    expect(prompt).toContain('当前最集中的交流发生在甲与乙之间');
+    expect(prompt).not.toContain('target is required to speak');
+    expect(prompt).not.toContain('source is required to speak');
+  });
+
   it('removes leaked runtime field names from generated visible content', async () => {
     generateResponseMock.mockReset();
     generateResponseMock.mockResolvedValue(JSON.stringify({
