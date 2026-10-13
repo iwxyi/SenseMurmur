@@ -3287,6 +3287,7 @@ async function generateWithPrompt(params: {
   const parsedEnvelope = parseInlineInteractionEnvelope(response, {
     allowContentSalvage: !requiresGroupEnvelope,
     requireConversationUpdate: requiresConversationUpdate,
+    validateActivityUpdate: requiresGroupEnvelope,
   });
   if (streamedProtocolError || containsUnsupportedToolProtocol(response)
     || (parsedEnvelope && containsUnsupportedToolProtocol(JSON.stringify(parsedEnvelope)))) {
@@ -4235,7 +4236,7 @@ export async function generateSpeakerMessage(params: {
 - ${sourceName} left a point that may have been meant for${targetNames.length > 1 ? ` ${targetNames.join('、')}` : ' you'}; it is one thread in the room, not a command.
 - Source turn: ${sourceQuote ? `「${sourceQuote}」` : 'the addressed turn is in the recent transcript'}
 - Decide from the whole exchange whether this deserves attention now. You may answer part of it, answer indirectly, interrupt, return to it later, or let it pass when that is more natural for this person.
-- If your visible reply genuinely creates a new expectation for someone, return addressedTargets for those person(s); otherwise use null.`;
+- Record the current visible addressee in addressedTargets. Use replyDebtTargets separately only when the reply explicitly expects someone to answer next; otherwise return null for replyDebtTargets.`;
     })()
     : '';
   const mediaProfiles = resolveMediaProfiles(params.apiConfig, params.profiles);

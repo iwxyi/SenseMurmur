@@ -241,6 +241,22 @@ describe('chatEngine streaming preview', () => {
     expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
   });
 
+  it('retries malformed activity availability instead of silently removing it', async () => {
+    generateResponseMock.mockReset();
+    const activityUpdate = { title: '巡城', kind: 'activity', status: 'completed', evidenceText: '巡城走完了' };
+    generateResponseMock
+      .mockResolvedValueOnce(JSON.stringify({ messages: [{ content: '巡城走完了。' }], activityUpdate: { ...activityUpdate, availability: true } }))
+      .mockResolvedValueOnce(JSON.stringify({ messages: [{ content: '巡城走完了。' }], activityUpdate }));
+    const message = await generateSpeakerMessage({
+      chat: buildChat(), speaker: buildCharacter('mei', '美羊羊'),
+      characters: [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')],
+      messages: [], apiConfig: buildProfiles(),
+    });
+    expect(generateResponseMock).toHaveBeenCalledTimes(2);
+    expect(generateResponseMock.mock.calls[1]?.[2]).toEqual(generateResponseMock.mock.calls[0]?.[2]);
+    expect(message.metadata?.activityUpdate).toMatchObject({ status: 'completed' });
+  });
+
   it('retries continuity updates that reference a member outside the supplied registry', async () => {
     generateResponseMock.mockReset();
     generateResponseMock
@@ -1041,6 +1057,9 @@ describe('chatEngine streaming preview', () => {
     expect(prompt).toContain('Recent social cue');
     expect(prompt).toContain('not a command');
     expect(prompt).toContain('let it pass');
+    expect(prompt).toContain('Record the current visible addressee in addressedTargets');
+    expect(prompt).toContain('Use replyDebtTargets separately only when the reply explicitly expects someone to answer next');
+    expect(prompt).not.toContain('creates a new expectation for someone, return addressedTargets');
     expect(prompt).not.toContain('Pending reply expectation');
     expect(prompt).not.toContain('live social obligation');
     expect(prompt).not.toContain('Reply obligation');

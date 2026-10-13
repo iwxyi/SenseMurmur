@@ -153,6 +153,25 @@ describe('continuity member reference boundary', () => {
 });
 
 describe('parseInlineInteractionEnvelope story events', () => {
+  const activity = { title: '巡城', kind: 'activity', status: 'in_progress', evidenceText: '还在巡城' };
+  it.each([
+    { availability: true }, { availability: 'available' }, { startsNow: 'true' },
+    { startAt: '1000' }, { startAt: -1 }, { durationMinutes: 0 }, { durationMinutes: '30' },
+    { participantIds: ['mei', 1] }, { participantIds: 'mei' }, { participantIds: [''] },
+    { calendarItemId: 1 }, { timeHint: {} }, { locationHint: ['南门'] }, { title: '' },
+  ])('rejects malformed activity fields before normalization in strict mode: %j', (fields) => {
+    const raw = JSON.stringify({ messages: [{ content: '还在巡城。' }], activityUpdate: { ...activity, ...fields } });
+    expect(parseInlineInteractionEnvelope(raw)).not.toBeNull();
+    expect(parseInlineInteractionEnvelope(raw, { validateActivityUpdate: true })).toBeNull();
+  });
+
+  it.each([undefined, null, activity, { ...activity, availability: 'online', startsNow: false,
+    startAt: null, durationMinutes: null, participantIds: null, calendarItemId: null }])(
+    'keeps absent, null and valid optional activity fields compatible: %j', (activityUpdate) => {
+      expect(parseInlineInteractionEnvelope(JSON.stringify({ messages: [{ content: '还在巡城。' }], activityUpdate }),
+        { validateActivityUpdate: true })).not.toBeNull();
+    });
+
   it.each([
     {}, { conversationUpdate: 'none' }, { conversationUpdate: [] }, { conversationUpdate: {} },
     { conversationUpdate: { items: null } }, { metadata: { conversationUpdate: null } },
@@ -434,6 +453,8 @@ describe('buildInlineInteractionContract analysis room detection', () => {
     expect(contract).toContain('replyDebtTargets is a separate field');
     expect(contract).toContain('A member merely mentioned or affected is not addressed');
     expect(contract).toContain('Use null for replyDebtTargets when no next answer is expected');
+    expect(contract).toContain('a goodbye may still address someone, but with no expected immediate reply it has replyDebtTargets=null');
+    expect(contract).not.toContain('a goodbye with no expected immediate reply has addressedTargets=null');
   });
 
   it('shortens conversation guidance without removing the shared runtime protocol', () => {

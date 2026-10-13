@@ -2763,6 +2763,7 @@ async function runStateReadbackCase(model) {
 async function runStateReadbackSamples(model) {
   const runtime = await loadRuntimeChatModules();
   const envelope = await runtime.server.ssrLoadModule('/src/services/inlineInteractionHint.ts');
+  const segmenter = await runtime.server.ssrLoadModule('/src/services/generatedMessageSegmenter.ts');
   const scenario = runtimeChatflowScenarios().find((item) => item.name === 'longzhong_activity_update_room');
   assertCondition(scenario, 'Missing activity readback fixture');
   const characters = scenario.characters;
@@ -2775,48 +2776,76 @@ async function runStateReadbackSamples(model) {
   const original = runtime.projectWorldCalendar([source], characters, { now, inferTemporalStatus: false }).items[0];
   assertCondition(original, 'Activity readback seed was not committed');
   const fixtures = [
-    { name: 'location_only', content: '大哥，俺刚巡到南门，一路都还安稳。', status: 'in_progress', locationHint: '南门' },
+    { name: 'location_only', content: '大哥，俺刚巡到南门，一路都还安稳。', status: 'in_progress', locationHint: '南门', addressedIds: ['bei'] },
     { name: 'completed', content: '巡城走完了，俺回来了。', status: 'completed' },
     { name: 'remaining_duration', content: '还在南门巡，二十分钟后回来。', status: 'in_progress', locationHint: '南门', durationMinutes: 20 },
+    { name: 'no_activity_change', content: '二哥，你这话倒把俺逗笑了。', addressedIds: ['yu'] },
+    { name: 'question_without_activity_change', content: '二哥，营门那边可安稳？', addressedIds: ['yu'], replyDebtIds: ['yu'] },
+    { name: 'location_and_question_separate_sends', sends: ['大哥，俺刚巡到南门。', '二哥，营门那边可安稳？'],
+      status: 'in_progress', locationHint: '南门', addressedIds: ['bei', 'yu'], replyDebtIds: ['yu'] },
   ];
   const samples = [];
   for (const fixture of fixtures) {
+    logProgress('state readback sample', { model, sample: fixture.name });
     const request = {
       speakerId: 'fei', members: characters.map((item) => ({ id: item.id, name: item.name })),
       knownActivity: { calendarItemId: original.id, title: original.title, kind: original.kind,
         status: original.status, startAt: original.startAt, endAt: original.endAt,
         locationHint: original.locationHint, participantIds: original.participantIds },
-      visibleSends: [fixture.content],
+      visibleSends: fixture.sends || [fixture.content],
     };
     const response = await readFrozenActivityTurn(model, request);
     let parsed = null;
     let error = null;
     try {
       const output = JSON.parse(response.content);
-      assertCondition(Object.hasOwn(output, 'activityUpdate') && Object.hasOwn(output, 'addressedTargets'),
+      assertCondition(['activityUpdate', 'addressedTargets', 'replyDebtTargets'].every((key) => Object.hasOwn(output, key)),
         'Missing explicit readback judgement');
-      parsed = envelope.parseInlineInteractionEnvelope(JSON.stringify({ ...output, messages: [{ content: fixture.content }] }), { allowContentSalvage: false });
+      parsed = envelope.parseInlineInteractionEnvelope(JSON.stringify({ ...output,
+        messages: request.visibleSends.map((content) => ({ content })) }), { allowContentSalvage: false, validateActivityUpdate: true });
       assertCondition(parsed && !envelope.hasInvalidStateEvidence(parsed), 'Invalid readback evidence');
+      for (const [field, expected] of [['addressedTargets', fixture.addressedIds || []], ['replyDebtTargets', fixture.replyDebtIds || []]]) {
+        assertCondition(output[field] === null || parsed[field], `${field} rejected by normalization`);
+        const actual = parsed[field]?.targetIds || [];
+        assertCondition(actual.length === expected.length && expected.every((id) => actual.includes(id)), `Wrong ${field}`);
+      }
+      if (!fixture.status) {
+        assertCondition(output.activityUpdate === null && !parsed.activityUpdate, 'Invented activity update');
+        samples.push({ name: fixture.name, ok: true, request, response: response.content,
+          finishReason: response.raw.choices?.[0]?.finish_reason, parsed, usage: response.usage });
+        continue;
+      }
       assertCondition(parsed.activityUpdate, 'Activity update missing or rejected by production normalization');
       assertCondition(parsed.activityUpdate?.calendarItemId === original.id, 'Original activity ID not reused');
       assertCondition(parsed.activityUpdate.status === fixture.status, 'Wrong activity status');
       assertCondition(!parsed.activityUpdate.startsNow && parsed.activityUpdate.startAt === undefined,
         'Unchanged start time should be omitted');
-      assertCondition(!parsed.addressedTargets?.targetIds?.length, 'Invented reply debt');
+      assertCondition(parsed.activityUpdate.availability == null || parsed.activityUpdate.availability === 'online',
+        'Invented departure');
       if (fixture.locationHint) assertCondition(parsed.activityUpdate.locationHint === fixture.locationHint, 'Wrong location');
       assertCondition(parsed.activityUpdate.durationMinutes === fixture.durationMinutes, 'Unsupported or missing duration');
       const message = { ...seed, id: `readback-${fixture.name}`, timestamp: now,
-        content: fixture.content, metadata: { activityUpdate: parsed.activityUpdate } };
-      const transition = runtime.applyPresenceUpdateToTransition({ chat: source, characters, message,
-        transition: { chatPatch: {}, characterPatches: [], runtimeEvents: [] }, now });
-      const after = runtime.projectWorldCalendar([applyRuntimeTransition(runtime, source, transition)], characters,
+        content: request.visibleSends[0], messageParts: request.visibleSends.map((content) => ({ content })),
+        metadata: { activityUpdate: parsed.activityUpdate } };
+      const segments = segmenter.splitGeneratedRoundMessage(message);
+      assertCondition(segments.filter((segment) => segment.metadata?.activityUpdate).length === 1,
+        'Activity evidence must belong to exactly one send');
+      let updatedChat = source;
+      for (const [index, segment] of segments.entries()) {
+        const transition = runtime.applyPresenceUpdateToTransition({ chat: updatedChat, characters,
+          message: { ...segment, id: `${message.id}-${index}` },
+          transition: { chatPatch: {}, characterPatches: [], runtimeEvents: [] }, now });
+        updatedChat = applyRuntimeTransition(runtime, updatedChat, transition);
+      }
+      const after = runtime.projectWorldCalendar([updatedChat], characters,
         { now, inferTemporalStatus: false }).items.find((item) => item.id === original.id);
       assertCondition(after?.status === fixture.status && after.startAt === original.startAt, 'Production state or start changed');
       const expectedEnd = fixture.durationMinutes ? now + fixture.durationMinutes * 60_000
         : fixture.status === 'completed' ? now : original.endAt;
       assertCondition(after.endAt === expectedEnd, 'Production end time mismatch');
       samples.push({ name: fixture.name, ok: true, request, response: response.content,
-        finishReason: response.raw.choices?.[0]?.finish_reason, parsed, after, usage: response.usage });
+        finishReason: response.raw.choices?.[0]?.finish_reason, parsed, after,
+        activityEvidenceSend: segments.findIndex((segment) => segment.metadata?.activityUpdate), usage: response.usage });
     } catch (failure) {
       error = String(failure?.message || failure);
       samples.push({ name: fixture.name, ok: false, request, response: response.content,
@@ -2830,10 +2859,10 @@ async function runStateReadbackSamples(model) {
 async function readFrozenActivityTurn(model, request) {
   return callChat(model, [
     { role: 'system', content: [
-        'Read a frozen public chat turn and report state changes. Return one JSON object with activityUpdate and addressedTargets. Do not write or revise dialogue.',
+        'Read a frozen public chat turn and report state changes. Return one JSON object with activityUpdate, addressedTargets and replyDebtTargets. Do not write or revise dialogue.',
         'activityUpdate is null for no change, otherwise {calendarItemId,title,kind,status,evidenceText,locationHint?,durationMinutes?,availability?}. Reuse the exact known ID. status is planned, in_progress, completed or cancelled. evidenceText must be an exact substring of a single visible send supporting the update.',
-        'A non-null activityUpdate requires calendarItemId,title,kind,status,evidenceText; reuse the known title and kind when unchanged. Only report optional changed fields supported by this turn. Omit unchanged or unknown time, duration and participants. durationMinutes means explicitly stated remaining minutes, not elapsed time or an estimate. Completion requires an actual completed result; ongoing work is in_progress. Activity does not imply departure.',
-        'addressedTargets is null unless this turn requires an immediate answer or explicitly hands the floor to another member. Speaking to someone, answering them, reporting progress and giving a reminder do not alone require a reply. If needed use {targetIds,primaryTargetId,confidence,reason} with valid member IDs.',
+        'A non-null activityUpdate requires calendarItemId,title,kind,status,evidenceText; reuse the known title and kind when unchanged. Only report optional changed fields supported by this turn. Omit unchanged or unknown time, duration and participants. durationMinutes means explicitly stated remaining minutes, not elapsed time or an estimate. Completion requires an actual completed result; ongoing work is in_progress. availability is optional and must be "away" or "online", never a boolean; report it only for an explicit availability change. Activity does not imply departure.',
+        'addressedTargets records the current addressee, including a reply or report directed to them. Mere mention is not addressing. replyDebtTargets records only explicit questions, challenges or handing the floor to a member expected to answer next; reports, reminders and replies do not alone require another reply. Each field is null when absent, otherwise {targetIds,primaryTargetId,confidence,reason} with valid member IDs. A multi-send turn may address multiple members without requiring all of them to reply.',
       ].join('\n') },
     { role: 'user', content: JSON.stringify(request) },
   ], { maxTokens: 4096, temperature: 0 });
@@ -3633,6 +3662,16 @@ function runtimeChatflowScenarios() {
       metadata: { activityUpdate: { calendarItemId: null, title: '巡城', kind: 'activity', status: 'in_progress',
         startsNow: true, availability: 'online', locationHint: '北门', evidenceText: '俺先从北门巡起' } },
     });
+  const patrolUpdate = scenarios.find((scenario) => scenario.name === 'longzhong_activity_update_room');
+  scenarios.push({
+    ...patrolUpdate,
+    name: 'longzhong_activity_update_followup_room',
+    userInjections: [{ afterTurn: 1, content: '二哥，张飞刚报的巡城进展你听到了吗？他现在在哪儿？' }],
+    promptExpectations: [{ turn: 2, speakerId: 'yu',
+      text: 'Known public activity: 巡城; 张飞 (participating); recorded status: in_progress at 南门' }],
+    activityExpectations: [1, 2].map((turn) => ({ turn, title: '巡城', status: 'in_progress', locationHint: '南门', preserveSeedId: true })),
+    rubricHint: `${patrolUpdate.rubricHint} 用户随后询问关羽是否听到张飞的进展；检查关羽读取已提交的公开活动后回答，不凭空增加进展或宣布完成。`,
+  });
   scenarios.push({
     name: 'longzhong_public_activity_room', roomKind: 'group', turns: 2,
     rubricHint: '张飞已经公开报告巡城到南门，仍在巡查且可以聊天。他问关羽那边是否安稳。检查关羽理解公开进展后自然回答，不重复索取地点，不把巡城当下线，不为接话编造军情；无需复述活动或固定句式。',
@@ -3789,6 +3828,8 @@ function summarizeRuntimeTurn(message) {
     scenarioStateBefore: message.scenarioStateBefore || null,
     addressedTargetIds: message.addressedTargetIds || [],
     primaryAddressedTargetId: message.primaryAddressedTargetId || null,
+    replyDebtTargetIds: message.replyDebtTargetIds ?? null,
+    primaryReplyDebtTargetId: message.primaryReplyDebtTargetId ?? null,
     interactionHints: message.interactionHints || message.interactionHint ? (message.interactionHints || [message.interactionHint]).filter(Boolean) : [],
     socialEventHints: message.socialEventHints || [],
     relationshipSignals: message.committedRelationshipSignals
@@ -4474,7 +4515,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
       `chatflow ${scenario.name} rejected seeded activity`);
     chat = applyRuntimeTransition(runtime, chat, seeded);
     characters = characters.map((character) => ({ ...character,
-      ...(seeded.characterPatches.find((item) => item.id === character.id)?.patch || {}) }));
+      ...(seeded.characterPatches.find((item) => item.characterId === character.id)?.patch || {}) }));
   }
   const seedCalendar = runtime.projectWorldCalendar([chat], characters, { inferTemporalStatus: false }).items;
 
@@ -4558,11 +4599,16 @@ async function runRuntimeChatflowScenario(model, scenario) {
     }
     if (errors.length) break;
     if (quietTurns.includes(turn)) {
-      assertCondition(scenario.quietExpectedTurns?.includes(turn) || scenario.naturalQuietAllowed === true,
-        `chatflow ${scenario.name} unexpectedly quiet on turn ${turn}`);
-      assertCondition(!completed && !selectedSpeakers.some((item) => item.turn === turn)
-        && !promptRequests.some((item) => item.turn === turn) && !generatedResponses.some((item) => item.turn === turn),
-        `chatflow ${scenario.name} quiet turn generated or completed a reply`);
+      try {
+        assertCondition(scenario.quietExpectedTurns?.includes(turn) || scenario.naturalQuietAllowed === true,
+          `chatflow ${scenario.name} unexpectedly quiet on turn ${turn}`);
+        assertCondition(!completed && !selectedSpeakers.some((item) => item.turn === turn)
+          && !promptRequests.some((item) => item.turn === turn) && !generatedResponses.some((item) => item.turn === turn),
+          `chatflow ${scenario.name} quiet turn generated or completed a reply`);
+      } catch (error) {
+        errors.push(error instanceof Error ? error : new Error(String(error)));
+        break;
+      }
       logProgress('chatflow quiet', { model, scenario: scenario.name, turn });
       const injections = await commitUserInjections(turn);
       if (!injections.length && scenario.naturalQuietAllowed === true) {
@@ -4573,7 +4619,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
     }
     assertCondition(completed, `chatflow ${scenario.name} did not complete turn ${turn}`);
     if (config.activityReadback) {
-      assertCondition(scenario.name === 'longzhong_activity_update_room', 'Activity readback experiment requires the patrol scenario');
+      assertCondition(['longzhong_activity_update_room', 'longzhong_activity_update_followup_room'].includes(scenario.name), 'Activity readback experiment requires the patrol scenario');
       const activities = runtime.projectWorldCalendar([chat], characters, { inferTemporalStatus: false }).items
         .filter((item) => !item.derivedFromItemId && item.participantIds.length === 1 && item.participantIds[0] === completed.senderId);
       if (activities.length) {
@@ -4593,20 +4639,25 @@ async function runRuntimeChatflowScenario(model, scenario) {
           record.usage = response.usage;
           record.finishReason = response.raw.choices?.[0]?.finish_reason;
           const output = JSON.parse(response.content);
-          assertCondition(Object.hasOwn(output, 'activityUpdate') && Object.hasOwn(output, 'addressedTargets'), 'Missing readback judgement');
+          assertCondition(['activityUpdate', 'addressedTargets', 'replyDebtTargets'].every((key) => Object.hasOwn(output, key)), 'Missing readback judgement');
           const envelope = await runtime.server.ssrLoadModule('/src/services/inlineInteractionHint.ts');
           const parsed = envelope.parseInlineInteractionEnvelope(JSON.stringify({ ...output,
-            messages: record.request.visibleSends.map((content) => ({ content })) }), { allowContentSalvage: false });
+            messages: record.request.visibleSends.map((content) => ({ content })) }), { allowContentSalvage: false, validateActivityUpdate: true });
           record.parsed = parsed;
           assertCondition(parsed && !envelope.hasInvalidStateEvidence(parsed), 'Invalid readback evidence');
           assertCondition(output.activityUpdate === null || parsed.activityUpdate, 'Readback activity rejected by normalization');
           assertCondition(!parsed.activityUpdate || activities.some((item) => item.id === parsed.activityUpdate.calendarItemId
             && item.title === parsed.activityUpdate.title && item.kind === parsed.activityUpdate.kind), 'Readback changed unknown activity or its identity');
-          assertCondition(output.addressedTargets === null || parsed.addressedTargets, 'Readback targets rejected by normalization');
-          assertCondition(!parsed.addressedTargets?.targetIds?.some((id) => !characters.some((item) => item.id === id)), 'Unknown readback target');
+          for (const field of ['addressedTargets', 'replyDebtTargets']) {
+            assertCondition(output[field] === null || parsed[field], `${field} rejected by normalization`);
+            assertCondition(!parsed[field]?.targetIds?.some((id) => !characters.some((item) => item.id === id)), `Unknown ${field} target`);
+            assertCondition(!parsed[field]?.primaryTargetId || parsed[field].targetIds.includes(parsed[field].primaryTargetId), `Invalid ${field} primary target`);
+          }
           completed = { ...completed, metadata: { ...completed.metadata, activityUpdate: parsed.activityUpdate || undefined },
             addressedTargetIds: parsed.addressedTargets?.targetIds || null,
-            primaryAddressedTargetId: parsed.addressedTargets?.primaryTargetId || null };
+            primaryAddressedTargetId: parsed.addressedTargets?.primaryTargetId || null,
+            replyDebtTargetIds: parsed.replyDebtTargets?.targetIds || null,
+            primaryReplyDebtTargetId: parsed.replyDebtTargets?.primaryTargetId || null };
         } catch (error) {
           record.error = String(error?.message || error);
           errors.push(error instanceof Error ? error : new Error(String(error)));
@@ -4780,7 +4831,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
         '8. 故事房一条持久化消息是一轮生成，不是一个可见气泡：页面按 visibleStoryBlocks 顺序展示旁白段落和人物气泡。旁白是叙事代理，没有普通角色 innerLife。是否必须输出选项，以 scenarioStateBefore 的 choicePolicy 为准；scenarioStateAfter 是下一节拍状态，不能拿来要求本轮补选项。',
         '9. 学习房还要核查本轮讲解的事实与例句是否一致，不能因语气自然就放过自相矛盾的规则或误导性纠错。',
         '10. 产品目标是可信且有观赏性的人物互动：情绪、人格与关系应在措辞、留白、语气或选择中可辨认，而非只在 metadata 里存在。不要按感叹号、长短句或冲突数量打分；平静、克制的回合也可以有表现力。生成前的情绪与动作估计不是成稿必须完成的指令。',
-        '11. 评审边界：innerLife.impulse/tone/pressure/typoLevel 是调度或表达估值，不要求正文逐项照演。addressedTargets 是期待后续回应的对象，不是全部被回复或提及的人；memoryContext 是生成前选取的记忆视角，不是成稿的唯一受话对象。记忆可以隐含生效，单轮不要求所有成员出场或所有旧事复述；仍需检查真正未处理的点名、持续机械对答和角色趋同。',
+        '11. 评审边界：innerLife.impulse/tone/pressure/typoLevel 是调度或表达估值，不要求正文逐项照演。addressedTargetIds 表示当前受话对象；replyDebtTargetIds 表示明确期待后续回答的对象，二者可以不同，提及不等于受话或回应债。memoryContext 是生成前选取的记忆视角，不是成稿的唯一受话对象。记忆可以隐含生效，单轮不要求所有成员出场或所有旧事复述；仍需检查真正未处理的点名、持续机械对答和角色趋同。',
         `玩法类型：${scenario.roomKind}。场景要求：${scenario.rubricHint}`,
       ].join('\n'), {
         scenario: scenario.name,
@@ -4845,7 +4896,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
         '11. 检查社交因果与情绪传递：每个重要回合应能解释为“这个人因为自己的欲望/顾虑/关系位置/共同经历而这样说”，并改变后续人物的面子、距离、情绪、注意或选择。纯信息增量、建议接龙和任务分工不能冒充人物互动。',
         '12. 自然感不绑定某一种表面风格：温暖陪伴、冷淡拒绝、权力压迫、陌生试探、熟人揭短、任务争执都应各自成立。不要把所有优化收敛为更温柔、更短、更口语；也不要要求每轮制造戏剧转折。',
         '13. 另行检查观赏性：人物声音能否区分，重要刺激是否留下可见反应，场景是否有张弛和后续想看的选择或悬念。不能把平淡的信息接龙、比喻接龙评为戏剧张力，也不能奖励无依据的新秘密、强行争吵或每轮升级。任务、审议与教学首先要正确完成目标。',
-        '14. 调度估值不是成稿情绪事实：innerLife.impulse/tone/pressure 可用于选择发言者，不能要求正文照演这些本地估值。addressedTargets 表示期待后续回应的对象，并非每个被回复或提及的人；缺少回应债不能单独判为回复对象错误。记忆可以作为隐含底色，不要求注入的旧事逐条说出；短样本中也不要求所有成员轮流出场，应检查是否存在真正未处理的点名或参与机会。',
+        '14. 调度估值不是成稿情绪事实：innerLife.impulse/tone/pressure 可用于选择发言者，不能要求正文照演这些本地估值。addressedTargetIds 是当前受话对象，replyDebtTargetIds 才是明确期待后续回答的对象；本报告的空回应债不表示没有受话对象，不能单独判为回复对象错误。记忆可以作为隐含底色，不要求注入的旧事逐条说出；短样本中也不要求所有成员轮流出场，应检查是否存在真正未处理的点名或参与机会。',
         '15. 单聊、AI 私聊和学习房每次启动只生成一轮，然后等待用户再次启动或输入。本次运行只覆盖已触发的回合；没有后续触发时，一轮回复是合法样本，不是缺失私聊闭环。只评估可观察范围，不要求凭空增加回合。',
         `场景额外要求：${scenario.rubricHint}`,
       ].join('\n'), {

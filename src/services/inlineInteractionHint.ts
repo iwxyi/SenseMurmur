@@ -642,7 +642,7 @@ Known public continuity (keys are only for writeback):\n${continuityContext || '
       participantStates: item.participantStates,
     }));
   const socialRule = `socialEventHints: null unless the visible turn itself proposes, commits to, updates, or cancels a concrete social event. For a shared outing, use [{"eventKind":"social_outing","title":"actual activity","activityType":"actual type","participantIds":["member-id"],"targetIds":["member-id"],"timeHint":"time as stated","locationHint":"place as stated","participantStates":{"member-id":"invited"},"dedupeKey":"stable-activity-key","confidence":0.9}]. eventKind is REQUIRED. Reuse the existing dedupeKey when updating. Participant states: mentioned, invited, interested, maybe, going, declined, withdrawn. Include "user" when invited or participating. This channel proposes shared social events; use activityUpdate for the speaker's own actual activity or departure, and never emit both channels for the same activity.`;
-  const activityRule = `activityUpdate records an actual calendar arrangement, including solo activities: {"title":"actual activity","kind":"activity|travel|rest|preparation|blocked_time|reminder","status":"planned|in_progress|completed|cancelled","participantIds":["member-id"],"startsNow":true,"startAt":null,"durationMinutes":60,"timeHint":"time as spoken","locationHint":"place as spoken","availability":"away|online","calendarItemId":null,"evidenceText":"short exact quote from one visible send"}. Use null when nothing changes. Describe only what this turn actually establishes. Other participants are invited, never forced offline. availability changes ONLY this speaker and is optional: doing an activity may still allow chatting. Use away when actually leaving now; a goodbye with no expected immediate reply has addressedTargets=null. Do not keep saying goodbye to someone who has left. startsNow is true only for actually starting now; future plans are planned and never set current availability. startAt is Unix milliseconds only when an exact real-world time is known, otherwise omit it and keep timeHint; never convert a fictional historical date to today's date. Duration is minutes, 3..43200, default away duration 30 when unknown. A three-day report interval is not a three-day absence: set 4320 only if the absence itself lasts three days. For returning or cancelling use the known calendarItemId, completed/cancelled; presenceUpdate online also ends the linked absence. Current speaker activity key: ${params.speaker.presence?.calendarItemId || '(none)'}. Do not expose these internal fields in dialogue.`;
+  const activityRule = `activityUpdate records an actual calendar arrangement, including solo activities: {"title":"actual activity","kind":"activity|travel|rest|preparation|blocked_time|reminder","status":"planned|in_progress|completed|cancelled","participantIds":["member-id"],"startsNow":true,"startAt":null,"durationMinutes":60,"timeHint":"time as spoken","locationHint":"place as spoken","availability":"away|online","calendarItemId":null,"evidenceText":"short exact quote from one visible send"}. Use null when nothing changes. Describe only what this turn actually establishes. Other participants are invited, never forced offline. availability changes ONLY this speaker and is optional: doing an activity may still allow chatting. Use away when actually leaving now; a goodbye may still address someone, but with no expected immediate reply it has replyDebtTargets=null. Do not keep saying goodbye to someone who has left. startsNow is true only for actually starting now; future plans are planned and never set current availability. startAt is Unix milliseconds only when an exact real-world time is known, otherwise omit it and keep timeHint; never convert a fictional historical date to today's date. Duration is minutes, 3..43200, default away duration 30 when unknown. A three-day report interval is not a three-day absence: set 4320 only if the absence itself lasts three days. For returning or cancelling use the known calendarItemId, completed/cancelled; presenceUpdate online also ends the linked absence. Current speaker activity key: ${params.speaker.presence?.calendarItemId || '(none)'}. Do not expose these internal fields in dialogue.`;
   return `${mediaCapabilityInstruction}\n## Output Contract
 Return exactly one JSON object. It must be parseable. messages is the ordered list of this speaker's visible sends, including a single send; use null for absent fields and never expose protocol text.
 {"messages":[{"content":"visible send"${mediaExample}}],"intentionalRepeat":false${deliberationExample}${studyUpdateExample},"presenceUpdate":null,"activityUpdate":null,"conflictFocus":null,"incomingImpact":null,"interactionHints":null,"addressedTargets":null,"replyDebtTargets":null,"socialEventHints":null${continuityEnabled ? ',"conversationUpdate":null' : ''}${toolRequestExample}}
@@ -669,18 +669,35 @@ ${toolRule}
 Recent transcript scope: ${transcriptScope}${recentSocialEvents ? `\nRecent social events: ${recentSocialEvents}` : ''}`;
 }
 
-export function parseInlineInteractionEnvelope(raw: string, options: { allowContentSalvage?: boolean; requireConversationUpdate?: boolean } = {}): InlineInteractionEnvelope | null {
+function isValidActivityUpdateInput(update: InlineInteractionEnvelope['activityUpdate']) {
+  if (update == null) return true;
+  if (!normalizeActivityUpdate(update)) return false;
+  if (update.availability != null && update.availability !== 'away' && update.availability !== 'online') return false;
+  if (update.startsNow != null && typeof update.startsNow !== 'boolean') return false;
+  if (update.startAt != null && (typeof update.startAt !== 'number' || !Number.isFinite(update.startAt) || update.startAt < 0)) return false;
+  if (update.durationMinutes != null && (typeof update.durationMinutes !== 'number' || !Number.isFinite(update.durationMinutes) || update.durationMinutes <= 0)) return false;
+  if (update.participantIds != null && (!Array.isArray(update.participantIds)
+    || update.participantIds.some((id) => typeof id !== 'string' || !id.trim()))) return false;
+  return [update.calendarItemId, update.timeHint, update.locationHint].every((value) => value == null || typeof value === 'string');
+}
+
+export function parseInlineInteractionEnvelope(raw: string, options: {
+  allowContentSalvage?: boolean;
+  requireConversationUpdate?: boolean;
+  validateActivityUpdate?: boolean;
+} = {}): InlineInteractionEnvelope | null {
   try {
     const jsonMatch = cleanJsonLikeText(raw).match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
     const parsed = JSON.parse(jsonMatch[0]) as InlineInteractionEnvelope;
     if (!parsed || !hasVisibleEnvelopeContent(parsed)) return null;
+    if (options.validateActivityUpdate && !isValidActivityUpdateInput(parsed.activityUpdate)) return null;
     if (options.requireConversationUpdate && (!Object.hasOwn(parsed, 'conversationUpdate')
       || (parsed.conversationUpdate !== null && (!parsed.conversationUpdate
         || !Array.isArray(parsed.conversationUpdate.items))))) return null;
     return sanitizeEnvelope(parsed);
   } catch {
-    if (options.allowContentSalvage === false || options.requireConversationUpdate) return null;
+    if (options.allowContentSalvage === false || options.requireConversationUpdate || options.validateActivityUpdate) return null;
     const salvaged = salvageContentFromMalformedEnvelope(raw);
     return salvaged ? sanitizeEnvelope(salvaged) : null;
   }
