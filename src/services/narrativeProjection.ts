@@ -64,6 +64,20 @@ function clipText(text: string, max = 88) {
   return normalized.length > max ? `${normalized.slice(0, max)}…` : normalized;
 }
 
+function continuityAgeTurns(itemUpdatedAt: number, messages: Message[]) {
+  return messages.filter((message) => message.type === 'ai'
+    && !message.isDeleted
+    && message.timestamp > itemUpdatedAt).length;
+}
+
+function continuitySalience(ageTurns: number) {
+  // An unresolved item remains available as memory, but cannot monopolize the
+  // director after several other characters have already had their say.
+  if (ageTurns <= 0) return 0.64;
+  if (ageTurns === 1) return 0.44;
+  return 0.24;
+}
+
 function looksLikeSystemPayload(text: string) {
   const normalized = text.trim();
   if (!normalized) return true;
@@ -580,17 +594,22 @@ export function projectNarrativeLines(params: {
   return [
     ...(usesConversationContinuity(params.chat) ? params.chat.worldState.conversationContinuity?.items || [] : [])
       .filter(isPendingConversationItem)
-      .map((item): NarrativeLineProjection => ({
-        id: `continuity:${item.key}`, conversationId: params.chat.id, type: 'goal',
-        title: item.kind === 'condition' ? '尚未满足的条件' : item.kind === 'commitment' ? '尚待兑现的承诺' : '未决事项',
-        summary: item.summary, participantIds: item.participantIds, visibility: 'public', status: 'active',
-        contextKind: 'unresolved',
-        tension: 0, momentum: 0.5, salience: 0.64,
-        sourceEventIds: [], lastTouchedAt: item.updatedAt,
-        openQuestions: [item.status === 'established' ? `已接受，尚未报告兑现：${item.summary}` : item.summary],
-        possibleNextBeats: [{ beatType: item.status === 'established' ? 'answer' : 'invite',
-          targetActorIds: item.participantIds, pressure: 0.5, reason: item.summary }],
-      })),
+      .map((item): NarrativeLineProjection => {
+        const ageTurns = continuityAgeTurns(item.updatedAt, params.messages);
+        const salience = continuitySalience(ageTurns);
+        const active = ageTurns <= 1;
+        return {
+          id: `continuity:${item.key}`, conversationId: params.chat.id, type: 'goal',
+          title: item.kind === 'condition' ? '尚未满足的条件' : item.kind === 'commitment' ? '尚待兑现的承诺' : '未决事项',
+          summary: item.summary, participantIds: item.participantIds, visibility: 'public', status: 'active',
+          contextKind: active ? 'unresolved' : 'background',
+          tension: 0, momentum: active ? 0.5 : 0.18, salience,
+          sourceEventIds: [], lastTouchedAt: item.updatedAt,
+          openQuestions: active ? [item.status === 'established' ? `已接受，尚未报告兑现：${item.summary}` : item.summary] : [],
+          possibleNextBeats: active ? [{ beatType: item.status === 'established' ? 'answer' : 'invite',
+            targetActorIds: item.participantIds, pressure: 0.5, reason: item.summary }] : [],
+        };
+      }),
     ...buildConflictLines(params.chat, now),
     ...buildRoomLines(params.chat, now),
     ...buildRelationshipLines(params.chat, params.characters || [], now),

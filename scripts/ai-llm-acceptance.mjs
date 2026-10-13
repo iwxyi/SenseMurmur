@@ -2908,6 +2908,7 @@ function runtimeChatflowScenarios() {
       name: 'longzhong_continuity_room',
       roomKind: 'group',
       turns: 8,
+      naturalQuietAllowed: true,
       rubricHint: '三顾茅庐归来后的普通群聊。隆中之策是长期谋划，眼下没有既定攻城目标或开战命令。观察三兄弟对新军师、彼此位置和大哥信任的不同反应；自然相处可以有嘴硬、试探、揭短和留白，但不得人为制造军情。分工讨论不能冒充战事已定，已接受事项不得反复宣誓确认。允许自然收束。',
       chat: { id: 'acceptance-longzhong', name: '三顾归来', topic: '三顾茅庐归来后：隆中之策如何落到眼前的三步。', memberIds: ['bei', 'yu', 'fei'], style: 'roleplay' },
       characters: [
@@ -4557,12 +4558,16 @@ async function runRuntimeChatflowScenario(model, scenario) {
     }
     if (errors.length) break;
     if (quietTurns.includes(turn)) {
-      assertCondition(scenario.quietExpectedTurns?.includes(turn), `chatflow ${scenario.name} unexpectedly quiet on turn ${turn}`);
+      assertCondition(scenario.quietExpectedTurns?.includes(turn) || scenario.naturalQuietAllowed === true,
+        `chatflow ${scenario.name} unexpectedly quiet on turn ${turn}`);
       assertCondition(!completed && !selectedSpeakers.some((item) => item.turn === turn)
         && !promptRequests.some((item) => item.turn === turn) && !generatedResponses.some((item) => item.turn === turn),
         `chatflow ${scenario.name} quiet turn generated or completed a reply`);
       logProgress('chatflow quiet', { model, scenario: scenario.name, turn });
       const injections = await commitUserInjections(turn);
+      if (!injections.length && scenario.naturalQuietAllowed === true) {
+        naturallySettled = true;
+      }
       if (!injections.length) break;
       continue;
     }

@@ -66,6 +66,24 @@ describe('conversation continuity commit boundary', () => {
     expect(projectNarrativeLines({ chat: current, messages: [] }).some((line) => line.id === 'continuity:role')).toBe(false);
   });
 
+  it('lets an untouched open item recede behind newer room turns without deleting it', () => {
+    const initial = chat();
+    const opened = applyConversationUpdate(initial, message({ items: [{ ...item, kind: 'issue', status: 'open' }] }), null);
+    const current = { ...initial, worldState: { ...initial.worldState, conversationContinuity: opened.continuity } };
+    const lines = projectNarrativeLines({
+      chat: current,
+      messages: [
+        message({ items: [{ ...item, kind: 'issue', status: 'open' }] }),
+        message({ items: [] }, { id: 'later-1', senderId: 'b', timestamp: 20, content: '我先说另一件事。' }),
+        message({ items: [] }, { id: 'later-2', senderId: 'a', timestamp: 30, content: '这件事先放一放。' }),
+      ],
+      now: 30,
+    });
+    const line = lines.find((entry) => entry.id === 'continuity:role');
+    expect(line).toMatchObject({ contextKind: 'background', salience: 0.24, possibleNextBeats: [] });
+    expect(current.worldState.conversationContinuity?.items[0].status).toBe('open');
+  });
+
   it('bounds ended history separately from open matters', () => {
     const initial = chat();
     initial.worldState.conversationContinuity = { items: [
