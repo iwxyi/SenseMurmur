@@ -150,6 +150,8 @@ describe('turnDirective', () => {
     expect(prompt).toContain('A bare receipt');
     expect(prompt).toContain('concrete stance, choice, condition, responsibility, question, or immediate action');
     expect(prompt).toContain('A reaction may still reveal');
+    expect(prompt).toContain('Live: add one condition, cost, or limit that changes the next response to 陈越');
+    expect(prompt).toContain('do not explain the whole topic');
   });
 
   it.each([0, 80])('keeps projected topic context at drift %s out of unresolved task assertions', (topicDrift) => {
@@ -342,7 +344,7 @@ describe('turnDirective', () => {
     expect(prompt).not.toContain('先接住/我来回应/这句我认');
     expect(prompt).toContain('warmth, bite, hesitation or delight');
     expect(prompt).not.toContain('Do not manufacture a second point');
-    expect(prompt.length).toBeLessThan(1500);
+    expect(prompt.length).toBeLessThan(1550);
   });
 
   it('treats scalar social posture as subordinate to concrete relationship evidence', () => {

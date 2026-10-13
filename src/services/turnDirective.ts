@@ -81,7 +81,7 @@ function describeSocialJob(plan: ConversationMovePlan, intent: SpeakIntent) {
   if (plan.moveType === 'ask_followup' || plan.moveType === 'ask_evidence' || plan.moveType === 'test_assumption') return 'ask one situated question that tests the point';
   if (plan.moveType === 'bring_back_prior_point') return 'pull back one dropped earlier point';
   if (plan.moveType === 'name_tradeoff') return 'name one practical tradeoff the room has not faced';
-  if (plan.moveType === 'answer_unresolved_question') return 'decide whether the unresolved address deserves attention now; if it does, answer only the part that genuinely reaches this person';
+  if (plan.moveType === 'answer_unresolved_question') return 'answer the unresolved address with one concrete stance or opening';
   if (intent.stance === 'support' || intent.stance === 'back_up') return 'show social support while keeping independent judgment';
   if (intent.stance === 'side_comment' || intent.delivery === 'side_remark') return 'drop a side comment that changes the room temperature or angle';
   return 'make one locally specific conversational move';
@@ -236,10 +236,13 @@ export function buildTurnDirectivePrompt(directive: TurnDirective | null | undef
     ? `\n- Situational constraints: ${directive.situationalConstraints.join('; ')}.`
     : '';
   // Project evidence, not a locally assigned recipient or expression checklist.
+  const targetLine = directive.targetName
+    ? `\n- Live: ${directive.socialJob} to ${directive.targetName}; do not explain the whole topic.`
+    : `\n- Live: ${directive.socialJob}; do not explain the whole topic.`;
   return `\n## Turn Directive — This Person in This Moment
 Speak as this person among people who share this exchange. Choose what catches their attention and what they actually want to say now. Their words may have warmth, bite, hesitation or delight; the exchange decides the shape.
 Acknowledgement is implicit by default. Name someone or explicitly agree when that itself matters to the relationship; responding does not require announcing agreement, receipt, or a recap. A bare receipt such as “I acknowledge that”, “noted”, or “I will listen” is not a completed social move: if you acknowledge, let the line reveal a concrete stance, choice, condition, responsibility, question, or immediate action. A reaction may still reveal relief, reluctance, affection or resistance without adding another task when the exchange is genuinely complete. Let a completed exchange rest. Honor explicit requests for a deliverable and its format.
-- Cue ${directive.socialJob}. Keep it implicit.
+${targetLine}
 - Personal meaning: ${directive.characterDrive.stake}. Felt residue: ${directive.characterDrive.feltReaction}.
 - Attention habits: ${directive.characterDrive.attentionLens}.
 - Emotional and dramatic context: ${directive.emotionalUndercurrent}. ${directive.narrativePressure ? `${directive.narrativePressure}.` : 'No dramatic escalation is required.'} ${directive.requiredChange}.
