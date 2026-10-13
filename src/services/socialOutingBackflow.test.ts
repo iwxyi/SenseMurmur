@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeConversation } from '../types/chat';
-import type { SocialEventCandidatePayload } from '../types/runtimeEvent';
+import type { RuntimeEventV2, SocialEventCandidatePayload } from '../types/runtimeEvent';
 import { updateSourceChatAfterSocialOuting } from './directSessionRuntime';
+import { projectWorldCalendarItems } from './worldRuntimeProjection';
 
 function buildPayload(overrides: Partial<SocialEventCandidatePayload> = {}): SocialEventCandidatePayload {
   return {
@@ -70,17 +71,40 @@ describe('social outing backflow', () => {
     expect(updateSourceChatAfterSocialOuting(chat, payload, ['甲', '乙', '丙']).runtimeEventsV2?.length).toBeGreaterThan(0);
   });
 
-  it('backflows effect, memory, artifact, and room shift into source chat', () => {
+  it('records an arrangement without fabricating participation or social effects', () => {
     const chat = buildChat();
     const patch = updateSourceChatAfterSocialOuting(chat, buildPayload(), ['甲', '乙', '丙']);
     const kinds = (patch.runtimeEventsV2 || []).map((event) => event.kind);
-    expect(kinds).toContain('relationship_delta');
-    expect(kinds).toContain('memory_candidate');
+    expect(kinds).not.toContain('relationship_delta');
+    expect(kinds).not.toContain('memory_candidate');
     expect(kinds).toContain('artifact');
-    expect(kinds).toContain('room_shift');
-    const effect = (patch.runtimeEventsV2 || []).find((event) => event.kind === 'relationship_delta');
-    expect((effect?.payload as { eventKind?: string; effectType?: string }).eventKind).toBe('social_outing');
-    expect((effect?.payload as { eventKind?: string; effectType?: string }).effectType).toBe('artifact');
+    expect(kinds).not.toContain('room_shift');
+    expect(patch.worldState?.structuredRoomState).toEqual(chat.worldState.structuredRoomState);
+    expect(patch.worldState?.recentEvent).not.toContain('参与了');
     expect(patch.worldState?.recentEvent).toContain('甲、乙、丙');
+  });
+
+  it('preserves invitation states and projects the consumed candidate as tentative', () => {
+    const chat = buildChat();
+    const patch = updateSourceChatAfterSocialOuting(chat, buildPayload({
+      title: '营中夜议', dedupeKey: 'night-meeting', timeHint: '今晚', locationHint: '营中',
+      participantStates: { a: 'going', b: 'invited', c: 'maybe' },
+    }), ['甲', '乙', '丙']);
+    const items = projectWorldCalendarItems([{ ...chat, ...patch }], [], { now: Date.now() });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: 'night-meeting', status: 'tentative', title: '营中夜议',
+      timeHint: '今晚', locationHint: '营中', participantStates: { a: 'going', b: 'invited', c: 'maybe' } });
+    const runtimeEventsV2: RuntimeEventV2[] = [...(patch.runtimeEventsV2 || []), {
+      id: 'meeting-start', conversationId: chat.id, kind: 'calendar_item_patch' as const,
+      createdAt: Date.now() + 1, actorIds: ['a'], summary: '夜议开始', visibility: 'public' as const,
+      payload: { calendarItemId: 'night-meeting', status: 'in_progress', addParticipantStates: { b: 'going' } },
+    }];
+    const started = projectWorldCalendarItems([{ ...chat, ...patch, runtimeEventsV2 }], []);
+    expect(started[0]).toMatchObject({ id: 'night-meeting', status: 'in_progress',
+      participantStates: { a: 'going', b: 'going', c: 'maybe' } });
+    runtimeEventsV2.push({ id: 'meeting-cancel', conversationId: chat.id, kind: 'calendar_item_patch',
+      createdAt: Date.now() + 2, actorIds: ['a'], summary: '夜议取消', visibility: 'public',
+      payload: { calendarItemId: 'night-meeting', status: 'cancelled' } });
+    expect(projectWorldCalendarItems([{ ...chat, ...patch, runtimeEventsV2 }], [])[0]?.status).toBe('cancelled');
   });
 });

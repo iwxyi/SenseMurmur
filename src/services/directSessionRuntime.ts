@@ -647,46 +647,9 @@ export function updateSourceChatAfterPostMoment(sourceChat: GroupChat, payload: 
 }
 
 export function buildSocialOutingEffectEvents(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorNames: string[]) {
-  const activityLabel = payload.sourceText?.match(/(吃火锅|聚餐|约饭|看展|唱歌|出去玩|散步|庆祝|打卡|线下活动|活动)/i)?.[0] || '线下活动';
-  const summary = `${actorNames.join('、')} 参与了刚才提到的${activityLabel}。`;
-  const shiftedRoom = calculateRoomShift(sourceChat.worldState.structuredRoomState || null, {
-    kind: 'support',
-    actorId: payload.initiatorId,
-    targetId: payload.targetIds?.[0] || null,
-    intensity: 2,
-    tone: 'warm',
-    evidenceText: (payload.sourceText || summary).slice(0, 120),
-    confidence: payload.confidence,
-  });
+  const activityLabel = payload.title || payload.activityType || '线下活动';
+  const summary = `${actorNames.join('、')} 的待定活动安排：${activityLabel}。`;
   return {
-    effectEvent: createRuntimeEventV2({
-      conversationId: sourceChat.id,
-      kind: 'relationship_delta',
-      summary: `活动回流：${summary}`,
-      actorIds: [payload.initiatorId],
-      targetIds: payload.participantIds,
-      visibility: 'derived_public',
-      payload: {
-        eventKind: 'social_outing',
-        effectType: 'artifact',
-        summary: `活动回流：${summary}`,
-        confidence: payload.confidence,
-      },
-    }),
-    memoryEvent: createRuntimeEventV2({
-      conversationId: sourceChat.id,
-      kind: 'memory_candidate',
-      summary,
-      actorIds: [payload.initiatorId],
-      targetIds: payload.participantIds,
-      visibility: 'derived_public',
-      payload: {
-        kind: 'topic',
-        text: summary,
-        salience: 0.76,
-        confidence: payload.confidence,
-      },
-    }),
     artifactEvent: createRuntimeEventV2({
       conversationId: sourceChat.id,
       kind: 'artifact',
@@ -697,40 +660,31 @@ export function buildSocialOutingEffectEvents(sourceChat: GroupChat, payload: So
       payload: {
         artifactType: 'outing_summary',
         eventKind: 'social_outing',
+        status: 'tentative',
         text: summary,
         expectedArtifacts: payload.expectedArtifacts || [],
         dedupeKey: payload.dedupeKey,
         title: payload.title,
         activityType: payload.activityType,
         participantIds: payload.participantIds,
+        participantStates: payload.participantStates,
         targetIds: payload.targetIds,
         timeHint: payload.timeHint,
         locationHint: payload.locationHint,
       },
     }),
-    roomShiftEvent: createRuntimeEventV2({
-      conversationId: sourceChat.id,
-      kind: 'room_shift',
-      summary: `线下活动回流后房间态势微调：热度 ${shiftedRoom.nextState.heat} / 凝聚 ${shiftedRoom.nextState.cohesion}`,
-      actorIds: [payload.initiatorId],
-      targetIds: payload.participantIds,
-      visibility: 'derived_public',
-      payload: shiftedRoom.shift,
-    }),
-    nextStructuredRoomState: shiftedRoom.nextState,
     publicSummary: summary,
   };
 }
 
 export function updateSourceChatAfterSocialOuting(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorNames: string[]) {
-  const { effectEvent, memoryEvent, artifactEvent, roomShiftEvent, nextStructuredRoomState, publicSummary } = buildSocialOutingEffectEvents(sourceChat, payload, actorNames);
+  const { artifactEvent, publicSummary } = buildSocialOutingEffectEvents(sourceChat, payload, actorNames);
   return withFrameworkPatch(sourceChat, {
     lastMessageAt: Date.now(),
-    runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [effectEvent, memoryEvent, artifactEvent, roomShiftEvent]),
+    runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [artifactEvent]),
     worldState: {
       ...DEFAULT_CONVERSATION_WORLD_STATE,
       ...(sourceChat.worldState || {}),
-      structuredRoomState: nextStructuredRoomState,
       recentEvent: publicSummary.slice(0, 120),
     },
     ...accumulateChatRuntime(sourceChat, { type: 'event', content: publicSummary }),

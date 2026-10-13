@@ -756,7 +756,7 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
       const item: WorldCalendarItem = {
         id: buildCalendarKey(event) || event.id,
         kind,
-        status: event.kind === 'artifact' ? 'confirmed' : 'tentative',
+        status: asCalendarStatus(payload.status) || (event.kind === 'artifact' ? 'confirmed' : 'tentative'),
         title,
         activityType,
         participantIds,

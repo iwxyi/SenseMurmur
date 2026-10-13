@@ -487,6 +487,12 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     });
     expect(result.handledEventId).toBe('evt-candidate-1');
     expect(updateChat).toHaveBeenCalledTimes(1);
+    const patch = (updateChat.mock.calls[0] as [string, Partial<typeof chat>] | undefined)?.[1];
+    const events = patch?.runtimeEventsV2 || [];
+    expect(events.some((event) => ['relationship_delta', 'memory_candidate', 'room_shift'].includes(event.kind))).toBe(false);
+    expect(events.find((event) => (event.payload as { artifactType?: string }).artifactType === 'outing_summary')?.payload)
+      .toMatchObject({ status: 'tentative' });
+    expect(events.some((event) => event.summary === 'handled_social_event:evt-candidate-1')).toBe(true);
   });
 
   it('runs unified auto social flow for check_in candidates', async () => {
