@@ -584,7 +584,7 @@ ${transcriptScope}${recentSocialEvents ? `\n\nRecent social events to avoid dupl
   const interactionKinds = 'support|challenge|mock|dismiss|defend|evade|probe|pile_on|redirect|apologize|concede|take_responsibility|include|exclude|boundary|side_comment';
   const continuityEnabled = usesConversationContinuity(params.chat);
   const continuityContext = continuityEnabled ? buildConversationContinuityContext(params.chat, params.characters) : '';
-  const continuityRule = continuityEnabled ? `\nconversationUpdate extracts durable changes supported by this speaker's visible sends. Use null when nothing changes. Otherwise use {"items":[{"key":"short-stable-key","kind":"issue|commitment|decision|condition","status":"open|established|resolved|retracted","summary":"the actual issue, promise, decision or condition","participantIds":[],"evidenceText":"short exact quote from this turn"}],"room":null,"settled":null}.
+  const continuityRule = continuityEnabled ? `\nconversationUpdate reports durable changes in this speaker's visible sends. With known items, this top-level field is required: check them, then return null for no change or {"items":[{"key":"short-stable-key","kind":"issue|commitment|decision|condition","status":"open|established|resolved|retracted","summary":"the actual issue, promise, decision or condition","participantIds":[],"evidenceText":"short exact quote from this turn"}],"room":null,"settled":null}. Omission is not a no-change judgement.
 Reuse the known key when updating an item. Omitted items remain unchanged. Record an issue or unmet condition as open; an explicitly accepted decision or promise as established. Resolve only the actual issue addressed, retract only a visibly withdrawn promise or decision. A role assignment is not permission to start a battle; agreement about one part does not settle unspoken prerequisites. Do not invent obstacles, deadlines, motives or conflict. Extract what is said, including a concrete unanswered point or commitment, without requiring one every turn. Empty participantIds means a roomwide issue. Never use hidden/private material as public evidence.
 Keep each item atomic: its exact quote must support the whole summary, not just one part. participantIds identifies the people responsible for or directly involved in that item; include the speaker for their own promise. Assigning a task to someone else is an open proposal until that person accepts it; the assignment alone cannot establish their commitment. A speaker's own explicit promise can be established immediately. Track a new concrete promise even if the same turn also confirms an older decision; reuse a key only for the same obligation. An open proposal may become an established decision under the same key, with an explicit kind/status update. A partial acceptance must preserve who has not yet accepted; it cannot establish everyone's commitment.
 An established commitment means accepted, not completed. When this turn explicitly reports its fulfillment or confirms the actual result, update that same key to resolved with evidence supporting completion. Work in progress stays established; accepting a task or announcing a future action is not fulfillment. A withdrawn commitment is retracted. Keep any separate unanswered issue open; completing one obligation does not complete other obligations.
@@ -634,15 +634,18 @@ ${toolRule}
 Recent transcript scope: ${transcriptScope}${recentSocialEvents ? `\nRecent social events: ${recentSocialEvents}` : ''}`;
 }
 
-export function parseInlineInteractionEnvelope(raw: string, options: { allowContentSalvage?: boolean } = {}): InlineInteractionEnvelope | null {
+export function parseInlineInteractionEnvelope(raw: string, options: { allowContentSalvage?: boolean; requireConversationUpdate?: boolean } = {}): InlineInteractionEnvelope | null {
   try {
     const jsonMatch = cleanJsonLikeText(raw).match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
     const parsed = JSON.parse(jsonMatch[0]) as InlineInteractionEnvelope;
     if (!parsed || !hasVisibleEnvelopeContent(parsed)) return null;
+    if (options.requireConversationUpdate && (!Object.hasOwn(parsed, 'conversationUpdate')
+      || (parsed.conversationUpdate !== null && (!parsed.conversationUpdate
+        || !Array.isArray(parsed.conversationUpdate.items))))) return null;
     return sanitizeEnvelope(parsed);
   } catch {
-    if (options.allowContentSalvage === false) return null;
+    if (options.allowContentSalvage === false || options.requireConversationUpdate) return null;
     const salvaged = salvageContentFromMalformedEnvelope(raw);
     return salvaged ? sanitizeEnvelope(salvaged) : null;
   }

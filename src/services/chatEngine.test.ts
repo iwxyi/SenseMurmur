@@ -203,6 +203,55 @@ function buildGuidanceIntervention(
 }
 
 describe('chatEngine streaming preview', () => {
+  const knownContinuity = { items: [{ key: 'report', kind: 'commitment' as const, status: 'established' as const,
+    summary: '美羊羊交回记录', participantIds: ['mei'], evidenceText: '我回来交记录',
+    sourceMessageIds: ['seed'], updatedAt: 1 }] };
+
+  it.each([null, { items: [{ key: 'report', kind: 'commitment', status: 'resolved',
+    summary: '记录已交回', participantIds: ['mei'], evidenceText: '记录交回来了' }] }])(
+    'requires an explicit judgement for known group items and retries the same speaker: %j', async (conversationUpdate) => {
+      generateResponseMock.mockReset();
+      generateResponseMock.mockResolvedValueOnce(JSON.stringify({ messages: [{ content: '记录交回来了。' }] }))
+        .mockResolvedValueOnce(JSON.stringify({ messages: [{ content: '记录交回来了。' }], conversationUpdate }));
+      const onChunk = vi.fn();
+      const message = await generateSpeakerMessage({
+        chat: buildChat({ worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE, conversationContinuity: knownContinuity } }),
+        speaker: buildCharacter('mei', '美羊羊'), characters: [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')],
+        messages: [], apiConfig: buildProfiles(), onChunk,
+      });
+      expect(generateResponseMock).toHaveBeenCalledTimes(2);
+      expect(generateResponseMock.mock.calls[1]?.[2]).toEqual(generateResponseMock.mock.calls[0]?.[2]);
+      expect(generateResponseMock.mock.calls[1]?.[1]).toContain('explicitly include top-level conversationUpdate');
+      expect(onChunk).toHaveBeenCalledWith('');
+      expect(message.content).toBe('记录交回来了。');
+      if (conversationUpdate) expect(message.metadata?.conversationUpdate?.items[0]).toMatchObject({ key: 'report', status: 'resolved' });
+      else expect(message.metadata?.conversationUpdate).toBeUndefined();
+    });
+
+  it('does not submit a turn that repeatedly skips the known-item judgement', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ content: '记录交回来了。' }));
+    const callbacks = { onSpeakerSelected: vi.fn(), onMessageChunk: vi.fn(), onMessageComplete: vi.fn(), onError: vi.fn() };
+    await runOneRound(buildChat({ worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE, conversationContinuity: knownContinuity } }),
+      [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')], [], buildProfiles(), callbacks);
+    expect(generateResponseMock).toHaveBeenCalledTimes(3);
+    expect(callbacks.onSpeakerSelected).toHaveBeenCalledTimes(1);
+    expect(callbacks.onMessageComplete).not.toHaveBeenCalled();
+    expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
+  });
+
+  it.each(['direct', 'ai_direct'] as const)('keeps %s compatible when continuity state is present', async (type) => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ content: '记录交回来了。' }));
+    const message = await generateSpeakerMessage({
+      chat: buildChat({ type, worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE, conversationContinuity: knownContinuity } }),
+      speaker: buildCharacter('mei', '美羊羊'), characters: [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')],
+      messages: [], apiConfig: buildProfiles(),
+    });
+    expect(generateResponseMock).toHaveBeenCalledTimes(1);
+    expect(message.content).toBe('记录交回来了。');
+  });
+
   it('withholds reserved tool protocol prefixes, including decoded JSON escapes', () => {
     for (const opener of ['<||DSML||', '<\uFF5C\uFF5CDSML\uFF5C\uFF5C', '</||DSML||']) {
       for (let length = 1; length <= opener.length; length += 1) {

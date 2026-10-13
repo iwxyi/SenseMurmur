@@ -43,6 +43,25 @@ describe('state evidence source boundary', () => {
 });
 
 describe('parseInlineInteractionEnvelope story events', () => {
+  it.each([
+    {}, { conversationUpdate: 'none' }, { conversationUpdate: [] }, { conversationUpdate: {} },
+    { conversationUpdate: { items: null } }, { metadata: { conversationUpdate: null } },
+  ])('rejects an unreported or malformed required continuity judgement: %j', (fields) => {
+    const raw = JSON.stringify({ messages: [{ content: '看过了。' }], ...fields });
+    expect(parseInlineInteractionEnvelope(raw)).not.toBeNull();
+    expect(parseInlineInteractionEnvelope(raw, { requireConversationUpdate: true })).toBeNull();
+  });
+
+  it.each([null, { items: [] }])('accepts an explicit unchanged continuity judgement: %j', (conversationUpdate) => {
+    expect(parseInlineInteractionEnvelope(JSON.stringify({ messages: [{ content: '看过了。' }], conversationUpdate }),
+      { requireConversationUpdate: true })?.content).toBe('看过了。');
+  });
+
+  it('does not salvage malformed JSON around a required continuity judgement', () => {
+    expect(parseInlineInteractionEnvelope('{"content":"看过了。","conversationUpdate":',
+      { requireConversationUpdate: true })).toBeNull();
+  });
+
   it('allows callers to reject content salvaged from a malformed envelope', () => {
     const raw = '{"messages":[{"content":"明早点卯，我接。"},{"content":"二哥，粮册你自己看。"}],"conversationUpdate":';
     expect(parseInlineInteractionEnvelope(raw)?.content).toBe('明早点卯，我接。');

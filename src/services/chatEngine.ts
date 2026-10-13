@@ -3244,7 +3244,11 @@ async function generateWithPrompt(params: {
   const isStoryReader = params.chat.sessionKind?.scenarioId === 'story-reader';
   const requiresGroupEnvelope = !isStoryReader && params.chat.type === 'group'
     && resolveSessionFamilyKey(params.chat) === 'conversation';
-  const parsedEnvelope = parseInlineInteractionEnvelope(response, { allowContentSalvage: !requiresGroupEnvelope });
+  const requiresConversationUpdate = requiresGroupEnvelope && Boolean(params.chat.worldState?.conversationContinuity?.items?.length);
+  const parsedEnvelope = parseInlineInteractionEnvelope(response, {
+    allowContentSalvage: !requiresGroupEnvelope,
+    requireConversationUpdate: requiresConversationUpdate,
+  });
   if (streamedProtocolError || containsUnsupportedToolProtocol(response)
     || (parsedEnvelope && containsUnsupportedToolProtocol(JSON.stringify(parsedEnvelope)))) {
     return { protocolError: 'unsupported_tool_protocol' as const };
@@ -3458,7 +3462,7 @@ async function generateNonDuplicateResponse(params: {
         const failure = unsupportedTool ? 'unsupported tool-call markup'
           : invalidStateEvidence ? 'a state update whose evidenceText was not an exact quote from one of this response\'s visible sends'
             : 'no valid JSON envelope';
-        prompt = `${params.systemPrompt}\n\nOutput protocol retry:\n- The previous attempt returned ${failure}. Return one valid JSON object using the supplied output contract and actual visible character speech. Preserve the supported structured fields for this turn; use null when there is no supported update. State evidenceText must be copied exactly from one visible send in this response, never from the earlier transcript or known records. Do not add spoken confirmations merely to manufacture evidence. Do not invent updates, emit tool-call markup or simulate unavailable tools. Do not mention this retry to participants.`;
+        prompt = `${params.systemPrompt}\n\nOutput protocol retry:\n- The previous attempt returned ${failure}. Return one valid JSON object using the supplied output contract and actual visible character speech. Preserve the supported structured fields for this turn; use null when there is no supported update. If known public items exist, explicitly include top-level conversationUpdate after checking whether this turn changes them: null or an update object with items; never omit it. State evidenceText must be copied exactly from one visible send in this response, never from the earlier transcript or known records. Do not add spoken confirmations merely to manufacture evidence. Do not invent updates, emit tool-call markup or simulate unavailable tools. Do not mention this retry to participants.`;
         continue;
       }
       throw new EmptyGeneratedResponseError(params.speaker.name, {
