@@ -17,7 +17,7 @@ import { buildChatPatch, buildNextWorldState, buildRelationshipTransition, build
 import { applyInteractionEmotions, getEmotionalBaseline } from '../personalityDrift';
 import { projectInnerLife } from '../innerLifeEngine';
 import { canApplyRelationshipInteraction, getRelationshipLedgerEntry, inferRelationshipDelta, reduceRelationshipLedger, summarizeRelationshipDelta } from '../relationshipLedger';
-import { calculateRoomShift, hasRoomShiftSignal } from '../roomStateSynthesizer';
+import { calculateRoomShift, hasRoomShiftSignal, selectDominantInteraction } from '../roomStateSynthesizer';
 import { resolveRuntimeEvolutionConfig } from '../runtimeEvolutionConfig';
 import type { APIConfig } from '../../types/settings';
 import { getGuidanceTargetActorIds } from '../userGuidanceIntent';
@@ -176,22 +176,7 @@ async function resolveInteraction(params: {
   const hints = params.message.interactionHints?.length
     ? params.message.interactionHints
     : params.message.interactionHint ? [params.message.interactionHint] : [];
-  return hints
-    .filter((hint): hint is InteractionEventPayload => Boolean(hint))
-    .map((hint, index) => ({ hint, index }))
-    .sort((left, right) => {
-      const targetRank = Number(Boolean(right.hint.targetId)) - Number(Boolean(left.hint.targetId));
-      if (targetRank !== 0) return targetRank;
-      const confidenceRank = (right.hint.confidence || 0) - (left.hint.confidence || 0);
-      if (Math.abs(confidenceRank) > 0.001) return confidenceRank;
-      const intensityRank = (right.hint.intensity || 0) - (left.hint.intensity || 0);
-      if (intensityRank !== 0) return intensityRank;
-      const leftDelta = left.hint.immediateImpact?.roomDelta;
-      const rightDelta = right.hint.immediateImpact?.roomDelta;
-      const roomRank = (Math.abs(rightDelta?.heat || 0) + Math.abs(rightDelta?.cohesion || 0) + Math.abs(rightDelta?.topicDrift || 0))
-        - (Math.abs(leftDelta?.heat || 0) + Math.abs(leftDelta?.cohesion || 0) + Math.abs(leftDelta?.topicDrift || 0));
-      return roomRank || left.index - right.index;
-    })[0]?.hint || null;
+  return selectDominantInteraction(hints.filter((hint): hint is InteractionEventPayload => Boolean(hint)));
 }
 
 function buildMemoryCandidateFromStructuredEvent(event: RuntimeEventV2): RuntimeEventV2 | null {

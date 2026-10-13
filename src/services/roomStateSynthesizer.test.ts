@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { InteractionEventPayload } from '../types/runtimeEvent';
-import { calculateRoomShift, hasRoomShiftSignal } from './roomStateSynthesizer';
+import { calculateRoomShift, hasRoomShiftSignal, selectDominantInteraction } from './roomStateSynthesizer';
 
 function buildInteraction(overrides: Partial<InteractionEventPayload> = {}): InteractionEventPayload {
   return {
@@ -161,6 +161,12 @@ describe('roomStateSynthesizer', () => {
     ], { semanticSource: 'model' });
 
     expect(nextState.dominantThread).toEqual(['c', 'd']);
+  });
+
+  it('uses the same dominant interaction for legacy single-value consumers', () => {
+    const first = buildInteraction({ targetId: 'b', confidence: 0.62, intensity: 2 });
+    const later = buildInteraction({ actorId: 'c', targetId: 'd', confidence: 0.95, intensity: 4 });
+    expect(selectDominantInteraction([first, later])).toBe(later);
   });
 
   it('deduplicates reciprocal room pairs and lets repair clear stale conflict', () => {

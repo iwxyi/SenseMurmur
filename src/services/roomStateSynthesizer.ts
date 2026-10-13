@@ -75,7 +75,7 @@ function interactionRoomDeltaMagnitude(interaction: InteractionEventPayload) {
 }
 
 /** Select the visible thread without relying on the model's array order alone. */
-function selectDominantInteraction(interactions: InteractionEventPayload[]) {
+export function selectDominantInteraction(interactions: InteractionEventPayload[]) {
   return interactions
     .map((interaction, index) => ({ interaction, index }))
     .filter(({ interaction }) => Boolean(interaction.targetId))

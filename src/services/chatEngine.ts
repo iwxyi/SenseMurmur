@@ -56,6 +56,7 @@ import { api, ApiError, type AiSearchResultItem } from './api';
 import { useAuthStore } from '../stores/useAuthStore';
 import { canUseStickerCapability } from './capabilityGraph';
 import { getPromptSpeakerLabel, getPromptTurnTypeLabel, isHumanDirectedMessage } from './chatMessageSemantics';
+import { selectDominantInteraction } from './roomStateSynthesizer';
 
 export interface GeneratedRoundMessage extends Omit<Message, 'id' | 'timestamp' | 'isDeleted'> {
   extraMessages?: string[] | null;
@@ -3863,7 +3864,7 @@ function buildCompletedMessage(params: {
     messageParts: params.messageParts,
     metadata: params.metadata,
     emotion: params.emotion,
-    interactionHint: interactionHints[0] || null,
+    interactionHint: selectDominantInteraction(interactionHints) || null,
     interactionHints,
     incomingInteractionHint,
     addressedTargetIds: addressedTargetIds.length ? addressedTargetIds : null,
