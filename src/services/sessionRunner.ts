@@ -602,8 +602,23 @@ export async function runSessionLoop(params: {
         params.pauseLoop?.();
       }
       const committedChat = params.getCurrentChat?.();
-      if (committedChat && shouldPauseSettledConversation(conversationRunStart, committedChat,
-        params.getCurrentCharacters?.() || params.characters, params.getCurrentMessages())) {
+      const latestCharacters = params.getCurrentCharacters?.() || params.characters;
+      const latestMessages = getSessionMessages(params.getCurrentMessages);
+      const shouldPauseSettled = Boolean(committedChat && shouldPauseSettledConversation(
+        conversationRunStart, committedChat, latestCharacters, latestMessages));
+      if (shouldPauseSettled && committedChat) {
+        const continuity = committedChat.worldState.conversationContinuity;
+        const pendingReply = resolvePendingReplyContext(latestCharacters, latestMessages, committedChat);
+        logDeveloperDiagnostic('chat-run:settled-pause-evaluated', {
+          chatId: params.chatId,
+          loopId: params.loopId,
+          settledAt: continuity?.settledAt || null,
+          previousSettledAt: conversationRunStart?.worldState.conversationContinuity?.settledAt || null,
+          pendingReplyTargetIds: pendingReply?.targetIds || [],
+          pendingReplySourceMessageId: pendingReply?.sourceMessageId || null,
+          lastAiSpeakerId: [...latestMessages].reverse().find((message) => message.type === 'ai' && !message.isDeleted)?.senderId || null,
+          activeContinuityItemCount: continuity?.items?.length || 0,
+        }, 'info', 'chat-run');
         params.pauseLoop?.();
         conversationRunStart = null;
       }
