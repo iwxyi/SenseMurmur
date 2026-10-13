@@ -144,6 +144,25 @@ describe('roomStateSynthesizer', () => {
     expect(shift.delta?.cohesion).toBeGreaterThan(0);
   });
 
+  it('uses a later targeted interaction when the first interaction has no target', () => {
+    const { nextState } = calculateRoomShift(null, [
+      buildInteraction({ targetId: undefined, kind: 'side_comment', immediateImpact: { roomDelta: { heat: 3 } } }),
+      buildInteraction({ actorId: 'c', targetId: 'd', kind: 'support', confidence: 0.8 }),
+    ], { semanticSource: 'model' });
+
+    expect(nextState.dominantThread).toEqual(['c', 'd']);
+    expect(nextState.heat).toBe(3);
+  });
+
+  it('prefers the clearer targeted interaction over an earlier weaker target', () => {
+    const { nextState } = calculateRoomShift(null, [
+      buildInteraction({ actorId: 'a', targetId: 'b', confidence: 0.72, intensity: 2 }),
+      buildInteraction({ actorId: 'c', targetId: 'd', confidence: 0.94, intensity: 4 }),
+    ], { semanticSource: 'model' });
+
+    expect(nextState.dominantThread).toEqual(['c', 'd']);
+  });
+
   it('deduplicates reciprocal room pairs and lets repair clear stale conflict', () => {
     const challenged = calculateRoomShift({
       heat: 20,

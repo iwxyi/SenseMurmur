@@ -68,6 +68,29 @@ function removePairs(list: Array<[string, string]>, interactions: InteractionEve
 
 type RoomDelta = Required<NonNullable<RoomShiftPayload['delta']>>;
 
+function interactionRoomDeltaMagnitude(interaction: InteractionEventPayload) {
+  const delta = interaction.immediateImpact?.roomDelta;
+  if (!delta) return 0;
+  return Math.abs(delta.heat || 0) + Math.abs(delta.cohesion || 0) + Math.abs(delta.topicDrift || 0);
+}
+
+/** Select the visible thread without relying on the model's array order alone. */
+function selectDominantInteraction(interactions: InteractionEventPayload[]) {
+  return interactions
+    .map((interaction, index) => ({ interaction, index }))
+    .filter(({ interaction }) => Boolean(interaction.targetId))
+    .sort((left, right) => {
+      const targetRank = Number(Boolean(right.interaction.targetId)) - Number(Boolean(left.interaction.targetId));
+      if (targetRank !== 0) return targetRank;
+      const confidenceRank = (right.interaction.confidence || 0) - (left.interaction.confidence || 0);
+      if (Math.abs(confidenceRank) > 0.001) return confidenceRank;
+      const intensityRank = (right.interaction.intensity || 0) - (left.interaction.intensity || 0);
+      if (intensityRank !== 0) return intensityRank;
+      const roomRank = interactionRoomDeltaMagnitude(right.interaction) - interactionRoomDeltaMagnitude(left.interaction);
+      return roomRank || left.index - right.index;
+    })[0]?.interaction || null;
+}
+
 function scale(intensity: number, multiplier: number) {
   return Math.round(Math.max(1, Math.min(5, intensity)) * multiplier);
 }
@@ -160,7 +183,7 @@ export function calculateRoomShift(
   options: { semanticSource?: 'model' | 'legacy' } = {},
 ): { nextState: RoomStateSnapshotV2; shift: RoomShiftPayload } {
   const interactions = Array.isArray(input) ? input : [input];
-  const interaction = interactions[0];
+  const interaction = selectDominantInteraction(interactions);
   const base = current
     ? {
         ...current,

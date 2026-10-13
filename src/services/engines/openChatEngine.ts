@@ -173,9 +173,25 @@ async function resolveInteraction(params: {
   void params.characters;
   void params.recentMessages;
   void params.apiConfig;
-  const hint = params.message.interactionHint || null;
-  if (hint?.targetId && (hint.confidence || 0) >= 0.8) return hint;
-  return hint;
+  const hints = params.message.interactionHints?.length
+    ? params.message.interactionHints
+    : params.message.interactionHint ? [params.message.interactionHint] : [];
+  return hints
+    .filter((hint): hint is InteractionEventPayload => Boolean(hint))
+    .map((hint, index) => ({ hint, index }))
+    .sort((left, right) => {
+      const targetRank = Number(Boolean(right.hint.targetId)) - Number(Boolean(left.hint.targetId));
+      if (targetRank !== 0) return targetRank;
+      const confidenceRank = (right.hint.confidence || 0) - (left.hint.confidence || 0);
+      if (Math.abs(confidenceRank) > 0.001) return confidenceRank;
+      const intensityRank = (right.hint.intensity || 0) - (left.hint.intensity || 0);
+      if (intensityRank !== 0) return intensityRank;
+      const leftDelta = left.hint.immediateImpact?.roomDelta;
+      const rightDelta = right.hint.immediateImpact?.roomDelta;
+      const roomRank = (Math.abs(rightDelta?.heat || 0) + Math.abs(rightDelta?.cohesion || 0) + Math.abs(rightDelta?.topicDrift || 0))
+        - (Math.abs(leftDelta?.heat || 0) + Math.abs(leftDelta?.cohesion || 0) + Math.abs(leftDelta?.topicDrift || 0));
+      return roomRank || left.index - right.index;
+    })[0]?.hint || null;
 }
 
 function buildMemoryCandidateFromStructuredEvent(event: RuntimeEventV2): RuntimeEventV2 | null {
@@ -1679,9 +1695,10 @@ async function buildStructuredRuntime(params: {
   const allInteractions = (enrichedMessage.interactionHints?.length
     ? enrichedMessage.interactionHints
     : interaction ? [interaction] : [])
-    .filter((item, index, items) => item?.targetId && items.findIndex((candidate) => candidate.targetId === item.targetId && candidate.kind === item.kind) === index);
+    .filter((item, index, items) => (item?.targetId || item?.immediateImpact?.roomDelta)
+      && items.findIndex((candidate) => candidate.targetId === item.targetId && candidate.kind === item.kind && candidate.evidenceText === item.evidenceText) === index);
   const secondaryInteractionEvents = allInteractions
-    .filter((item) => item !== interaction)
+    .filter((item) => item !== interaction && item.targetId)
     .map((item) => {
       const secondaryActorName = params.characters.find((character) => character.id === item.actorId)?.name || item.actorId;
       const secondaryTargetName = params.characters.find((character) => character.id === item.targetId)?.name || item.targetId || '';
