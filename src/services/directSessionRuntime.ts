@@ -1013,6 +1013,8 @@ async function buildWorldDrivenCandidate(
     .filter((item) => item.status !== 'cancelled' && item.status !== 'completed')
     .find((item) => {
       if (!item.participantIds.includes(attention.actorId) || !item.participantIds.includes('user')) return false;
+      if ([attention.actorId, 'user'].some((id) =>
+        ['declined', 'withdrawn', 'left_early', 'no_show', 'cancelled_by_dependency'].includes(item.participantStates[id]))) return false;
       const startAt = typeof item.startAt === 'number' ? item.startAt : null;
       if (!startAt) return false;
       return startAt >= now && startAt - now <= 6 * 60 * 60_000;
@@ -1039,7 +1041,7 @@ async function buildWorldDrivenCandidate(
     && !hasRecentWorldArtifact(chat, attention.actorId, 'react_to_moment', 120 * 60_000)
     && passesWorldAttentionRestraintPolicy(chat, attention.actorId, 'user', now, 'react_to_moment', followupReasonType, actor, { attentionScore: attention.attentionScore });
   const canInviteActivity = false;
-  const canCalendarReminder = attention.suggestedActions.includes('calendar_reminder')
+  const canCalendarReminder = Boolean(upcomingCalendarItem) && attention.suggestedActions.includes('calendar_reminder')
     && !hasRecentWorldArtifact(chat, attention.actorId, 'status_update', 120 * 60_000)
     && passesWorldAttentionRestraintPolicy(chat, attention.actorId, 'user', now, 'status_update', reminderReasonType, actor, { attentionScore: attention.attentionScore });
   const canStatus = !hasRecentWorldArtifact(chat, attention.actorId, 'status_update', 90 * 60_000)
@@ -1059,7 +1061,6 @@ async function buildWorldDrivenCandidate(
     && !(isLateNight && !actorNightOwl)
     && !postMomentDelayBlocked
     && !hasRecentWorldArtifact(chat, attention.actorId, 'post_moment', 180 * 60_000);
-  const shouldPrioritizeCalendarReminder = Boolean(upcomingCalendarItem) && canCalendarReminder;
   const minutesUntil = upcomingCalendarItem?.startAt ? Math.max(0, Math.round((upcomingCalendarItem.startAt - now) / 60_000)) : null;
   const buildCandidateChoice = (
     eventKind: SocialEventCandidatePayload['eventKind'],
@@ -1067,7 +1068,7 @@ async function buildWorldDrivenCandidate(
     mode: 'calendar' | 'invite' | 'private' | 'followup' | 'checkin' | 'react' | 'moment' | 'status',
   ) => {
     const seedIntent = mode === 'calendar'
-      ? `${upcomingCalendarItem?.summary || upcomingCalendarItem?.title || '临近日程提醒'}${minutesUntil !== null ? `（${minutesUntil} 分钟后）` : ''}`
+      ? `${upcomingCalendarItem?.status === 'tentative' ? '待确认安排：' : ''}${upcomingCalendarItem?.summary || upcomingCalendarItem?.title || ''}${minutesUntil !== null ? `（${minutesUntil} 分钟后）` : ''}`
       : mode === 'invite'
         ? (attention.reasons[0] || '关注状态触发一次线下邀约。')
         : mode === 'private'
@@ -1142,14 +1143,15 @@ async function buildWorldDrivenCandidate(
           ? 'mixed'
           : 'user_private' as SocialEventCandidatePayload['visibilityPlan'],
       dedupeKey: mode === 'calendar'
-        ? `calendar-upcoming-reminder-${chat.id}-${attention.actorId}-${upcomingCalendarItem?.id || 'item'}`
+        ? `calendar-upcoming-reminder-${chat.id}-${attention.actorId}-${upcomingCalendarItem?.id}`
         : `world-attention-${eventKind}-${chat.id}-${attention.actorId}`,
+      timeHint: mode === 'calendar' ? upcomingCalendarItem?.timeHint : undefined,
+      locationHint: mode === 'calendar' ? upcomingCalendarItem?.locationHint : undefined,
     };
   };
   const choices: Array<ReturnType<typeof buildCandidateChoice>> = [];
-  if (shouldPrioritizeCalendarReminder) choices.push(buildCandidateChoice('status_update', 'world_calendar_upcoming_reminder', 'calendar'));
+  if (canCalendarReminder) choices.push(buildCandidateChoice('status_update', 'world_calendar_upcoming_reminder', 'calendar'));
   if (canInviteActivity) choices.push(buildCandidateChoice('social_outing', inviteReasonType, 'invite'));
-  if (canCalendarReminder) choices.push(buildCandidateChoice('status_update', reminderReasonType, 'calendar'));
   if (canPrivateMessage) choices.push(buildCandidateChoice('check_in', privateMessageReasonType, 'private'));
   if (canAskFollowup) choices.push(buildCandidateChoice('check_in', followupQuestionReasonType, 'followup'));
   if (canCheckIn) choices.push(buildCandidateChoice('check_in', followupReasonType, 'checkin'));
@@ -1227,6 +1229,8 @@ async function buildWorldDrivenCandidate(
       decisionSource: 'local_fallback',
       title: chosen.title,
       activityType: chosen.activityType,
+      timeHint: chosen.timeHint,
+      locationHint: chosen.locationHint,
       dedupeKey: chosen.dedupeKey,
     } satisfies SocialEventCandidatePayload,
   });

@@ -3,7 +3,10 @@ import type { RuntimeEventV2 } from '../types/runtimeEvent';
 export function isCalendarStateEvent(event: RuntimeEventV2) {
   if (event.kind === 'calendar_item_patch') return true;
   if (event.kind !== 'event_candidate' && event.kind !== 'artifact') return false;
-  const kind = (event.payload as Record<string, unknown>)?.eventKind;
+  const payload = event.payload as Record<string, unknown> | undefined;
+  const kind = payload?.eventKind;
+  if (kind === 'status_update' && (payload?.reasonType === 'world_calendar_upcoming_reminder'
+    || payload?.reasonType === 'world_attention_calendar_reminder')) return true;
   return kind === 'social_outing' || kind === 'travel_plan' || kind === 'calendar_reminder';
 }
 

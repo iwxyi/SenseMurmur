@@ -1484,7 +1484,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     expect((patch?.runtimeEventsV2 || []).some((event) => event.kind === 'artifact' && (event.payload as { eventKind?: string; artifactType?: string }).eventKind === 'social_outing' && (event.payload as { artifactType?: string }).artifactType === 'outing_summary')).toBe(false);
   });
 
-  it('world-driven fallback maps calendar_reminder attention into status_update candidate', async () => {
+  it('does not turn calendar_reminder attention into a reminder without a scheduled calendar item', async () => {
     const now = Date.now();
     const chat = {
       ...buildChatWithEvents([
@@ -1532,9 +1532,9 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     });
     const firstCall = updateChat.mock.calls.at(0) as [string, { runtimeEventsV2?: RuntimeEventV2[] }] | undefined;
     const patch = firstCall?.[1];
-    const worldCandidate = (patch?.runtimeEventsV2 || []).find((event) => event.kind === 'event_candidate' && (event.payload as { eventKind?: string }).eventKind === 'status_update');
-    expect((worldCandidate?.payload as { reasonType?: string }).reasonType).toBe('world_attention_calendar_reminder');
-    expect((worldCandidate?.payload as { activityType?: string }).activityType).toBe('日程提醒');
+    const candidates = (patch?.runtimeEventsV2 || []).filter((event) => event.kind === 'event_candidate');
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates.some((event) => (event.payload as { activityType?: string }).activityType === '日程提醒')).toBe(false);
   });
 
   it.each([
@@ -1613,10 +1613,25 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     expect(influencedCandidate?.payload).toEqual(baseCandidate?.payload);
   });
 
-  it('keeps world-driven status_update confidence independent of lexical diagnostics', async () => {
+  it('keeps a scheduled reminder independent of lexical diagnostics', async () => {
     const now = Date.now();
     const baseChat = {
       ...buildChatWithEvents([
+        {
+          id: 'calendar-diagnostic-source',
+          conversationId: 'chat-1',
+          kind: 'calendar_item_patch',
+          createdAt: now - 5 * 60_000,
+          actorIds: ['a'],
+          summary: '晨会安排',
+          visibility: 'derived_public',
+          payload: {
+            eventType: 'calendar_item_patch', calendarItemId: 'diagnostic-meeting',
+            kind: 'activity', status: 'planned', title: '晨会',
+            participantIds: ['a', 'user'], participantStates: { a: 'going', user: 'going' },
+            startAt: now + 2 * 60 * 60_000, durationMinutes: 45,
+          },
+        } as RuntimeEventV2,
         {
           id: 'att-1',
           conversationId: 'chat-1',
@@ -1688,10 +1703,11 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     });
     const basePatch = (updateChatBase.mock.calls.at(0) as [string, { runtimeEventsV2?: RuntimeEventV2[] }] | undefined)?.[1];
     const influencedPatch = (updateChatInfluenced.mock.calls.at(0) as [string, { runtimeEventsV2?: RuntimeEventV2[] }] | undefined)?.[1];
-    const baseCandidate = (basePatch?.runtimeEventsV2 || []).find((event) => event.kind === 'event_candidate' && (event.payload as { reasonType?: string }).reasonType === 'world_attention_calendar_reminder');
-    const influencedCandidate = (influencedPatch?.runtimeEventsV2 || []).find((event) => event.kind === 'event_candidate' && (event.payload as { reasonType?: string }).reasonType === 'world_attention_calendar_reminder');
+    const baseCandidate = (basePatch?.runtimeEventsV2 || []).find((event) => event.kind === 'event_candidate');
+    const influencedCandidate = (influencedPatch?.runtimeEventsV2 || []).find((event) => event.kind === 'event_candidate');
     expect(baseCandidate).toBeTruthy();
     expect(influencedCandidate).toBeTruthy();
+    expect(baseCandidate?.payload).toMatchObject({ eventKind: 'status_update', reasonType: 'world_calendar_upcoming_reminder' });
     const baseConfidence = (baseCandidate?.payload as { confidence?: number }).confidence || 0;
     const influencedConfidence = (influencedCandidate?.payload as { confidence?: number }).confidence || 0;
     expect(influencedConfidence).toBe(baseConfidence);
@@ -1748,7 +1764,18 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     jsonSpy.mockRestore();
   });
 
-  it('prioritizes upcoming shared calendar item as world_calendar_upcoming_reminder', async () => {
+  it.each([
+    { status: 'planned', hours: 2, userState: 'going', expected: true },
+    { status: 'tentative', hours: 2, userState: 'invited', expected: true },
+    { status: 'cancelled', hours: 2, userState: 'going', expected: false },
+    { status: 'completed', hours: 2, userState: 'going', expected: false },
+    { status: 'planned', hours: null, userState: 'going', expected: false },
+    { status: 'planned', hours: -1, userState: 'going', expected: false },
+    { status: 'planned', hours: 7, userState: 'going', expected: false },
+    ...['declined', 'withdrawn', 'left_early', 'no_show', 'cancelled_by_dependency'].map((userState) => ({
+      status: 'planned', hours: 2, userState, expected: false,
+    })),
+  ])('binds calendar reminders to an eligible shared item %j', async ({ status, hours, userState, expected }) => {
     const now = Date.now();
     const chat = {
       ...buildChatWithEvents([
@@ -1776,12 +1803,14 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
             eventType: 'calendar_item_patch',
             calendarItemId: 'item-upcoming-1',
             kind: 'activity',
-            status: 'planned',
+            status,
             title: '晨会',
             activityType: '工作会议',
             participantIds: ['a', 'user'],
-            participantStates: { a: 'going', user: 'going' },
-            startAt: now + 2 * 60 * 60_000,
+            participantStates: { a: 'going', user: userState },
+            startAt: hours === null ? null : now + hours * 60 * 60_000,
+            timeHint: '今天稍后',
+            locationHint: '城南营',
             durationMinutes: 45,
             summary: '晨会安排',
           },
@@ -1808,9 +1837,22 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     });
     const firstCall = updateChat.mock.calls.at(0) as [string, { runtimeEventsV2?: RuntimeEventV2[] }] | undefined;
     const patch = firstCall?.[1];
-    const worldCandidate = (patch?.runtimeEventsV2 || []).find((event) => event.kind === 'event_candidate' && (event.payload as { eventKind?: string }).eventKind === 'status_update');
-    expect((worldCandidate?.payload as { reasonType?: string }).reasonType).toBe('world_calendar_upcoming_reminder');
+    const worldCandidate = (patch?.runtimeEventsV2 || []).find((event) => event.kind === 'event_candidate'
+      && (event.payload as { reasonType?: string }).reasonType === 'world_calendar_upcoming_reminder');
+    if (!expected) {
+      expect(worldCandidate).toBeUndefined();
+      return;
+    }
+    expect(worldCandidate?.payload).toMatchObject({
+      eventKind: 'status_update', activityType: '日程提醒', timeHint: '今天稍后', locationHint: '城南营',
+    });
     expect((worldCandidate?.payload as { dedupeKey?: string }).dedupeKey).toContain('item-upcoming-1');
+    expect((worldCandidate?.payload as { seedIntent?: string }).seedIntent).toContain('晨会安排');
+    if (status === 'tentative') expect((worldCandidate?.payload as { seedIntent?: string }).seedIntent).toContain('待确认安排');
+    expect((patch?.runtimeEventsV2 || []).find((event) => event.kind === 'artifact'
+      && (event.payload as { candidateId?: string }).candidateId === worldCandidate?.id)?.payload).toMatchObject({
+      status: 'tentative', timeHint: '今天稍后', locationHint: '城南营',
+    });
   });
 
   it('records restrained proactive-care fallback when status_update is selected', async () => {
