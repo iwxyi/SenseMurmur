@@ -214,6 +214,39 @@ describe('characterPresence', () => {
     expect(result.characterPatches[0].patch.presence?.status).toBe('online');
   });
 
+  it.each(['planned', 'in_progress'] as const)('releases the linked absence when the activity is rescheduled into the future: %s', (status) => {
+    const { id, source, character } = ongoingActivity();
+    const now = 5000;
+    const result = applyPresenceUpdateToTransition({ chat: source, characters: [character], transition, now,
+      message: message({ id: 'postpone', content: '明日再出发。', metadata: { activityUpdate: {
+        calendarItemId: id, title: '探路', kind: 'travel', status,
+        startAt: now + 24 * 60 * 60_000, durationMinutes: 90, availability: 'away', evidenceText: '明日再出发',
+      } } }),
+    });
+    const updatedCharacter = { ...character, ...result.characterPatches[0]?.patch };
+    expect(updatedCharacter.presence).toMatchObject({ status: 'online', lastAwayAt: 1000 });
+    expect(updatedCharacter.presence?.unavailableUntil).toBeUndefined();
+    expect(isCharacterAvailableForScheduling(updatedCharacter, now)).toBe(true);
+    expect(result.chatRuntimeDelta?.runtimeEventsV2?.upserts).toHaveLength(1);
+    const item = projectWorldCalendar([{ ...source, ...result.chatPatch }], [], { now, inferTemporalStatus: false }).items[0];
+    expect(item).toMatchObject({ id, status: 'planned', startAt: now + 24 * 60 * 60_000,
+      participantStates: { a: 'going', b: 'going' } });
+  });
+
+  it('does not release an unrelated absence when planning another activity', () => {
+    const { id, source, character } = ongoingActivity();
+    const elsewhere = { ...character, presence: { ...character.presence!, calendarItemId: 'other-activity' } };
+    const result = applyPresenceUpdateToTransition({ chat: source, characters: [elsewhere], transition, now: 5000,
+      message: message({ content: '明日再出发。', metadata: { activityUpdate: {
+        calendarItemId: id, title: '探路', kind: 'travel', status: 'planned',
+        startAt: 100_000, evidenceText: '明日再出发',
+      } } }),
+    });
+    expect(result.characterPatches).toEqual([]);
+    expect(result.chatRuntimeDelta?.runtimeEventsV2?.upserts).toHaveLength(1);
+    expect(isCharacterAvailableForScheduling(elsewhere, 5000)).toBe(false);
+  });
+
   it('reads activity state already accumulated in the current transition', () => {
     const { id, started } = ongoingActivity();
     const result = applyPresenceUpdateToTransition({ chat, transition: started, now: 5000,

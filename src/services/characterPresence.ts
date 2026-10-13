@@ -108,11 +108,13 @@ export function applyPresenceUpdateToTransition(params: {
         ?? (needsAwayWindow && durationMinutes !== undefined ? now + durationMinutes * 60_000 : undefined);
     const isCurrent = validActivity.status === 'in_progress' && startAt !== undefined && startAt <= now
       && (endAt === undefined || endAt > now);
+    const activityStatus = validActivity.status === 'in_progress' && startAt !== undefined && startAt > now
+      ? 'planned' : validActivity.status;
     const participantIds = Array.from(new Set([params.message.senderId,
       ...(validActivity.participantIds || []).filter((id) => params.chat?.memberIds.includes(id))]));
     addEvent(`actor-activity-event-${params.message.id}`, {
       calendarItemId, title: validActivity.title, kind: validActivity.kind,
-      status: validActivity.status === 'in_progress' && startAt !== undefined && startAt > now ? 'planned' : validActivity.status,
+      status: activityStatus,
       ...(existing ? {
         addParticipantIds: participantIds,
         addParticipantStates: Object.fromEntries(participantIds.map((id) => [id,
@@ -132,7 +134,7 @@ export function applyPresenceUpdateToTransition(params: {
         updatedAt: now, sourceMessageId: params.message.id, calendarItemId,
         locationHint: validActivity.locationHint ?? existing?.locationHint ?? linkedPresence?.locationHint } };
     }
-    if ((validActivity.status === 'completed' || validActivity.status === 'cancelled')
+    if ((activityStatus === 'completed' || activityStatus === 'cancelled' || activityStatus === 'planned')
       && speaker?.presence?.calendarItemId === calendarItemId) {
       patch = { presence: { status: 'online', updatedAt: now, sourceMessageId: params.message.id } };
     }
