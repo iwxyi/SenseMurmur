@@ -456,6 +456,7 @@ export async function runAutoSocialEventFlowImpl(sourceChat: GroupChat, context:
     characters: context.characters,
     imageModelEnabled,
     textApiConfig,
+    allowWorldFallback: sourceChat.isActive,
     updateChat: context.updateChat,
     addChat: async (input) => useChatStore.getState().addChat(input as never),
     addMessage: context.addMessage,

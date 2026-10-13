@@ -1140,6 +1140,7 @@ export interface SocialEventRuntimeOps {
   messages?: Message[];
   imageModelEnabled?: boolean;
   textApiConfig?: APIConfig | null;
+  allowWorldFallback?: boolean;
   updateChat: (chatId: string, patch: Partial<GroupChat>) => Promise<unknown>;
   addChat: (input: Omit<GroupChat, 'id' | 'createdAt' | 'updatedAt' | 'lastMessageAt'>) => Promise<GroupChat>;
   addMessage: (message: SocialRuntimeMessageInput) => Promise<unknown>;
@@ -2321,6 +2322,8 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
     await ops.updateChat(sourceChat.id, appendHandledSocialEvent(sourceChat, updateSourceChatAfterConflictExpression(sourceChat, payload, actorName), conflictCandidate.id, payload.initiatorId));
     return { handledEventId: conflictCandidate.id };
   }
+
+  if (ops.allowWorldFallback === false) return { handledEventId: null };
 
   const worldDrivenDecision = await evaluateWorldDrivenDecision(
     sourceChat,

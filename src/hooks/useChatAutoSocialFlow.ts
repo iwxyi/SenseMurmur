@@ -19,6 +19,7 @@ const WORLD_SOCIAL_TICK_READY_DELAY_MS = 12_000;
 interface UseChatAutoSocialFlowParams {
   chat: GroupChat | undefined;
   runAutoSocialEventFlow: (chat: GroupChat) => Promise<unknown>;
+  onError: (error: unknown) => void;
 }
 
 function hasHandledSocialEventMarker(chat: GroupChat, eventId: string) {
@@ -29,11 +30,15 @@ function hasHandledSocialEventMarker(chat: GroupChat, eventId: string) {
 }
 
 export function hasPendingAutoSocialEventCandidate(chat: GroupChat) {
-  return (chat.runtimeEventsV2 || []).some((event) => {
+  return getPendingCandidateIds(chat).length > 0;
+}
+
+function getPendingCandidateIds(chat: GroupChat) {
+  return (chat.runtimeEventsV2 || []).filter((event) => {
     if (event.kind !== 'event_candidate' || !event.id || hasHandledSocialEventMarker(chat, event.id)) return false;
     const eventKind = (event.payload as { eventKind?: unknown } | null | undefined)?.eventKind;
     return typeof eventKind === 'string' && AUTO_SOCIAL_EVENT_KINDS.has(eventKind);
-  });
+  }).map((event) => event.id);
 }
 
 export function getAutoSocialFlowDelayMs(chat: GroupChat, now = Date.now()) {
@@ -44,39 +49,87 @@ export function getAutoSocialFlowDelayMs(chat: GroupChat, now = Date.now()) {
   return WORLD_SOCIAL_TICK_MIN_IDLE_MS - idleMs;
 }
 
-export function useChatAutoSocialFlow(params: UseChatAutoSocialFlowParams) {
-  const lastAutoThreadCandidateIdRef = useRef<string | null>(null);
+function getSchedule(chat: GroupChat | undefined) {
+  if (!chat || chat.type !== 'group') return null;
+  const pendingIds = getPendingCandidateIds(chat);
+  if (pendingIds.length) {
+    return { mode: 'candidate', key: JSON.stringify([chat.id, pendingIds]), delayMs: PENDING_AUTO_SOCIAL_DELAY_MS };
+  }
+  if (!chat.isActive) return null;
+  return { mode: 'world', key: JSON.stringify([chat.id, chat.updatedAt]), delayMs: getAutoSocialFlowDelayMs(chat) };
+}
 
+export function createChatAutoSocialScheduler() {
+  let latest: UseChatAutoSocialFlowParams | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let scheduled: { chatId: string; mode: string; key: string } | undefined;
+  let lastAttemptKey: string | undefined;
+  let running = false;
+  let disposed = false;
+
+  const clearTimer = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    scheduled = undefined;
+  };
+
+  const reconcile = () => {
+    const chat = latest?.chat;
+    const plan = getSchedule(chat);
+    if (disposed || !chat || !plan || plan.key === lastAttemptKey) {
+      clearTimer();
+      return;
+    }
+    if (running) return;
+    // Keep the pending candidate deadline while messages and callbacks change.
+    if (scheduled && scheduled.chatId === chat.id && scheduled.mode === plan.mode
+      && (plan.mode === 'candidate' || scheduled.key === plan.key)) return;
+    clearTimer();
+    scheduled = { chatId: chat.id, mode: plan.mode, key: plan.key };
+    timer = setTimeout(() => { void run(); }, plan.delayMs);
+  };
+
+  const run = async () => {
+    clearTimer();
+    const current = latest;
+    const plan = getSchedule(current?.chat);
+    if (disposed || running || !current?.chat || !plan || plan.key === lastAttemptKey) return;
+    lastAttemptKey = plan.key;
+    running = true;
+    try {
+      await current.runAutoSocialEventFlow(current.chat);
+    } catch (error) {
+      current.onError(error);
+    } finally {
+      running = false;
+      reconcile();
+    }
+  };
+
+  return {
+    update(params: UseChatAutoSocialFlowParams) {
+      latest = params;
+      reconcile();
+    },
+    dispose() {
+      disposed = true;
+      clearTimer();
+    },
+  };
+}
+
+export function useChatAutoSocialFlow(params: UseChatAutoSocialFlowParams) {
+  const schedulerRef = useRef<ReturnType<typeof createChatAutoSocialScheduler> | null>(null);
+  const chatId = params.chat?.id;
   useEffect(() => {
-    const chat = params.chat;
-    if (!chat || chat.type !== 'group') return;
-    if (!chat.isActive) return;
-    const delayMs = getAutoSocialFlowDelayMs(chat);
-    const latestEventId = chat.runtimeEventsV2?.at(-1)?.id || null;
-    const autoFlowKey = `${chat.id}:${chat.updatedAt}:${latestEventId}:${delayMs <= WORLD_SOCIAL_TICK_READY_DELAY_MS ? 'world-ready' : 'scheduled'}`;
-    if (lastAutoThreadCandidateIdRef.current === autoFlowKey) return;
-    lastAutoThreadCandidateIdRef.current = autoFlowKey;
-    let cancelled = false;
-    let idleHandle: number | null = null;
-    const run = () => {
-      if (cancelled) return;
-      void params.runAutoSocialEventFlow(chat);
-    };
-    const handle = window.setTimeout(() => {
-      const scheduler = (window as typeof window & {
-        requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-        cancelIdleCallback?: (id: number) => void;
-      }).requestIdleCallback;
-      if (typeof scheduler === 'function') {
-        idleHandle = scheduler(run, { timeout: 4000 });
-        return;
-      }
-      run();
-    }, delayMs);
+    const scheduler = createChatAutoSocialScheduler();
+    schedulerRef.current = scheduler;
     return () => {
-      cancelled = true;
-      window.clearTimeout(handle);
-      if (idleHandle != null) window.cancelIdleCallback?.(idleHandle);
+      scheduler.dispose();
+      schedulerRef.current = null;
     };
-  }, [params.chat, params.runAutoSocialEventFlow]);
+  }, [chatId]);
+  useEffect(() => {
+    schedulerRef.current?.update(params);
+  }, [params]);
 }

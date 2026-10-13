@@ -480,6 +480,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     const result = await runSocialEventAutoFlow(chat, {
       chats: [chat],
       characters: [],
+      allowWorldFallback: false,
       updateChat,
       addChat: vi.fn(async () => buildBaseChat()),
       addMessage: vi.fn(async () => ({})),
@@ -493,6 +494,32 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     expect(events.find((event) => (event.payload as { artifactType?: string }).artifactType === 'outing_summary')?.payload)
       .toMatchObject({ status: 'tentative' });
     expect(events.some((event) => event.summary === 'handled_social_event:evt-candidate-1')).toBe(true);
+  });
+
+  it('does not generate a world-driven fallback when only committed candidates may be consumed', async () => {
+    const chat = buildChatWithEvents([{
+      id: 'att-paused',
+      conversationId: 'chat-1',
+      kind: 'attention_candidate',
+      createdAt: Date.now() - 2_000,
+      actorIds: ['user'],
+      targetIds: ['a'],
+      summary: '用户点名甲，等待回应',
+      visibility: 'derived_public',
+      payload: { source: 'user_group_message', targetIds: ['a'], confidence: 0.9, reason: '用户刚点名了甲' },
+    } as RuntimeEventV2]);
+    const updateChat = vi.fn(async () => undefined);
+    const result = await runSocialEventAutoFlow(chat, {
+      chats: [chat],
+      characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')],
+      allowWorldFallback: false,
+      updateChat,
+      addChat: vi.fn(async () => buildBaseChat()),
+      addMessage: vi.fn(async () => ({})),
+      appendEventMessage: vi.fn(async () => undefined),
+    });
+    expect(result).toEqual({ handledEventId: null });
+    expect(updateChat).not.toHaveBeenCalled();
   });
 
   it('runs unified auto social flow for check_in candidates', async () => {

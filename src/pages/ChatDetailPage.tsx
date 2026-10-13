@@ -3760,7 +3760,7 @@ export default function ChatDetailPage() {
     setSnackbar({ open: true, message: '已重新加入生成队列', severity: 'info' });
   }, [aiProfiles, characters, chatInteractionDisabled, chatReadOnlyReason, currentChatMessages, upsertMessageStable]);
 
-  useChatAutoSocialFlow({ chat, runAutoSocialEventFlow });
+  useChatAutoSocialFlow({ chat, runAutoSocialEventFlow, onError: (error) => showErrorToast(error instanceof Error ? error.message : String(error)) });
 
   const handleLoadOlderMessages = useCallback(async () => {
     if (!id || loadingMoreRef.current || !hasMore || currentChatMessages.length === 0) return;
