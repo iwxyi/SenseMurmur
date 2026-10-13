@@ -112,7 +112,7 @@ export function applyPresenceUpdateToTransition(params: {
       ...(validActivity.participantIds || []).filter((id) => params.chat?.memberIds.includes(id))]));
     addEvent(`actor-activity-event-${params.message.id}`, {
       calendarItemId, title: validActivity.title, kind: validActivity.kind,
-      status: validActivity.status === 'in_progress' && !isCurrent ? 'planned' : validActivity.status,
+      status: validActivity.status === 'in_progress' && startAt !== undefined && startAt > now ? 'planned' : validActivity.status,
       ...(existing ? {
         addParticipantIds: participantIds,
         addParticipantStates: Object.fromEntries(participantIds.map((id) => [id,

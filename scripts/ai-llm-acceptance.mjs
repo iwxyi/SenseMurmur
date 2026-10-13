@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
-const VALID_CASES = ['basic', 'json', 'activity', 'story', 'storylong', 'role', 'group', 'chat', 'chatflow', 'generation', 'agent', 'ops', 'artifact', 'artifactflow', 'memory', 'continuity', 'calendar', 'safety', 'image', 'e2e', 'e2e_direct', 'quality'];
+const VALID_CASES = ['basic', 'json', 'activity', 'story', 'storylong', 'role', 'group', 'chat', 'chatflow', 'state_readback', 'generation', 'agent', 'ops', 'artifact', 'artifactflow', 'memory', 'continuity', 'calendar', 'safety', 'image', 'e2e', 'e2e_direct', 'quality'];
 
 const HELP = `
 AI real-model acceptance.
@@ -2750,6 +2750,89 @@ async function closeRuntimeChatModules() {
   await runtime?.server?.close();
 }
 
+async function runStateReadbackCase(model) {
+  try {
+    return await runStateReadbackSamples(model);
+  } finally {
+    await closeRuntimeChatModules();
+  }
+}
+
+async function runStateReadbackSamples(model) {
+  const runtime = await loadRuntimeChatModules();
+  const envelope = await runtime.server.ssrLoadModule('/src/services/inlineInteractionHint.ts');
+  const scenario = runtimeChatflowScenarios().find((item) => item.name === 'longzhong_activity_update_room');
+  assertCondition(scenario, 'Missing activity readback fixture');
+  const characters = scenario.characters;
+  const seed = scenario.seedMessages[0];
+  const chat = runtime.normalizeConversation(scenario.chat);
+  const now = seed.timestamp + 60_000;
+  const seeded = runtime.applyPresenceUpdateToTransition({ chat, characters, message: seed,
+    transition: { chatPatch: {}, characterPatches: [], runtimeEvents: [] }, now: seed.timestamp });
+  const source = applyRuntimeTransition(runtime, chat, seeded);
+  const original = runtime.projectWorldCalendar([source], characters, { now, inferTemporalStatus: false }).items[0];
+  assertCondition(original, 'Activity readback seed was not committed');
+  const fixtures = [
+    { name: 'location_only', content: '大哥，俺刚巡到南门，一路都还安稳。', status: 'in_progress', locationHint: '南门' },
+    { name: 'completed', content: '巡城走完了，俺回来了。', status: 'completed' },
+    { name: 'remaining_duration', content: '还在南门巡，二十分钟后回来。', status: 'in_progress', locationHint: '南门', durationMinutes: 20 },
+  ];
+  const samples = [];
+  for (const fixture of fixtures) {
+    const request = {
+      speakerId: 'fei', members: characters.map((item) => ({ id: item.id, name: item.name })),
+      knownActivity: { calendarItemId: original.id, title: original.title, kind: original.kind,
+        status: original.status, startAt: original.startAt, endAt: original.endAt,
+        locationHint: original.locationHint, participantIds: original.participantIds },
+      visibleSends: [fixture.content],
+    };
+    const response = await callChat(model, [
+      { role: 'system', content: [
+        'Read a frozen public chat turn and report state changes. Return one JSON object with activityUpdate and addressedTargets. Do not write or revise dialogue.',
+        'activityUpdate is null for no change, otherwise {calendarItemId,title,kind,status,evidenceText,locationHint?,durationMinutes?,availability?}. Reuse the exact known ID. status is planned, in_progress, completed or cancelled. evidenceText must be an exact substring of a single visible send supporting the update.',
+        'A non-null activityUpdate requires calendarItemId,title,kind,status,evidenceText; reuse the known title and kind when unchanged. Only report optional changed fields supported by this turn. Omit unchanged or unknown time, duration and participants. durationMinutes means explicitly stated remaining minutes, not elapsed time or an estimate. Completion requires an actual completed result; ongoing work is in_progress. Activity does not imply departure.',
+        'addressedTargets is null unless this turn requires an immediate answer or explicitly hands the floor to another member. Speaking to someone, answering them, reporting progress and giving a reminder do not alone require a reply. If needed use {targetIds,primaryTargetId,confidence,reason} with valid member IDs.',
+      ].join('\n') },
+      { role: 'user', content: JSON.stringify(request) },
+    ], { maxTokens: 4096, temperature: 0 });
+    let parsed = null;
+    let error = null;
+    try {
+      const output = JSON.parse(response.content);
+      assertCondition(Object.hasOwn(output, 'activityUpdate') && Object.hasOwn(output, 'addressedTargets'),
+        'Missing explicit readback judgement');
+      parsed = envelope.parseInlineInteractionEnvelope(JSON.stringify({ ...output, messages: [{ content: fixture.content }] }), { allowContentSalvage: false });
+      assertCondition(parsed && !envelope.hasInvalidStateEvidence(parsed), 'Invalid readback evidence');
+      assertCondition(parsed.activityUpdate, 'Activity update missing or rejected by production normalization');
+      assertCondition(parsed.activityUpdate?.calendarItemId === original.id, 'Original activity ID not reused');
+      assertCondition(parsed.activityUpdate.status === fixture.status, 'Wrong activity status');
+      assertCondition(!parsed.activityUpdate.startsNow && parsed.activityUpdate.startAt === undefined,
+        'Unchanged start time should be omitted');
+      assertCondition(!parsed.addressedTargets?.targetIds?.length, 'Invented reply debt');
+      if (fixture.locationHint) assertCondition(parsed.activityUpdate.locationHint === fixture.locationHint, 'Wrong location');
+      assertCondition(parsed.activityUpdate.durationMinutes === fixture.durationMinutes, 'Unsupported or missing duration');
+      const message = { ...seed, id: `readback-${fixture.name}`, timestamp: now,
+        content: fixture.content, metadata: { activityUpdate: parsed.activityUpdate } };
+      const transition = runtime.applyPresenceUpdateToTransition({ chat: source, characters, message,
+        transition: { chatPatch: {}, characterPatches: [], runtimeEvents: [] }, now });
+      const after = runtime.projectWorldCalendar([applyRuntimeTransition(runtime, source, transition)], characters,
+        { now, inferTemporalStatus: false }).items.find((item) => item.id === original.id);
+      assertCondition(after?.status === fixture.status && after.startAt === original.startAt, 'Production state or start changed');
+      const expectedEnd = fixture.durationMinutes ? now + fixture.durationMinutes * 60_000
+        : fixture.status === 'completed' ? now : original.endAt;
+      assertCondition(after.endAt === expectedEnd, 'Production end time mismatch');
+      samples.push({ name: fixture.name, ok: true, request, response: response.content,
+        finishReason: response.raw.choices?.[0]?.finish_reason, parsed, after, usage: response.usage });
+    } catch (failure) {
+      error = String(failure?.message || failure);
+      samples.push({ name: fixture.name, ok: false, request, response: response.content,
+        finishReason: response.raw.choices?.[0]?.finish_reason, parsed, error, usage: response.usage });
+    }
+  }
+  return { ok: samples.every((sample) => sample.ok), samples,
+    error: samples.filter((sample) => !sample.ok).map((sample) => `${sample.name}: ${sample.error}`).join('; ') || null };
+}
+
 function runtimeProfile(model) {
   return [{
     id: `acceptance-${model}`,
@@ -4885,6 +4968,7 @@ const CASE_RUNNERS = {
   group: runGroupCase,
   chat: runChatCase,
   chatflow: runChatflowCase,
+  state_readback: runStateReadbackCase,
   generation: runGenerationCase,
   agent: runAgentCase,
   ops: runOpsCase,

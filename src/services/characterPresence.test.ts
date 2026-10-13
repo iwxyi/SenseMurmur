@@ -142,6 +142,34 @@ describe('characterPresence', () => {
     });
   });
 
+  it('preserves an ongoing activity after its estimated end without renewing the absence', () => {
+    const { id, source, character } = ongoingActivity();
+    const now = 1000 + 240 * 60_000;
+    const result = applyPresenceUpdateToTransition({ chat: source, characters: [character], transition, now,
+      message: message({ id: 'overdue', content: '还在探路，到了城南。', metadata: { activityUpdate: {
+        calendarItemId: id, title: '探路', kind: 'travel', status: 'in_progress',
+        locationHint: '城南', evidenceText: '还在探路，到了城南',
+      } } }),
+    });
+    const item = projectWorldCalendar([{ ...source, ...result.chatPatch }], [], { now, inferTemporalStatus: false }).items[0];
+    expect(item).toMatchObject({ id, status: 'in_progress', startAt: 1000,
+      endAt: 1000 + 180 * 60_000, durationMinutes: 180, locationHint: '城南',
+      participantStates: { a: 'going', b: 'going' } });
+    expect(result.characterPatches).toEqual([]);
+    expect(isCharacterAvailableForScheduling(character, now)).toBe(true);
+  });
+
+  it('keeps an explicitly future start as planned even if the model labels it ongoing', () => {
+    const result = applyPresenceUpdateToTransition({ chat, transition, now: 1000,
+      message: message({ content: '明日再去探路。', metadata: { activityUpdate: {
+        title: '探路', kind: 'travel', status: 'in_progress', startAt: 100_000,
+        availability: 'away', evidenceText: '明日再去探路',
+      } } }),
+    });
+    expect(result.chatRuntimeDelta?.runtimeEventsV2?.upserts[0].payload).toMatchObject({ status: 'planned', startAt: 100_000 });
+    expect(result.characterPatches).toEqual([]);
+  });
+
   it('updates remaining time from now and keeps the linked absence window aligned', () => {
     const { id, source, character } = ongoingActivity();
     const now = 1000 + 60 * 60_000;
