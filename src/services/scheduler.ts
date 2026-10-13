@@ -53,13 +53,13 @@ function getEmotionalReplyBias(character: AICharacter, lastSpeakerId?: string) {
 }
 
 function hasRecentSpeakerStreak(messages: Message[], charId: string) {
-  const recentAi = messages.filter((message) => message.type === 'ai' && !message.isDeleted).slice(-3);
+  const recentAi = collapseGeneratedBubbleTurns(messages).slice(-3);
   return recentAi.length >= 2 && recentAi.every((message) => message.senderId === charId);
 }
 
 function hasRecentSameTargetLoop(messages: Message[], charId: string, targetId?: string) {
   if (!targetId) return false;
-  const recentAi = messages.filter((message) => message.type === 'ai' && !message.isDeleted).slice(-5);
+  const recentAi = collapseGeneratedBubbleTurns(messages).slice(-5);
   const sameSpeakerTurns = recentAi.filter((message) => message.senderId === charId);
   const lastTwoAi = recentAi.slice(-2);
   return sameSpeakerTurns.length >= 2
@@ -67,6 +67,35 @@ function hasRecentSameTargetLoop(messages: Message[], charId: string, targetId?:
     && lastTwoAi.length === 2
     && lastTwoAi[0].senderId === targetId
     && lastTwoAi[1].senderId === charId;
+}
+
+/**
+ * A generated turn may persist several visible bubbles. Fairness and rotation
+ * must count that as one speaker turn; reply debt and evidence checks still use
+ * the original bubble sequence.
+ */
+function collapseGeneratedBubbleTurns(messages: Message[]) {
+  const turns: Message[] = [];
+  for (const message of messages) {
+    if (message.type !== 'ai' || message.isDeleted) continue;
+    const segment = message.metadata?.turnSegment;
+    const previous = turns.at(-1);
+    const previousSegment = previous?.metadata?.turnSegment;
+    const isContinuation = Boolean(
+      segment && segment.count > 1
+      && previous
+      && previous.senderId === message.senderId
+      && previousSegment
+      && previousSegment.count === segment.count
+      && previousSegment.index + 1 === segment.index,
+    );
+    if (isContinuation) {
+      turns[turns.length - 1] = message;
+    } else {
+      turns.push(message);
+    }
+  }
+  return turns;
 }
 
 function hasTwoActorExchangeLoop(recentAiMessages: Message[], sourceSpeakerId?: string | null, targetId?: string | null) {
@@ -313,9 +342,10 @@ export function calculateWeights(
     && isCharacterAvailableForScheduling(char, now)
   ));
   const recentAiMessages = recentMessages.filter((m) => m.type === 'ai' && !m.isDeleted);
-  const lastSpeakerId = recentAiMessages.at(-1)?.senderId;
+  const recentAiTurns = collapseGeneratedBubbleTurns(recentMessages);
+  const lastSpeakerId = recentAiTurns.at(-1)?.senderId;
   const conflictContext = resolveConflictSpeakerContext(chat);
-  const recentSpeakerIds = recentAiMessages.slice(-6).map((m) => m.senderId);
+  const recentSpeakerIds = recentAiTurns.slice(-6).map((m) => m.senderId);
   const recentSpeakCounts = recentSpeakerIds.reduce<Record<string, number>>((acc, speakerId) => {
     acc[speakerId] = (acc[speakerId] || 0) + 1;
     return acc;
@@ -328,7 +358,7 @@ export function calculateWeights(
     return -1;
   })();
   const postUserAiMessages = latestHumanIndex >= 0
-    ? recentMessages.slice(latestHumanIndex + 1).filter((message) => message.type === 'ai' && !message.isDeleted)
+    ? collapseGeneratedBubbleTurns(recentMessages.slice(latestHumanIndex + 1))
     : [];
   const postUserSpeakCounts = postUserAiMessages.slice(-6).reduce<Record<string, number>>((acc, message) => {
     acc[message.senderId] = (acc[message.senderId] || 0) + 1;
@@ -339,18 +369,18 @@ export function calculateWeights(
   const consecutiveByLastSpeaker = (() => {
     if (!lastSpeakerId) return 0;
     let count = 0;
-    for (let i = recentAiMessages.length - 1; i >= 0; i -= 1) {
-      if (recentAiMessages[i].senderId !== lastSpeakerId) break;
+    for (let i = recentAiTurns.length - 1; i >= 0; i -= 1) {
+      if (recentAiTurns[i].senderId !== lastSpeakerId) break;
       count += 1;
     }
     return count;
   })();
   const pendingTwoActorLoop = hasTwoActorExchangeLoop(
-    recentAiMessages,
+    recentAiTurns,
     pendingReplyContext?.sourceSpeakerId,
     pendingReplyContext?.primaryTargetId,
   );
-  const twoActorDominance = hasTwoActorDominance(recentAiMessages);
+  const twoActorDominance = hasTwoActorDominance(recentAiTurns);
 
   const cooldownDuration = baseCooldownMs / speed;
   const recentText = buildSchedulerTopicText(recentMessages, directorIntent);
@@ -421,7 +451,7 @@ export function calculateWeights(
       const unspokenMemberBias = chat?.type === 'group'
         && speakableCharacters.length >= 3
         && recentCount === 0
-        && recentAiMessages.length >= Math.min(2, speakableCharacters.length - 1)
+        && recentAiTurns.length >= Math.min(2, speakableCharacters.length - 1)
         && !forcedUserGuidanceActorIds.length
         && (pendingTwoActorLoop || twoActorDominance)
         ? (pendingReplyContext?.primaryTargetId ? ((pendingTwoActorLoop || twoActorDominance) ? 0.38 : 0.08) : 0.22)
@@ -506,7 +536,7 @@ export function calculateWeights(
         const emotionalReplyBias = getEmotionalReplyBias(char, lastAiMessage.senderId);
         weight += emotionalReplyBias;
         relationshipPressure += emotionalReplyBias;
-        const repliedRecentlyToSameSpeaker = recentAiMessages.slice(-4, -1).some((message) => message.senderId === char.id) && recentAiMessages.slice(-4, -1).some((message) => message.senderId === lastAiMessage.senderId);
+        const repliedRecentlyToSameSpeaker = recentAiTurns.slice(-4, -1).some((message) => message.senderId === char.id) && recentAiTurns.slice(-4, -1).some((message) => message.senderId === lastAiMessage.senderId);
         if (repliedRecentlyToSameSpeaker) weight += 0.04;
         const dramaBoost = Boolean((globalThis as { __PNEUMATA_DRAMA_BOOST__?: boolean }).__PNEUMATA_DRAMA_BOOST__);
         if (Math.abs(safeRelationWeight) >= (dramaBoost ? 0.12 : 0.2)) {
@@ -552,7 +582,7 @@ export function calculateWeights(
           });
         }
       }
-      if (runtimeBehavior.proactivity >= 65 && recentAiMessages.length > 0) {
+      if (runtimeBehavior.proactivity >= 65 && recentAiTurns.length > 0) {
         const latestContentLength = recentAiMessages[recentAiMessages.length - 1]?.content.length || 0;
         if (latestContentLength > 60) weight += 0.05;
       }

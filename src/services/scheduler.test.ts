@@ -395,6 +395,39 @@ describe('scheduler speaker scoring', () => {
     expect(c?.scoreBreakdown?.reasons).not.toContain('unspoken_member');
   });
 
+  it('counts a multi-bubble turn once when detecting an unspoken member', () => {
+    const now = Date.now();
+    const messages = [
+      ...['甲先说一段。', '甲再补一句。', '甲最后收住。'].map((content, index) => {
+        const message = buildMessage({ id: `a-${index}`, senderId: 'a', senderName: '甲', content, timestamp: now - 40_000 + index });
+        message.metadata = { turnSegment: { index, count: 3 } };
+        return message;
+      }),
+      ...['乙先说一段。', '乙再补一句。', '乙最后收住。'].map((content, index) => {
+        const message = buildMessage({ id: `b-${index}`, senderId: 'b', senderName: '乙', content, timestamp: now - 20_000 + index });
+        message.metadata = { turnSegment: { index, count: 3 } };
+        return message;
+      }),
+      ...['甲又说一段。', '甲又补一句。', '甲又收住。'].map((content, index) => {
+        const message = buildMessage({ id: `a2-${index}`, senderId: 'a', senderName: '甲', content, timestamp: now - 10_000 + index });
+        message.metadata = { turnSegment: { index, count: 3 } };
+        return message;
+      }),
+    ];
+    const candidates = calculateWeights(
+      [buildCharacter('a', '甲'), buildCharacter('b', '乙'), buildCharacter('c', '丙')],
+      messages,
+      {},
+      1,
+      0,
+      null,
+      { ...buildChat(), memberIds: ['a', 'b', 'c'] },
+    );
+
+    const c = candidates.find((candidate) => candidate.characterId === 'c');
+    expect(c?.scoreBreakdown?.reasons).toContain('unspoken_member');
+  });
+
   it('keeps the pending responder without treating unspoken rotation as pressure', () => {
     const now = Date.now();
     const latest = buildMessage({ id: 'm3', senderId: 'a', senderName: '甲', content: '乙，那你的规矩是什么？', timestamp: now - 5_000 });
