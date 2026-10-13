@@ -3689,8 +3689,9 @@ function assertRuntimeChatflowTranscript(scenario, transcript, errors, naturally
     }
   }
   const pausesAfterReply = scenario.chat.type === 'direct' || scenario.chat.type === 'ai_direct' || scenario.roomKind === 'study';
-  const availableTurns = pausesAfterReply ? 1 + (scenario.userInjections || []).length : config.chatflowTurns;
-  assertCondition(transcript.length >= (naturallySettled ? 1 : Math.min(3, config.chatflowTurns, availableTurns)), `chatflow ${scenario.name} produced too few turns`, transcript);
+  const plannedTurns = Math.min(scenario.turns ?? config.chatflowTurns, config.chatflowTurns);
+  const availableTurns = pausesAfterReply ? 1 + (scenario.userInjections || []).length : plannedTurns;
+  assertCondition(transcript.length >= (naturallySettled ? 1 : Math.min(3, plannedTurns, availableTurns)), `chatflow ${scenario.name} produced too few turns`, transcript);
   const speakers = new Set(transcript.map((turn) => turn.senderId));
   if (scenario.roomKind !== 'story' && scenario.characters.length > 1 && transcript.length > 1) {
     assertCondition(speakers.size >= 2, `chatflow ${scenario.name} did not rotate across multiple speakers`, transcript);

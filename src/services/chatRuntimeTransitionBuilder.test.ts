@@ -11,6 +11,8 @@ import type { ConflictDevelopmentHook, ConflictFocusPayload } from '../types/run
 import type { MemoryItem } from './memoryTypes';
 import { buildChatPatch, buildNextWorldState, buildRelationshipTransition, buildWorldRuntimeEvents } from './chatRuntimeTransitionBuilder';
 import { resolveRuntimeEvolutionConfig } from './runtimeEvolutionConfig';
+import { projectNarrativeLines } from './narrativeProjection';
+import { buildInlineInteractionContract } from './inlineInteractionHint';
 
 function buildChat(overrides: Partial<ReturnType<typeof normalizeConversation>> = {}) {
   return normalizeConversation({
@@ -805,6 +807,9 @@ describe('buildWorldRuntimeEvents', () => {
     });
     expect(cooled.nextConflictState?.primaryConflict).toMatchObject({ id: goalId, severity: 0.2, stage: 'cooling' });
     expect(cooled.nextConflictState?.activeConflicts.find((item) => item.id === untouched?.id)).toEqual(untouched);
+    const cooledChat = { ...chat, worldState: cooled.worldState };
+    expect(projectNarrativeLines({ chat: cooledChat, messages: [], now: 200 }))
+      .toContainEqual(expect.objectContaining({ id: goalId, status: 'cooling', contextKind: 'unresolved' }));
     let multiBubble = cooled.worldState;
     for (let i = 0; i < 4; i += 1) {
       multiBubble = buildNextWorldState({ ...chat, worldState: multiBubble }, {
@@ -819,6 +824,14 @@ describe('buildWorldRuntimeEvents', () => {
     });
     expect(resolved.nextConflictState?.primaryConflict).toEqual(untouched);
     expect(resolved.nextConflictState?.activeConflicts).toEqual([untouched]);
+    const resolvedChat = { ...chat, worldState: resolved.worldState };
+    const lines = projectNarrativeLines({ chat: resolvedChat, messages: [], now: 300 });
+    expect(lines.some((line) => line.id === goalId)).toBe(false);
+    expect(lines).toContainEqual(expect.objectContaining({ id: untouched?.id, contextKind: 'unresolved' }));
+    const characters = [buildCharacter('char-a', '甲'), buildCharacter('char-b', '乙')];
+    const contract = buildInlineInteractionContract({ chat: resolvedChat, speaker: characters[0], characters, recentMessages: [] });
+    expect(contract).not.toContain(`"conflictId":"${goalId}"`);
+    expect(contract).toContain(`"conflictId":"${untouched?.id}"`);
   });
 
   it.each(['goal_conflict', 'value_conflict', 'tone_escalation', 'identity_ownership'] as const)(
