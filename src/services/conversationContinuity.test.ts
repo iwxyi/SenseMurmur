@@ -3,8 +3,10 @@ import { normalizeConversation } from '../types/chat';
 import type { Message } from '../types/message';
 import type { ConversationUpdate } from '../types/conversationContinuity';
 import { createInitialRoomState } from './roomStateSynthesizer';
-import { applyConversationUpdate, normalizeConversationUpdate } from './conversationContinuity';
+import { applyConversationUpdate, buildConversationContinuityContext, normalizeConversationUpdate } from './conversationContinuity';
 import { projectNarrativeLines } from './narrativeProjection';
+import { buildInlineInteractionContract } from './inlineInteractionHint';
+import { normalizeCharacter } from '../types/character';
 
 const chat = () => normalizeConversation({ id: 'room', type: 'group', mode: 'open_chat', memberIds: ['a', 'b'] });
 const item = { key: 'role', kind: 'decision' as const, status: 'established' as const,
@@ -15,6 +17,45 @@ const message = (update: ConversationUpdate, patch: Partial<Message> = {}): Mess
 });
 
 describe('conversation continuity commit boundary', () => {
+  it('bounds ended history separately from open matters', () => {
+    const initial = chat();
+    initial.worldState.conversationContinuity = { items: [
+      { ...item, key: 'pending', status: 'open', participantIds: [], updatedAt: 1, sourceMessageIds: [] },
+      ...Array.from({ length: 20 }, (_, index) => ({ ...item, key: `ended-${index}`, updatedAt: index + 2, sourceMessageIds: [] })),
+    ] };
+    const context = buildConversationContinuityContext(initial, [{ id: 'a', name: '甲' }, { id: 'b', name: '乙' }]);
+    expect(context).toContain('[pending] decision/open');
+    expect(context).toContain('participants: roomwide');
+    expect(context).toContain('[ended-19]');
+    expect(context).not.toContain('[ended-0]');
+    expect(context.match(/decision\/established/g)).toHaveLength(16);
+  });
+
+  it('keeps old open keys and participants available for acceptance beyond the recent context window', () => {
+    const initial = chat();
+    initial.worldState.conversationContinuity = { items: Array.from({ length: 20 }, (_, index) => ({
+      ...item, key: `proposal-${index}`, kind: 'issue', status: 'open',
+      updatedAt: index + 1, sourceMessageIds: [`proposal-message-${index}`],
+    })) };
+    const context = buildConversationContinuityContext(initial, [{ id: 'a', name: '甲' }, { id: 'b', name: '乙' }]);
+    expect(context).toContain('[proposal-0] issue/open');
+    expect(context).toContain('participants: 甲, 乙');
+    expect(context.match(/issue\/open/g)).toHaveLength(20);
+    const contract = buildInlineInteractionContract({ chat: initial,
+      speaker: normalizeCharacter({ id: 'a', name: '甲' }),
+      characters: [normalizeCharacter({ id: 'a', name: '甲' }), normalizeCharacter({ id: 'b', name: '乙' })],
+      recentMessages: [],
+    });
+    expect(contract).toContain('[proposal-0] issue/open');
+    expect(contract).toContain('participants: 甲, 乙');
+    const next = applyConversationUpdate(initial, message({ items: [{ ...item, key: 'proposal-0' }] }), null);
+    const updated = { ...initial, worldState: { ...initial.worldState, conversationContinuity: next.continuity } };
+    expect(next.continuity?.items).toHaveLength(20);
+    expect(projectNarrativeLines({ chat: updated, messages: [] }).some((line) => line.id === 'continuity:proposal-0')).toBe(false);
+    expect(buildConversationContinuityContext(updated, [{ id: 'a', name: '甲' }, { id: 'b', name: '乙' }]))
+      .toContain('[proposal-0] decision/established');
+  });
+
   it('validates model updates without guessing semantics from words', () => {
     expect(normalizeConversationUpdate({ items: [{ ...item, kind: 'battle' }] })).toBeNull();
     expect(applyConversationUpdate(chat(), message({ items: [] }), null).changedItems).toEqual([]);

@@ -118,6 +118,9 @@ export function buildConversationContinuityContext(chat: GroupChat, members: Arr
   const items = chat.worldState?.conversationContinuity?.items || [];
   const current = items.filter((item) => item.status === 'open').sort((a, b) => b.updatedAt - a.updatedAt);
   const established = items.filter((item) => item.status !== 'open').sort((a, b) => b.updatedAt - a.updatedAt);
-  return [...current, ...established].slice(0, 16).map((item) =>
-    `[${item.key}] ${item.kind}/${item.status}: ${sanitizeUserFacingText(item.summary, members)}; evidence: ${sanitizeUserFacingText(item.evidenceText, members)}`).join('\n');
+  const participantLabel = (participantIds: string[]) => participantIds.length
+    ? participantIds.map((id) => members.find((member) => member.id === id)?.name || (id === 'user' ? 'User' : 'Unknown member')).join(', ')
+    : 'roomwide';
+  return [...current, ...established.slice(0, 16)].map((item) =>
+    `[${item.key}] ${item.kind}/${item.status}: ${sanitizeUserFacingText(item.summary, members)}; participants: ${participantLabel(item.participantIds)}; evidence: ${sanitizeUserFacingText(item.evidenceText, members)}`).join('\n');
 }
