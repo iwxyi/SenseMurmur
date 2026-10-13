@@ -150,7 +150,9 @@ describe('turnDirective', () => {
     expect(prompt).toContain('A bare receipt');
     expect(prompt).toContain('concrete stance, choice, condition, responsibility, question, or immediate action');
     expect(prompt).toContain('A reaction may still reveal');
-    expect(prompt).toContain('Live: add one condition, cost, or limit that changes the next response to 陈越');
+    expect(prompt).toContain('Live: add one condition, cost, or limit that changes the next response');
+    expect(prompt).not.toContain('changes the next response to 陈越');
+    expect(prompt).toContain('latest speaker is context, not recipient');
     expect(prompt).toContain('do not explain the whole topic');
   });
 
@@ -243,6 +245,18 @@ describe('turnDirective', () => {
       expect(directive?.narrativePressure).not.toContain('私密事实');
       expect(directive?.narrativePressure).not.toContain('另一个');
     }
+  });
+
+  it('keeps narrative and topic targets as soft context in ordinary groups', () => {
+    const directive = buildTurnDirective({
+      chat: chat(), speaker: character('rui', '瑞瑞'),
+      members: [character('rui', '瑞瑞'), character('chen', '陈越')], messages: [message()],
+      intent, innerLife, conversationMovePlan: movePlan, turnPlan,
+      directorIntent: { source: 'topic', beatType: 'invite', targetActorIds: ['chen'], pressure: 0.4, reason: '继续话题' },
+    });
+    const prompt = buildTurnDirectivePrompt(directive);
+    expect(prompt).not.toContain('to 陈越');
+    expect(prompt).toContain('latest speaker is context, not recipient');
   });
   it('does not prescribe expression from scheduler pressure or planned rhythm', () => {
     const input = {

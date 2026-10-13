@@ -20,6 +20,7 @@ export interface TurnDirective {
   characterDrive: CharacterTurnDrive;
   socialJob: string;
   targetName?: string;
+  targetIsOptional?: boolean;
   emotionalUndercurrent: string;
   relationshipEffect: string;
   narrativePressure?: string;
@@ -189,11 +190,17 @@ function describeSituationalConstraints(input: BuildTurnDirectiveInput) {
 
 export function buildTurnDirective(input: BuildTurnDirectiveInput): TurnDirective | null {
   if (!shouldUseUnifiedTurnDirective(input.chat)) return null;
-  const targetActorId = input.conversationMovePlan.targetActorId || input.intent.target;
-  const targetName = speakerName(input.members, targetActorId);
-  const sharedRelationshipFacts = targetActorId
+  const targetIsOptionalThread = input.chat.type === 'group'
+    && !input.userGuidance
+    && input.directorIntent?.source !== 'user_message'
+    && input.directorIntent?.source !== 'conversation_reply'
+    && !['pending_direct_address', 'explicit_user_guidance', 'directed_emotional_residue'].includes(input.conversationMovePlan.reason);
+  const relationshipTargetId = input.conversationMovePlan.targetActorId || input.intent.target;
+  const targetActorId = targetIsOptionalThread ? undefined : relationshipTargetId;
+  const targetName = speakerName(input.members, relationshipTargetId);
+  const sharedRelationshipFacts = relationshipTargetId
     ? (input.chat.relationshipStructure?.sharedFacts || [])
-      .filter((fact) => fact.memberIds.includes(input.speaker.id) && fact.memberIds.includes(targetActorId))
+      .filter((fact) => fact.memberIds.includes(input.speaker.id) && fact.memberIds.includes(relationshipTargetId))
       .map((fact) => fact.statement)
     : [];
   const narrativePressure = describeNarrativePressure(input, targetActorId);
@@ -227,6 +234,7 @@ export function buildTurnDirective(input: BuildTurnDirectiveInput): TurnDirectiv
     }),
     socialJob: describeSocialJob(input.conversationMovePlan, input.intent),
     targetName,
+    targetIsOptional: targetIsOptionalThread,
     emotionalUndercurrent: input.innerLife.activeAffect && input.innerLife.activeAffect.counterpartId === targetActorId
       ? `${describeEmotion(input.innerLife)} Directed ${input.innerLife.activeAffect.role} ${input.innerLife.activeAffect.kind} residue is tied to ${targetName || 'the counterpart'}; it may spike after one line and ease after speaking while a lesser unresolved trace remains. Their relationship changes only with durable evidence.`
       : describeEmotion(input.innerLife),
@@ -258,9 +266,11 @@ export function buildTurnDirectivePrompt(directive: TurnDirective | null | undef
     ? `\n- Room atmosphere: ${directive.roomAtmosphere.join(' ')} This is environmental context, not a speaking order or a demand to create conflict.`
     : '';
   // Project evidence, not a locally assigned recipient or expression checklist.
-  const targetLine = directive.targetName
+  const targetLine = directive.targetName && !directive.targetIsOptional
     ? `\n- Live: ${directive.socialJob} to ${directive.targetName}; do not explain the whole topic.`
-    : `\n- Live: ${directive.socialJob}; do not explain the whole topic.`;
+    : directive.targetIsOptional
+      ? `\n- Live: ${directive.socialJob}; latest speaker is context, not recipient; do not explain the whole topic.`
+      : `\n- Live: ${directive.socialJob}; do not explain the whole topic.`;
   return `\n## Turn Directive — This Person in This Moment
 Speak as this person among people who share this exchange. Choose what catches their attention and what they actually want to say now. Their words may have warmth, bite, hesitation or delight; the exchange decides the shape.
 Acknowledgement is implicit by default. Name someone or explicitly agree when that itself matters to the relationship; responding does not require announcing agreement, receipt, or a recap. A bare receipt such as “I acknowledge that”, “noted”, or “I will listen” is not a completed social move: if you acknowledge, let the line reveal a concrete stance, choice, condition, responsibility, question, or immediate action. A reaction may still reveal relief, reluctance, affection or resistance without adding another task when the exchange is genuinely complete. Let a completed exchange rest. Honor explicit requests for a deliverable and its format.

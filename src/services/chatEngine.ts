@@ -4065,10 +4065,20 @@ export async function generateSpeakerMessage(params: {
         reason: 'directed_emotional_residue',
       }
     : plannedConversationMove;
+  // A planner target is often only the latest thread that may be useful to
+  // notice. In ordinary group chat it must not become an output-contract
+  // recipient unless this turn has a real handoff, user direction, or a
+  // carried emotional/reply obligation.
+  const hasExplicitConversationTarget = Boolean(
+    explicitGuidanceForSpeaker
+      || directedAffectTarget
+      || params.pendingReplyContext?.targetIds.includes(params.speaker.id)
+      || ['pending_direct_address', 'explicit_user_guidance', 'directed_emotional_residue'].includes(conversationMovePlan.reason),
+  );
   const focusMessage = conversationMovePlan.targetMessageId
     ? activeMessages.find((message) => message.id === conversationMovePlan.targetMessageId)
     : null;
-  const recentTargetId = explicitGuidanceForSpeaker
+  const recentTargetId = !hasExplicitConversationTarget
     ? undefined
     : conversationMovePlan.targetActorId
       || resolveRecentTargetIdForSpeaker(params.chat, params.speaker, activeMessages, params.pendingReplyContext);
@@ -4169,9 +4179,13 @@ export async function generateSpeakerMessage(params: {
     speaker: params.speaker,
     messages: activeMessages,
   });
-  const focusedTargetIds = explicitGuidanceForSpeaker
-    ? []
-    : conversationMovePlan.targetActorId ? [conversationMovePlan.targetActorId] : runtimeBundle.turnPlan?.targetIds || [];
+  const focusedTargetIds = hasExplicitConversationTarget
+    ? (conversationMovePlan.targetActorId && conversationMovePlan.targetActorId !== 'user'
+      ? [conversationMovePlan.targetActorId]
+      : explicitGuidanceForSpeaker || !runtimeBundle.turnPlan?.targetIds?.some((id) => id !== 'user')
+        ? []
+        : runtimeBundle.turnPlan?.targetIds || [])
+    : [];
   const runtimeBundleWithMovePlan = {
     ...runtimeBundle,
     turnPlan: runtimeBundle.turnPlan ? { ...runtimeBundle.turnPlan, targetIds: focusedTargetIds } : runtimeBundle.turnPlan,
@@ -4230,9 +4244,9 @@ export async function generateSpeakerMessage(params: {
     surface: responseSurface,
     richDelivery,
   });
-  const finalTargetIds = conversationMovePlan.targetActorId
+  const finalTargetIds = hasExplicitConversationTarget && conversationMovePlan.targetActorId && conversationMovePlan.targetActorId !== 'user'
     ? [conversationMovePlan.targetActorId]
-    : runtimeBundleWithMovePlan.turnPlan?.targetIds || [];
+    : hasExplicitConversationTarget ? runtimeBundleWithMovePlan.turnPlan?.targetIds || [] : [];
   const finalTurnPlan: TurnPlan = {
     ...turnPlan,
     // The conversation move is the semantic owner of the target. Keep the
