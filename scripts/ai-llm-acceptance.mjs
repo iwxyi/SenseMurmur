@@ -3654,6 +3654,7 @@ function runtimeChatflowScenarios() {
     name: 'longzhong_commitment_result_room',
     roomKind: 'group',
     turns: 3,
+    userInjections: [{ afterTurn: 1, content: '记录先放桌上。二哥，你看三弟这趟做得怎么样？' }],
     rubricHint: '张飞探路归来，关羽实际收到了他交回的关口记录。观察人物对结果的反应及原承诺的完成写回，不重复索取接受，不要求新增冲突、任务或固定气泡数。',
     chat: { ...longzhong.chat, id: 'acceptance-longzhong-result', name: '探路归来', topic: '张飞探路归来，把关口记录交到关羽手中。' },
     characters: longzhong.characters.map((character) => character.id === 'yu'
@@ -3669,6 +3670,15 @@ function runtimeChatflowScenarios() {
       }),
     ],
     continuityExpectations: [{ turn: 1, key: 'fei-scout-report', status: 'resolved' }],
+    promptExpectations: [
+      { turn: 1, speakerId: 'yu', text: '已接受，尚未报告兑现' },
+      { turn: 2, text: '[fei-scout-report] commitment/resolved' },
+      { turn: 2, text: '已接受，尚未报告兑现', absent: true },
+    ],
+    narrativeExpectations: [
+      { turn: 1, id: 'continuity:fei-scout-report' },
+      { turn: 2, id: 'continuity:fei-scout-report', absent: true },
+    ],
   });
   if (!underworld) throw new Error('Underworld character fixture missing');
   const backgrounds = {
@@ -3705,6 +3715,12 @@ function assertRuntimeChatflowTranscript(scenario, transcript, errors, naturally
     const turn = transcript.find((item) => item.turn === expected.turn);
     const item = turn?.conversationContinuityAfter?.items.find((item) => item.key === expected.key);
     assertCondition(item?.status === expected.status, `chatflow ${scenario.name} turn ${expected.turn} expected ${expected.key}/${expected.status}`, { expected, actual: item || null });
+  }
+  for (const expected of scenario.narrativeExpectations || []) {
+    const turn = transcript.find((item) => item.turn === expected.turn);
+    const exists = turn?.narrativeLines.some((line) => line.id === expected.id);
+    assertCondition(turn && exists === !expected.absent,
+      `chatflow ${scenario.name} turn ${expected.turn} narrative lifecycle mismatch`, { expected, actual: turn?.narrativeLines });
   }
   for (const expected of scenario.activityExpectations || []) {
     const turn = transcript.find((item) => item.turn === expected.turn);
@@ -3776,6 +3792,8 @@ function summarizeRuntimeTurn(message) {
     roomShiftSignals: message.committedRoomShiftSignals || [],
     speakerSelection: runtimeDecision.speakerSelection || null,
     speakerScore: runtimeDecision.speakerScore || null,
+    narrativeLines: runtimeDecision.narrativeLines || [],
+    directorIntent: runtimeDecision.directorIntent || null,
     innerLife: runtimeDecision.innerLife || null,
     surface: runtimeDecision.surface || null,
     turnPlan: runtimeDecision.turnPlan || null,
@@ -3790,7 +3808,7 @@ function summarizeRuntimeTurn(message) {
 // Keep selection-time estimates in diagnostic reports, not in the text-quality
 // judge's evidence. Otherwise the judge rewards acting out local planner labels.
 function projectObservableTurn(turn) {
-  const { innerLife, speakerScore, speakerSelection, turnPlan, conversationMove, memoryContext, worldInfluence, surface, ...observable } = turn;
+  const { innerLife, speakerScore, speakerSelection, narrativeLines, directorIntent, turnPlan, conversationMove, memoryContext, worldInfluence, surface, ...observable } = turn;
   return observable;
 }
 
@@ -4760,11 +4778,12 @@ async function runRuntimeChatflowScenario(model, scenario) {
     assertRuntimeChatflowTranscript(scenario, transcript, errors, naturallySettled);
     for (const expected of scenario.promptExpectations || []) {
       assertCondition(config.capturePrompts, 'Prompt expectations require --capture-prompts');
-      assertCondition(selectedSpeakers.some((item) => item.turn === expected.turn && item.characterId === expected.speakerId),
+      assertCondition(!expected.speakerId || selectedSpeakers.some((item) => item.turn === expected.turn && item.characterId === expected.speakerId),
         `chatflow ${scenario.name} prompt expectation speaker mismatch`, expected);
-      assertCondition(promptRequests.some((request) => request.turn === expected.turn
-        && request.messages.some((message) => message.content?.includes(expected.text))),
-        `chatflow ${scenario.name} missing public activity in actual generation request`, expected);
+      const requests = promptRequests.filter((request) => request.turn === expected.turn);
+      const present = requests.some((request) => request.messages.some((message) => message.content?.includes(expected.text)));
+      assertCondition(requests.length && present === !expected.absent,
+        `chatflow ${scenario.name} actual generation context mismatch`, expected);
     }
     assertScenarioSpecificChatflow(scenario, transcript, chat);
   } catch (error) {
@@ -4855,6 +4874,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
     finalScenarioState: collectScenarioStateSnapshot(chat),
     seedConversationContinuity,
     continuityExpectations: scenario.continuityExpectations || [],
+    narrativeExpectations: scenario.narrativeExpectations || [],
     promptExpectations: scenario.promptExpectations || [],
     seedUserMessages: scenario.seedMessages
       .filter((message) => message.type === 'user')

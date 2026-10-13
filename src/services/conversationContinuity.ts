@@ -60,6 +60,10 @@ export function usesConversationContinuity(chat: GroupChat) {
   return chat.type === 'group' && resolveSessionFamilyKey(chat) === 'conversation';
 }
 
+export function isPendingConversationItem(item: Pick<ConversationItemUpdate, 'kind' | 'status'>) {
+  return item.status === 'open' || (item.kind === 'commitment' && item.status === 'established');
+}
+
 // Only a public, committed speaker turn can establish public continuity.
 export function applyConversationUpdate(chat: GroupChat, message: Pick<Message, 'content' | 'type' | 'senderId' | 'metadata'> & Partial<Pick<Message, 'id' | 'timestamp' | 'isDeleted'>>,
   room: RoomStateSnapshotV2 | null | undefined) {
@@ -107,8 +111,8 @@ export function applyConversationUpdate(chat: GroupChat, message: Pick<Message, 
   const reopened = changedItems.some((item) => item.status === 'open');
   const allItems = [...items.values()];
   const continuity = { items: [
-    ...allItems.filter((item) => item.status === 'open'),
-    ...allItems.filter((item) => item.status !== 'open').sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 64),
+    ...allItems.filter(isPendingConversationItem),
+    ...allItems.filter((item) => !isPendingConversationItem(item)).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 64),
   ], ...(settled ? { settledAt: now } : !reopened && previous?.settledAt ? { settledAt: previous.settledAt } : {}) };
   return { continuity, room: nextRoom, changedItems };
 }
@@ -116,11 +120,11 @@ export function applyConversationUpdate(chat: GroupChat, message: Pick<Message, 
 export function buildConversationContinuityContext(chat: GroupChat, members: Array<{ id: string; name: string }>) {
   if (!usesConversationContinuity(chat)) return '';
   const items = chat.worldState?.conversationContinuity?.items || [];
-  const current = items.filter((item) => item.status === 'open').sort((a, b) => b.updatedAt - a.updatedAt);
-  const established = items.filter((item) => item.status !== 'open').sort((a, b) => b.updatedAt - a.updatedAt);
+  const current = items.filter(isPendingConversationItem).sort((a, b) => b.updatedAt - a.updatedAt);
+  const history = items.filter((item) => !isPendingConversationItem(item)).sort((a, b) => b.updatedAt - a.updatedAt);
   const participantLabel = (participantIds: string[]) => participantIds.length
     ? participantIds.map((id) => members.find((member) => member.id === id)?.name || (id === 'user' ? 'User' : 'Unknown member')).join(', ')
     : 'roomwide';
-  return [...current, ...established.slice(0, 16)].map((item) =>
+  return [...current, ...history.slice(0, 16)].map((item) =>
     `[${item.key}] ${item.kind}/${item.status}: ${sanitizeUserFacingText(item.summary, members)}; participants: ${participantLabel(item.participantIds)}; evidence: ${sanitizeUserFacingText(item.evidenceText, members)}`).join('\n');
 }

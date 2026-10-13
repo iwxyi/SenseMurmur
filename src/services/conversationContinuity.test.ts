@@ -7,6 +7,7 @@ import { applyConversationUpdate, buildConversationContinuityContext, normalizeC
 import { projectNarrativeLines } from './narrativeProjection';
 import { buildInlineInteractionContract } from './inlineInteractionHint';
 import { normalizeCharacter } from '../types/character';
+import { resolveDirectorIntent } from './directorIntent';
 
 const chat = () => normalizeConversation({ id: 'room', type: 'group', mode: 'open_chat', memberIds: ['a', 'b'] });
 const item = { key: 'role', kind: 'decision' as const, status: 'established' as const,
@@ -17,6 +18,54 @@ const message = (update: ConversationUpdate, patch: Partial<Message> = {}): Mess
 });
 
 describe('conversation continuity commit boundary', () => {
+  it.each(['resolved', 'retracted'] as const)('keeps an accepted commitment active until its %s result is committed', (status) => {
+    const initial = chat();
+    const promise = { ...item, key: 'scout-report', kind: 'commitment' as const,
+      summary: '甲答应把关口记录交给乙', evidenceText: '我把关口记录交给你' };
+    const accepted = message({ items: [promise] }, { content: '我把关口记录交给你。' });
+    const first = applyConversationUpdate(initial, accepted, null);
+    const current = { ...initial, worldState: { ...initial.worldState, conversationContinuity: first.continuity } };
+    const lines = projectNarrativeLines({ chat: current, messages: [accepted] });
+    expect(lines.find((line) => line.id === 'continuity:scout-report')).toMatchObject({
+      contextKind: 'unresolved', status: 'active', tension: 0,
+      openQuestions: ['已接受，尚未报告兑现：甲答应把关口记录交给乙'],
+      possibleNextBeats: [{ beatType: 'answer', targetActorIds: ['a', 'b'] }],
+    });
+    expect(resolveDirectorIntent({ chat: current, characters: [], messages: [accepted], narrativeLines: lines }))
+      .toMatchObject({ targetLineId: 'continuity:scout-report', beatType: 'answer' });
+    const evidence = status === 'resolved' ? '关口记录给你了' : '这回记录我交不了了';
+    const result = message({ items: [{ ...promise, status, evidenceText: evidence }] },
+      { id: 'result', content: evidence, timestamp: 20 });
+    const applied = applyConversationUpdate(current, result, null);
+    const ended = { ...current, worldState: { ...current.worldState, conversationContinuity: applied.continuity } };
+    expect(projectNarrativeLines({ chat: ended, messages: [result] }).some((line) => line.id === 'continuity:scout-report')).toBe(false);
+    expect(buildConversationContinuityContext(ended, [{ id: 'a', name: '甲' }, { id: 'b', name: '乙' }]))
+      .toContain(`[scout-report] commitment/${status}`);
+    expect(applied.continuity?.items[0].sourceMessageIds).toEqual(['sent', 'result']);
+  });
+
+  it('preserves an older accepted commitment beyond both history windows and keeps it in the output contract', () => {
+    const initial = chat();
+    initial.worldState.conversationContinuity = { items: [
+      { ...item, key: 'old-promise', kind: 'commitment', updatedAt: 1, sourceMessageIds: ['old-source'] },
+      ...Array.from({ length: 70 }, (_, index) => ({ ...item, key: `decision-${index}`,
+        updatedAt: index + 2, sourceMessageIds: [] })),
+    ] };
+    const next = applyConversationUpdate(initial, message({ items: [item] }, { timestamp: 100 }), null);
+    const current = { ...initial, worldState: { ...initial.worldState, conversationContinuity: next.continuity } };
+    expect(next.continuity?.items).toHaveLength(65);
+    expect(next.continuity?.items.find((entry) => entry.key === 'old-promise'))
+      .toMatchObject({ status: 'established', updatedAt: 1, sourceMessageIds: ['old-source'] });
+    const speaker = normalizeCharacter({ id: 'a', name: '甲' });
+    const characters = [speaker, normalizeCharacter({ id: 'b', name: '乙' })];
+    const contract = buildInlineInteractionContract({ chat: current, speaker, characters, recentMessages: [] });
+    expect(contract).toContain('[old-promise] commitment/established');
+    expect(contract).not.toContain('[decision-0]');
+    expect(projectNarrativeLines({ chat: current, messages: [] }).map((line) => line.id))
+      .toContain('continuity:old-promise');
+    expect(projectNarrativeLines({ chat: current, messages: [] }).some((line) => line.id === 'continuity:role')).toBe(false);
+  });
+
   it('bounds ended history separately from open matters', () => {
     const initial = chat();
     initial.worldState.conversationContinuity = { items: [

@@ -13,6 +13,7 @@ import { deriveCharacterTurnDrive, type CharacterTurnDrive } from './characterTu
 import { resolveSessionFamilyKey } from './sessionEngineKeys';
 import type { DirectorIntent } from './directorIntent';
 import { sanitizeUserFacingText } from './displayTextSanitizer';
+import { isPendingConversationItem } from './conversationContinuity';
 
 export interface TurnDirective {
   roomStyle: 'casual' | 'analytical' | 'discovery' | 'dramatic';
@@ -216,7 +217,7 @@ export function buildTurnDirective(input: BuildTurnDirectiveInput): TurnDirectiv
     continuityEvidence: (input.chat.worldState.conversationContinuity?.items || [])
       .filter((item) => !item.participantIds.length || item.participantIds.includes(input.speaker.id)
         || item.participantIds.includes(targetActorId || '') || `continuity:${item.key}` === input.directorIntent?.targetLineId)
-      .sort((a, b) => Number(b.status === 'open') - Number(a.status === 'open') || b.updatedAt - a.updatedAt)
+      .sort((a, b) => Number(isPendingConversationItem(b)) - Number(isPendingConversationItem(a)) || b.updatedAt - a.updatedAt)
       .slice(0, 6).map((item) => sanitizeUserFacingText(`${item.kind}/${item.status}: ${item.summary}; spoken evidence: ${item.evidenceText}`, input.members)),
     requiredChange: describeRequiredChange(input, Boolean(narrativePressure)),
     expressionShape: describeExpression(input),

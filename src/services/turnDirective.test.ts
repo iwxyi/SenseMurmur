@@ -178,6 +178,33 @@ describe('turnDirective', () => {
     expect(after).not.toContain('Recorded open question');
   });
 
+  it('prioritizes an older unfulfilled commitment and releases its narrative pressure after fulfillment', () => {
+    const room = chat({ worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE,
+      conversationContinuity: { items: [{ key: 'book', kind: 'commitment', status: 'established',
+        summary: '瑞瑞答应把书还给陈越', participantIds: ['rui', 'chen'], evidenceText: '书我会还给你',
+        sourceMessageIds: ['promise'], updatedAt: 1 },
+      ...Array.from({ length: 8 }, (_, index) => ({ key: `done-${index}`, kind: 'decision' as const,
+        status: 'established' as const, summary: '今晚在家吃饭', participantIds: ['rui', 'chen'],
+        evidenceText: '今晚在家吃饭', sourceMessageIds: [], updatedAt: index + 2 }))] } } });
+    const reply = message({ senderId: 'rui', content: '书给你了，夹着的票还在。', timestamp: 20,
+      metadata: { conversationUpdate: { items: [{ key: 'book', kind: 'commitment', status: 'resolved',
+        summary: '瑞瑞已经把书还给陈越', participantIds: ['rui', 'chen'], evidenceText: '书给你了' }] } } });
+    const input = { speaker: character('rui', '瑞瑞'), members: [character('rui', '瑞瑞'), character('chen', '陈越')],
+      messages: [reply], intent, innerLife, conversationMovePlan: movePlan, turnPlan };
+    const before = buildTurnDirective({ ...input, chat: room,
+      narrativeLines: projectNarrativeLines({ chat: room, messages: [reply], now: 20 }) });
+    expect(before.continuityEvidence?.[0]).toContain('commitment/established: 瑞瑞答应把书还给陈越');
+    expect(buildTurnDirectivePrompt(before)).toContain('已接受，尚未报告兑现');
+    expect(buildTurnDirectivePrompt(before)).toContain('it does not require action or resolution this turn');
+    const applied = applyConversationUpdate(room, reply, room.worldState.structuredRoomState);
+    const ended = { ...room, worldState: { ...room.worldState, conversationContinuity: applied.continuity } };
+    const after = buildTurnDirectivePrompt(buildTurnDirective({ ...input, chat: ended,
+      narrativeLines: projectNarrativeLines({ chat: ended, messages: [reply], now: 21 }) }));
+    expect(after).toContain('commitment/resolved: 瑞瑞已经把书还给陈越');
+    expect(after).not.toContain('已接受，尚未报告兑现');
+    expect(after).not.toContain('Recorded unresolved matter');
+  });
+
   it('uses the director focus even for a roomwide line or a speaker outside its participants', () => {
     const focused = { id: 'current', conversationId: 'chat-1', type: 'goal' as const, title: '等授权', summary: '只接受了分工，未决定开战',
       participantIds: ['chen'], visibility: 'public' as const, status: 'active' as const, tension: 0, momentum: 0.5, salience: 0.5,
