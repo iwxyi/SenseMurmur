@@ -391,6 +391,7 @@ export function calculateWeights(
   const recentText = buildSchedulerTopicText(recentMessages, directorIntent);
   const keywords = extractKeywords(recentText);
   const forcedUserGuidanceActorIds = getForcedUserGuidanceActorIds(directorIntent);
+  const hasHardUserAddress = directorIntent?.source === 'user_message' && directorIntent.targetActorIds.length > 0;
   const suppressedUserGuidanceActorIds = directorIntent?.source === 'user_message'
     ? (directorIntent.userGuidance?.suppressedActorIds || [])
     : [];
@@ -671,9 +672,11 @@ export function calculateWeights(
   const activeCandidates = flattenedCandidates.filter((candidate) => !candidate.idleStaySilent);
   const unspokenRotationIds = chat?.type === 'group'
     && speakableCharacters.length >= 3
-    && !pendingReplyContext
+    // Model-derived reply debt is a soft cue. After a two-person loop it must
+    // yield once to a willing absent member; explicit user addressing remains hard.
+    && (!pendingReplyContext || pendingTwoActorLoop || twoActorDominance)
     && !forcedUserGuidanceActorIds.length
-    && !directorIntent?.targetActorIds.length
+    && !hasHardUserAddress
     && (pendingTwoActorLoop || twoActorDominance)
     ? new Set(speakableCharacters
       .filter((character) => (recentSpeakCounts[character.id] || 0) === 0)

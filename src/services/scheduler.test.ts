@@ -456,6 +456,27 @@ describe('scheduler speaker scoring', () => {
     expect(candidates.map((candidate) => candidate.characterId)).toEqual(['c']);
   });
 
+  it('lets a model-derived reply cue yield to an absent member after a loop', () => {
+    const now = Date.now();
+    const candidates = calculateWeights(
+      [buildCharacter('a', '甲'), buildCharacter('b', '乙'), buildCharacter('c', '丙', {
+        personality: { openness: 70, extroversion: 75, agreeableness: 55, neuroticism: 45, humor: 55, creativity: 60, assertiveness: 60, empathy: 60 },
+        behavior: { proactivity: 80, aggressiveness: 45, humorIntensity: 55, empathyLevel: 60, summarizing: 40, offTopic: 20 },
+      })],
+      [
+        buildMessage({ id: 'm1', senderId: 'a', content: '先说第一件事。', timestamp: now - 30_000 }),
+        buildMessage({ id: 'm2', senderId: 'b', content: '我接着说。', timestamp: now - 20_000 }),
+        buildMessage({ id: 'm3', senderId: 'a', content: '那就这样？', timestamp: now - 10_000 }),
+      ],
+      {}, 1, 0,
+      { targetIds: ['b'], primaryTargetId: 'b', sourceSpeakerId: 'a', sourceMessageId: 'm3', unmetTurns: 1, strength: 'soft' },
+      { ...buildChat(), memberIds: ['a', 'b', 'c'] },
+      { source: 'conversation_reply', beatType: 'answer', targetActorIds: ['b'], pressure: 0.5, reason: 'model-derived cue' },
+    );
+
+    expect(candidates.map((candidate) => candidate.characterId)).toEqual(['c']);
+  });
+
   it('keeps the pending responder without treating unspoken rotation as pressure', () => {
     const now = Date.now();
     const latest = buildMessage({ id: 'm3', senderId: 'a', senderName: '甲', content: '乙，那你的规矩是什么？', timestamp: now - 5_000 });
