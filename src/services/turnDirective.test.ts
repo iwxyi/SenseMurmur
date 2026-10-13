@@ -370,6 +370,7 @@ describe('turnDirective', () => {
 
     expect(directive?.userConstraint).toContain('user steered the topic');
     expect(buildTurnDirectivePrompt(directive)).toContain('User constraint');
+    expect(directive?.situationalConstraints.join('\n')).toContain('explicitly apply that constraint');
   });
 
   it('projects core profile and relationship stakes ahead of the generic social job', () => {
@@ -509,6 +510,36 @@ describe('turnDirective', () => {
     expect(directive?.situationalConstraints.join('\n')).not.toContain('short clean handoff');
     expect(directive?.situationalConstraints.join('\n')).toContain('recent own visible line');
     expect(buildTurnDirectivePrompt(directive)).toContain('Situational constraints');
+  });
+
+  it.each(['open', 'established'] as const)('keeps %s evidence without assigning a task from prior speech', (status) => {
+    const directive = buildTurnDirective({
+      chat: chat({ worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE, conversationContinuity: {
+        items: [{ key: 'foundation', kind: 'decision', status, summary: '先守住新野',
+          evidenceText: '先守住新野', participantIds: ['rui', 'chen'], updatedAt: 2, sourceMessageIds: ['m1'] }],
+      } } }),
+      speaker: character('rui', '瑞瑞'), members: [character('rui', '瑞瑞'), character('chen', '陈越')],
+      messages: [message({ senderId: 'rui', content: '先守住新野' }), message({ id: 'm2', timestamp: 2 })],
+      intent, innerLife, conversationMovePlan: movePlan, turnPlan,
+    });
+    const prompt = buildTurnDirectivePrompt(directive);
+    expect(prompt).toContain(`${status}: 先守住新野`);
+    expect(prompt).toContain('recent own visible line');
+    expect(prompt).not.toContain('preserve the current unresolved need');
+    expect(prompt).not.toContain('do not switch to a fresh logistical action');
+  });
+
+  it('does not treat old own messages as recent after other speakers have moved on', () => {
+    const directive = buildTurnDirective({
+      chat: chat(), speaker: character('rui', '瑞瑞'),
+      members: [character('rui', '瑞瑞'), character('chen', '陈越')],
+      messages: [message({ senderId: 'rui' }), ...[2, 3, 4].map((index) => message({
+        id: `m${index}`, timestamp: index,
+      })), message({ id: 'deleted', senderId: 'rui', isDeleted: true }),
+      message({ id: 'event', type: 'event' })],
+      intent, innerLife, conversationMovePlan: movePlan, turnPlan,
+    });
+    expect(directive?.situationalConstraints).toEqual([]);
   });
 
   it('does not expose raw runtime field names in the visible prompt block', () => {

@@ -154,17 +154,14 @@ function describeSituationalConstraints(input: BuildTurnDirectiveInput) {
   const previous = visible.at(-1);
   const previousSpeakerSame = previous?.type === 'ai' && previous.senderId === input.speaker.id;
   const recentOwnCount = visible
-    .filter((message) => message.type === 'ai' && message.senderId === input.speaker.id)
-    .slice(-3).length;
+    .slice(-3)
+    .filter((message) => message.type === 'ai' && message.senderId === input.speaker.id).length;
   const constraints = [
     previousSpeakerSame ? 'the previous visible speaker was also this character; continue only if the situation has moved' : '',
     recentOwnCount ? `this character has ${recentOwnCount} recent own visible line(s); use them only as no-repeat evidence` : '',
   ].filter(Boolean);
-  if (constraints.length) {
-    constraints.push('preserve the current unresolved need; do not switch to a fresh logistical action, new fact, deadline, or softening move merely to be different');
-    if (input.userGuidance?.hasHardConstraints || input.userGuidance?.kind === 'topic_shift') {
-      constraints.push('if the user corrected a premise, preference, budget, boundary, or topic, explicitly apply that constraint before returning to AI-to-AI planning');
-    }
+  if (input.userGuidance?.hasHardConstraints || input.userGuidance?.kind === 'topic_shift') {
+    constraints.push('if the user corrected a premise, preference, budget, boundary, or topic, explicitly apply that constraint before returning to AI-to-AI planning');
   }
   return constraints;
 }
