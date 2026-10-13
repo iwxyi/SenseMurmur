@@ -3,6 +3,7 @@ import type { AICharacter } from '../types/character';
 import type { ActorRef, RuntimeEventV2, SocialEventCandidatePayload } from '../types/runtimeEvent';
 import { buildAiIdSet, toActorRef } from './actorRefPresentation';
 import { buildMomentCandidatePreview } from './momentTextBuilder';
+import { isCompletedSocialArtifact } from './socialIntentArtifact';
 
 export interface WorldCalendarSourceRef {
   conversationId: string;
@@ -1237,7 +1238,7 @@ export function projectWorldAttentionStates(chats: GroupChat[], characters: AICh
   const recentUserPrivateAction = new Map<string, number>();
   chats.filter((chat) => !chat.deletedAt).forEach((chat) => {
     (chat.runtimeEventsV2 || []).forEach((event) => {
-      if (event.kind !== 'event_candidate' && event.kind !== 'artifact') return;
+      if (!isCompletedSocialArtifact(event)) return;
       const payload = getPayload(event);
       const eventKind = getString(payload.eventKind);
       if (eventKind !== 'check_in' && eventKind !== 'pair_private_thread' && eventKind !== 'react_to_moment') return;

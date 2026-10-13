@@ -7,7 +7,7 @@ import type { APIConfig } from '../types/settings';
 import { createDefaultConversationFrameworkPatch, mergeSessionChatPatch } from '../types/sessionEngine';
 import { DEFAULT_CONVERSATION_WORLD_STATE } from '../types/chat';
 import { retainRuntimeEvents } from './runtimeEventRetention';
-import { buildSocialIntentArtifact } from './socialIntentArtifact';
+import { buildSocialIntentArtifact, isCompletedSocialArtifact } from './socialIntentArtifact';
 import { accumulateChatRuntime } from './chatRuntime';
 import { getRelationshipLedgerEntry } from './relationshipLedger';
 import { projectWorldAttentionStates, projectWorldCalendar } from './worldRuntimeProjection';
@@ -147,12 +147,18 @@ function resolveWorldDrivenCandidateCreatedAt(chat: GroupChat, actorId: string, 
   return Math.max(updatedAt, Math.min(now - 5 * 60_000, updatedAt + offlineWindowMs + offsetMs));
 }
 
-function readActionCooldownNextSuggestedAt(
+function isSocialArtifactReservation(event: RuntimeEventV2) {
+  return isCompletedSocialArtifact(event)
+    || (event.kind === 'artifact' && (event.payload as { status?: string }).status === 'tentative');
+}
+
+function readSocialArtifactNextSuggestedAt(
   chat: GroupChat,
   actorId: string,
   eventKind: 'check_in' | 'react_to_moment' | 'social_outing',
   windowMs: number,
   now = Date.now(),
+  status: 'action' | 'intent' = 'action',
 ) {
   const artifactTypeByKind: Record<typeof eventKind, string> = {
     check_in: 'check_in_note',
@@ -163,8 +169,9 @@ function readActionCooldownNextSuggestedAt(
   const lastAt = (chat.runtimeEventsV2 || [])
     .filter((event) => event.kind === 'artifact' && (event.actorIds || [])[0] === actorId)
     .filter((event) => {
-      const payload = event.payload as { artifactType?: string; eventKind?: string };
-      return payload.artifactType === artifactType && payload.eventKind === eventKind;
+      const payload = event.payload as { artifactType?: string; eventKind?: string; status?: string };
+      return payload.artifactType === artifactType && payload.eventKind === eventKind
+        && (status === 'intent' ? payload.status === 'tentative' : isCompletedSocialArtifact(event));
     })
     .map((event) => event.createdAt)
     .sort((a, b) => b - a)[0];
@@ -601,7 +608,7 @@ function hasRecentWorldArtifact(
 ) {
   const now = Date.now();
   return (chat.runtimeEventsV2 || []).some((event) => {
-    if (event.kind !== 'artifact') return false;
+    if (!isSocialArtifactReservation(event)) return false;
     const payload = event.payload as { eventKind?: string };
     return payload.eventKind === eventKind && event.actorIds?.[0] === actorId && now - event.createdAt <= withinMs;
   });
@@ -626,7 +633,7 @@ function hasRecentAttentionFollowup(chat: GroupChat, actorId: string, withinMs: 
   return (chat.runtimeEventsV2 || []).some((event) => {
     if (now - event.createdAt > withinMs) return false;
     const payload = event.payload as { eventKind?: string };
-    if (event.kind === 'artifact' && event.actorIds?.[0] === actorId) {
+    if (isSocialArtifactReservation(event) && event.actorIds?.[0] === actorId) {
       return payload.eventKind === 'check_in' || payload.eventKind === 'react_to_moment';
     }
     if (event.kind === 'event_candidate' && event.actorIds?.[0] === actorId) {
@@ -645,7 +652,7 @@ function hasRecentUserPrivateAction(chat: GroupChat, actorId: string, targetId: 
   return (chat.runtimeEventsV2 || []).some((event) => {
     if (event.createdAt >= createdAt || createdAt - event.createdAt > cooldownMs) return false;
     const payload = event.payload as Partial<SocialEventCandidatePayload> & { eventKind?: string; visibilityPlan?: string };
-    if (event.kind !== 'event_candidate' && event.kind !== 'artifact') return false;
+    if (!isCompletedSocialArtifact(event)) return false;
     if (payload.visibilityPlan !== 'user_private' && payload.eventKind !== 'check_in' && payload.eventKind !== 'pair_private_thread') return false;
     const sameActor = (event.actorIds || [])[0] === actorId;
     const sameTarget = (event.targetIds || []).includes(targetId);
@@ -705,7 +712,7 @@ export function passesWorldAttentionRestraintPolicy(
     if (isQuietHours(createdAt)) return false;
     const recentReactionCount = (chat.runtimeEventsV2 || []).filter((event) => {
       if (event.createdAt >= createdAt || createdAt - event.createdAt > 2 * 60 * 60_000) return false;
-      if (event.kind !== 'artifact') return false;
+      if (!isCompletedSocialArtifact(event)) return false;
       const artifactPayload = event.payload as { artifactType?: string; eventKind?: string };
       return artifactPayload.artifactType === 'moment_reaction_note'
         && artifactPayload.eventKind === 'react_to_moment'
@@ -734,7 +741,7 @@ function shouldConsumeCandidateWithRestraint(chat: GroupChat, payload: SocialEve
     const config = configByEventKind[payload.eventKind];
     if (!config) return false;
     return (chat.runtimeEventsV2 || []).some((event) => {
-      if (event.kind !== 'artifact') return false;
+      if (!isSocialArtifactReservation(event)) return false;
       const artifactPayload = event.payload as { artifactType?: string; dedupeKey?: string };
       if (artifactPayload.artifactType !== config.artifactType) return false;
       if (artifactPayload.dedupeKey !== dedupeKey) return false;
@@ -1352,9 +1359,12 @@ async function evaluateWorldDrivenDecision(
   }
 
   const shareMomentSuggested = attention.suggestedActions.includes('share_moment');
-  const checkInCooldownNextAt = readActionCooldownNextSuggestedAt(chat, attention.actorId, 'check_in', 90 * 60_000, now);
-  const reactCooldownNextAt = readActionCooldownNextSuggestedAt(chat, attention.actorId, 'react_to_moment', 120 * 60_000, now);
-  const inviteCooldownNextAt = readActionCooldownNextSuggestedAt(chat, attention.actorId, 'social_outing', 6 * 60 * 60_000, now);
+  const checkInCooldownNextAt = readSocialArtifactNextSuggestedAt(chat, attention.actorId, 'check_in', 90 * 60_000, now);
+  const reactCooldownNextAt = readSocialArtifactNextSuggestedAt(chat, attention.actorId, 'react_to_moment', 120 * 60_000, now);
+  const inviteCooldownNextAt = readSocialArtifactNextSuggestedAt(chat, attention.actorId, 'social_outing', 6 * 60 * 60_000, now);
+  const checkInIntentNextAt = readSocialArtifactNextSuggestedAt(chat, attention.actorId, 'check_in', 90 * 60_000, now, 'intent');
+  const reactIntentNextAt = readSocialArtifactNextSuggestedAt(chat, attention.actorId, 'react_to_moment', 120 * 60_000, now, 'intent');
+  const inviteIntentNextAt = readSocialArtifactNextSuggestedAt(chat, attention.actorId, 'social_outing', 6 * 60 * 60_000, now, 'intent');
   const momentsEnabled = isCharacterFeatureEnabled(actor, 'moments');
   const isLateNight = (() => {
     const hour = new Date(now).getHours();
@@ -1488,6 +1498,25 @@ async function evaluateWorldDrivenDecision(
     }));
   }
 
+  for (const [suggestion, eventKind, nextAt] of [
+    ['check_in', 'check_in', checkInIntentNextAt],
+    ['react_to_moment', 'react_to_moment', reactIntentNextAt],
+    ['invite_activity', 'social_outing', inviteIntentNextAt],
+  ] as const) {
+    if (!attention.suggestedActions.includes(suggestion) || !nextAt
+      || hasRecentWorldSuppressionEvent(chat, attention.actorId, `world_attention_${eventKind}_intent_throttle`, 20 * 60_000, now)) continue;
+    suppressionEvents.push(buildWorldSuppressionEvent({
+      chat,
+      actorId: attention.actorId,
+      actorName,
+      reasonType: `world_attention_${eventKind}_intent_throttle`,
+      reasonLabel: '同类意图去重',
+      reasonDetail: '近期已记录同类待定意图，暂缓重复生成；尚不代表行动已执行。',
+      candidateEventKind: eventKind,
+      nextSuggestedAt: nextAt,
+    }));
+  }
+
   const candidateResult = await buildWorldDrivenCandidate(chat, characters, messages, imageModelEnabled);
   const candidate = candidateResult.candidate;
   const candidatePayload = candidate?.payload as SocialEventCandidatePayload | undefined;
@@ -1518,6 +1547,11 @@ async function evaluateWorldDrivenDecision(
     fallbackIntent
     && candidatePayload?.eventKind === 'status_update'
   ) {
+    const intentFallbackNextAt = fallbackIntent === 'check_in'
+      ? checkInIntentNextAt
+      : fallbackIntent === 'react_to_moment'
+        ? reactIntentNextAt
+        : null;
     const cooldownFallbackNextAt = fallbackIntent === 'check_in'
       ? checkInCooldownNextAt
       : fallbackIntent === 'react_to_moment'
@@ -1527,6 +1561,8 @@ async function evaluateWorldDrivenDecision(
       ? 'world_attention_moment_delay_window'
       : cooldownFallbackNextAt
         ? 'world_attention_cooldown_window'
+      : intentFallbackNextAt
+        ? 'world_attention_intent_throttle'
       : 'world_attention_restrained_fallback';
     const fallbackReasonLabel = fallbackIntent === 'post_moment' && postMomentDelayBlocked
       ? '朋友圈进入延迟窗口，先走状态更新'
@@ -1535,7 +1571,9 @@ async function evaluateWorldDrivenDecision(
       ? `原倾向 post_moment，当前处于延迟窗口，先改为 status_update，建议时间 ${new Date(postMomentNextSuggestedAt as number).toISOString()}`
       : cooldownFallbackNextAt
         ? `原倾向 ${fallbackIntent}，当前处于冷却窗口，先改为 status_update，建议时间 ${new Date(cooldownFallbackNextAt).toISOString()}`
-        : `原倾向 ${fallbackIntent}，因冷却/克制/边界限制改为 status_update`;
+      : intentFallbackNextAt
+        ? `原倾向 ${fallbackIntent}，近期已有待定意图，先改为 status_update，建议时间 ${new Date(intentFallbackNextAt).toISOString()}`
+        : `原倾向 ${fallbackIntent}，因意图去重/克制/边界限制改为 status_update`;
     decisionEvents.push(buildWorldDecisionEvent({
       chat,
       actorId: attention.actorId,
@@ -1548,7 +1586,7 @@ async function evaluateWorldDrivenDecision(
       toEventKind: 'status_update',
       nextSuggestedAt: fallbackIntent === 'post_moment' && postMomentDelayBlocked
         ? (postMomentNextSuggestedAt as number)
-        : (cooldownFallbackNextAt || undefined),
+        : (cooldownFallbackNextAt || intentFallbackNextAt || undefined),
     }));
   } else if (candidatePayload?.eventKind) {
     decisionEvents.push(buildWorldDecisionEvent({

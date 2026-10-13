@@ -1,4 +1,11 @@
-import type { SocialEventCandidatePayload } from '../types/runtimeEvent';
+import type { RuntimeEventV2, SocialEventCandidatePayload } from '../types/runtimeEvent';
+
+export function isCompletedSocialArtifact(event: RuntimeEventV2) {
+  if (event.kind !== 'artifact') return false;
+  const payload = event.payload as { status?: string };
+  // Legacy artifacts had no lifecycle status; preserve their existing interpretation.
+  return payload.status == null || payload.status === 'completed';
+}
 
 const ARTIFACT_TYPES = {
   status_update: 'status_note',

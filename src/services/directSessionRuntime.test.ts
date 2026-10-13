@@ -2056,7 +2056,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     expect((holder?.payload as { nextSuggestedAt?: number }).nextSuggestedAt).toBe(nextSuggestedAt);
   });
 
-  it('records proactive-care cooldown fallback with nextSuggestedAt for check_in intent', async () => {
+  it.each([undefined, 'completed', 'tentative', 'cancelled', 'failed'])('separates action cooldown, intent throttle and inactive check_in status %s', async (status) => {
     const now = Date.now();
     const recentCheckInAt = now - 10 * 60_000;
     const chat = {
@@ -2081,7 +2081,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
           targetIds: ['user'],
           summary: '甲刚刚问候过',
           visibility: 'derived_public',
-          payload: { artifactType: 'check_in_note', eventKind: 'check_in', text: '甲刚刚问候过' },
+          payload: { artifactType: 'check_in_note', eventKind: 'check_in', status, text: '甲的关心记录' },
         } as RuntimeEventV2,
       ]),
       relationshipLedger: [{
@@ -2104,16 +2104,31 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
       appendEventMessage: vi.fn(async () => undefined),
     });
     const patch = (updateChat.mock.calls.at(0) as [string, { runtimeEventsV2?: RuntimeEventV2[] }] | undefined)?.[1];
+    if (status === 'cancelled' || status === 'failed') {
+      expect((patch?.runtimeEventsV2 || []).filter((event) => event.kind === 'event_candidate')
+        .map((event) => event.payload)).not.toHaveLength(0);
+      expect((patch?.runtimeEventsV2 || []).some((event) =>
+        ['world_attention_check_in_cooldown', 'world_attention_check_in_intent_throttle'].includes(
+          (event.payload as { reasonType?: string }).reasonType || '',
+        ))).toBe(false);
+      return;
+    }
     const fallback = (patch?.runtimeEventsV2 || []).find((event) => event.kind === 'artifact'
       && (event.payload as { eventType?: string; reasonType?: string; decisionType?: string }).eventType === 'world_decision_v2'
-      && (event.payload as { reasonType?: string }).reasonType === 'world_attention_cooldown_window'
+      && (event.payload as { reasonType?: string }).reasonType === (status === 'tentative' ? 'world_attention_intent_throttle' : 'world_attention_cooldown_window')
       && (event.payload as { decisionType?: string }).decisionType === 'fallback');
     const suppression = (patch?.runtimeEventsV2 || []).find((event) => event.kind === 'artifact'
       && (event.payload as { eventType?: string; reasonType?: string }).eventType === 'event_candidate_suppressed'
-      && (event.payload as { reasonType?: string }).reasonType === 'world_attention_check_in_cooldown');
+      && (event.payload as { reasonType?: string }).reasonType === (status === 'tentative' ? 'world_attention_check_in_intent_throttle' : 'world_attention_check_in_cooldown'));
     const holder = fallback || suppression;
     expect(holder).toBeTruthy();
     expect(typeof (holder?.payload as { nextSuggestedAt?: unknown })?.nextSuggestedAt).toBe('number');
+    expect((patch?.runtimeEventsV2 || []).filter((event) => event.kind === 'event_candidate'
+      && (event.payload as { eventKind?: string }).eventKind === 'check_in')).toHaveLength(0);
+    if (status === 'tentative') {
+      expect((patch?.runtimeEventsV2 || []).some((event) =>
+        (event.payload as { reasonType?: string }).reasonType === 'world_attention_check_in_cooldown')).toBe(false);
+    }
   });
 
   it('world-driven post_moment uses text-only artifact when image model is unavailable', async () => {
@@ -2980,6 +2995,28 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
 });
 
 describe('passesWorldAttentionRestraintPolicy', () => {
+  it.each([
+    { status: undefined, allowed: false },
+    { status: 'completed', allowed: false },
+    { status: 'tentative', allowed: true },
+    { status: 'cancelled', allowed: true },
+    { status: 'failed', allowed: true },
+  ])('counts only completed moment reactions toward the action limit %j', ({ status, allowed }) => {
+    const now = Date.now();
+    const chat = buildChatWithEvents([1, 2].map((index) => ({
+      id: `reaction-${index}`,
+      conversationId: 'chat-1',
+      kind: 'artifact',
+      createdAt: now - index * 60_000,
+      actorIds: ['a'],
+      targetIds: ['user'],
+      summary: '动态回应记录',
+      visibility: 'pair_private',
+      payload: { artifactType: 'moment_reaction_note', eventKind: 'react_to_moment', status },
+    } as RuntimeEventV2)));
+    expect(passesWorldAttentionRestraintPolicy(chat, 'a', 'user', now, 'react_to_moment', 'world_attention_followup')).toBe(allowed);
+  });
+
   it('blocks user-targeted proactive care when companionship boundary rejects active contact', () => {
     const now = new Date('2026-05-29T21:30:00+08:00').getTime();
     const chat = {
@@ -3027,18 +3064,25 @@ describe('passesWorldAttentionRestraintPolicy', () => {
     expect(passesWorldAttentionRestraintPolicy(chat, 'a', 'user', now, 'social_outing', 'world_attention_invite_activity')).toBe(false);
   });
 
-  it('blocks reminder when recent user-private follow-up is still in cooldown', () => {
+  it.each([
+    { kind: 'artifact', status: undefined, allowed: false },
+    { kind: 'artifact', status: 'completed', allowed: false },
+    { kind: 'artifact', status: 'tentative', allowed: true },
+    { kind: 'artifact', status: 'cancelled', allowed: true },
+    { kind: 'artifact', status: 'failed', allowed: true },
+    { kind: 'event_candidate', status: undefined, allowed: true },
+  ] as const)('uses only completed private contact for reminder cooldown %j', ({ kind, status, allowed }) => {
     const now = new Date('2026-05-29T21:30:00+08:00').getTime();
     const chat = buildChatWithEvents([{
       id: 'evt-check-1',
       conversationId: 'chat-1',
-      kind: 'artifact',
+      kind,
       createdAt: now - 30 * 60_000,
       actorIds: ['a'],
       targetIds: ['user'],
       summary: 'a 私聊问候了 user',
       visibility: 'derived_public',
-      payload: { eventKind: 'check_in', visibilityPlan: 'user_private', artifactType: 'check_in_note' },
+      payload: { eventKind: 'check_in', visibilityPlan: 'user_private', artifactType: 'check_in_note', status },
     } as RuntimeEventV2]);
     chat.relationshipLedger = [{
       pairKey: 'a->user',
@@ -3049,6 +3093,6 @@ describe('passesWorldAttentionRestraintPolicy', () => {
       recentEvents: [],
       lastUpdatedAt: now - 1_000,
     }];
-    expect(passesWorldAttentionRestraintPolicy(chat, 'a', 'user', now, 'status_update', 'world_attention_calendar_reminder')).toBe(false);
+    expect(passesWorldAttentionRestraintPolicy(chat, 'a', 'user', now, 'status_update', 'world_attention_calendar_reminder')).toBe(allowed);
   });
 });

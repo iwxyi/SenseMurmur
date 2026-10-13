@@ -1480,7 +1480,14 @@ describe('worldRuntimeProjection', () => {
     expect(states[0]?.suggestedActions).toContain('share_moment');
   });
 
-  it('raises restraint in quiet hours or after recent private touches', () => {
+  it.each([
+    { kind: 'artifact', status: undefined, contacted: true },
+    { kind: 'artifact', status: 'completed', contacted: true },
+    { kind: 'artifact', status: 'tentative', contacted: false },
+    { kind: 'artifact', status: 'cancelled', contacted: false },
+    { kind: 'artifact', status: 'failed', contacted: false },
+    { kind: 'event_candidate', status: undefined, contacted: false },
+  ] as const)('separates quiet hours from actual recent private contact %j', ({ kind, status, contacted }) => {
     const now = new Date('2026-05-30T00:30:00+08:00').getTime();
     const chats = [normalizeConversation({
       ...buildChat('chat-1', '群聊一', [
@@ -1498,13 +1505,14 @@ describe('worldRuntimeProjection', () => {
         {
           id: 'evt-private-1',
           conversationId: 'chat-1',
-          kind: 'event_candidate',
+          kind,
           createdAt: now - 30 * 60_000,
           actorIds: ['a'],
           targetIds: ['user'],
-          summary: 'A 刚私聊过用户',
+          summary: 'A 的私下联系记录',
           visibility: 'derived_public',
           payload: {
+            status,
             eventKind: 'pair_private_thread',
             initiatorId: 'a',
             participantIds: ['a', 'user'],
@@ -1529,9 +1537,10 @@ describe('worldRuntimeProjection', () => {
     })];
     const states = projectWorldAttentionStates(chats, [character('a', 'A')], { now });
     expect(states).toHaveLength(1);
-    expect(states[0]?.restraint).toBeGreaterThan(0.7);
+    if (contacted) expect(states[0]?.restraint).toBeGreaterThan(0.7);
+    else expect(states[0]?.restraint).toBeLessThan(0.7);
     expect(states[0]?.reasons.join(' / ')).toContain('夜间时段');
-    expect(states[0]?.reasons.join(' / ')).toContain('最近已有私域触达');
+    expect(states[0]?.reasons.some((reason) => reason.includes('最近已有私域触达'))).toBe(contacted);
   });
 
   it('derives in-progress and completed statuses from schedule window', () => {
