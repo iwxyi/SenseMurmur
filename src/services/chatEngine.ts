@@ -492,6 +492,7 @@ export interface ChatEngineCallbacks {
   onMessageComplete: (message: GeneratedRoundMessage) => void | Promise<void>;
   onLocalInterception?: (event: LocalInterceptionEvent) => void | Promise<void>;
   onIdle?: (reason: string) => void;
+  onQuiet?: () => void;
   onError: (error: Error) => void;
   signal?: AbortSignal;
 }
@@ -4699,6 +4700,14 @@ export const runOneRound = async (
   const candidates = calculateWeights(autoSpeakableMembers, activeMessages, effectiveCooldownMap, chat.speed, BASE_COOLDOWN_MS, pendingReplyContext, chat, directorIntent);
   const lockedGuidanceSpeaker = resolveUserGuidanceLockedSpeaker(autoSpeakableMembers, directorIntent);
   const roundtableTurnSpeaker = resolveRoundtableTurnSpeaker(chat, autoSpeakableMembers);
+  const latestVisibleMessage = activeMessages.findLast((message) => message.type !== 'event' && message.type !== 'system');
+  if (chat.type === 'group' && resolveSessionFamilyKey(chat) === 'conversation'
+    && latestVisibleMessage?.type === 'ai'
+    && candidates.length > 0 && candidates.every((candidate) => candidate.prefersSilence)
+    && !storyNarrator && !lockedGuidanceSpeaker && !roundtableTurnSpeaker) {
+    callbacks.onQuiet?.();
+    return;
+  }
   let speakerSelection: SpeakerSelectionState = storyNarrator
     ? {
       speakerId: storyNarrator.id,

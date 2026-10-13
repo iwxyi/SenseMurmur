@@ -3680,6 +3680,19 @@ function runtimeChatflowScenarios() {
       { turn: 2, id: 'continuity:fei-scout-report', absent: true },
     ],
   });
+  const commitmentResult = scenarios.find((scenario) => scenario.name === 'longzhong_commitment_result_room');
+  if (!commitmentResult) throw new Error('Commitment result fixture missing');
+  scenarios.push({
+    ...commitmentResult,
+    name: 'longzhong_quiet_resume_room',
+    turns: 4,
+    quietExpectedTurns: [3],
+    promptExpectations: [...commitmentResult.promptExpectations,
+      { turn: 4, speakerId: 'fei', text: '[fei-scout-report] commitment/resolved' }],
+    userInjections: [...commitmentResult.userInjections,
+      { afterTurn: 3, content: '三弟，南门那半刻空当，你是怎么确认的？' }],
+    rubricHint: '交付完成后允许暂时安静。用户随后向张飞追问已有事实，观察是否恢复本人回应，不要求增加任务、冲突或新地点。',
+  });
   if (!underworld) throw new Error('Underworld character fixture missing');
   const backgrounds = {
     yan: '幽都最高裁决者，与夜巡属下共事多年。',
@@ -4430,6 +4443,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
   const errors = [];
   const judgeErrors = [];
   const localInterceptions = [];
+  const quietTurns = [];
   let naturallySettled = false;
   const profiles = runtimeProfile(model);
   const api = profiles[0];
@@ -4463,6 +4477,16 @@ async function runRuntimeChatflowScenario(model, scenario) {
 
   const conversationRunStart = chat;
   const seedConversationContinuity = structuredClone(chat.worldState.conversationContinuity || null);
+  async function commitUserInjections(turn) {
+    const injections = (scenario.userInjections || []).filter((item) => item.afterTurn === turn);
+    for (const [index, injection] of injections.entries()) {
+      const message = acceptanceUserMessage(scenario.chat.id, injection.content, Date.now() + turn * 1000 + index + 100);
+      messages.push(message);
+      chat = await commitHumanTurn(runtime, chat, characters, messages, message, api);
+      userInjectionLog.push({ afterTurn: turn, content: injection.content });
+    }
+    return injections;
+  }
   for (let turn = 1; turn <= turnCount; turn += 1) {
     // The session runner pauses private/study rooms after one generation.
     // Only an explicit user injection unlocks another round in this harness.
@@ -4515,6 +4539,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
         onMessageComplete: (message) => { completed = message; },
         onLocalInterception: (event) => { localInterceptions.push({ turn, ...event }); },
         onIdle: (reason) => { errors.push(new Error(`idle on turn ${turn}: ${reason}`)); },
+        onQuiet: () => { quietTurns.push(turn); },
         onError: (error) => { errors.push(error instanceof Error ? error : new Error(String(error))); },
       },
       profiles,
@@ -4529,6 +4554,16 @@ async function runRuntimeChatflowScenario(model, scenario) {
       }
     }
     if (errors.length) break;
+    if (quietTurns.includes(turn)) {
+      assertCondition(scenario.quietExpectedTurns?.includes(turn), `chatflow ${scenario.name} unexpectedly quiet on turn ${turn}`);
+      assertCondition(!completed && !selectedSpeakers.some((item) => item.turn === turn)
+        && !promptRequests.some((item) => item.turn === turn) && !generatedResponses.some((item) => item.turn === turn),
+        `chatflow ${scenario.name} quiet turn generated or completed a reply`);
+      logProgress('chatflow quiet', { model, scenario: scenario.name, turn });
+      const injections = await commitUserInjections(turn);
+      if (!injections.length) break;
+      continue;
+    }
     assertCondition(completed, `chatflow ${scenario.name} did not complete turn ${turn}`);
     if (config.activityReadback) {
       assertCondition(scenario.name === 'longzhong_activity_update_room', 'Activity readback experiment requires the patrol scenario');
@@ -4754,17 +4789,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
       turnReviews.push({ turn, senderName: summarized.senderName, score: 0, review: null, judgeError: message });
       logProgress('chatflow turn judge failed', { model, scenario: scenario.name, turn, error: clip(message, 400) });
     }
-    const injections = (scenario.userInjections || []).filter((item) => item.afterTurn === turn);
-    for (const [index, injection] of injections.entries()) {
-      const message = acceptanceUserMessage(
-        scenario.chat.id,
-        injection.content,
-        Date.now() + turn * 1000 + index + 100,
-      );
-      messages.push(message);
-      chat = await commitHumanTurn(runtime, chat, characters, messages, message, api);
-      userInjectionLog.push({ afterTurn: turn, content: injection.content });
-    }
+    const injections = await commitUserInjections(turn);
     if (runtime.shouldPauseSettledConversation(conversationRunStart, chat, characters, messages)
       && !injections.length) {
       naturallySettled = true;
@@ -4776,6 +4801,9 @@ async function runRuntimeChatflowScenario(model, scenario) {
   let hardError = '';
   try {
     assertRuntimeChatflowTranscript(scenario, transcript, errors, naturallySettled);
+    for (const turn of scenario.quietExpectedTurns || []) {
+      assertCondition(quietTurns.includes(turn), `chatflow ${scenario.name} expected quiet turn ${turn}`, { quietTurns });
+    }
     for (const expected of scenario.promptExpectations || []) {
       assertCondition(config.capturePrompts, 'Prompt expectations require --capture-prompts');
       assertCondition(!expected.speakerId || selectedSpeakers.some((item) => item.turn === expected.turn && item.characterId === expected.speakerId),
@@ -4868,6 +4896,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
     scenario: scenario.name,
     turnCount: transcript.length,
     naturallySettled,
+    quietTurns,
     selectedSpeakers,
     transcript,
     turnReviews,

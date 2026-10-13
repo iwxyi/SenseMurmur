@@ -250,6 +250,7 @@ export async function runSessionLoop(params: {
   onTurnWorkStarted?: () => void;
   onTurnWorkFinished?: () => void;
   onIdle?: (reason: string) => void;
+  onQuiet?: () => void;
   onMessageChunk: (content: string) => void;
   onStreamingComplete?: () => void;
   onLocalInterception?: (event: LocalInterceptionEvent) => void | Promise<void>;
@@ -499,6 +500,10 @@ export async function runSessionLoop(params: {
           onIdle: (reason) => {
             if (!isActiveLoop(params)) return;
             params.onIdle?.(reason);
+          },
+          onQuiet: () => {
+            if (!isActiveLoop(params)) return;
+            params.onQuiet?.();
           },
           onMessageComplete: async (message) => {
             if (!isActiveLoop(params)) return;

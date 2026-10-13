@@ -258,6 +258,35 @@ describe('runSessionLoop', () => {
     expect(params.onLoopError).not.toHaveBeenCalled();
   });
 
+  it('keeps quiet ticks running without pause, errors or commits and reads a later user turn', async () => {
+    const start = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
+    const params = buildLoopParams(start);
+    let messages: Message[] = [];
+    params.getCurrentMessages = () => messages;
+    const quiet = vi.fn();
+    const pause = vi.fn(params.pauseLoop);
+    params.pauseLoop = pause;
+    runOneRoundMock.mockImplementation(async (_chat, _characters, snapshot, _api, hooks) => {
+      if (runOneRoundMock.mock.calls.length === 1) {
+        hooks.onQuiet();
+        messages = [{ id: 'user-new', type: 'user', content: '还有一件事。' } as Message];
+      } else {
+        expect(snapshot).toEqual(messages);
+        expect(pause).not.toHaveBeenCalled();
+        hooks.onQuiet();
+        params.pauseLoop();
+      }
+    });
+    await runSessionLoop({ ...params, onQuiet: quiet } as never);
+    expect(quiet).toHaveBeenCalledTimes(2);
+    expect(params.onIdle).not.toHaveBeenCalled();
+    expect(params.onLoopError).not.toHaveBeenCalled();
+    expect(params.onEngineError).not.toHaveBeenCalled();
+    expect(params.onCommit).not.toHaveBeenCalled();
+    expect(params.upsertMessage).not.toHaveBeenCalled();
+    expect(pause).toHaveBeenCalledTimes(1);
+  });
+
   it('does not pause a newly started run because of a retained old settled signal', async () => {
     const start = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' },
       worldState: { ...buildChat().worldState, conversationContinuity: { items: [], settledAt: 10 } } });

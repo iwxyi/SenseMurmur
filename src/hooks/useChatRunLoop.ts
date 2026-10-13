@@ -288,6 +288,12 @@ export function useChatRunLoop(params: {
           current.setCurrentSpeaker(null);
           setRunLoopError(reason);
         },
+        onQuiet: () => {
+          current.discardStreamingMessage();
+          setThinkingId(null);
+          current.setCurrentSpeaker(null);
+          setRunLoopError(null);
+        },
         onClearStreamingState: () => {
           current.clearStreamingMessageRef();
           setThinkingId(null);

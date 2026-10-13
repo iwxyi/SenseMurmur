@@ -95,6 +95,7 @@ export function isChatMemberMuted(chat: Pick<GroupChat, 'governance' | 'scenario
 export interface WeightedCandidate {
   characterId: string;
   weight: number;
+  prefersSilence?: boolean;
   scoreBreakdown?: SpeakerScoreBreakdown;
 }
 
@@ -637,6 +638,7 @@ export function calculateWeights(
   return baseSelectedCandidates.map((candidate) => ({
     characterId: candidate.characterId,
     weight: candidate.weight,
+    prefersSilence: candidate.idleStaySilent,
     scoreBreakdown: candidate.scoreBreakdown,
   }));
 }

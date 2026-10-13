@@ -4382,7 +4382,7 @@ describe('chatEngine streaming preview', () => {
     expect((completed[0] as { metadata?: { runtimeDecision?: { directorIntent?: { userGuidance?: { actorIds?: string[] } } } } }).metadata?.runtimeDecision?.directorIntent?.userGuidance?.actorIds).toEqual(['susu']);
   });
 
-  it('does not lock a speaker for a broad constraint that only mentions several members', async () => {
+  it.each([true, false])('does not turn a broad constraint into a speaker lock (pending reply: %s)', async (hasPendingReply) => {
     generateResponseMock.mockReset();
     generateResponseMock.mockResolvedValue(JSON.stringify({
       content: '我没打算把这件事当成拍漏了。',
@@ -4393,6 +4393,7 @@ describe('chatEngine streaming preview', () => {
     const members = [buildCharacter('wen', '闻溪'), buildCharacter('tang', '许棠'), buildCharacter('cheng', '程野')];
     const now = Date.now();
     const completed: Message[] = [];
+    const quiet = vi.fn();
     const guidance: NonNullable<DirectorIntent['userGuidance']> = {
       kind: 'topic_shift', rawText: '合照里怎么只有闻溪和程野，许棠去哪了？这件事别当成拍漏了就算了。',
       actorIds: [], mentionedActorIds: ['wen', 'tang', 'cheng'], hardConstraintActorIds: ['tang'],
@@ -4410,19 +4411,32 @@ describe('chatEngine streaming preview', () => {
         buildUserMessage('合照里怎么只有闻溪和程野，许棠去哪了？这件事别当成拍漏了就算了。', now - 75_000),
         buildAiMessage('cheng', '程野', '她去拿蛋糕了。', now - 60_000),
         buildAiMessage('tang', '许棠', '没事，你们那张挺好看的。', now - 45_000),
-        buildAiMessage('wen', '闻溪', '许棠，你是不是生气了。', now - 30_000),
+        {
+          ...buildAiMessage('wen', '闻溪', '许棠，你是不是生气了。', now - 30_000),
+          addressedTargetIds: hasPendingReply ? ['tang'] : null,
+          primaryAddressedTargetId: hasPendingReply ? 'tang' : null,
+        },
       ],
       buildProfiles(),
       {
         onSpeakerSelected: () => undefined,
         onMessageChunk: () => undefined,
         onMessageComplete: (message) => { completed.push(message as Message); },
+        onQuiet: quiet,
         onError: (error) => { throw error; },
       },
     );
-    expect(completed).toHaveLength(1);
-    expect(completed[0].metadata?.runtimeDecision?.speakerSelection?.policy?.source).not.toBe('user_guidance_lock');
-    expect(completed[0].metadata?.runtimeDecision?.directorIntent?.userGuidance?.hasHardConstraints).toBe(true);
+    if (hasPendingReply) {
+      expect(quiet).not.toHaveBeenCalled();
+      expect(completed).toHaveLength(1);
+      expect(completed[0].senderId).toBe('tang');
+      expect(completed[0].metadata?.runtimeDecision?.speakerSelection?.policy?.source).not.toBe('user_guidance_lock');
+      expect(completed[0].metadata?.runtimeDecision?.directorIntent?.userGuidance?.hasHardConstraints).toBe(true);
+    } else {
+      expect(quiet).toHaveBeenCalledOnce();
+      expect(completed).toHaveLength(0);
+      expect(generateResponseMock).not.toHaveBeenCalled();
+    }
   });
 
   it.skip('legacy local media speaker lock is retired', async () => {
@@ -4630,6 +4644,33 @@ describe('chatEngine streaming preview', () => {
     expect(prompt).not.toContain('## Turn Plan');
     expect(prompt).not.toContain('## Runtime Role Constraint');
     expect(prompt).not.toContain('## Focused Situational Job Contract');
+  });
+
+  it('waits quietly without generating and resumes after a new user turn', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ content: '我在。', interactionHints: null }));
+    const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙')];
+    const chat = buildChat({ memberIds: ['a', 'b'] });
+    const messages = [buildAiMessage('a', '甲', '记录已经放好了。', Date.now() - 30_000)];
+    const callbacks = {
+      onSpeakerSelected: vi.fn(), onMessageChunk: vi.fn(), onMessageComplete: vi.fn(),
+      onQuiet: vi.fn(), onIdle: vi.fn(), onError: vi.fn(),
+    };
+    for (let tick = 0; tick < 2; tick += 1) {
+      await runOneRound(chat, characters, messages, buildProfiles(), callbacks, undefined, undefined, {});
+    }
+    expect(callbacks.onQuiet).toHaveBeenCalledTimes(2);
+    expect(callbacks.onIdle).not.toHaveBeenCalled();
+    expect(callbacks.onError).not.toHaveBeenCalled();
+    expect(callbacks.onSpeakerSelected).not.toHaveBeenCalled();
+    expect(callbacks.onMessageComplete).not.toHaveBeenCalled();
+    expect(generateResponseMock).not.toHaveBeenCalled();
+
+    await runOneRound(chat, characters, [...messages, buildUserMessage('乙，说说你的看法。', Date.now())],
+      buildProfiles(), callbacks, undefined, undefined, {});
+    expect(callbacks.onMessageComplete).toHaveBeenCalledTimes(1);
+    expect(callbacks.onQuiet).toHaveBeenCalledTimes(2);
+    expect(callbacks.onError).not.toHaveBeenCalled();
   });
 
   it('keeps conversation interaction rules on a creative roleplay surface', async () => {
