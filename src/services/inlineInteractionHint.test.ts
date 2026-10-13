@@ -3,7 +3,7 @@ import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
 import { normalizeInteractionHintCollection } from '../types/runtimeEvent';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
-import { buildInlineInteractionContract, hasInvalidStateEvidence, parseInlineInteractionEnvelope } from './inlineInteractionHint';
+import { buildInlineInteractionContract, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope } from './inlineInteractionHint';
 
 describe('known activity writeback context', () => {
   const speaker = { id: 'speaker', name: '张飞' } as AICharacter;
@@ -111,6 +111,44 @@ describe('state evidence source boundary', () => {
 
   it('allows a turn without state updates', () => {
     expect(hasInvalidStateEvidence({ content: '看过了。', conversationUpdate: null })).toBe(false);
+  });
+});
+
+describe('continuity member reference boundary', () => {
+  it.each([
+    { addAlliances: [['speaker', 'unknown']] },
+    { removeAlliances: [['speaker', 'unknown']] },
+    { addConflictPairs: [['speaker', 'unknown']] },
+    { removeConflictPairs: [['speaker', 'unknown']] },
+    { pileOnTarget: 'unknown' },
+    { silencedActors: ['unknown'] },
+  ])('checks each room structural reference: %j', (room) => {
+    const parsed = parseInlineInteractionEnvelope(JSON.stringify({ content: '本轮台词',
+      conversationUpdate: { items: [], room: { ...room, evidenceText: '本轮台词' } },
+    }));
+    expect(hasInvalidConversationMemberReferences(parsed!, ['speaker', 'other'])).toBe(true);
+  });
+
+  it('rejects unknown participant and room member ids instead of allowing commit-time loss', () => {
+    const parsed = parseInlineInteractionEnvelope(JSON.stringify({
+      messages: [{ content: '我接下巡城。' }],
+      conversationUpdate: {
+        items: [{ key: 'patrol', kind: 'commitment', status: 'established', summary: '接下巡城', participantIds: ['speaker', '曹操'], evidenceText: '我接下巡城' }],
+        room: { addConflictPairs: [['speaker', '曹操']], evidenceText: '我接下巡城' },
+      },
+    }));
+    expect(parsed).not.toBeNull();
+    expect(hasInvalidConversationMemberReferences(parsed!, ['speaker', 'other'])).toBe(true);
+  });
+
+  it('accepts current members and the user member', () => {
+    const parsed = parseInlineInteractionEnvelope(JSON.stringify({
+      messages: [{ content: '我接下巡城。' }],
+      conversationUpdate: {
+        items: [{ key: 'patrol', kind: 'commitment', status: 'established', summary: '接下巡城', participantIds: ['speaker', 'user'], evidenceText: '我接下巡城' }],
+      },
+    }));
+    expect(hasInvalidConversationMemberReferences(parsed!, ['speaker', 'other'])).toBe(false);
   });
 });
 

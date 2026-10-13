@@ -241,6 +241,38 @@ describe('chatEngine streaming preview', () => {
     expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
   });
 
+  it('retries continuity updates that reference a member outside the supplied registry', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock
+      .mockResolvedValueOnce(JSON.stringify({ messages: [{ content: '我接下巡城。' }], conversationUpdate: {
+        items: [{ key: 'patrol', kind: 'commitment', status: 'established', summary: '接下巡城', participantIds: ['mei', '曹操'], evidenceText: '我接下巡城' }],
+      } }))
+      .mockResolvedValueOnce(JSON.stringify({ messages: [{ content: '我接下巡城。' }], conversationUpdate: {
+        items: [{ key: 'patrol', kind: 'commitment', status: 'established', summary: '接下巡城', participantIds: ['mei'], evidenceText: '我接下巡城' }],
+      } }));
+    const message = await generateSpeakerMessage({
+      chat: buildChat({ worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE, conversationContinuity: knownContinuity } }),
+      speaker: buildCharacter('mei', '美羊羊'), characters: [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')],
+      messages: [], apiConfig: buildProfiles(),
+    });
+    expect(generateResponseMock).toHaveBeenCalledTimes(2);
+    expect(generateResponseMock.mock.calls[1]?.[1]).toContain('outside the supplied member list');
+    expect(message.metadata?.conversationUpdate?.items[0]).toMatchObject({ participantIds: ['mei'] });
+  });
+
+  it('does not submit or rotate speakers when unknown continuity members exhaust protocol retries', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ content: '我接下巡城。', conversationUpdate: {
+      items: [{ key: 'patrol', kind: 'commitment', status: 'established', summary: '接下巡城', participantIds: ['unknown'], evidenceText: '我接下巡城' }],
+    } }));
+    const callbacks = { onSpeakerSelected: vi.fn(), onMessageChunk: vi.fn(), onMessageComplete: vi.fn(), onError: vi.fn() };
+    await runOneRound(buildChat(), [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')], [], buildProfiles(), callbacks);
+    expect(generateResponseMock).toHaveBeenCalledTimes(3);
+    expect(callbacks.onSpeakerSelected).toHaveBeenCalledTimes(1);
+    expect(callbacks.onMessageComplete).not.toHaveBeenCalled();
+    expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
+  });
+
   it.each(['direct', 'ai_direct'] as const)('keeps %s compatible when continuity state is present', async (type) => {
     generateResponseMock.mockReset();
     generateResponseMock.mockResolvedValue(JSON.stringify({ content: '记录交回来了。' }));

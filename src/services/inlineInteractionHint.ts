@@ -333,6 +333,34 @@ export function hasInvalidStateEvidence(envelope: InlineInteractionEnvelope) {
   return evidence.some((quote) => !parts.some((part) => typeof part === 'string' && part.includes(quote)));
 }
 
+/**
+ * Structured continuity updates must not be silently reduced at commit time.
+ * Unknown member ids are a protocol error so the same speaker can retry with
+ * the member registry that was supplied in the prompt.
+ */
+export function hasInvalidConversationMemberReferences(
+  envelope: InlineInteractionEnvelope,
+  memberIds: Iterable<string>,
+) {
+  const update = envelope.conversationUpdate;
+  if (!update) return false;
+  const members = new Set(memberIds);
+  members.add('user');
+  const valid = (id: string) => members.has(id);
+  if (update.items.some((item) => item.participantIds.some((id) => !valid(id)))) return true;
+  const room = update.room;
+  if (!room) return false;
+  const pairs = [
+    ...(room.addAlliances || []),
+    ...(room.removeAlliances || []),
+    ...(room.addConflictPairs || []),
+    ...(room.removeConflictPairs || []),
+  ];
+  if (pairs.some((pair) => pair.some((id) => !valid(id)))) return true;
+  if (room.pileOnTarget && !valid(room.pileOnTarget)) return true;
+  return Boolean(room.silencedActors?.some((id) => !valid(id)));
+}
+
 function buildMemberReference(params: { chat: GroupChat; characters: AICharacter[]; speakerId?: string }) {
   const memberIds = new Set(params.chat.memberIds);
   const characterLines = params.characters
