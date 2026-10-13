@@ -2303,18 +2303,6 @@ export default function ChatDetailPage() {
             error: error instanceof Error ? error.message : String(error),
           }, 'warn', 'chat-run');
         }
-        if (chat.type === 'ai_direct') {
-          const { applyAiDirectFeedback } = await import('../services/directSessionRuntime');
-          await applyAiDirectFeedback({
-            chat: nextChat,
-            chats,
-            characters,
-            content: trimmedContent,
-            updateCharacter,
-            updateChat,
-            appendEventMessage,
-          });
-        }
       }
       if (cancelledRunningLoop) {
         setSnackbar({ open: true, message: '已切换到新分支，当前生成已重启', severity: 'success' });
@@ -3044,14 +3032,12 @@ export default function ChatDetailPage() {
       }
       if (latestChat.type === 'ai_direct') {
         startConversationLoopIfNeeded(latestChat, { allowDirect: true, immediate: true });
-        const { applyAiDirectFeedback } = await import('../services/directSessionRuntime');
-        await applyAiDirectFeedback({ chat: latestChat, chats, characters, content, updateCharacter, updateChat, appendEventMessage });
         return;
       }
       const startBlockReason = startConversationLoopIfNeeded(latestChat);
       if (isLearningProgressRoom && startBlockReason) setIsDirectReplyPending(false);
     });
-  }, [addMessageStable, aiProfiles, api, appendEventMessage, appendEventMessageStable, appendEventMessagesStable, appendLocalInterceptionHint, applyChatRuntimeDelta, characters, chat, chatInteractionDisabled, chatReadOnlyReason, chats, commitPersistedManualRuntime, currentChatMessages, currentUser?.nickname, enqueueManualInput, getNextMessageTimestamp, id, recordSpeak, selectedAssistantArtifactId, setSnackbar, showErrorToast, startConversationLoopIfNeeded, updateCharacter, updateCharacters, updateChat, upsertMessageStable]);
+  }, [addMessageStable, aiProfiles, api, appendEventMessageStable, appendEventMessagesStable, appendLocalInterceptionHint, applyChatRuntimeDelta, characters, chat, chatInteractionDisabled, chatReadOnlyReason, commitPersistedManualRuntime, currentChatMessages, currentUser?.nickname, enqueueManualInput, getNextMessageTimestamp, id, recordSpeak, selectedAssistantArtifactId, setSnackbar, showErrorToast, startConversationLoopIfNeeded, updateCharacter, updateCharacters, updateChat, upsertMessageStable]);
 
   const handlePendingAppCommandChoice = useCallback(async (choiceId: string) => {
     if (!chat || !id || chat.type !== 'assistant') return;

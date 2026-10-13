@@ -102,6 +102,32 @@ describe('buildRelationshipTransition', () => {
     expect(result.characterPatches).toEqual([]);
   });
 
+  it.each(['user', 'god'] as const)('does not attribute private %s input to the AI pair', (type) => {
+    const chat = buildChat({
+      type: 'ai_direct',
+      memberIds: ['char-a', 'char-b'],
+      sourceChatId: 'source-group',
+      sourceMemberIds: ['char-a', 'char-b'],
+    });
+    const speaker = buildCharacter('char-a', '甲');
+    const target = buildCharacter('char-b', '乙');
+    speaker.personalityDrift = { openness: 3 };
+    const characters = [speaker, target];
+    const before = structuredClone(characters);
+
+    const result = buildRelationshipTransition({
+      conversation: chat,
+      characters,
+      message: { type, senderId: 'user', content: '这是私下给你们的指示，请先各自想想。' },
+      previousAiMessage: null,
+    });
+
+    expect(result.characterPatches).toEqual([]);
+    expect(result.runtimeEvents).toEqual([]);
+    expect(result.relationshipLedger).toEqual([]);
+    expect(characters).toEqual(before);
+  });
+
   it('applies a fast target emotion without inventing a lasting relationship delta', () => {
     const chat = buildChat();
     const speaker = buildCharacter('char-a', '甲');
@@ -375,8 +401,13 @@ describe('buildRelationshipTransition', () => {
     expect(speakerPatch?.coreProfile).toBeUndefined();
   });
 
-  it('writes runtime relationship deltas back to global character relationships and the room ledger', () => {
-    const chat = buildChat();
+  it.each(['group', 'ai_direct'] as const)('writes %s relationship deltas back to global character relationships and the room ledger', (type) => {
+    const chat = buildChat(type === 'ai_direct' ? {
+      type,
+      memberIds: ['char-a', 'char-b'],
+      sourceChatId: 'source-group',
+      sourceMemberIds: ['char-a', 'char-b'],
+    } : {});
     const speaker = buildCharacter('char-a', '甲');
     speaker.relationships = [{ characterId: 'char-b', warmth: 30, competence: 20, trust: 25, threat: 4, attachment: 12, deference: 8, note: '甲认可乙，但仍会观察。' }];
     const target = buildCharacter('char-b', '乙');
