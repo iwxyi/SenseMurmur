@@ -38,6 +38,7 @@ Optional CLI overrides:
   --provider=openai                Override PNEUMATA_TEST_LLM_PROVIDER.
   --chatflow-turns=6               Override PNEUMATA_TEST_LLM_CHATFLOW_TURNS.
   --capture-prompts               Save fixture-only runtime request messages, without headers or credentials.
+  --capture-responses             Save fixture-only generated text before envelope parsing.
   --chatflow-scenarios=story_choice_room,deliberation_artifact_room
                                   Override PNEUMATA_TEST_LLM_CHATFLOW_SCENARIOS.
 
@@ -90,6 +91,7 @@ try {
     chatflowTurnsExplicit: Boolean(chatflowTurnsArg || process.env.PNEUMATA_TEST_LLM_CHATFLOW_TURNS),
     chatflowScenarios: parseList(chatflowScenariosArg || process.env.PNEUMATA_TEST_LLM_CHATFLOW_SCENARIOS || ''),
     capturePrompts: process.argv.includes('--capture-prompts'),
+    captureResponses: process.argv.includes('--capture-responses'),
     judgeModel: process.env.PNEUMATA_TEST_LLM_JUDGE_MODEL || '',
     judgeApiKey: process.env.PNEUMATA_TEST_LLM_JUDGE_API_KEY || process.env.PNEUMATA_TEST_LLM_API_KEY || '',
     judgeBaseUrl: process.env.PNEUMATA_TEST_LLM_JUDGE_BASE_URL || process.env.PNEUMATA_TEST_LLM_BASE_URL || DEFAULT_BASE_URL,
@@ -2703,7 +2705,7 @@ async function loadRuntimeChatModules() {
         logLevel: 'error',
       });
       try {
-        const [chatEngine, chatTypes, chatDraftBuilder, generatedTurnCommit, sessionEngineLoader, sessionActionExecutors, sessionRunner] = await Promise.all([
+        const [chatEngine, chatTypes, chatDraftBuilder, generatedTurnCommit, sessionEngineLoader, sessionActionExecutors, sessionRunner, settingsStore] = await Promise.all([
           server.ssrLoadModule('/src/services/chatEngine.ts'),
           server.ssrLoadModule('/src/types/chat.ts'),
           server.ssrLoadModule('/src/services/chatDraftBuilder.ts'),
@@ -2711,6 +2713,7 @@ async function loadRuntimeChatModules() {
           server.ssrLoadModule('/src/services/sessionEngineLoader.ts'),
           server.ssrLoadModule('/src/services/sessionActionExecutors/sessionActionExecutorRegistry.ts'),
           server.ssrLoadModule('/src/services/sessionRunner.ts'),
+          server.ssrLoadModule('/src/stores/useSettingsStore.ts'),
         ]);
         return {
           server,
@@ -2722,6 +2725,7 @@ async function loadRuntimeChatModules() {
           loadSessionEngine: sessionEngineLoader.loadSessionEngine,
           runSessionActionExecutor: sessionActionExecutors.runSessionActionExecutor,
           shouldPauseSettledConversation: sessionRunner.shouldPauseSettledConversation,
+          settingsStore: settingsStore.useSettingsStore,
         };
       } catch (error) {
         await server.close();
@@ -4214,6 +4218,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
   const eventMessages = [];
   const userInjectionLog = [];
   const promptRequests = [];
+  const generatedResponses = [];
   for (const message of messages.filter((item) => item.type === 'user' || item.type === 'god')) {
     chat = await commitHumanTurn(runtime, chat, characters, messages, message, api);
   }
@@ -4231,6 +4236,18 @@ async function runRuntimeChatflowScenario(model, scenario) {
     logProgress('chatflow turn generate', { model, scenario: scenario.name, turn, turnCount });
     let completed = null;
     const originalFetch = globalThis.fetch;
+    const originalDebug = console.debug;
+    const originalDeveloperMode = runtime.settingsStore.getState().developerMode;
+    if (config.captureResponses) {
+      runtime.settingsStore.setState({ developerMode: true });
+      console.debug = (label, payload, ...rest) => {
+        if (label === '[ai-raw-response]' && typeof payload?.response === 'string') {
+          generatedResponses.push({ turn, attempt: payload.attempt, response: payload.response });
+          return;
+        }
+        originalDebug(label, payload, ...rest);
+      };
+    }
     if (config.capturePrompts) {
       globalThis.fetch = async (input, init) => {
         // Capture only the synthetic fixture payload. Never retain URLs,
@@ -4267,6 +4284,10 @@ async function runRuntimeChatflowScenario(model, scenario) {
     );
     } finally {
       globalThis.fetch = originalFetch;
+      if (config.captureResponses) {
+        console.debug = originalDebug;
+        runtime.settingsStore.setState({ developerMode: originalDeveloperMode });
+      }
     }
     if (errors.length) break;
     assertCondition(completed, `chatflow ${scenario.name} did not complete turn ${turn}`);
@@ -4563,6 +4584,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
       .map((message) => ({ senderName: message.senderName, content: message.content })),
     userInjectionLog,
     ...(config.capturePrompts ? { promptRequests } : {}),
+    ...(config.captureResponses ? { generatedResponses } : {}),
     eventMessages,
     localInterceptions,
     hardError,

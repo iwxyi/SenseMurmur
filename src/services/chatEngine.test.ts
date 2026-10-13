@@ -254,6 +254,53 @@ describe('chatEngine streaming preview', () => {
     expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
   });
 
+  it.each(['二哥，我先去城头看看。', '{"messages":', '{"unrecognized":"台词"}'])('retries incomplete ordinary group output without committing it: %s', async (invalid) => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValueOnce(invalid).mockResolvedValueOnce(JSON.stringify({
+      messages: [{ content: '二哥，刀先借俺使使。' }, { content: '大哥那边俺自己去说。' }],
+      conversationUpdate: null,
+    }));
+    const mei = buildCharacter('mei', '美羊羊');
+    const onChunk = vi.fn();
+    const profiles = buildProfiles().map((profile) => profile.type === 'text' ? { ...profile, provider: 'deepseek' as const } : profile);
+    const message = await generateSpeakerMessage({
+      chat: buildChat(), speaker: mei, characters: [mei, buildCharacter('hui', '灰太狼')],
+      messages: [], apiConfig: profiles, onChunk,
+    });
+    expect(generateResponseMock).toHaveBeenCalledTimes(2);
+    expect(message.content).toBe('二哥，刀先借俺使使。');
+    expect(message.metadata?.conversationUpdate).toBeUndefined();
+    expect(onChunk).toHaveBeenCalledWith('');
+    expect(String(generateResponseMock.mock.calls[1]?.[1])).toContain('no valid JSON envelope');
+    expect(generateResponseMock.mock.calls[1]?.[2]).toEqual(generateResponseMock.mock.calls[0]?.[2]);
+  });
+
+  it('reports repeated plain text as protocol failure without sending or rotating speakers', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue('俺真走了，你们别送。');
+    const callbacks = { onSpeakerSelected: vi.fn(), onMessageChunk: vi.fn(), onMessageComplete: vi.fn(), onError: vi.fn() };
+    await runOneRound(buildChat(), [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')],
+      [buildUserMessage('你们继续聊。')], buildProfiles(), callbacks);
+    expect(generateResponseMock).toHaveBeenCalledTimes(3);
+    expect(callbacks.onSpeakerSelected).toHaveBeenCalledTimes(1);
+    expect(callbacks.onMessageComplete).not.toHaveBeenCalled();
+    expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
+  });
+
+  it('does not commit a plain streamed draft when the final group response is blank', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockImplementationOnce(async (_api, _prompt, _messages, onRawChunk?: (chunk: string) => void) => {
+      onRawChunk?.('俺这就走。');
+      return '';
+    }).mockResolvedValueOnce(JSON.stringify({ content: '门口那辆车还没走？' }));
+    const mei = buildCharacter('mei', '美羊羊');
+    const profiles = buildProfiles().map((profile) => profile.type === 'text' ? { ...profile, provider: 'deepseek' as const } : profile);
+    const message = await generateSpeakerMessage({ chat: buildChat(), speaker: mei,
+      characters: [mei, buildCharacter('hui', '灰太狼')], messages: [], apiConfig: profiles, onChunk: vi.fn() });
+    expect(generateResponseMock).toHaveBeenCalledTimes(2);
+    expect(message.content).toBe('门口那辆车还没走？');
+  });
+
   it('discards the streamed draft when invalid protocol is followed by a blank final response', async () => {
     generateResponseMock.mockReset();
     generateResponseMock.mockImplementationOnce(async (_api, _prompt, _messages, onRawChunk?: (chunk: string) => void) => {

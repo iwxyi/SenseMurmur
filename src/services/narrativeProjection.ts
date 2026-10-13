@@ -31,6 +31,7 @@ export interface NarrativeLineProjection {
   hiddenParticipantIds?: string[];
   visibility: 'public' | 'role_private' | 'moderator_only' | 'derived_public';
   status: NarrativeLineStatus;
+  contextKind?: 'unresolved' | 'background';
   tension: number;
   momentum: number;
   salience: number;
@@ -193,6 +194,7 @@ function buildConflictLines(chat: GroupChat, now: number): NarrativeLineProjecti
         participantIds: targetActorIds,
         visibility: 'public',
         status: mapConflictStatus(conflict.stage),
+        contextKind: 'unresolved',
         tension,
         momentum,
         salience: Math.max(0.34, clamp01(tension * 0.62 + momentum * 0.38)),
@@ -582,6 +584,7 @@ export function projectNarrativeLines(params: {
         id: `continuity:${item.key}`, conversationId: params.chat.id, type: 'goal',
         title: item.kind === 'condition' ? '尚未满足的条件' : item.kind === 'commitment' ? '尚待兑现的承诺' : '未决事项',
         summary: item.summary, participantIds: item.participantIds, visibility: 'public', status: 'active',
+        contextKind: 'unresolved',
         tension: 0, momentum: 0.5, salience: 0.64,
         sourceEventIds: [], lastTouchedAt: item.updatedAt, openQuestions: [item.summary],
         possibleNextBeats: [{ beatType: 'invite', targetActorIds: item.participantIds, pressure: 0.5, reason: item.summary }],

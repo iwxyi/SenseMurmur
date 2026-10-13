@@ -13,6 +13,8 @@ import type { ConversationMovePlan } from './conversationMovePlanner';
 import type { SpeakIntent } from './intentEngine';
 import type { TurnPlan } from './turnPlanner';
 import { buildTurnDirective, buildTurnDirectivePrompt, shouldUseUnifiedTurnDirective } from './turnDirective';
+import { projectNarrativeLines } from './narrativeProjection';
+import { applyConversationUpdate } from './conversationContinuity';
 
 function character(id: string, name: string, patch: Partial<AICharacter> = {}): AICharacter {
   return {
@@ -133,6 +135,49 @@ const turnPlan: TurnPlan = {
 };
 
 describe('turnDirective', () => {
+  it.each([0, 80])('keeps projected topic context at drift %s out of unresolved task assertions', (topicDrift) => {
+    const room = chat({ worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE,
+      structuredRoomState: { heat: 0, cohesion: 0, topicDrift, dominantThread: [], alliances: [],
+        conflictPairs: [], pileOnTarget: null, silencedActors: [] } } });
+    const messages = [message({ senderId: 'rui', content: '今天的晚霞好看。' })];
+    const directive = buildTurnDirective({ chat: room, speaker: character('rui', '瑞瑞'),
+      members: [character('rui', '瑞瑞'), character('chen', '陈越')], messages,
+      intent, innerLife, conversationMovePlan: movePlan, turnPlan,
+      narrativeLines: projectNarrativeLines({ chat: room, messages, now: 2 }),
+    });
+    const prompt = buildTurnDirectivePrompt(directive);
+    expect(prompt).toContain('Background context');
+    expect(prompt).not.toContain('unresolved line');
+    expect(prompt).not.toContain('Recorded unresolved matter');
+    if (topicDrift) {
+      expect(prompt).toContain('Possible angle');
+      expect(prompt).not.toContain('Recorded open question');
+    } else expect(prompt).toContain('今天的晚霞好看');
+  });
+
+  it('removes recorded unresolved pressure after a supported resolution while retaining topic context', () => {
+    const room = chat({ worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE,
+      conversationContinuity: { items: [{ key: 'budget', kind: 'issue', status: 'open',
+        summary: '预算上限尚未确定', participantIds: ['rui', 'chen'], evidenceText: '预算多少？',
+        sourceMessageIds: ['m0'], updatedAt: 1 }] } } });
+    const reply = message({ senderId: 'rui', content: '预算就两百，已经订好了。', timestamp: 2,
+      metadata: { conversationUpdate: { items: [{ key: 'budget', kind: 'issue', status: 'resolved',
+        summary: '预算确定为两百并完成预订', participantIds: ['rui', 'chen'], evidenceText: '预算就两百，已经订好了。' }] } } });
+    const input = { speaker: character('rui', '瑞瑞'), members: [character('rui', '瑞瑞'), character('chen', '陈越')],
+      messages: [reply], intent, innerLife, conversationMovePlan: movePlan, turnPlan };
+    const before = buildTurnDirectivePrompt(buildTurnDirective({ ...input, chat: room,
+      narrativeLines: projectNarrativeLines({ chat: room, messages: [reply], now: 2 }) }));
+    expect(before).toContain('Recorded unresolved matter');
+    const applied = applyConversationUpdate(room, reply, room.worldState.structuredRoomState);
+    const resolvedRoom = { ...room, worldState: { ...room.worldState, conversationContinuity: applied.continuity } };
+    const after = buildTurnDirectivePrompt(buildTurnDirective({ ...input, chat: resolvedRoom,
+      narrativeLines: projectNarrativeLines({ chat: resolvedRoom, messages: [reply], now: 3 }) }));
+    expect(after).toContain('Background context');
+    expect(after).toContain('issue/resolved');
+    expect(after).not.toContain('Recorded unresolved matter');
+    expect(after).not.toContain('Recorded open question');
+  });
+
   it('uses the director focus even for a roomwide line or a speaker outside its participants', () => {
     const focused = { id: 'current', conversationId: 'chat-1', type: 'goal' as const, title: '等授权', summary: '只接受了分工，未决定开战',
       participantIds: ['chen'], visibility: 'public' as const, status: 'active' as const, tension: 0, momentum: 0.5, salience: 0.5,

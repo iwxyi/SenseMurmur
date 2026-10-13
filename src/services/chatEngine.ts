@@ -3247,6 +3247,10 @@ async function generateWithPrompt(params: {
     return { protocolError: 'unsupported_tool_protocol' as const };
   }
   const isStoryReader = params.chat.sessionKind?.scenarioId === 'story-reader';
+  if (!isStoryReader && params.chat.type === 'group' && resolveSessionFamilyKey(params.chat) === 'conversation'
+    && response.trim() && !parsedEnvelope) {
+    return { protocolError: 'missing_json_envelope' as const };
+  }
   const narrativeRuntime = isStoryReader ? await loadNarrativeRuntime() : null;
   const rawStoryEvents = narrativeRuntime
     ? narrativeRuntime.normalizeStoryEvents(parsedEnvelope?.storyEvents, { previousMessages: params.activeMessages })
@@ -3293,7 +3297,8 @@ async function generateWithPrompt(params: {
     && !params.chat.memberIds.includes(params.speaker.id);
   let finalResponse = narrativeBlocks.length && !keepStoryEventsAsContent ? '' : finalizedResponse;
   let streamedFallbackUsed = false;
-  if (!isStoryReader && !normalizeForComparison(finalResponse)) {
+  const requiresGroupEnvelope = !isStoryReader && params.chat.type === 'group' && resolveSessionFamilyKey(params.chat) === 'conversation';
+  if (!isStoryReader && (!requiresGroupEnvelope || parsedEnvelope) && !normalizeForComparison(finalResponse)) {
     const streamedFallback = streamBridge.getLastContent();
     if (normalizeForComparison(streamedFallback)) {
       finalResponse = sanitizeUserFacingText(
@@ -3438,12 +3443,14 @@ async function generateNonDuplicateResponse(params: {
     }
     if (generated.protocolError) {
       params.onChunk?.('');
+      const unsupportedTool = generated.protocolError === 'unsupported_tool_protocol';
       logAiGenerationFailure({
         chat: params.chat, speaker: params.speaker, reason: generated.protocolError,
-        message: 'AI 返回了不支持的工具调用协议，本次生成未提交。', attempt: attempt + 1,
+        message: unsupportedTool ? 'AI 返回了不支持的工具调用协议，本次生成未提交。' : 'AI 回复缺少有效的结构化输出，本次生成未提交。', attempt: attempt + 1,
       });
       if (attempt < 2) {
-        prompt = `${params.systemPrompt}\n\nOutput protocol retry:\n- The previous attempt returned unsupported tool-call markup. Return one valid JSON object using the supplied output contract and actual visible character speech. Do not emit tool-call markup or simulate unavailable tools. Do not mention this retry to participants.`;
+        const failure = unsupportedTool ? 'unsupported tool-call markup' : 'no valid JSON envelope';
+        prompt = `${params.systemPrompt}\n\nOutput protocol retry:\n- The previous attempt returned ${failure}. Return one valid JSON object using the supplied output contract and actual visible character speech. Preserve the supported structured fields for this turn; use null when there is no supported update. Do not invent updates, emit tool-call markup or simulate unavailable tools. Do not mention this retry to participants.`;
         continue;
       }
       throw new EmptyGeneratedResponseError(params.speaker.name, {

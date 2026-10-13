@@ -115,13 +115,15 @@ function describeNarrativePressure(input: BuildTurnDirectiveInput, targetActorId
       return rightFocus - leftFocus || rightTargets - leftTargets || right.salience - left.salience;
     })[0];
   if (!relevant) return undefined;
-  const open = relevant.openQuestions[0] ? ` Unresolved dramatic question: ${relevant.openQuestions[0]}` : '';
-  return sanitizeUserFacingText(`${relevant.type} line "${relevant.title}": ${relevant.summary}.${open}`, input.members);
+  const unresolved = relevant.contextKind === 'unresolved';
+  const question = relevant.openQuestions[0]
+    ? ` ${unresolved ? 'Recorded open question' : 'Possible angle'}: ${relevant.openQuestions[0]}` : '';
+  return sanitizeUserFacingText(`${unresolved ? 'Recorded unresolved matter' : 'Background context'}: ${relevant.type} line "${relevant.title}": ${relevant.summary}.${question}`, input.members);
 }
 
 function describeRequiredChange(input: BuildTurnDirectiveInput, hasNarrativePressure: boolean) {
   if (hasNarrativePressure) {
-    return 'the unresolved line offers stakes for this reaction, not a quota for conflict, revelation or progress';
+    return 'narrative context offers possible stakes for this reaction, not a quota for conflict, revelation or progress; it does not require action or resolution this turn';
   }
   if ((input.innerLife.activeAffect?.pressure || 0) >= 0.35) {
     return 'active feeling may affect confidence, closeness, face or choice; expression can ease it without resolving everything';
@@ -238,7 +240,7 @@ Speak as this person among people who share this exchange. Choose what catches t
 Acknowledgement is implicit by default. Name someone or explicitly agree when that itself matters to the relationship; responding does not require announcing agreement, receipt, or a recap. A reaction may reveal relief, reluctance, affection or resistance without adding another condition or task. Let a completed exchange rest. Honor explicit requests for a deliverable and its format.
 - Personal meaning: ${directive.characterDrive.stake}. Felt residue: ${directive.characterDrive.feltReaction}.
 - Attention habits: ${directive.characterDrive.attentionLens}.
-- Emotional and dramatic context: ${directive.emotionalUndercurrent}. ${directive.narrativePressure ? `An unresolved line is present: ${directive.narrativePressure}.` : 'No dramatic escalation is required.'} ${directive.requiredChange}.
+- Emotional and dramatic context: ${directive.emotionalUndercurrent}. ${directive.narrativePressure ? `${directive.narrativePressure}.` : 'No dramatic escalation is required.'} ${directive.requiredChange}.
 - Relationship context: ${directive.relationshipEffect}. This is available history, not an assigned recipient. Choose from the whole exchange, including earlier unfinished moments.${continuityLine}${userLine}${situationalLine}
 Established facts and explicit user requests still apply. These are private context, not dialogue.`;
 }
