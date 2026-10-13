@@ -27,6 +27,35 @@ function buildMessage(content: string, messageCount = 1): GeneratedRoundMessage 
 }
 
 describe('generatedMessageSegmenter', () => {
+  it.each(['modern', 'legacy'])('commits outgoing interactions with their exact evidence send (%s)', (format) => {
+    const primary = { actorId: 'char-1', targetId: 'char-2', kind: 'support' as const,
+      intensity: 2, confidence: 0.9, evidenceText: '你先歇会',
+      immediateImpact: { roomDelta: { heat: -2 } } };
+    const secondary = { actorId: 'char-1', targetId: 'char-3', kind: 'challenge' as const,
+      intensity: 3, confidence: 0.9, evidenceText: '这次你来',
+      immediateImpact: { targetEmotionDelta: { irritation: 3 } } };
+    const invalid = { ...primary, evidenceText: '没有发送的话' };
+    const contents = ['先把门关上。', '你先歇会。', '这次你来。', '你先歇会。'];
+    const message = { ...buildMessage(contents[0]),
+      ...(format === 'modern' ? { messageParts: contents.map((content) => ({ content })) } : { extraMessages: contents.slice(1) }),
+      interactionHint: primary, interactionHints: [primary, secondary, invalid],
+    };
+    const segments = splitGeneratedRoundMessage(message);
+    expect(segments.map((segment) => segment.interactionHints)).toEqual([null, [primary], [secondary], null]);
+    expect(segments.map((segment) => segment.interactionHint)).toEqual([null, primary, secondary, null]);
+    expect(segments[1].interactionHint?.immediateImpact).toEqual(primary.immediateImpact);
+    expect(segments[2].interactionHint?.immediateImpact).toEqual(secondary.immediateImpact);
+  });
+
+  it('routes a legacy single interaction without crossing bubble boundaries', () => {
+    const interactionHint = { actorId: 'char-1', targetId: 'char-2', kind: 'support' as const,
+      intensity: 2, confidence: 0.9, evidenceText: '你先歇会' };
+    const message = { ...buildMessage('先等一下。'), extraMessages: ['你先歇会。'], interactionHint };
+    expect(splitGeneratedRoundMessage(message).map((segment) => segment.interactionHint)).toEqual([null, interactionHint]);
+    expect(splitGeneratedRoundMessage({ ...message, interactionHint: { ...interactionHint, evidenceText: '一下。\n你先' } })
+      .every((segment) => segment.interactionHint === null)).toBe(true);
+  });
+
   it.each(['modern', 'legacy'])('commits conflict changes only with their evidence send (%s)', (format) => {
     const message = { ...buildMessage('先说别的。'),
       ...(format === 'modern' ? { messageParts: [{ content: '先说别的。' }, { content: '这事说清楚了。' }, { content: '这事说清楚了。' }] } : { extraMessages: ['这事说清楚了。', '这事说清楚了。'] }),

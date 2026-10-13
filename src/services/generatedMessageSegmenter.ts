@@ -16,6 +16,15 @@ function continuityForSegment(update: ConversationUpdate | undefined, parts: str
   return items.length || room || settled ? { items, ...(room ? { room } : {}), ...(settled ? { settled } : {}) } : undefined;
 }
 
+function interactionsForSegment(message: GeneratedRoundMessage, parts: string[], index: number) {
+  const interactions = message.interactionHints?.length
+    ? message.interactionHints
+    : message.interactionHint ? [message.interactionHint] : [];
+  const owned = interactions.filter((interaction) => Boolean(interaction.evidenceText)
+    && parts.findIndex((part) => part.includes(interaction.evidenceText)) === index);
+  return { interactionHint: owned[0] || null, interactionHints: owned.length ? owned : null };
+}
+
 // Compatibility-only protection for legacy extraMessages. The model-facing
 // room limit is deliberately softer and may be exceeded when meaning requires it.
 const MAX_EXTRA_MESSAGES = 7;
@@ -73,8 +82,7 @@ export function splitGeneratedRoundMessage(message: GeneratedRoundMessage) {
           count: parts.length,
         },
       },
-      interactionHint: index === 0 ? message.interactionHint : null,
-      interactionHints: index === 0 ? message.interactionHints : null,
+      ...interactionsForSegment(message, parts.map((item) => item.content), index),
       incomingInteractionHint: index === 0 ? message.incomingInteractionHint : null,
       addressedTargetIds: index === 0 ? message.addressedTargetIds : null,
       primaryAddressedTargetId: index === 0 ? message.primaryAddressedTargetId : null,
@@ -120,8 +128,7 @@ export function splitGeneratedRoundMessage(message: GeneratedRoundMessage) {
         count: parts.length,
       },
     },
-    interactionHint: index === 0 ? message.interactionHint : null,
-    interactionHints: index === 0 ? message.interactionHints : null,
+    ...interactionsForSegment(message, parts, index),
     incomingInteractionHint: index === 0 ? message.incomingInteractionHint : null,
     addressedTargetIds: index === 0 ? message.addressedTargetIds : null,
     primaryAddressedTargetId: index === 0 ? message.primaryAddressedTargetId : null,

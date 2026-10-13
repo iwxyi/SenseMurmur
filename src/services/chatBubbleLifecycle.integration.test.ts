@@ -150,6 +150,35 @@ describe('shared generated bubble lifecycle', () => {
     expect(context.writes.filter((message) => message.isStreaming && message.content)).toHaveLength(0);
   });
 
+  it('does not commit an interaction whose evidence bubble is cancelled', async () => {
+    const context = fixture('group');
+    const controller = new AbortController();
+    const interactionHint = { actorId: 'speaker', targetId: 'other', kind: 'support' as const,
+      intensity: 2, confidence: 0.9, evidenceText: context.message.messageParts![1].content };
+    const committed: string[] = [];
+    const result = commitGeneratedMessageTurn({
+      ...context.params,
+      shouldContinue: () => !controller.signal.aborted,
+      message: { ...context.message, interactionHint, interactionHints: [interactionHint] },
+      onCommit: async (params) => {
+        committed.push(params.message.content);
+        return { chatPatch: {}, characterPatches: [], runtimeEvents: [] };
+      },
+      upsertMessage: (message) => {
+        context.params.upsertMessage(message);
+        if (message.isStreaming && message.content && interactionHint.evidenceText.startsWith(message.content)) {
+          controller.abort();
+        }
+      },
+    });
+    await expect(drain(result)).rejects.toThrow();
+    expect(committed).toHaveLength(1);
+    expect(committed[0]).toBe(context.message.content);
+    expect(context.synced[0].interactionHint).toBeNull();
+    expect(context.synced[0].interactionHints).toBeNull();
+    expect(context.synced.map((message) => message.content)).toEqual([context.message.content]);
+  });
+
   it('keeps intentionally repeated sends independent using the existing message identity', async () => {
     useSettingsStore.setState({ enableStreamingDisplayAnimation: false });
     const context = fixture('direct');
