@@ -39,6 +39,7 @@ Optional CLI overrides:
   --chatflow-turns=6               Override PNEUMATA_TEST_LLM_CHATFLOW_TURNS.
   --capture-prompts               Save fixture-only runtime request messages, without headers or credentials.
   --capture-responses             Save fixture-only generated text before envelope parsing.
+  --activity-readback             Experiment: read frozen patrol dialogue before production commit.
   --chatflow-scenarios=story_choice_room,deliberation_artifact_room
                                   Override PNEUMATA_TEST_LLM_CHATFLOW_SCENARIOS.
 
@@ -92,6 +93,7 @@ try {
     chatflowScenarios: parseList(chatflowScenariosArg || process.env.PNEUMATA_TEST_LLM_CHATFLOW_SCENARIOS || ''),
     capturePrompts: process.argv.includes('--capture-prompts'),
     captureResponses: process.argv.includes('--capture-responses'),
+    activityReadback: process.argv.includes('--activity-readback'),
     judgeModel: process.env.PNEUMATA_TEST_LLM_JUDGE_MODEL || '',
     judgeApiKey: process.env.PNEUMATA_TEST_LLM_JUDGE_API_KEY || process.env.PNEUMATA_TEST_LLM_API_KEY || '',
     judgeBaseUrl: process.env.PNEUMATA_TEST_LLM_JUDGE_BASE_URL || process.env.PNEUMATA_TEST_LLM_BASE_URL || DEFAULT_BASE_URL,
@@ -2786,15 +2788,7 @@ async function runStateReadbackSamples(model) {
         locationHint: original.locationHint, participantIds: original.participantIds },
       visibleSends: [fixture.content],
     };
-    const response = await callChat(model, [
-      { role: 'system', content: [
-        'Read a frozen public chat turn and report state changes. Return one JSON object with activityUpdate and addressedTargets. Do not write or revise dialogue.',
-        'activityUpdate is null for no change, otherwise {calendarItemId,title,kind,status,evidenceText,locationHint?,durationMinutes?,availability?}. Reuse the exact known ID. status is planned, in_progress, completed or cancelled. evidenceText must be an exact substring of a single visible send supporting the update.',
-        'A non-null activityUpdate requires calendarItemId,title,kind,status,evidenceText; reuse the known title and kind when unchanged. Only report optional changed fields supported by this turn. Omit unchanged or unknown time, duration and participants. durationMinutes means explicitly stated remaining minutes, not elapsed time or an estimate. Completion requires an actual completed result; ongoing work is in_progress. Activity does not imply departure.',
-        'addressedTargets is null unless this turn requires an immediate answer or explicitly hands the floor to another member. Speaking to someone, answering them, reporting progress and giving a reminder do not alone require a reply. If needed use {targetIds,primaryTargetId,confidence,reason} with valid member IDs.',
-      ].join('\n') },
-      { role: 'user', content: JSON.stringify(request) },
-    ], { maxTokens: 4096, temperature: 0 });
+    const response = await readFrozenActivityTurn(model, request);
     let parsed = null;
     let error = null;
     try {
@@ -2831,6 +2825,18 @@ async function runStateReadbackSamples(model) {
   }
   return { ok: samples.every((sample) => sample.ok), samples,
     error: samples.filter((sample) => !sample.ok).map((sample) => `${sample.name}: ${sample.error}`).join('; ') || null };
+}
+
+async function readFrozenActivityTurn(model, request) {
+  return callChat(model, [
+    { role: 'system', content: [
+        'Read a frozen public chat turn and report state changes. Return one JSON object with activityUpdate and addressedTargets. Do not write or revise dialogue.',
+        'activityUpdate is null for no change, otherwise {calendarItemId,title,kind,status,evidenceText,locationHint?,durationMinutes?,availability?}. Reuse the exact known ID. status is planned, in_progress, completed or cancelled. evidenceText must be an exact substring of a single visible send supporting the update.',
+        'A non-null activityUpdate requires calendarItemId,title,kind,status,evidenceText; reuse the known title and kind when unchanged. Only report optional changed fields supported by this turn. Omit unchanged or unknown time, duration and participants. durationMinutes means explicitly stated remaining minutes, not elapsed time or an estimate. Completion requires an actual completed result; ongoing work is in_progress. Activity does not imply departure.',
+        'addressedTargets is null unless this turn requires an immediate answer or explicitly hands the floor to another member. Speaking to someone, answering them, reporting progress and giving a reminder do not alone require a reply. If needed use {targetIds,primaryTargetId,confidence,reason} with valid member IDs.',
+      ].join('\n') },
+    { role: 'user', content: JSON.stringify(request) },
+  ], { maxTokens: 4096, temperature: 0 });
 }
 
 function runtimeProfile(model) {
@@ -4391,6 +4397,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
   const userInjectionLog = [];
   const promptRequests = [];
   const generatedResponses = [];
+  const activityReadbacks = [];
   for (const message of messages.filter((item) => item.type === 'ai' && item.metadata?.conversationUpdate)) {
     const seeded = runtime.applyConversationUpdate(chat, message, chat.worldState.structuredRoomState);
     assertCondition(seeded.changedItems.length === message.metadata.conversationUpdate.items.length,
@@ -4482,6 +4489,48 @@ async function runRuntimeChatflowScenario(model, scenario) {
     }
     if (errors.length) break;
     assertCondition(completed, `chatflow ${scenario.name} did not complete turn ${turn}`);
+    if (config.activityReadback) {
+      assertCondition(scenario.name === 'longzhong_activity_update_room', 'Activity readback experiment requires the patrol scenario');
+      const activities = runtime.projectWorldCalendar([chat], characters, { inferTemporalStatus: false }).items
+        .filter((item) => !item.derivedFromItemId && item.participantIds.length === 1 && item.participantIds[0] === completed.senderId);
+      if (activities.length) {
+        const record = { turn, request: {
+          speakerId: completed.senderId,
+          members: characters.map((item) => ({ id: item.id, name: item.name })),
+          knownActivities: activities.map((item) => ({ calendarItemId: item.id, title: item.title, kind: item.kind,
+            status: item.status, startAt: item.startAt, endAt: item.endAt, locationHint: item.locationHint,
+            participantIds: item.participantIds })),
+          visibleSends: completed.messageParts?.length ? completed.messageParts.map((item) => item.content)
+            : [completed.content, ...(completed.extraMessages || [])],
+        } };
+        activityReadbacks.push(record);
+        try {
+          const response = await readFrozenActivityTurn(model, record.request);
+          record.response = response.content;
+          record.usage = response.usage;
+          record.finishReason = response.raw.choices?.[0]?.finish_reason;
+          const output = JSON.parse(response.content);
+          assertCondition(Object.hasOwn(output, 'activityUpdate') && Object.hasOwn(output, 'addressedTargets'), 'Missing readback judgement');
+          const envelope = await runtime.server.ssrLoadModule('/src/services/inlineInteractionHint.ts');
+          const parsed = envelope.parseInlineInteractionEnvelope(JSON.stringify({ ...output,
+            messages: record.request.visibleSends.map((content) => ({ content })) }), { allowContentSalvage: false });
+          record.parsed = parsed;
+          assertCondition(parsed && !envelope.hasInvalidStateEvidence(parsed), 'Invalid readback evidence');
+          assertCondition(output.activityUpdate === null || parsed.activityUpdate, 'Readback activity rejected by normalization');
+          assertCondition(!parsed.activityUpdate || activities.some((item) => item.id === parsed.activityUpdate.calendarItemId
+            && item.title === parsed.activityUpdate.title && item.kind === parsed.activityUpdate.kind), 'Readback changed unknown activity or its identity');
+          assertCondition(output.addressedTargets === null || parsed.addressedTargets, 'Readback targets rejected by normalization');
+          assertCondition(!parsed.addressedTargets?.targetIds?.some((id) => !characters.some((item) => item.id === id)), 'Unknown readback target');
+          completed = { ...completed, metadata: { ...completed.metadata, activityUpdate: parsed.activityUpdate || undefined },
+            addressedTargetIds: parsed.addressedTargets?.targetIds || null,
+            primaryAddressedTargetId: parsed.addressedTargets?.primaryTargetId || null };
+        } catch (error) {
+          record.error = String(error?.message || error);
+          errors.push(error instanceof Error ? error : new Error(String(error)));
+          break;
+        }
+      }
+    }
     let workingChat = chat;
     let workingCharacters = characters;
     const commitInputMessages = [...messages];
@@ -4781,6 +4830,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
     userInjectionLog,
     ...(config.capturePrompts ? { promptRequests } : {}),
     ...(config.captureResponses ? { generatedResponses } : {}),
+    ...(config.activityReadback ? { activityReadbacks } : {}),
     eventMessages,
     localInterceptions,
     hardError,
