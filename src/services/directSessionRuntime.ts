@@ -595,55 +595,37 @@ function isAutoOpenEligible(chat: GroupChat, event: RuntimeEventV2) {
 }
 
 function findLatestAutoOpenCandidate(chat: GroupChat) {
-  return (chat.runtimeEventsV2 || []).slice().reverse().find((event) => isAutoOpenEligible(chat, event)) || null;
+  return findLatestPendingSocialCandidate(chat, 'pair_private_thread', 0.8, (event) => isAutoOpenEligible(chat, event));
+}
+
+function findLatestPendingSocialCandidate(
+  chat: GroupChat,
+  eventKind: SocialEventCandidatePayload['eventKind'],
+  minimumConfidence: number,
+  isEligible?: (event: RuntimeEventV2) => boolean,
+) {
+  return (chat.runtimeEventsV2 || []).slice().reverse().find((event) => {
+    if (event.kind !== 'event_candidate' || hasHandledSocialEvent(chat, event.id)) return false;
+    const payload = event.payload as SocialEventCandidatePayload;
+    return payload.eventKind === eventKind && payload.confidence >= minimumConfidence
+      && (!isEligible || isEligible(event));
+  }) || null;
 }
 
 export function findLatestAutoPostMomentCandidate(chat: GroupChat) {
-  return (chat.runtimeEventsV2 || []).slice().reverse().find((event) => {
-    if (event.kind !== 'event_candidate') return false;
-    const payload = event.payload as SocialEventCandidatePayload;
-    if (payload.eventKind !== 'post_moment') return false;
-    if (payload.confidence < 0.8) return false;
-    return !(chat.runtimeEventsV2 || []).some((item) => item.kind === 'artifact' && (item.payload as { artifactType?: string; eventKind?: string }).artifactType === 'moment_text' && (item.payload as { eventKind?: string }).eventKind === 'post_moment' && item.actorIds?.[0] === payload.initiatorId && item.createdAt >= event.createdAt);
-  }) || null;
+  return findLatestPendingSocialCandidate(chat, 'post_moment', 0.8);
 }
 
 export function findLatestAutoStatusUpdateCandidate(chat: GroupChat) {
-  return (chat.runtimeEventsV2 || []).slice().reverse().find((event) => {
-    if (event.kind !== 'event_candidate') return false;
-    const payload = event.payload as SocialEventCandidatePayload;
-    if (payload.eventKind !== 'status_update') return false;
-    if (payload.confidence < 0.8) return false;
-    return !(chat.runtimeEventsV2 || []).some((item) => item.kind === 'artifact' && (item.payload as { artifactType?: string; eventKind?: string }).artifactType === 'status_note' && (item.payload as { eventKind?: string }).eventKind === 'status_update' && item.actorIds?.[0] === payload.initiatorId && item.createdAt >= event.createdAt);
-  }) || null;
+  return findLatestPendingSocialCandidate(chat, 'status_update', 0.8);
 }
 
 function findLatestAutoCheckInCandidate(chat: GroupChat) {
-  return (chat.runtimeEventsV2 || []).slice().reverse().find((event) => {
-    if (event.kind !== 'event_candidate') return false;
-    const payload = event.payload as SocialEventCandidatePayload;
-    if (payload.eventKind !== 'check_in') return false;
-    if (payload.confidence < 0.75) return false;
-    return !(chat.runtimeEventsV2 || []).some((item) => item.kind === 'artifact'
-      && (item.payload as { artifactType?: string; eventKind?: string }).artifactType === 'check_in_note'
-      && (item.payload as { eventKind?: string }).eventKind === 'check_in'
-      && item.actorIds?.[0] === payload.initiatorId
-      && item.createdAt >= event.createdAt);
-  }) || null;
+  return findLatestPendingSocialCandidate(chat, 'check_in', 0.75);
 }
 
 function findLatestAutoReactToMomentCandidate(chat: GroupChat) {
-  return (chat.runtimeEventsV2 || []).slice().reverse().find((event) => {
-    if (event.kind !== 'event_candidate') return false;
-    const payload = event.payload as SocialEventCandidatePayload;
-    if (payload.eventKind !== 'react_to_moment') return false;
-    if (payload.confidence < 0.75) return false;
-    return !(chat.runtimeEventsV2 || []).some((item) => item.kind === 'artifact'
-      && (item.payload as { artifactType?: string; eventKind?: string }).artifactType === 'moment_reaction_note'
-      && (item.payload as { eventKind?: string }).eventKind === 'react_to_moment'
-      && item.actorIds?.[0] === payload.initiatorId
-      && item.createdAt >= event.createdAt);
-  }) || null;
+  return findLatestPendingSocialCandidate(chat, 'react_to_moment', 0.75);
 }
 
 export function updateSourceChatAfterStatusUpdate(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string) {
@@ -884,27 +866,19 @@ export function updateSourceChatAfterReactToMoment(sourceChat: GroupChat, payloa
 }
 
 function findLatestAutoSocialOutingCandidate(chat: GroupChat) {
-  return (chat.runtimeEventsV2 || []).slice().reverse().find((event) => {
-    if (event.kind !== 'event_candidate') return false;
-    const payload = event.payload as SocialEventCandidatePayload;
-    return payload.eventKind === 'social_outing' && payload.confidence >= 0.8 && !(chat.runtimeEventsV2 || []).some((item) => item.kind === 'artifact' && (item.payload as { artifactType?: string }).artifactType === 'outing_summary' && item.createdAt >= event.createdAt);
-  }) || null;
+  return findLatestPendingSocialCandidate(chat, 'social_outing', 0.8);
 }
 
 function findLatestAutoGiftExchangeCandidate(chat: GroupChat) {
-  return (chat.runtimeEventsV2 || []).slice().reverse().find((event) => {
-    if (event.kind !== 'event_candidate') return false;
-    const payload = event.payload as SocialEventCandidatePayload;
-    return payload.eventKind === 'gift_exchange' && payload.confidence >= 0.8 && !(chat.runtimeEventsV2 || []).some((item) => item.kind === 'artifact' && (item.payload as { artifactType?: string }).artifactType === 'gift_note' && item.createdAt >= event.createdAt);
-  }) || null;
+  return findLatestPendingSocialCandidate(chat, 'gift_exchange', 0.8, (event) => (
+    shouldConsumeCandidateWithRestraint(chat, event.payload as SocialEventCandidatePayload, event.createdAt)
+  ));
 }
 
 function findLatestAutoConflictExpressionCandidate(chat: GroupChat) {
-  return (chat.runtimeEventsV2 || []).slice().reverse().find((event) => {
-    if (event.kind !== 'event_candidate') return false;
-    const payload = event.payload as SocialEventCandidatePayload;
-    return payload.eventKind === 'conflict_expression' && payload.confidence >= 0.8 && !(chat.runtimeEventsV2 || []).some((item) => item.kind === 'artifact' && (item.payload as { artifactType?: string }).artifactType === 'conflict_note' && item.createdAt >= event.createdAt);
-  }) || null;
+  return findLatestPendingSocialCandidate(chat, 'conflict_expression', 0.8, (event) => (
+    shouldConsumeCandidateWithRestraint(chat, event.payload as SocialEventCandidatePayload, event.createdAt)
+  ));
 }
 
 export function updateSourceChatAfterGiftExchange(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string) {
@@ -1071,8 +1045,7 @@ export function pickAutoPairPrivateThreadCandidate(chat: GroupChat) {
 }
 
 function findLatestCoolingCompanionshipPairCandidate(chat: GroupChat) {
-  return (chat.runtimeEventsV2 || []).slice().reverse().find((event) => {
-    if (event.kind !== 'event_candidate') return false;
+  return findLatestPendingSocialCandidate(chat, 'pair_private_thread', 0.8, (event) => {
     const payload = event.payload as SocialEventCandidatePayload;
     return isCompanionshipPrivateThreadPayload(payload)
       && payload.participantIds.length === 2
@@ -1082,7 +1055,7 @@ function findLatestCoolingCompanionshipPairCandidate(chat: GroupChat) {
         participantIds: payload.participantIds,
         now: Date.now(),
       }));
-  }) || null;
+  });
 }
 
 export function buildPrivateThreadOpenedEvent(chat: GroupChat, candidateEvent: RuntimeEventV2): RuntimeEventV2 {

@@ -496,6 +496,157 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     expect(events.some((event) => event.summary === 'handled_social_event:evt-candidate-1')).toBe(true);
   });
 
+  it.each([
+    ['post_moment', 'moment_text', 'public'],
+    ['status_update', 'status_note', 'public'],
+    ['check_in', 'check_in_note', 'user_private'],
+    ['react_to_moment', 'moment_reaction_note', 'user_private'],
+    ['social_outing', 'outing_summary', 'public'],
+    ['gift_exchange', 'gift_note', 'public'],
+    ['conflict_expression', 'conflict_note', 'public'],
+  ] as const)('consumes pending %s after a newer candidate was handled', async (eventKind, artifactType, visibilityPlan) => {
+    const payload = buildCandidatePayload({
+      eventKind,
+      visibilityPlan,
+      participantIds: ['a', 'b'],
+      targetIds: visibilityPlan === 'user_private' || eventKind === 'status_update' ? ['user'] : ['b'],
+      confidence: 0.9,
+      reasonType: 'celebration',
+      dedupeKey: 'pending-older',
+    });
+    let chat = buildChatWithEvents([
+      buildCandidateEvent(payload, 1),
+      buildCandidateEvent({ ...payload, dedupeKey: 'handled-newer' }, 2),
+      {
+        ...buildOpenedEvent(3),
+        actorIds: ['a'],
+        payload: { artifactType, eventKind, dedupeKey: 'handled-newer' },
+      },
+      {
+        ...buildOpenedEvent(4),
+        summary: 'handled_social_event:evt-candidate-2',
+        payload: { artifactType: 'handled_social_event', eventId: 'evt-candidate-2' },
+      },
+    ]);
+    const updateChat = vi.fn(async (_id: string, patch: Partial<typeof chat>) => {
+      chat = normalizeConversation({ ...chat, ...patch });
+    });
+    const ops = {
+      chats: [chat],
+      characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')],
+      allowWorldFallback: false,
+      updateChat,
+      addChat: vi.fn(async () => buildBaseChat()),
+      addMessage: buildAddMessageMock(),
+      appendEventMessage: buildAppendEventMessageMock(),
+    };
+
+    const result = await runSocialEventAutoFlow(chat, ops);
+    expect(result.handledEventId).toBe('evt-candidate-1');
+    expect(chat.runtimeEventsV2?.filter((event) => event.summary === 'handled_social_event:evt-candidate-1')).toHaveLength(1);
+    expect(chat.runtimeEventsV2?.some((event) => event.kind === 'artifact'
+      && (event.payload as { dedupeKey?: string }).dedupeKey === 'pending-older')).toBe(true);
+
+    expect(await runSocialEventAutoFlow(chat, ops)).toEqual({ handledEventId: null });
+    expect(updateChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let an already handled private-thread candidate block another kind', async () => {
+    const chat = buildChatWithEvents([
+      buildCandidateEvent(buildCandidatePayload({ eventKind: 'gift_exchange', visibilityPlan: 'public' }), 1),
+      buildCandidateEvent(buildCandidatePayload(), 2),
+      {
+        ...buildOpenedEvent(3),
+        summary: 'handled_social_event:evt-candidate-2',
+        payload: { artifactType: 'handled_social_event', eventId: 'evt-candidate-2' },
+      },
+    ]);
+    const addChat = vi.fn(async () => buildBaseChat());
+    const updateChat = vi.fn(async (id: string, patch: Partial<typeof chat>) => {
+      void id;
+      void patch;
+    });
+    expect(pickAutoPairPrivateThreadCandidate(chat)).toBeNull();
+    const result = await runSocialEventAutoFlow(chat, {
+      chats: [chat],
+      characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')],
+      allowWorldFallback: false,
+      updateChat,
+      addChat,
+      addMessage: buildAddMessageMock(),
+      appendEventMessage: buildAppendEventMessageMock(),
+    });
+    expect(result.handledEventId).toBe('evt-candidate-1');
+    expect(addChat).not.toHaveBeenCalled();
+    expect(updateChat).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['gift_exchange', 'gift_note'],
+    ['conflict_expression', 'conflict_note'],
+  ] as const)('skips duplicate %s content while consuming a distinct pending candidate', async (eventKind, artifactType) => {
+    const payload = buildCandidatePayload({ eventKind, visibilityPlan: 'public', confidence: 0.9 });
+    const chat = buildChatWithEvents([
+      buildCandidateEvent({ ...payload, dedupeKey: 'distinct-event' }, 1),
+      buildCandidateEvent({ ...payload, dedupeKey: 'same-event' }, 2),
+      { ...buildOpenedEvent(3), payload: { artifactType, eventKind, dedupeKey: 'same-event' } },
+    ]);
+    const updateChat = vi.fn(async (id: string, patch: Partial<typeof chat>) => {
+      void id;
+      void patch;
+    });
+    const result = await runSocialEventAutoFlow(chat, {
+      chats: [chat],
+      characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')],
+      allowWorldFallback: false,
+      updateChat,
+      addChat: vi.fn(async () => buildBaseChat()),
+      addMessage: buildAddMessageMock(),
+      appendEventMessage: buildAppendEventMessageMock(),
+    });
+    expect(result.handledEventId).toBe('evt-candidate-1');
+    const patch = updateChat.mock.calls[0]?.[1];
+    const artifacts = patch?.runtimeEventsV2?.filter((event) => event.kind === 'artifact'
+      && (event.payload as { artifactType?: string }).artifactType === artifactType);
+    expect(artifacts?.filter((event) => (event.payload as { dedupeKey?: string }).dedupeKey === 'same-event')).toHaveLength(1);
+    expect(artifacts?.filter((event) => (event.payload as { dedupeKey?: string }).dedupeKey === 'distinct-event')).toHaveLength(1);
+  });
+
+  it('consumes two distinct outing candidates and retains both arrangements without replaying either', async () => {
+    const payload = buildCandidatePayload({
+      eventKind: 'social_outing',
+      visibilityPlan: 'public',
+      confidence: 0.9,
+      reasonType: 'celebration',
+    });
+    let chat = buildChatWithEvents([
+      buildCandidateEvent({ ...payload, title: '湖边散步', dedupeKey: 'lake-walk' }, 1),
+      buildCandidateEvent({ ...payload, title: '院中下棋', dedupeKey: 'courtyard-chess' }, 2),
+    ]);
+    const updateChat = vi.fn(async (_id: string, patch: Partial<typeof chat>) => {
+      chat = normalizeConversation({ ...chat, ...patch });
+    });
+    const ops = {
+      chats: [chat],
+      characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')],
+      allowWorldFallback: false,
+      updateChat,
+      addChat: vi.fn(async () => buildBaseChat()),
+      addMessage: buildAddMessageMock(),
+      appendEventMessage: buildAppendEventMessageMock(),
+    };
+    expect((await runSocialEventAutoFlow(chat, ops)).handledEventId).toBe('evt-candidate-2');
+    vi.advanceTimersByTime(8_000);
+    expect((await runSocialEventAutoFlow(chat, ops)).handledEventId).toBe('evt-candidate-1');
+    const arrangements = chat.runtimeEventsV2?.filter((event) => event.kind === 'artifact'
+      && (event.payload as { artifactType?: string }).artifactType === 'outing_summary');
+    expect(arrangements?.map((event) => (event.payload as { dedupeKey?: string }).dedupeKey).sort())
+      .toEqual(['courtyard-chess', 'lake-walk']);
+    expect(arrangements?.every((event) => (event.payload as { status?: string }).status === 'tentative')).toBe(true);
+    expect(await runSocialEventAutoFlow(chat, ops)).toEqual({ handledEventId: null });
+    expect(updateChat).toHaveBeenCalledTimes(2);
+  });
+
   it('does not generate a world-driven fallback when only committed candidates may be consumed', async () => {
     const chat = buildChatWithEvents([{
       id: 'att-paused',
