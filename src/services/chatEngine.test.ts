@@ -203,6 +203,89 @@ function buildGuidanceIntervention(
 }
 
 describe('chatEngine streaming preview', () => {
+  it('withholds reserved tool protocol prefixes, including decoded JSON escapes', () => {
+    for (const opener of ['<||DSML||', '<\uFF5C\uFF5CDSML\uFF5C\uFF5C', '</||DSML||']) {
+      for (let length = 1; length <= opener.length; length += 1) {
+        const partial = opener.slice(0, length);
+        expect(__chatEngineTestUtils.buildStreamingDisplayContent(partial, speaker)).toBeNull();
+        expect(__chatEngineTestUtils.buildStreamingDisplayContent(JSON.stringify({ content: partial }), speaker)).toBeNull();
+      }
+    }
+    expect(__chatEngineTestUtils.buildStreamingDisplayContent('{"content":"\\u003c\\u007c\\u007cDSML|| calls>"}', speaker)).toBeNull();
+    expect(__chatEngineTestUtils.buildStreamingDisplayContent('{"content":"\\u003', speaker)).toBeNull();
+    expect(__chatEngineTestUtils.buildStreamingDisplayContent('讨论 DSML 和 get_bot_profile', speaker)).toBe('讨论 DSML 和 get_bot_profile');
+    expect(__chatEngineTestUtils.buildStreamingDisplayContent('<普通文字>', speaker)).toBe('<普通文字>');
+  });
+
+  it.each([
+    '<||DSML|| invoke name="get_bot_profile">',
+    '<\uFF5C\uFF5CDSML\uFF5C\uFF5C invoke name="get_bot_profile">',
+    JSON.stringify({ content: '<||DSML|| calls>' }),
+    JSON.stringify({ messages: [{ content: '先去看看。' }, { content: '<||DSML|| calls>' }] }),
+    JSON.stringify({ content: '先去看看。', extraMessages: ['<||DSML|| calls>'] }),
+    '{"content":"\\u003c\\u007c\\u007cDSML|| calls>"}',
+  ])('rejects an entire invalid generation and retries the same speaker: %s', async (invalid) => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValueOnce(invalid).mockResolvedValueOnce(JSON.stringify({ content: '门口那辆车怎么又来了？' }));
+    const mei = buildCharacter('mei', '美羊羊');
+    const onChunk = vi.fn();
+    const message = await generateSpeakerMessage({
+      chat: buildChat(), speaker: mei, characters: [mei, buildCharacter('hui', '灰太狼')],
+      messages: [], apiConfig: buildProfiles(), onChunk,
+    });
+    expect(generateResponseMock).toHaveBeenCalledTimes(2);
+    expect(message.content).toBe('门口那辆车怎么又来了？');
+    expect(onChunk).toHaveBeenCalledWith('');
+    expect(String(generateResponseMock.mock.calls[1]?.[1])).toContain('Output protocol retry');
+  });
+
+  it('reports persistent protocol failure without completing a message or rotating speakers', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue('<||DSML|| calls>');
+    const callbacks = {
+      onSpeakerSelected: vi.fn(), onMessageChunk: vi.fn(), onMessageComplete: vi.fn(), onError: vi.fn(),
+    };
+    await runOneRound(buildChat(), [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')],
+      [buildUserMessage('你们继续聊。')], buildProfiles(), callbacks);
+    expect(generateResponseMock).toHaveBeenCalledTimes(3);
+    expect(callbacks.onSpeakerSelected).toHaveBeenCalledTimes(1);
+    expect(callbacks.onMessageComplete).not.toHaveBeenCalled();
+    expect(callbacks.onError).toHaveBeenCalledTimes(1);
+    expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
+  });
+
+  it('discards the streamed draft when invalid protocol is followed by a blank final response', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockImplementationOnce(async (_api, _prompt, _messages, onRawChunk?: (chunk: string) => void) => {
+      onRawChunk?.('先去看看。');
+      onRawChunk?.('先去看看。<||DSML|| calls>');
+      return '';
+    }).mockResolvedValueOnce(JSON.stringify({ content: '你听见外头的动静了吗？' }));
+    const mei = buildCharacter('mei', '美羊羊');
+    const onChunk = vi.fn();
+    const profiles = buildProfiles().map((profile) => profile.type === 'text' ? { ...profile, provider: 'deepseek' as const } : profile);
+    const message = await generateSpeakerMessage({
+      chat: buildChat(), speaker: mei, characters: [mei, buildCharacter('hui', '灰太狼')],
+      messages: [], apiConfig: profiles, onChunk,
+    });
+    expect(generateResponseMock).toHaveBeenCalledTimes(2);
+    expect(message.content).toBe('你听见外头的动静了吗？');
+    expect(onChunk).toHaveBeenCalledWith('');
+    expect(onChunk.mock.calls.some(([content]) => String(content).includes('DSML'))).toBe(false);
+  });
+
+  it.each(['provider unavailable', 'AbortError'])('propagates %s without protocol retries', async (reason) => {
+    generateResponseMock.mockReset();
+    const error = reason === 'AbortError' ? new DOMException('Cancelled', 'AbortError') : new Error(reason);
+    generateResponseMock.mockRejectedValue(error);
+    const mei = buildCharacter('mei', '美羊羊');
+    await expect(generateSpeakerMessage({
+      chat: buildChat(), speaker: mei, characters: [mei, buildCharacter('hui', '灰太狼')],
+      messages: [], apiConfig: buildProfiles(),
+    })).rejects.toBe(error);
+    expect(generateResponseMock).toHaveBeenCalledTimes(1);
+  });
+
   it('suppresses incomplete JSON envelope chunks before content is available', () => {
     expect(__chatEngineTestUtils.isPendingJsonEnvelopeChunk('{')).toBe(true);
     expect(__chatEngineTestUtils.isPendingJsonEnvelopeChunk('  {"content"')).toBe(true);

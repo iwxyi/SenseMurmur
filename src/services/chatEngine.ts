@@ -1048,15 +1048,6 @@ function cleanJsonLikeText(value: string) {
     .trim();
 }
 
-function unescapeJsonStringContent(value: string) {
-  return value
-    .replace(/\\"/g, '"')
-    .replace(/\\n/g, '\n')
-    .replace(/\\r/g, '\r')
-    .replace(/\\t/g, '\t')
-    .replace(/\\\\/g, '\\');
-}
-
 function extractPartialJsonStringField(raw: string, fieldName: string) {
   const cleaned = cleanJsonLikeText(raw);
   const fieldPattern = new RegExp(`"${fieldName}"\\s*:\\s*"`);
@@ -1082,7 +1073,24 @@ function extractPartialJsonStringField(raw: string, fieldName: string) {
     value += char;
     index += 1;
   }
-  return unescapeJsonStringContent(value);
+  try {
+    return JSON.parse(`"${value}"`) as string;
+  } catch {
+    // A split escape sequence is not ready for display yet.
+    return null;
+  }
+}
+
+function containsUnsupportedToolProtocol(content: string) {
+  return /<\/?(?:\uFF5C{2}|\|{2})DSML(?:\uFF5C{2}|\|{2})/i.test(content);
+}
+
+function isPendingToolProtocolChunk(content: string) {
+  const start = content.lastIndexOf('<');
+  if (start < 0) return false;
+  const tail = content.slice(start);
+  return ['<\uFF5C\uFF5CDSML\uFF5C\uFF5C', '</\uFF5C\uFF5CDSML\uFF5C\uFF5C', '<||DSML||', '</||DSML||']
+    .some((prefix) => prefix.toLowerCase().startsWith(tail.toLowerCase()));
 }
 
 function isPendingJsonEnvelopeChunk(raw: string) {
@@ -1105,6 +1113,7 @@ function isLikelyInlineEnvelopeResponse(raw: string) {
 }
 
 function buildStreamingDisplayContent(raw: string, speaker: AICharacter, showRoleActions?: boolean) {
+  if (containsUnsupportedToolProtocol(raw)) return null;
   const extractedNarrativeText = extractPartialJsonStringField(raw, 'narrativeText');
   const extractedContent = extractPartialJsonStringField(raw, 'content');
   if (extractedNarrativeText === null && extractedContent === null) {
@@ -1113,6 +1122,7 @@ function buildStreamingDisplayContent(raw: string, speaker: AICharacter, showRol
     }
   }
   const content = extractedNarrativeText ?? extractedContent ?? raw;
+  if (containsUnsupportedToolProtocol(content) || isPendingToolProtocolChunk(content)) return null;
   const withoutPrefix = trimSpeakerPrefix(content, speaker.name);
   return showRoleActions === false ? stripRoleActions(withoutPrefix) : withoutPrefix;
 }
@@ -3166,8 +3176,13 @@ async function generateWithPrompt(params: {
   const requestMessages = params.chatMessages;
   const requestStartedAt = nowMs();
   let firstRawChunkLogged = false;
+  let streamedProtocolError = false;
   const rawChunkHandler = !useJsonResponseFormat && params.onChunk
     ? (raw: string) => {
+        const visible = extractPartialJsonStringField(raw, 'narrativeText')
+          ?? extractPartialJsonStringField(raw, 'content');
+        streamedProtocolError ||= containsUnsupportedToolProtocol(raw)
+          || (visible !== null && containsUnsupportedToolProtocol(visible));
         if (!firstRawChunkLogged) {
           firstRawChunkLogged = true;
           logDeveloperDiagnostic('chat-run:model-first-raw-chunk', {
@@ -3227,6 +3242,10 @@ async function generateWithPrompt(params: {
   }, 'info', 'chat-run');
   logRawAiResponse({ chat: params.chat, speaker: params.speaker, attempt: params.attempt, response });
   const parsedEnvelope = parseInlineInteractionEnvelope(response);
+  if (streamedProtocolError || containsUnsupportedToolProtocol(response)
+    || (parsedEnvelope && containsUnsupportedToolProtocol(JSON.stringify(parsedEnvelope)))) {
+    return { protocolError: 'unsupported_tool_protocol' as const };
+  }
   const isStoryReader = params.chat.sessionKind?.scenarioId === 'story-reader';
   const narrativeRuntime = isStoryReader ? await loadNarrativeRuntime() : null;
   const rawStoryEvents = narrativeRuntime
@@ -3302,7 +3321,7 @@ async function generateWithPrompt(params: {
   const storyChoices = eventStoryChoices?.length ? eventStoryChoices : normalizeStoryChoiceSuggestions(parsedEnvelope?.storyChoices);
   const fullNarrativeResponse = narrativeBlocks.map((block) => block.text).join('\n\n') || finalizedNarrativeText;
   streamBridge.flush(fullNarrativeResponse || finalResponse);
-  return { parsedEnvelope, rawContent, rawNarrativeText, finalResponse, narrativeText: finalizedNarrativeText, narrativeBlocks, storyChoices, fullResponse, fullNarrativeResponse, extraMessages, messageParts, storyEvents, streamedFallbackUsed };
+  return { protocolError: null, parsedEnvelope, rawContent, rawNarrativeText, finalResponse, narrativeText: finalizedNarrativeText, narrativeBlocks, storyChoices, fullResponse, fullNarrativeResponse, extraMessages, messageParts, storyEvents, streamedFallbackUsed };
 }
 
 async function generateNonDuplicateResponse(params: {
@@ -3348,7 +3367,7 @@ async function generateNonDuplicateResponse(params: {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const shouldStreamAttempt = !requestUsesJsonResponseFormat && !isStoryReader && !params.guidance && attempt === 0;
     let generated = await generateWithPrompt({ ...params, characters: params.characters || [], systemPrompt: prompt, attempt: attempt + 1, onChunk: shouldStreamAttempt ? params.onChunk : undefined });
-    const webSearchRequest = attempt === 0 && !isStoryReader && params.chat.modeState.assistantCapabilities?.webSearch
+    const webSearchRequest = !generated.protocolError && attempt === 0 && !isStoryReader && params.chat.modeState.assistantCapabilities?.webSearch
       ? normalizeWebSearchToolRequest(generated.parsedEnvelope?.toolRequest)
       : null;
     if (webSearchRequest) {
@@ -3415,6 +3434,20 @@ async function generateNonDuplicateResponse(params: {
         systemPrompt: `${prompt}\n\n${searchPromptBlock}\n\nSearch tool has already been handled for this turn. Return the final visible reply now and keep toolRequest=null.`,
         attempt: attempt + 1,
         onChunk: params.onChunk,
+      });
+    }
+    if (generated.protocolError) {
+      params.onChunk?.('');
+      logAiGenerationFailure({
+        chat: params.chat, speaker: params.speaker, reason: generated.protocolError,
+        message: 'AI 返回了不支持的工具调用协议，本次生成未提交。', attempt: attempt + 1,
+      });
+      if (attempt < 2) {
+        prompt = `${params.systemPrompt}\n\nOutput protocol retry:\n- The previous attempt returned unsupported tool-call markup. Return one valid JSON object using the supplied output contract and actual visible character speech. Do not emit tool-call markup or simulate unavailable tools. Do not mention this retry to participants.`;
+        continue;
+      }
+      throw new EmptyGeneratedResponseError(params.speaker.name, {
+        reason: 'output_protocol_invalid', message: `${params.speaker.name} 连续返回了无效回复，本轮未发送，请稍后重试。`,
       });
     }
     lastParsedEnvelope = generated.parsedEnvelope;
@@ -4798,7 +4831,7 @@ export const runOneRound = async (
         });
         error.localInterceptionReported = true;
       }
-      if (chat.sessionKind?.scenarioId === 'story-reader') throw error;
+      if (chat.sessionKind?.scenarioId === 'story-reader' || error.reason === 'output_protocol_invalid') throw error;
       if (lockedGuidanceSpeaker && activeSpeaker.id === lockedGuidanceSpeaker.id) throw error;
       const rotated = resolveSpeakerFromCandidates(chatMembers, candidates.filter((candidate) => candidate.characterId !== activeSpeaker.id));
       if (!rotated) {
