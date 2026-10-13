@@ -287,6 +287,8 @@ describe('chatEngine streaming preview', () => {
     expect(message.content).toBe('门口那辆车怎么又来了？');
     expect(onChunk).toHaveBeenCalledWith('');
     expect(String(generateResponseMock.mock.calls[1]?.[1])).toContain('Output protocol retry');
+    expect(String(generateResponseMock.mock.calls[1]?.[1])).toContain('Do not repeat or continue the previous plain-text draft');
+    expect(String(generateResponseMock.mock.calls[1]?.[1])).toContain('begin with the JSON object');
   });
 
   it('reports persistent protocol failure without completing a message or rotating speakers', async () => {
