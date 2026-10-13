@@ -1998,7 +1998,7 @@ function buildWorldEventContextPrompt(input: {
   const attention = projectWorldAttentionStates([input.chat], input.members, { now })
     .find((item) => item.actorId === input.speaker.id)
     || null;
-  const upcomingCalendar = projectWorldCalendar([input.chat], input.members, { now }).items
+  const upcomingCalendar = projectWorldCalendar([input.chat], input.members, { now, inferTemporalStatus: false }).items
     .filter((item) => item.status !== 'cancelled' && item.status !== 'completed' && item.participantIds.includes(input.speaker.id))
     .filter((item) => {
       const startAt = item.startAt ?? null;
@@ -2055,7 +2055,7 @@ function buildWorldEventInfluenceSnapshot(input: {
   const attention = projectWorldAttentionStates([input.chat], input.members, { now })
     .find((item) => item.actorId === input.speaker.id)
     || null;
-  const upcomingCalendar = projectWorldCalendar([input.chat], input.members, { now }).items
+  const upcomingCalendar = projectWorldCalendar([input.chat], input.members, { now, inferTemporalStatus: false }).items
     .filter((item) => item.status !== 'cancelled' && item.status !== 'completed' && item.participantIds.includes(input.speaker.id))
     .filter((item) => typeof item.startAt === 'number' && (item.startAt as number) >= now && (item.startAt as number) - now <= 24 * 60 * 60_000)
     .sort((a, b) => (a.startAt || 0) - (b.startAt || 0));

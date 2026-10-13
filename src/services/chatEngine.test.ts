@@ -528,6 +528,25 @@ describe('chatEngine streaming preview', () => {
     expect(__chatEngineTestUtils.buildWorldEventInfluenceRulesPrompt(input)).not.toContain('within 6 hours');
   });
 
+  it('keeps an elapsed activity in generation context until completion is recorded', () => {
+    const now = Date.now();
+    const chat = buildChat({ runtimeEventsV2: [
+      { id: 'patrol-start', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 120_000,
+        actorIds: ['mei'], visibility: 'public', summary: '巡城',
+        payload: { calendarItemId: 'patrol', title: '巡城', kind: 'activity', status: 'in_progress',
+          participantIds: ['mei'], startAt: now - 120_000, endAt: now - 60_000, locationHint: '南门' } },
+    ] });
+    const input = { chat, speaker: buildCharacter('mei', '美羊羊'), members: [buildCharacter('mei', '美羊羊')], now };
+    expect(__chatEngineTestUtils.buildWorldEventContextPrompt(input)).toContain('Current activity: 巡城 at 南门');
+    expect(__chatEngineTestUtils.buildWorldEventInfluenceRulesPrompt(input)).not.toContain('within 6 hours');
+    chat.runtimeEventsV2 = [...(chat.runtimeEventsV2 || []),
+      { id: 'patrol-done', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now,
+        actorIds: ['mei'], visibility: 'public', summary: '巡城完成',
+        payload: { calendarItemId: 'patrol', status: 'completed' } },
+    ];
+    expect(__chatEngineTestUtils.buildWorldEventContextPrompt(input)).not.toContain('巡城');
+  });
+
   it('builds world influence rules prompt for comfort-first and restraint', () => {
     const now = Date.now();
     const chat = buildChat({
