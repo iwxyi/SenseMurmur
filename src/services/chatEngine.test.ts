@@ -1449,7 +1449,7 @@ describe('chatEngine streaming preview', () => {
     expect(prompt).not.toContain('唉');
   });
 
-  it('reconciles stay-silent inner life when the scheduler finally selects the speaker', async () => {
+  it.each([0, 0.7])('only reconciles selected silence with real addressing (addressed=%s)', async (addressed) => {
     generateResponseMock.mockReset();
     generateResponseMock.mockResolvedValue(JSON.stringify({
       content: '那我只补一句：先让安安把访谈原话说完，其他结论晚点再收。',
@@ -1471,7 +1471,7 @@ describe('chatEngine streaming preview', () => {
       speakerScore: {
         actorId: 'mei',
         finalScore: 0.05,
-        addressed: 0,
+        addressed,
         topicRelevance: 0,
         lineInvolvement: 0,
         emotionalPressure: 0,
@@ -1488,10 +1488,16 @@ describe('chatEngine streaming preview', () => {
       },
     });
 
-    expect(message.metadata?.runtimeDecision?.innerLife?.impulse).toBe('answer');
-    expect(message.metadata?.runtimeDecision?.innerLife?.reason).toContain('调度最终选择');
-    expect(message.metadata?.runtimeDecision?.speakerScore?.reasons).not.toContain('inner:stay_silent');
-    expect(message.metadata?.runtimeDecision?.speakerScore?.reasons).toContain('inner:answer_after_scheduler_selection');
+    expect(message.metadata?.runtimeDecision?.innerLife?.impulse).toBe(addressed ? 'answer' : 'stay_silent');
+    expect(message.metadata?.runtimeDecision?.innerLife?.reason).not.toContain('调度最终选择');
+    const reasons = message.metadata?.runtimeDecision?.speakerScore?.reasons;
+    if (addressed) {
+      expect(reasons).not.toContain('inner:stay_silent');
+      expect(reasons).toContain('inner:answer_after_scheduler_selection');
+    } else {
+      expect(reasons).toContain('inner:stay_silent');
+      expect(reasons).not.toContain('inner:answer_after_scheduler_selection');
+    }
   });
 
   it('does not invent addressed targets from visible names when the model omits addressedTargets', async () => {

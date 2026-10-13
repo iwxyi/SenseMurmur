@@ -258,8 +258,8 @@ describe('conversationMovePlanner', () => {
     expect(plans.filter((plan) => plan.reason === 'ambient_thread_braid').every((plan) => plan.targetMessageId !== `m${base.length + 5}`)).toBe(true);
   });
 
-  it('turns unspoken-member scheduling into a concrete break-in move', () => {
-    const plan = planConversationMove({
+  it('does not derive a conversation move from rotation or selection despite silence', () => {
+    const input = {
       chat: chat('conversation'),
       speaker: character({ behavior: { proactivity: 70, aggressiveness: 20, humorIntensity: 20, empathyLevel: 50, summarizing: 20, offTopic: 20 } }),
       messages: [
@@ -285,13 +285,11 @@ describe('conversationMovePlanner', () => {
         finalScore: 0.7,
         reasons: ['unspoken_member', 'inner:stay_silent'],
       },
-    });
-
-    expect(plan.reason).toBe('break_in_selected_despite_silence');
-    expect(['name_tradeoff', 'counterexample', 'add_boundary_condition']).toContain(plan.moveType);
+    };
+    expect(planConversationMove(input)).toEqual(planConversationMove({ ...input, speakerScore: undefined }));
   });
 
-  it('answers a direct question before applying unspoken-member break-in rotation', () => {
+  it('does not let rotation override transcript-based guidance', () => {
     const plan = planConversationMove({
       chat: chat('conversation'),
       speaker: character({ id: 'a', name: '小甲' }),
@@ -307,8 +305,11 @@ describe('conversationMovePlanner', () => {
       },
     });
 
-    expect(plan.moveType).toBe('add_boundary_condition');
-    expect(plan.reason).toBe('unspoken_member_break_in');
+    expect(plan).toEqual(planConversationMove({
+      chat: chat('conversation'),
+      speaker: character({ id: 'a', name: '小甲' }),
+      messages: [message('m1', 'b', '小甲，那天你到底是什么感觉？')],
+    }));
   });
 
   it('renders a casual echo-loop prompt that stops manufacturing new substance', () => {
@@ -325,7 +326,7 @@ describe('conversationMovePlanner', () => {
     expect(prompt).toContain('brief personal reaction');
   });
 
-  it('renders a break-in prompt that requires a missing angle instead of loose commentary', () => {
+  it('does not require a missing angle for a historical break-in reason', () => {
     const prompt = buildConversationMovePrompt({
       speakerId: 'a',
       moveType: 'name_tradeoff',
@@ -334,9 +335,9 @@ describe('conversationMovePlanner', () => {
       confidence: 0.82,
     }, chat('conversation'));
 
-    expect(prompt).toContain('selected to break a narrow room loop');
-    expect(prompt).toContain('Do not merely comment that others are right');
-    expect(prompt).toContain('concrete missing angle');
+    expect(prompt).not.toContain('selected to break a narrow room loop');
+    expect(prompt).not.toContain('concrete missing angle');
+    expect(prompt).toContain('secondary realization option');
   });
 
   it('renders a prompt that separates warmth from viewpoint agreement in analysis rooms', () => {

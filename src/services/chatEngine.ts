@@ -2158,27 +2158,21 @@ function reconcileSelectedInnerLife(
   const floorGuardian = speakerScore.reasons.includes('guidance_floor_guardian');
   const selectedAgainstWithdrawal = ['stay_silent', 'avoid', 'withdraw'].includes(projection.impulse)
     && (speakerScore.addressed >= 0.62 || floorGuardian || speakerScore.reasons.includes('user_guidance_lock'));
-  if (projection.impulse !== 'stay_silent' && !selectedAgainstWithdrawal) return projection;
+  if (!selectedAgainstWithdrawal) return projection;
   const affect = projection.activeAffect;
-  const reason = selectedAgainstWithdrawal
-    ? '原本想回避或收住，但明确指向已经落到自己身上；这一轮必须留下可见回应，仍可保留迟疑、防守或简短。'
-    : affect
-    ? affect.role === 'received'
-      ? `调度最终选择后，刚才的${affect.kind}仍压在心口，不能像没听见一样过去。`
-      : `调度最终选择后，刚才递出去的${affect.kind}还没落地，想看对方怎么接。`
-    : floorGuardian
-      ? '需要护住当前发言权，先维持自己的位置，不替房间宣布结论。'
-      : '调度最终选择后，话题正碰到自己的位置，不能只让别人替自己说完。';
+  const reason = floorGuardian
+    ? '需要护住当前发言权，先维持自己的位置，不替房间宣布结论。'
+    : '原本想回避或收住，但明确指向已经落到自己身上；这一轮留下带保留的回应，仍可迟疑、防守或简短。';
   return {
     ...projection,
     impulse: 'answer',
-    tone: selectedAgainstWithdrawal && (
+    tone: (
       speakerScore.reasons.includes('emotion:tension')
       || (affect?.role === 'received' && ['challenge', 'mock', 'dismiss', 'pile_on', 'probe', 'exclude', 'boundary'].includes(affect.kind))
     ) ? 'defensive' : projection.tone,
     reason,
     pressure: Math.max(projection.pressure, 0.42),
-    evidence: Array.from(new Set([...projection.evidence, selectedAgainstWithdrawal ? '明确指向使回避冲动转为带保留的回应' : affect ? '定向情绪余波要求留下可见反应' : floorGuardian ? '调度选择本轮护住发言权' : '调度选择本轮需要发言'])).slice(0, 5),
+    evidence: Array.from(new Set([...projection.evidence, floorGuardian ? '本轮护住发言权' : '明确指向使回避冲动转为带保留的回应'])).slice(0, 5),
     state: {
       ...projection.state,
       lastImpulse: 'answer',

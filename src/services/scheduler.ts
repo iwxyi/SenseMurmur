@@ -577,7 +577,6 @@ export function calculateWeights(
         || attentionStateBias
         || relationshipPressure
         || directCueBoost
-        || unspokenMemberBias
         || characterDriveBias > 0
       );
       const idleStaySilent = innerLife.impulse === 'stay_silent' && innerLife.pressure < 0.32 && !hasExternalPressure;

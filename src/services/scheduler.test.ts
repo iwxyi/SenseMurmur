@@ -395,7 +395,7 @@ describe('scheduler speaker scoring', () => {
     expect(c?.scoreBreakdown?.reasons).not.toContain('unspoken_member');
   });
 
-  it('lets an unspoken member compete without removing the pending responder in a two-actor loop', () => {
+  it('keeps the pending responder without treating unspoken rotation as pressure', () => {
     const now = Date.now();
     const latest = buildMessage({ id: 'm3', senderId: 'a', senderName: '甲', content: '乙，那你的规矩是什么？', timestamp: now - 5_000 });
     latest.interactionHints = [{
@@ -432,10 +432,9 @@ describe('scheduler speaker scoring', () => {
 
     const b = candidates.find((candidate) => candidate.characterId === 'b');
     const c = candidates.find((candidate) => candidate.characterId === 'c');
-    expect(candidates.map((candidate) => candidate.characterId)).toEqual(['b', 'c']);
+    expect(candidates.map((candidate) => candidate.characterId)).toEqual(['b']);
     expect(b?.scoreBreakdown?.reasons).toContain('pending_reply');
-    expect(c?.scoreBreakdown?.reasons).toContain('unspoken_member');
-    expect(c?.scoreBreakdown?.reasons).not.toContain('direct_user_address');
+    expect(c).toBeUndefined();
   });
 
   it('keeps an explicit user-directed target even during a two-actor exchange loop', () => {
@@ -485,7 +484,7 @@ describe('scheduler speaker scoring', () => {
     expect(candidates[0]?.scoreBreakdown?.reasons).toContain('director:answer:target');
   });
 
-  it('lets an unspoken member speak when the other participants prefer silence', () => {
+  it('preserves the all-silent fallback without granting an unspoken member exclusive eligibility', () => {
     const now = Date.now();
     const messages = [
       buildMessage({ id: 'm1', senderId: 'a', senderName: '甲', content: '第一天先把规矩定死。', timestamp: now - 25_000 }),
@@ -508,8 +507,9 @@ describe('scheduler speaker scoring', () => {
       { ...buildChat(), memberIds: ['a', 'b', 'c'] },
     );
 
-    expect(candidates.map((candidate) => candidate.characterId)).toEqual(['c']);
+    expect(candidates.map((candidate) => candidate.characterId)).toEqual(['b', 'c']);
     expect(candidates.find((candidate) => candidate.characterId === 'c')?.scoreBreakdown?.reasons).toContain('unspoken_member');
+    expect(candidates.every((candidate) => candidate.scoreBreakdown?.reasons.includes('inner:stay_silent'))).toBe(true);
   });
 
   it('keeps a user-invited recent speaker eligible instead of giving an unspoken member the whole turn', () => {
@@ -534,7 +534,7 @@ describe('scheduler speaker scoring', () => {
       { ...buildChat(), memberIds: ['a', 'b', 'c'] }, intent);
 
     expect(candidates.find((candidate) => candidate.characterId === 'b')?.scoreBreakdown?.reasons).toContain('direct_user_address');
-    expect(candidates.find((candidate) => candidate.characterId === 'c')?.scoreBreakdown?.reasons).toContain('unspoken_member');
+    expect(candidates.find((candidate) => candidate.characterId === 'c')).toBeUndefined();
   });
 
   it('drops low-pressure stay-silent candidates when another actor has a live cue', () => {

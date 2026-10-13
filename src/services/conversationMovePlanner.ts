@@ -200,9 +200,6 @@ export function planConversationMove(params: {
   const repeatedCount = analysis ? 0 : repeatedPhraseCount(messages);
   const priorDroppedPoint = analysis ? null : findPriorDroppedPoint(messages, latest?.id);
   const deliberationArtifacts = analysis ? summarizeRecentDeliberationArtifacts(messages) : null;
-  const scoreReasons = params.speakerScore?.reasons || [];
-  const isUnspokenBreakIn = scoreReasons.includes('unspoken_member');
-  const selectedDespiteSilence = scoreReasons.includes('inner:stay_silent');
 
   const pendingReply = params.pendingReplyContext?.targetIds.includes(params.speaker.id)
     ? messages.find((message) => message.id === params.pendingReplyContext?.sourceMessageId)
@@ -217,26 +214,6 @@ export function planConversationMove(params: {
       socialPosture: chooseSocialPosture(params.speaker, pendingReply.senderId),
       reason: 'pending_direct_address',
       confidence: params.pendingReplyContext?.strength === 'strong' ? 0.96 : 0.82,
-    };
-  }
-
-  if (!analysis && isUnspokenBreakIn) {
-    const target = priorDroppedPoint || latest || undefined;
-    const assertive = (params.speaker.behavior?.aggressiveness || 0) >= 55;
-    const proactive = (params.speaker.behavior?.proactivity || 0) >= 55;
-    return {
-      speakerId: params.speaker.id,
-      targetMessageId: target?.id,
-      targetActorId: target?.senderId,
-      targetClaimText: target?.content.slice(0, 120),
-      moveType: repeatedCount >= 3 || assertive
-        ? 'counterexample'
-        : proactive
-          ? 'name_tradeoff'
-          : 'add_boundary_condition',
-      socialPosture: chooseSocialPosture(params.speaker, target?.senderId),
-      reason: selectedDespiteSilence ? 'break_in_selected_despite_silence' : 'unspoken_member_break_in',
-      confidence: selectedDespiteSilence ? 0.82 : 0.78,
     };
   }
 
@@ -412,9 +389,6 @@ export function buildConversationMovePrompt(
   const echoLoopLine = plan.reason === 'chat_echo_loop'
     ? '\n- The room has already worried the same point enough. Do not manufacture a new condition, risk, counterexample, task, or handoff merely to keep it moving. Let the point land with a brief personal reaction, a change in social temperature, a pause, or a genuinely nearby topic.'
     : '';
-  const breakInLine = plan.reason === 'unspoken_member_break_in' || plan.reason === 'break_in_selected_despite_silence'
-    ? '\n- You were selected to break a narrow room loop or fill a missing perspective. Do not merely comment that others are right. Enter with one concrete missing angle: a counterexample, boundary condition, practical consequence, fresh fact, or short action implication that gives the next speaker something new to answer.'
-    : '';
   const scrutinyLine = analysis && ['ask_evidence', 'counterexample', 'test_assumption', 'separate_claims'].includes(plan.moveType)
     ? '\n- Do not add another supporting analogy. Give the requested scrutiny: evidence condition, counterexample, assumption test, or claim split.\n- This turn is expected to create deliberationArtifacts from your visible reply; do not use a no-new-point response for this move.'
     : '';
@@ -425,5 +399,5 @@ export function buildConversationMovePrompt(
 - ${priorityLine}
 - Current semantic job: ${moveLabels[plan.moveType] || plan.moveType}.
 - Interpersonal posture: ${plan.socialPosture.warmth} warmth, ${plan.socialPosture.directness} directness.${targetLine}${analysisLine}
-- Use this as a local choice of what this turn should do. Do not mention the guidance itself.${echoLoopLine}${breakInLine}${scrutinyLine}`;
+- Use this as a local choice of what this turn should do. Do not mention the guidance itself.${echoLoopLine}${scrutinyLine}`;
 }
