@@ -279,6 +279,37 @@ describe('chatEngine streaming preview', () => {
     expect(generateResponseMock.mock.calls[1]?.[2]).toEqual(generateResponseMock.mock.calls[0]?.[2]);
   });
 
+  it('retries wrong state evidence and keeps the valid result on the same speaker', async () => {
+    generateResponseMock.mockReset();
+    const update = (evidenceText: string) => ({ items: [{ key: 'report', kind: 'commitment', status: 'resolved',
+      summary: '收到记录', participantIds: ['mei'], evidenceText }] });
+    generateResponseMock.mockResolvedValueOnce(JSON.stringify({ content: '记录看过了。', conversationUpdate: update('记录给你') }))
+      .mockResolvedValueOnce(JSON.stringify({ content: '记录看过了。', conversationUpdate: update('记录看过了') }));
+    const mei = buildCharacter('mei', '美羊羊');
+    const onChunk = vi.fn();
+    const message = await generateSpeakerMessage({ chat: buildChat(), speaker: mei,
+      characters: [mei, buildCharacter('hui', '灰太狼')], messages: [], apiConfig: buildProfiles(), onChunk });
+    expect(generateResponseMock).toHaveBeenCalledTimes(2);
+    expect(message.metadata?.conversationUpdate?.items[0]).toMatchObject({ key: 'report', status: 'resolved', evidenceText: '记录看过了' });
+    expect(onChunk).toHaveBeenCalledWith('');
+    expect(String(generateResponseMock.mock.calls[1]?.[1])).toContain('never from the earlier transcript');
+    expect(generateResponseMock.mock.calls[1]?.[2]).toEqual(generateResponseMock.mock.calls[0]?.[2]);
+  });
+
+  it('fails repeated wrong evidence without submitting or rotating speakers', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ content: '看过了。', conversationUpdate: {
+      items: [{ key: 'report', kind: 'commitment', status: 'resolved', summary: '收到记录', participantIds: ['mei'], evidenceText: '记录给你' }],
+    } }));
+    const callbacks = { onSpeakerSelected: vi.fn(), onMessageChunk: vi.fn(), onMessageComplete: vi.fn(), onError: vi.fn() };
+    await runOneRound(buildChat(), [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')],
+      [buildUserMessage('你们继续聊。')], buildProfiles(), callbacks);
+    expect(generateResponseMock).toHaveBeenCalledTimes(3);
+    expect(callbacks.onSpeakerSelected).toHaveBeenCalledTimes(1);
+    expect(callbacks.onMessageComplete).not.toHaveBeenCalled();
+    expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
+  });
+
   it('reports repeated plain text as protocol failure without sending or rotating speakers', async () => {
     generateResponseMock.mockReset();
     generateResponseMock.mockResolvedValue('俺真走了，你们别送。');

@@ -2,7 +2,45 @@ import { describe, expect, it } from 'vitest';
 import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
 import { normalizeInteractionHintCollection } from '../types/runtimeEvent';
-import { buildInlineInteractionContract, parseInlineInteractionEnvelope } from './inlineInteractionHint';
+import { buildInlineInteractionContract, hasInvalidStateEvidence, parseInlineInteractionEnvelope } from './inlineInteractionHint';
+
+describe('state evidence source boundary', () => {
+  const item = (evidenceText: string) => ({ key: 'report', kind: 'commitment', status: 'resolved',
+    summary: '收到记录', participantIds: ['speaker'], evidenceText });
+
+  it.each([
+    { messages: [{ content: '看过了。' }, { content: '记录在我这里。' }] },
+    { content: '看过了。', extraMessages: ['记录在我这里。'] },
+  ])('accepts evidence in a later send: %j', (speech) => {
+    const parsed = parseInlineInteractionEnvelope(JSON.stringify({ ...speech,
+      conversationUpdate: { items: [item('记录在我这里')] } }));
+    expect(parsed?.conversationUpdate?.items).toHaveLength(1);
+    expect(hasInvalidStateEvidence(parsed!)).toBe(false);
+  });
+
+  it.each(['上一轮交过记录', '看过了。记录在我这里。'])('rejects absent or cross-send evidence: %s', (quote) => {
+    const parsed = parseInlineInteractionEnvelope(JSON.stringify({
+      messages: [{ content: '看过了。' }, { content: '记录在我这里。' }],
+      conversationUpdate: { items: [item(quote)] },
+    }));
+    expect(parsed?.conversationUpdate?.items).toHaveLength(1);
+    expect(hasInvalidStateEvidence(parsed!)).toBe(true);
+  });
+
+  it.each([
+    { conversationUpdate: { items: [], room: { summary: '各忙各的', evidenceText: '旧台词' } } },
+    { conversationUpdate: { items: [], settled: { evidenceText: '旧台词' } } },
+    { activityUpdate: { title: '探路', kind: 'travel', status: 'in_progress', evidenceText: '旧台词' } },
+    { presenceUpdate: { status: 'away', evidenceText: '旧台词' } },
+    { conflictFocus: { key: 'gate', type: 'goal', participantIds: ['speaker', 'other'], severity: 4, evidenceText: '旧台词' } },
+  ])('checks each durable state update: %j', (update) => {
+    expect(hasInvalidStateEvidence({ content: '本轮台词', ...update } as Parameters<typeof hasInvalidStateEvidence>[0])).toBe(true);
+  });
+
+  it('allows a turn without state updates', () => {
+    expect(hasInvalidStateEvidence({ content: '看过了。', conversationUpdate: null })).toBe(false);
+  });
+});
 
 describe('parseInlineInteractionEnvelope story events', () => {
   it('allows callers to reject content salvaged from a malformed envelope', () => {

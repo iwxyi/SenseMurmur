@@ -32,7 +32,7 @@ import { buildHumanizationPrompt, postProcessHumanChat } from './dialogueHumaniz
 import { buildInnerLifeMetadata, buildInnerLifePromptBlock, projectInnerLife, type InnerLifeProjection } from './innerLifeEngine';
 import { maybeAutoWithdrawMessage } from './messageWithdrawal';
 import { BASE_COOLDOWN_MS, MAX_HISTORY_FOR_PROMPT } from '../constants/defaults';
-import { buildInlineInteractionContract, parseInlineInteractionEnvelope, type InlineStoryAssets } from './inlineInteractionHint';
+import { buildInlineInteractionContract, hasInvalidStateEvidence, parseInlineInteractionEnvelope, type InlineStoryAssets } from './inlineInteractionHint';
 import { getExpressionFeedbackCategoryLabel, summarizeExpressionFeedbackInfluence } from './expressionFeedbackInfluence';
 import type { UserGuidanceIntent } from './userGuidanceIntent';
 import { collectGuidanceProgressAfterTimestamp, evaluateGuidanceGeneratedContent, type GuidanceExecutionReason, type GuidanceRejectionReason } from './guidanceExecution';
@@ -3252,6 +3252,9 @@ async function generateWithPrompt(params: {
   if (requiresGroupEnvelope && response.trim() && !parsedEnvelope) {
     return { protocolError: 'missing_json_envelope' as const };
   }
+  if (requiresGroupEnvelope && parsedEnvelope && hasInvalidStateEvidence(parsedEnvelope)) {
+    return { protocolError: 'invalid_state_evidence' as const };
+  }
   const narrativeRuntime = isStoryReader ? await loadNarrativeRuntime() : null;
   const rawStoryEvents = narrativeRuntime
     ? narrativeRuntime.normalizeStoryEvents(parsedEnvelope?.storyEvents, { previousMessages: params.activeMessages })
@@ -3444,13 +3447,18 @@ async function generateNonDuplicateResponse(params: {
     if (generated.protocolError) {
       params.onChunk?.('');
       const unsupportedTool = generated.protocolError === 'unsupported_tool_protocol';
+      const invalidStateEvidence = generated.protocolError === 'invalid_state_evidence';
       logAiGenerationFailure({
         chat: params.chat, speaker: params.speaker, reason: generated.protocolError,
-        message: unsupportedTool ? 'AI 返回了不支持的工具调用协议，本次生成未提交。' : 'AI 回复缺少有效的结构化输出，本次生成未提交。', attempt: attempt + 1,
+        message: unsupportedTool ? 'AI 返回了不支持的工具调用协议，本次生成未提交。'
+          : invalidStateEvidence ? 'AI 状态更新的证据不属于本轮发言，本次生成未提交。'
+            : 'AI 回复缺少有效的结构化输出，本次生成未提交。', attempt: attempt + 1,
       });
       if (attempt < 2) {
-        const failure = unsupportedTool ? 'unsupported tool-call markup' : 'no valid JSON envelope';
-        prompt = `${params.systemPrompt}\n\nOutput protocol retry:\n- The previous attempt returned ${failure}. Return one valid JSON object using the supplied output contract and actual visible character speech. Preserve the supported structured fields for this turn; use null when there is no supported update. Do not invent updates, emit tool-call markup or simulate unavailable tools. Do not mention this retry to participants.`;
+        const failure = unsupportedTool ? 'unsupported tool-call markup'
+          : invalidStateEvidence ? 'a state update whose evidenceText was not an exact quote from one of this response\'s visible sends'
+            : 'no valid JSON envelope';
+        prompt = `${params.systemPrompt}\n\nOutput protocol retry:\n- The previous attempt returned ${failure}. Return one valid JSON object using the supplied output contract and actual visible character speech. Preserve the supported structured fields for this turn; use null when there is no supported update. State evidenceText must be copied exactly from one visible send in this response, never from the earlier transcript or known records. Do not add spoken confirmations merely to manufacture evidence. Do not invent updates, emit tool-call markup or simulate unavailable tools. Do not mention this retry to participants.`;
         continue;
       }
       throw new EmptyGeneratedResponseError(params.speaker.name, {

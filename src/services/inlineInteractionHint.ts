@@ -317,6 +317,20 @@ function hasVisibleEnvelopeContent(envelope: InlineInteractionEnvelope) {
   return hasVisibleStoryEvents(envelope.storyEvents);
 }
 
+export function hasInvalidStateEvidence(envelope: InlineInteractionEnvelope) {
+  const parts = envelope.messages?.length
+    ? envelope.messages.map((part) => part.content)
+    : [envelope.content, ...(envelope.extraMessages || [])];
+  const update = envelope.conversationUpdate;
+  const evidence = [
+    ...(update?.items || []).map((item) => item.evidenceText),
+    update?.room?.evidenceText, update?.settled?.evidenceText,
+    envelope.activityUpdate?.evidenceText, envelope.presenceUpdate?.evidenceText,
+    envelope.conflictFocus?.evidenceText,
+  ].filter((quote): quote is string => typeof quote === 'string' && quote.length > 0);
+  return evidence.some((quote) => !parts.some((part) => typeof part === 'string' && part.includes(quote)));
+}
+
 function buildMemberReference(params: { chat: GroupChat; characters: AICharacter[]; speakerId?: string }) {
   const memberIds = new Set(params.chat.memberIds);
   const characterLines = params.characters
