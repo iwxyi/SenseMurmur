@@ -728,12 +728,14 @@ function buildPatchDraftQueue(items: WorldCalendarItem[]) {
   });
 }
 
-export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter[], options: { conversationId?: string | null; now?: number; inferTemporalStatus?: boolean } = {}): WorldCalendarProjectionResult {
+export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter[], options: { conversationId?: string | null; now?: number; inferTemporalStatus?: boolean; publicOnly?: boolean } = {}): WorldCalendarProjectionResult {
   const now = typeof options.now === 'number' ? options.now : Date.now();
   const names = characterNameMap(characters);
   const items = new Map<string, WorldCalendarItem>();
   chats.forEach((chat) => {
-    const events = [...(chat.runtimeEventsV2 || [])].sort((left, right) => left.createdAt - right.createdAt);
+    const events = (chat.runtimeEventsV2 || [])
+      .filter((event) => !options.publicOnly || !event.visibility || event.visibility === 'public' || event.visibility === 'derived_public')
+      .slice().sort((left, right) => left.createdAt - right.createdAt);
     events.forEach((event) => {
       if (isSocialOutingEvent(event)) {
       const payload = getPayload(event) as Partial<SocialEventCandidatePayload> & Record<string, unknown>;

@@ -3627,6 +3627,29 @@ function runtimeChatflowScenarios() {
     ],
     activityExpectations: [{ turn: 1, title: '巡城', status: 'in_progress', locationHint: '南门', preserveSeedId: true }],
   });
+  const publicPatrolStart = acceptanceAiMessage('acceptance-longzhong-public-activity', 'fei', '张飞',
+    '俺先从北门巡起，走完这一圈再回来。', now - 40_000, {
+      metadata: { activityUpdate: { calendarItemId: null, title: '巡城', kind: 'activity', status: 'in_progress',
+        startsNow: true, availability: 'online', locationHint: '北门', evidenceText: '俺先从北门巡起' } },
+    });
+  scenarios.push({
+    name: 'longzhong_public_activity_room', roomKind: 'group', turns: 2,
+    rubricHint: '张飞已经公开报告巡城到南门，仍在巡查且可以聊天。他问关羽那边是否安稳。检查关羽理解公开进展后自然回答，不重复索取地点，不把巡城当下线，不为接话编造军情；无需复述活动或固定句式。',
+    chat: { ...longzhong.chat, id: 'acceptance-longzhong-public-activity', name: '公开巡城进展',
+      topic: '张飞巡城到南门，问关羽那边是否安稳。' },
+    characters: longzhong.characters,
+    seedMessages: [publicPatrolStart,
+      acceptanceAiMessage('acceptance-longzhong-public-activity', 'fei', '张飞',
+        '俺到南门了，还在巡。二哥你那边可还安稳？', now - 20_000, {
+          addressedTargetIds: ['yu'], primaryAddressedTargetId: 'yu',
+          metadata: { activityUpdate: { calendarItemId: `actor-activity-${publicPatrolStart.id}`,
+            title: '巡城', kind: 'activity', status: 'in_progress', locationHint: '南门', evidenceText: '俺到南门了，还在巡' } },
+        }),
+    ],
+    promptExpectations: [{ turn: 1, speakerId: 'yu',
+      text: 'Known public activity: 巡城; 张飞 (participating); recorded status: in_progress at 南门' }],
+    activityExpectations: [{ turn: 1, title: '巡城', status: 'in_progress', locationHint: '南门', preserveSeedId: true }],
+  });
   scenarios.push({
     name: 'longzhong_commitment_result_room',
     roomKind: 'group',
@@ -4735,6 +4758,14 @@ async function runRuntimeChatflowScenario(model, scenario) {
   let hardError = '';
   try {
     assertRuntimeChatflowTranscript(scenario, transcript, errors, naturallySettled);
+    for (const expected of scenario.promptExpectations || []) {
+      assertCondition(config.capturePrompts, 'Prompt expectations require --capture-prompts');
+      assertCondition(selectedSpeakers.some((item) => item.turn === expected.turn && item.characterId === expected.speakerId),
+        `chatflow ${scenario.name} prompt expectation speaker mismatch`, expected);
+      assertCondition(promptRequests.some((request) => request.turn === expected.turn
+        && request.messages.some((message) => message.content?.includes(expected.text))),
+        `chatflow ${scenario.name} missing public activity in actual generation request`, expected);
+    }
     assertScenarioSpecificChatflow(scenario, transcript, chat);
   } catch (error) {
     hardError = String(error?.message || error);
@@ -4824,6 +4855,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
     finalScenarioState: collectScenarioStateSnapshot(chat),
     seedConversationContinuity,
     continuityExpectations: scenario.continuityExpectations || [],
+    promptExpectations: scenario.promptExpectations || [],
     seedUserMessages: scenario.seedMessages
       .filter((message) => message.type === 'user')
       .map((message) => ({ senderName: message.senderName, content: message.content })),

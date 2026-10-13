@@ -1998,7 +1998,8 @@ function buildWorldEventContextPrompt(input: {
   const attention = projectWorldAttentionStates([input.chat], input.members, { now })
     .find((item) => item.actorId === input.speaker.id)
     || null;
-  const upcomingCalendar = projectWorldCalendar([input.chat], input.members, { now, inferTemporalStatus: false }).items
+  const calendar = projectWorldCalendar([input.chat], input.members, { now, inferTemporalStatus: false, publicOnly: true }).items;
+  const upcomingCalendar = calendar
     .filter((item) => item.status !== 'cancelled' && item.status !== 'completed' && item.participantIds.includes(input.speaker.id))
     .filter((item) => {
       const startAt = item.startAt ?? null;
@@ -2008,11 +2009,20 @@ function buildWorldEventContextPrompt(input: {
     .sort((a, b) => Number(b.status === 'in_progress') - Number(a.status === 'in_progress')
       || (a.startAt ?? Number.MAX_SAFE_INTEGER) - (b.startAt ?? Number.MAX_SAFE_INTEGER))
     .slice(0, 2);
+  const publicActivities = input.chat.type === 'group' ? calendar
+    .filter((item) => !item.derivedFromItemId && !item.participantIds.includes(input.speaker.id)
+      && item.participantIds.some((id) => input.members.some((member) => member.id === id)))
+    .filter((item) => item.status === 'in_progress'
+      || ((item.status === 'completed' || item.status === 'cancelled') && now - item.updatedAt <= 24 * 60 * 60_000)
+      || (!['completed', 'cancelled'].includes(item.status)
+        && (item.startAt == null || (item.startAt >= now && item.startAt - now <= 48 * 60 * 60_000))))
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 2) : [];
   const recentMoments = projectWorldMoments([input.chat], input.members)
     .filter((item) => item.actorId !== input.speaker.id)
     .filter((item) => now - item.createdAt <= 24 * 60 * 60_000)
     .slice(0, 2);
-  if (!attention && !upcomingCalendar.length && !recentMoments.length) return '';
+  if (!attention && !upcomingCalendar.length && !publicActivities.length && !recentMoments.length) return '';
   const lines: string[] = [];
   if (attention) {
     const targetName = attention.targetId === 'user'
@@ -2028,6 +2038,23 @@ function buildWorldEventContextPrompt(input: {
   upcomingCalendar.forEach((item) => {
     const timing = item.status === 'in_progress' ? 'Current activity' : item.startAt == null ? 'Schedule with unconfirmed time' : 'Upcoming schedule';
     lines.push(`- ${timing}: ${item.title}${item.timeHint ? ` @ ${item.timeHint}` : ''}${item.locationHint ? ` at ${item.locationHint}` : ''}.`);
+  });
+  publicActivities.forEach((item) => {
+    const participants = item.participantIds.map((id) => {
+      const name = id === 'user' ? '用户' : input.members.find((member) => member.id === id)?.name;
+      if (!name) return null;
+      const state = item.participantStates[id];
+      const participation = state === 'going' ? 'participating'
+        : state === 'invited' ? 'invited'
+          : state === 'late' ? 'late'
+            : state === 'declined' ? 'declined'
+              : state === 'withdrawn' || state === 'left_early' ? 'left'
+                : state === 'no_show' ? 'absent'
+                  : state === 'cancelled_by_dependency' ? 'participation cancelled'
+                    : 'participation unconfirmed';
+      return `${name} (${participation})`;
+    }).filter(Boolean).join(', ');
+    lines.push(`- Known public activity: ${item.title}; ${participants}; recorded status: ${item.status}${item.timeHint ? ` @ ${item.timeHint}` : ''}${item.locationHint ? ` at ${item.locationHint}` : ''}.`);
   });
   recentMoments.forEach((item) => {
     lines.push(`- Recent social signal: ${item.actorName} posted "${item.title}" (${item.kind}).`);
@@ -2055,7 +2082,7 @@ function buildWorldEventInfluenceSnapshot(input: {
   const attention = projectWorldAttentionStates([input.chat], input.members, { now })
     .find((item) => item.actorId === input.speaker.id)
     || null;
-  const upcomingCalendar = projectWorldCalendar([input.chat], input.members, { now, inferTemporalStatus: false }).items
+  const upcomingCalendar = projectWorldCalendar([input.chat], input.members, { now, inferTemporalStatus: false, publicOnly: true }).items
     .filter((item) => item.status !== 'cancelled' && item.status !== 'completed' && item.participantIds.includes(input.speaker.id))
     .filter((item) => typeof item.startAt === 'number' && (item.startAt as number) >= now && (item.startAt as number) - now <= 24 * 60 * 60_000)
     .sort((a, b) => (a.startAt || 0) - (b.startAt || 0));

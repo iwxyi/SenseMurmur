@@ -7,6 +7,7 @@ import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import type { AIModelProfile } from '../types/settings';
 import { __chatEngineTestUtils, generateSpeakerMessage, runOneRound } from './chatEngine';
 import { evaluateDuplicateGuard } from './duplicateGuard';
+import { applyPresenceUpdateToTransition } from './characterPresence';
 import { buildInlineInteractionContract, parseInlineInteractionEnvelope } from './inlineInteractionHint';
 import type { DirectorIntent } from './directorIntent';
 import { useSettingsStore } from '../stores/useSettingsStore';
@@ -545,6 +546,70 @@ describe('chatEngine streaming preview', () => {
         payload: { calendarItemId: 'patrol', status: 'completed' } },
     ];
     expect(__chatEngineTestUtils.buildWorldEventContextPrompt(input)).not.toContain('巡城');
+  });
+
+  it('reads another member activity after production writeback without granting activity ownership', () => {
+    const now = Date.now();
+    const members = [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')];
+    const chat = buildChat({ memberIds: members.map((member) => member.id), runtimeEventsV2: [
+      { id: 'patrol-start', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 120_000,
+        actorIds: ['hui'], visibility: 'public', summary: '巡城',
+        payload: { calendarItemId: 'patrol', title: '巡城', kind: 'activity', status: 'in_progress',
+          participantIds: ['hui'], participantStates: { hui: 'going' }, startAt: now - 120_000,
+          endAt: now - 60_000, locationHint: '北门' } },
+    ] });
+    const message: Message = { id: 'patrol-report', chatId: chat.id, type: 'ai', senderId: 'hui',
+      senderName: '灰太狼', content: '刚到南门，还在巡城。', emotion: 0, timestamp: now, isDeleted: false,
+      metadata: { activityUpdate: { calendarItemId: 'patrol', title: '巡城', kind: 'activity', status: 'in_progress',
+        locationHint: '南门', evidenceText: '刚到南门，还在巡城' } } };
+    const transition = applyPresenceUpdateToTransition({ chat, characters: members, message, now,
+      transition: { chatPatch: {}, characterPatches: [], runtimeEvents: [] } });
+    const updatedChat = { ...chat, ...transition.chatPatch };
+    const input = { chat: updatedChat, speaker: members[0], members, now };
+    const prompt = __chatEngineTestUtils.buildWorldEventContextPrompt(input);
+    expect(prompt).toContain('Known public activity: 巡城; 灰太狼 (participating); recorded status: in_progress at 南门');
+    expect(prompt).not.toContain('北门');
+    expect(prompt).not.toContain('patrol-report');
+    expect(prompt).not.toContain('patrol-start');
+    const contract = buildInlineInteractionContract({ chat: updatedChat, speaker: members[0], characters: members,
+      recentMessages: [message] });
+    expect(contract).toContain('Known speaker activity records: []');
+    expect(__chatEngineTestUtils.buildWorldEventInfluenceRulesPrompt(input)).not.toContain('within 6 hours');
+    const completed = applyPresenceUpdateToTransition({ chat: updatedChat, characters: members, now: now + 1000,
+      message: { ...message, id: 'patrol-result', content: '巡城走完了。', timestamp: now + 1000,
+        metadata: { activityUpdate: { calendarItemId: 'patrol', title: '巡城', kind: 'activity', status: 'completed',
+          evidenceText: '巡城走完了' } } },
+      transition: { chatPatch: {}, characterPatches: [], runtimeEvents: [] } });
+    expect(__chatEngineTestUtils.buildWorldEventContextPrompt({ ...input, chat: { ...updatedChat, ...completed.chatPatch }, now: now + 1000 }))
+      .toContain('recorded status: completed');
+    expect(__chatEngineTestUtils.buildWorldEventContextPrompt({ ...input, chat: { ...updatedChat, ...completed.chatPatch }, now: now + 25 * 60 * 60_000 }))
+      .not.toContain('巡城');
+  });
+
+  it('keeps public activity facts separate from invitations and private changes', () => {
+    const now = Date.now();
+    const members = [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼'), buildCharacter('lan', '懒羊羊')];
+    const chat = buildChat({ memberIds: members.map((member) => member.id), runtimeEventsV2: [
+      { id: 'outing', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 3000,
+        actorIds: ['hui'], visibility: 'public', summary: '去河边',
+        payload: { calendarItemId: 'outing-item', title: '河边散步', kind: 'activity', status: 'in_progress',
+          participantIds: ['hui', 'lan'], participantStates: { hui: 'going', lan: 'invited' }, locationHint: '河边' } },
+      { id: 'hidden-update', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 2000,
+        actorIds: ['hui'], visibility: 'pair_private', summary: '秘密变更',
+        payload: { calendarItemId: 'outing-item', locationHint: '秘密住所', status: 'cancelled' } },
+      { id: 'hidden-source', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 1000,
+        actorIds: ['hui'], visibility: 'role_private', summary: '私人探访',
+        payload: { calendarItemId: 'hidden-item', title: '私人探访', kind: 'activity', status: 'in_progress',
+          participantIds: ['hui'], locationHint: '秘密地点' } },
+    ] });
+    const prompt = __chatEngineTestUtils.buildWorldEventContextPrompt({ chat, speaker: members[0], members, now });
+    expect(prompt).toContain('灰太狼 (participating), 懒羊羊 (invited)');
+    expect(prompt).toContain('recorded status: in_progress at 河边');
+    expect(prompt).not.toContain('秘密');
+    expect(prompt).not.toContain('私人探访');
+    expect(prompt).not.toContain('cancelled');
+    expect(__chatEngineTestUtils.buildWorldEventContextPrompt({ chat: { ...chat, type: 'direct' }, speaker: members[0], members, now }))
+      .not.toContain('Known public activity:');
   });
 
   it('builds world influence rules prompt for comfort-first and restraint', () => {

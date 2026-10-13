@@ -62,6 +62,33 @@ function buildChat(id: string, name: string, runtimeEventsV2: RuntimeEventV2[]) 
 }
 
 describe('worldRuntimeProjection', () => {
+  it('filters private calendar sources and patches before merging only when publicOnly is requested', () => {
+    const now = Date.now();
+    const chat = buildChat('chat-1', '群聊', [
+      { id: 'public-source', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 4000,
+        actorIds: ['a'], visibility: 'public', summary: '巡城',
+        payload: { calendarItemId: 'patrol', title: '巡城', kind: 'activity', status: 'in_progress',
+          participantIds: ['a'], locationHint: '南门' } },
+      ...(['role_private', 'pair_private', 'moderator_only'] as const).flatMap((visibility, index): RuntimeEventV2[] => [
+        { id: `private-source-${index}`, conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 3000 + index,
+          actorIds: ['a'], visibility, summary: '私密活动',
+          payload: { calendarItemId: `private-item-${index}`, title: '私密活动', kind: 'activity', status: 'in_progress',
+            participantIds: ['a'], locationHint: '秘密地点' } },
+        { id: `private-patch-${index}`, conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 2000 + index,
+          actorIds: ['a'], visibility, summary: '私密变更',
+          payload: { calendarItemId: 'patrol', locationHint: '秘密地点', status: 'cancelled' } },
+      ]),
+    ]);
+    const members = [character('a', 'A')];
+    const publicItems = projectWorldCalendar([chat], members, { now, inferTemporalStatus: false, publicOnly: true }).items;
+    expect(publicItems).toHaveLength(1);
+    expect(publicItems[0]).toMatchObject({ id: 'patrol', status: 'in_progress', locationHint: '南门' });
+    expect(publicItems[0].sourceRefs[0].eventIds).toEqual(['public-source']);
+    const allItems = projectWorldCalendar([chat], members, { now, inferTemporalStatus: false }).items;
+    expect(allItems).toHaveLength(4);
+    expect(allItems.find((item) => item.id === 'patrol')).toMatchObject({ status: 'cancelled', locationHint: '秘密地点' });
+  });
+
   it('merges duplicate social outing candidates into one calendar item', () => {
     const chats = [buildChat('chat-1', '群聊一', [
       {
