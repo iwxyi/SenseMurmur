@@ -669,7 +669,22 @@ export function calculateWeights(
     });
   const flattenedCandidates = weightedCandidates.flat();
   const activeCandidates = flattenedCandidates.filter((candidate) => !candidate.idleStaySilent);
-  const baseSelectedCandidates = activeCandidates.length ? activeCandidates : flattenedCandidates;
+  const unspokenRotationIds = chat?.type === 'group'
+    && speakableCharacters.length >= 3
+    && !pendingReplyContext
+    && !forcedUserGuidanceActorIds.length
+    && !directorIntent?.targetActorIds.length
+    && (pendingTwoActorLoop || twoActorDominance)
+    ? new Set(speakableCharacters
+      .filter((character) => (recentSpeakCounts[character.id] || 0) === 0)
+      .map((character) => character.id))
+    : null;
+  // Once a room has become a two-person loop, give a willing absent member the
+  // next turn. Stay with the normal pool when every absent member is quiet.
+  const rotatedActiveCandidates = unspokenRotationIds && activeCandidates.some((candidate) => unspokenRotationIds.has(candidate.characterId))
+    ? activeCandidates.filter((candidate) => unspokenRotationIds.has(candidate.characterId))
+    : activeCandidates;
+  const baseSelectedCandidates = rotatedActiveCandidates.length ? rotatedActiveCandidates : activeCandidates.length ? activeCandidates : flattenedCandidates;
   return baseSelectedCandidates.map((candidate) => ({
     characterId: candidate.characterId,
     weight: candidate.weight,
