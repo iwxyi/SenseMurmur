@@ -487,6 +487,7 @@ export type ConflictDevelopmentHook =
 
 export interface ConflictFocusPayload {
   conflictId?: string | null;
+  evidenceText?: string;
   present: boolean;
   type?: ConflictType;
   severity?: number;

@@ -25,6 +25,7 @@ import { resolveRuntimeEvolutionConfig } from './runtimeEvolutionConfig';
 import { projectInnerLife } from './innerLifeEngine';
 import { buildRitualEventsFromRelationshipRuntimeEvents, buildRitualEventsFromSharedAnchorEvents, buildSharedAnchorEventsFromCompanionshipEvents } from './companionshipSharedAnchorBackflow';
 import { buildSharedPhraseEventsFromCompanionshipEvents } from './companionshipSharedPhraseBackflow';
+import { usesConversationContinuity } from './conversationContinuity';
 
 const { chatGap: CHAT_DISTILLATION_TURN_COUNT, characterGap: CHARACTER_DISTILLATION_TURN_COUNT } = getLocalDistillationPolicy();
 const PRIMARY_CONFLICT_DECAY_STEP = 0.06;
@@ -159,10 +160,18 @@ function appendDistilledMemoryEvents(conversation: GroupChat, existingEvents: Ru
 function normalizeConflictFocus(
   payload: ConflictFocusPayload | null | undefined,
   conversation: GroupChat,
-  message: Pick<Message, 'content' | 'senderId'>,
+  message: Pick<Message, 'content' | 'senderId'> & Partial<Pick<Message, 'metadata' | 'isDeleted'>>,
   referenceTimestamp: number,
 ): ConflictFocusState | null {
   if (!payload?.present || !payload.type || !payload.summary) return null;
+  if (usesConversationContinuity(conversation)) {
+    if (!conversation.memberIds.includes(message.senderId) || message.isDeleted || message.metadata?.withdrawal?.withdrawn
+      || (message.metadata?.visibility && message.metadata.visibility !== 'public')) return null;
+    const evidence = typeof payload.evidenceText === 'string' ? payload.evidenceText.trim() : '';
+    if (!evidence || evidence.length > 240 || !message.content.includes(evidence)) return null;
+    if ([...(payload.participantIds || []), ...(payload.primaryTargetIds || [])]
+      .some((id) => !conversation.memberIds.includes(id))) return null;
+  }
   const known = [conversation.worldState.conflictState?.primaryConflict, ...(conversation.worldState.conflictState?.activeConflicts || [])]
     .find((conflict) => conflict && conflict.id === payload.conflictId);
   if (payload.conflictId && !known) return null;
@@ -349,7 +358,7 @@ function shouldEmitWorldStateShift(previousWorldState: GroupChat['worldState'], 
 
 export function buildNextWorldState(
   conversation: GroupChat,
-  message: Pick<Message, 'content' | 'type' | 'senderId'> & { conflictFocus?: ConflictFocusPayload | null; timestamp?: number },
+  message: Pick<Message, 'content' | 'type' | 'senderId'> & Partial<Pick<Message, 'metadata' | 'isDeleted'>> & { conflictFocus?: ConflictFocusPayload | null; timestamp?: number },
   config: RuntimeEvolutionConfig = resolveRuntimeEvolutionConfig(conversation.runtimeEvolutionIntensity),
 ) {
   const now = resolveMessageTimestamp(message, conversation.updatedAt || Date.now());
@@ -431,7 +440,7 @@ function buildSeededRelationshipLedger(conversation: GroupChat, characters: AICh
 export function buildRelationshipTransition(params: {
   conversation: GroupChat;
   characters: AICharacter[];
-  message: Pick<Message, 'content' | 'type' | 'senderId'> & { interactionHint?: import('../types/runtimeEvent').InteractionEventPayload | null; interactionHints?: import('../types/runtimeEvent').InteractionEventPayload[] | null; incomingInteractionHint?: import('../types/runtimeEvent').InteractionEventPayload | null; conflictFocus?: ConflictFocusPayload | null; timestamp?: number };
+  message: Pick<Message, 'content' | 'type' | 'senderId'> & Partial<Pick<Message, 'metadata' | 'isDeleted'>> & { interactionHint?: import('../types/runtimeEvent').InteractionEventPayload | null; interactionHints?: import('../types/runtimeEvent').InteractionEventPayload[] | null; incomingInteractionHint?: import('../types/runtimeEvent').InteractionEventPayload | null; conflictFocus?: ConflictFocusPayload | null; timestamp?: number };
   previousAiMessage?: Pick<Message, 'senderId'> | null;
   recentMessages?: Message[];
   config?: RuntimeEvolutionConfig;

@@ -27,6 +27,17 @@ function buildMessage(content: string, messageCount = 1): GeneratedRoundMessage 
 }
 
 describe('generatedMessageSegmenter', () => {
+  it.each(['modern', 'legacy'])('commits conflict changes only with their evidence send (%s)', (format) => {
+    const message = { ...buildMessage('先说别的。'),
+      ...(format === 'modern' ? { messageParts: [{ content: '先说别的。' }, { content: '这事说清楚了。' }, { content: '这事说清楚了。' }] } : { extraMessages: ['这事说清楚了。', '这事说清楚了。'] }),
+      conflictFocus: { present: true, type: 'authority_challenge' as const, stage: 'resolved' as const, conflictId: 'conflict-1', evidenceText: '这事说清楚了' },
+    };
+    const segments = splitGeneratedRoundMessage(message);
+    expect(segments.map((item) => Boolean(item.conflictFocus))).toEqual([false, true, false]);
+    expect(segments.slice(0, 1).every((item) => !item.conflictFocus)).toBe(true);
+    expect(splitGeneratedRoundMessage({ ...message, conflictFocus: { ...message.conflictFocus, evidenceText: '没有说过的话' } })
+      .every((item) => !item.conflictFocus)).toBe(true);
+  });
   it('commits departure only once with its evidence bubble for modern messages', () => {
     const base = buildMessage('先说一件事。');
     const segments = splitGeneratedRoundMessage({ ...base,

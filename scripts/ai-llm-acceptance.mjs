@@ -3564,6 +3564,8 @@ function summarizeRuntimeTurn(message) {
       || message.metadata?.deliberationArtifacts?.verdicts
       || [],
     roomStateAfter: message.roomStateAfter || null,
+    conflictStateAfter: message.conflictStateAfter || null,
+    conflictUpdates: message.conflictUpdates || [],
     conversationContinuityAfter: message.conversationContinuityAfter || null,
     conversationUpdates: message.conversationUpdates || [],
     roomShiftSignals: message.committedRoomShiftSignals || [],
@@ -4365,6 +4367,9 @@ async function runRuntimeChatflowScenario(model, scenario) {
       committedRelationshipSignals,
       committedRoomShiftSignals,
       roomStateAfter: chat.worldState?.structuredRoomState || null,
+      conflictStateAfter: chat.worldState?.conflictState || null,
+      conflictUpdates: logicalTurnMessages.filter((item) => item.conflictFocus)
+        .map((item) => ({ content: item.content, conflictFocus: item.conflictFocus })),
       conversationContinuityAfter: chat.worldState?.conversationContinuity || null,
       conversationUpdates: logicalTurnMessages.map((item) => item.metadata?.conversationUpdate).filter(Boolean),
     });

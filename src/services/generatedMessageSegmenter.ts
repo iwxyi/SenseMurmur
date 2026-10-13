@@ -79,7 +79,7 @@ export function splitGeneratedRoundMessage(message: GeneratedRoundMessage) {
       addressedTargetIds: index === 0 ? message.addressedTargetIds : null,
       primaryAddressedTargetId: index === 0 ? message.primaryAddressedTargetId : null,
       socialEventHints: index === 0 ? message.socialEventHints : null,
-      conflictFocus: index === 0 ? message.conflictFocus : null,
+      conflictFocus: stateUpdateForSegment(message.conflictFocus || undefined, parts.map((item) => item.content), index) || null,
     }));
   }
   const parts = getVisibleTurnParts(message);
@@ -126,6 +126,6 @@ export function splitGeneratedRoundMessage(message: GeneratedRoundMessage) {
     addressedTargetIds: index === 0 ? message.addressedTargetIds : null,
     primaryAddressedTargetId: index === 0 ? message.primaryAddressedTargetId : null,
     socialEventHints: index === 0 ? message.socialEventHints : null,
-    conflictFocus: index === 0 ? message.conflictFocus : null,
+    conflictFocus: stateUpdateForSegment(message.conflictFocus || undefined, parts, index) || null,
   }));
 }

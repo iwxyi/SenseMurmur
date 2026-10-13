@@ -722,9 +722,18 @@ describe('buildWorldRuntimeEvents', () => {
     }
     expect(next.conflictState?.primaryConflict?.id).toBe('conflict-1');
     expect(next.conflictState?.primaryConflict?.severity).toBe(0);
+    const invalidResolution = buildNextWorldState({ ...chat, worldState: next }, {
+      type: 'ai', senderId: 'char-a', content: '明天再谈。',
+      conflictFocus: { present: true, conflictId: 'conflict-1', type: 'authority_challenge', severity: 0,
+        stage: 'resolved', summary: '这次越权的事说清楚了。', participantIds: ['char-a', 'char-b'],
+        evidenceText: '这次越权的事说清楚了' },
+    });
+    expect(invalidResolution.nextConflictState?.primaryConflict?.id).toBe('conflict-1');
+    expect(invalidResolution.nextConflictState?.primaryConflict?.stage).toBe('open');
     const resolved = buildNextWorldState({ ...chat, worldState: next }, {
       type: 'ai', senderId: 'char-a', content: '这次越权的事说清楚了。',
       conflictFocus: { present: true, conflictId: 'conflict-1', type: 'authority_challenge', severity: 0.1,
+        evidenceText: '这次越权的事说清楚了',
         stage: 'resolved', summary: '这次越权的事说清楚了。', participantIds: ['char-a', 'char-b'],
         primaryTargetIds: ['char-b'], nextPressure: 'cool' },
     });
@@ -767,6 +776,7 @@ describe('buildWorldRuntimeEvents', () => {
       nextPressure: 'escalate' as const,
       developmentHooks: ['invite_target_response'],
       why: '一方要求主导，另一方公开反驳并质疑资格。',
+      evidenceText: '冲突正在形成',
     };
     const resultA = buildNextWorldState(chat, {
       type: 'ai',
@@ -786,5 +796,23 @@ describe('buildWorldRuntimeEvents', () => {
     expect(resultA.worldState.conflictState?.primaryConflict?.id).toBe(resultB.worldState.conflictState?.primaryConflict?.id);
     expect(resultA.worldState.conflictState?.updatedAt).toBe(123456);
     expect(resultB.worldState.conflictState?.updatedAt).toBe(123456);
+    for (const invalid of [
+      { ...payload, evidenceText: undefined },
+      { ...payload, evidenceText: '没有说过的话' },
+      { ...payload, participantIds: ['char-a', 'unknown'] },
+    ]) {
+      const rejected = buildNextWorldState(chat, { type: 'ai', senderId: 'char-a', content: '冲突正在形成。', conflictFocus: invalid });
+      expect(rejected.nextConflictState).toBeNull();
+      expect(rejected.nextConflictAxes).toEqual(buildNextWorldState(chat, { type: 'ai', senderId: 'char-a', content: '冲突正在形成。' }).nextConflictAxes);
+    }
+    for (const invalidMessage of [
+      { isDeleted: true },
+      { senderId: 'unknown' },
+      { metadata: { visibility: 'pair_private' as const } },
+      { metadata: { withdrawal: { withdrawn: true } } },
+    ]) {
+      expect(buildNextWorldState(chat, { type: 'ai', senderId: 'char-a', content: '冲突正在形成。', conflictFocus: payload,
+        ...invalidMessage }).nextConflictState).toBeNull();
+    }
   });
 });
