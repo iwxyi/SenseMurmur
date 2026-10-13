@@ -17,10 +17,10 @@ import { isAutoRunnableSessionAction } from './conversationCapabilities';
 import { applyAnalysisRunPolicy, buildAnalysisRunPolicyEvent, type SessionLoopDecision } from './analysisRunPolicy';
 import { resolvePendingReplyContext } from './scheduler';
 
-export function shouldPauseSettledConversation(before: GroupChat, after: GroupChat, characters: AICharacter[], messages: Message[]) {
+export function shouldPauseSettledConversation(runStart: GroupChat, after: GroupChat, characters: AICharacter[], messages: Message[]) {
   const settledAt = after.worldState.conversationContinuity?.settledAt;
   return after.type === 'group' && resolveSessionFamilyKey(after) === 'conversation'
-    && Boolean(settledAt && settledAt !== before.worldState.conversationContinuity?.settledAt)
+    && Boolean(settledAt && settledAt !== runStart.worldState.conversationContinuity?.settledAt)
     && !resolvePendingReplyContext(characters, messages, after);
 }
 
@@ -278,6 +278,7 @@ export async function runSessionLoop(params: {
   signal?: AbortSignal;
 }) {
   const random = params.random || Math.random;
+  let conversationRunStart: GroupChat | null = null;
   activeSessionLoops.set(params.loopId, {
     chatId: params.chatId,
     startedAt: Date.now(),
@@ -290,6 +291,7 @@ export async function runSessionLoop(params: {
       if (params.signal?.aborted) return;
       if (!isActiveLoop(params)) return;
       if (params.isPaused()) {
+        conversationRunStart = null;
         markSessionLoop(params.loopId, { phase: 'paused' });
         await sleep(120);
         continue;
@@ -313,6 +315,7 @@ export async function runSessionLoop(params: {
         });
       const currentMessages = getSessionMessages(params.getCurrentMessages);
       const currentChat = params.getCurrentChat?.() || params.chat;
+      conversationRunStart ??= currentChat;
       const currentCharacters = params.getCurrentCharacters?.() || params.characters;
       const inputHold = resolveUserInputHold({
         messages: currentMessages,
@@ -594,9 +597,10 @@ export async function runSessionLoop(params: {
         params.pauseLoop?.();
       }
       const committedChat = params.getCurrentChat?.();
-      if (committedChat && shouldPauseSettledConversation(currentChat, committedChat,
+      if (committedChat && shouldPauseSettledConversation(conversationRunStart, committedChat,
         params.getCurrentCharacters?.() || params.characters, params.getCurrentMessages())) {
         params.pauseLoop?.();
+        conversationRunStart = null;
       }
 
       if (params.isRunning() && !params.isPaused() && shouldWaitAfterSessionTick()) {

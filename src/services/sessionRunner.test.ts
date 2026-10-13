@@ -234,6 +234,69 @@ function buildLoopParams(chat: GroupChat) {
 }
 
 describe('runSessionLoop', () => {
+  it('waits for the final pending reply then pauses without another settled update', async () => {
+    const start = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
+    let current = start;
+    const messages: Message[] = [];
+    const params = buildLoopParams(start);
+    params.getCurrentChat = () => current;
+    params.getCurrentMessages = () => messages;
+    const pause = vi.fn(params.pauseLoop);
+    params.pauseLoop = pause;
+    runOneRoundMock.mockImplementation(async () => {
+      const round = runOneRoundMock.mock.calls.length;
+      if (round > 2) throw new Error('Unexpected generation after the final reply');
+      current = { ...start, worldState: { ...start.worldState, conversationContinuity: { items: [], settledAt: 10 } } };
+      messages.push({ id: `reply-${round}`, chatId: start.id, type: 'ai', senderId: round === 1 ? 'a' : 'b',
+        senderName: round === 1 ? '甲' : '乙', content: round === 1 ? '乙，你说完咱们就走。' : '走吧。',
+        timestamp: round, emotion: 0, isDeleted: false, addressedTargetIds: round === 1 ? ['b'] : [],
+        primaryAddressedTargetId: round === 1 ? 'b' : null });
+    });
+    await runSessionLoop(params as never);
+    expect(runOneRoundMock).toHaveBeenCalledTimes(2);
+    expect(pause).toHaveBeenCalledTimes(1);
+    expect(params.onLoopError).not.toHaveBeenCalled();
+  });
+
+  it('does not pause a newly started run because of a retained old settled signal', async () => {
+    const start = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' },
+      worldState: { ...buildChat().worldState, conversationContinuity: { items: [], settledAt: 10 } } });
+    const params = buildLoopParams(start);
+    params.getCurrentChat = () => start;
+    const pause = vi.fn(params.pauseLoop);
+    params.pauseLoop = pause;
+    runOneRoundMock.mockImplementation(async () => {
+      if (runOneRoundMock.mock.calls.length === 2) params.onIdle();
+    });
+    await runSessionLoop(params as never);
+    expect(runOneRoundMock).toHaveBeenCalledTimes(2);
+    expect(pause).not.toHaveBeenCalled();
+  });
+
+  it('resets the settlement baseline when the same loop is paused and resumed', async () => {
+    const start = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
+    let current = start;
+    let running = true;
+    let paused = false;
+    const params = buildLoopParams(start);
+    params.getCurrentChat = () => current;
+    params.isRunning = () => running;
+    params.isPaused = () => {
+      const wasPaused = paused;
+      paused = false;
+      return wasPaused;
+    };
+    const pause = vi.fn(() => { paused = true; });
+    params.pauseLoop = pause;
+    runOneRoundMock.mockImplementation(async () => {
+      current = { ...start, worldState: { ...start.worldState, conversationContinuity: { items: [], settledAt: 10 } } };
+      if (runOneRoundMock.mock.calls.length === 2) running = false;
+    });
+    await runSessionLoop(params as never);
+    expect(runOneRoundMock).toHaveBeenCalledTimes(2);
+    expect(pause).toHaveBeenCalledTimes(1);
+  });
+
   it('pauses a newly settled group only after pending replies are answered', () => {
     const before = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
     const after = { ...before, worldState: { ...before.worldState, conversationContinuity: { items: [], settledAt: 10 } } };

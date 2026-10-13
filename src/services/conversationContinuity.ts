@@ -104,11 +104,12 @@ export function applyConversationUpdate(chat: GroupChat, message: Pick<Message, 
     };
   }
   const settled = update.settled && supports(update.settled.evidenceText);
+  const reopened = changedItems.some((item) => item.status === 'open');
   const allItems = [...items.values()];
   const continuity = { items: [
     ...allItems.filter((item) => item.status === 'open'),
     ...allItems.filter((item) => item.status !== 'open').sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 64),
-  ], ...(settled ? { settledAt: now } : previous?.settledAt ? { settledAt: previous.settledAt } : {}) };
+  ], ...(settled ? { settledAt: now } : !reopened && previous?.settledAt ? { settledAt: previous.settledAt } : {}) };
   return { continuity, room: nextRoom, changedItems };
 }
 

@@ -99,4 +99,15 @@ describe('conversation continuity commit boundary', () => {
     expect(next.continuity?.settledAt).toBe(10);
     expect(next.continuity?.items[0].sourceMessageIds).toEqual(['second-bubble']);
   });
+
+  it('reopens a settled exchange only for a supported open item unless explicitly deferred again', () => {
+    const initial = chat();
+    const first = applyConversationUpdate(initial, message({ items: [], settled: { evidenceText: '暂不出兵' } }), null);
+    const existing = { ...initial, worldState: { ...initial.worldState, conversationContinuity: first.continuity } };
+    const openItem = { ...item, kind: 'issue' as const, status: 'open' as const };
+    expect(applyConversationUpdate(existing, message({ items: [openItem] }), null).continuity?.settledAt).toBeUndefined();
+    expect(applyConversationUpdate(existing, message({ items: [{ ...openItem, evidenceText: '未发送' }] }), null).continuity?.settledAt).toBe(10);
+    expect(applyConversationUpdate(existing, message({ items: [openItem], settled: { evidenceText: '暂不出兵' } },
+      { timestamp: 11 }), null).continuity?.settledAt).toBe(11);
+  });
 });

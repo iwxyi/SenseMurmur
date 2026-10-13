@@ -4216,6 +4216,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
     chat = await commitHumanTurn(runtime, chat, characters, messages, message, api);
   }
 
+  const conversationRunStart = chat;
   for (let turn = 1; turn <= turnCount; turn += 1) {
     // The session runner pauses private/study rooms after one generation.
     // Only an explicit user injection unlocks another round in this harness.
@@ -4225,7 +4226,6 @@ async function runRuntimeChatflowScenario(model, scenario) {
       .filter((message) => !message.isDeleted && message.type !== 'system' && message.type !== 'event')
       .map((message) => ({ type: message.type, senderName: message.senderName, content: message.content }));
     const scenarioStateBefore = collectScenarioStateSnapshot(chat);
-    const chatBeforeTurn = chat;
     logProgress('chatflow turn generate', { model, scenario: scenario.name, turn, turnCount });
     let completed = null;
     const originalFetch = globalThis.fetch;
@@ -4455,7 +4455,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
       chat = await commitHumanTurn(runtime, chat, characters, messages, message, api);
       userInjectionLog.push({ afterTurn: turn, content: injection.content });
     }
-    if (runtime.shouldPauseSettledConversation(chatBeforeTurn, chat, characters, messages)
+    if (runtime.shouldPauseSettledConversation(conversationRunStart, chat, characters, messages)
       && !injections.length) {
       naturallySettled = true;
       logProgress('chatflow naturally settled', { model, scenario: scenario.name, turn });
