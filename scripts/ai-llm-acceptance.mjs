@@ -3720,6 +3720,32 @@ function runtimeChatflowScenarios() {
       { turn: 2, id: 'continuity:fei-scout-report', absent: true },
     ],
   });
+  const conflictId = 'fei-yu-judgement';
+  scenarios.push({
+    name: 'longzhong_conflict_resolution_room', roomKind: 'group', turns: 2,
+    chat: { ...longzhong.chat, id: 'acceptance-longzhong-conflict-resolution', name: '兄弟释嫌',
+      topic: '关羽误判张飞只会蛮干，双方已经公开说清这一次误会。',
+      initialConflictState: { primaryConflict: {
+        id: conflictId, scope: 'group', type: 'identity_ownership', severity: 0.3, stage: 'cooling',
+        summary: '张飞因关羽将他当作只会蛮干的莽夫而不满，双方正在澄清这一次误判。',
+        participantIds: ['fei', 'yu'], targetIds: ['fei'], nextPressure: 'cool',
+        developmentHooks: [], sourceEventIds: [], updatedAt: now - 40_000,
+      }, activeConflicts: [], developmentHooks: [], volatility: 0.3, cooling: 0.4, updatedAt: now - 40_000 } },
+    characters: longzhong.characters,
+    seedMessages: [
+      acceptanceAiMessage('acceptance-longzhong-conflict-resolution', 'yu', '关羽',
+        '三弟，这回是我看轻你了。你探路没有硬闯，记录也清楚，我先前说你只会蛮干，错在我。', now - 40_000),
+      acceptanceAiMessage('acceptance-longzhong-conflict-resolution', 'fei', '张飞',
+        '二哥，你肯说这句，俺就不计较了。这次误会咱俩说开了，以后别再拿俺当莽夫。', now - 20_000,
+        { addressedTargetIds: ['yu'], primaryAddressedTargetId: 'yu' }),
+    ],
+    userInjections: [{ afterTurn: 1, content: '大哥，二弟三弟这次说开了，你怎么看？' }],
+    conflictExpectations: [{ turn: 1, id: conflictId, absent: true }, { turn: 2, id: conflictId, absent: true }],
+    narrativeExpectations: [{ turn: 1, id: conflictId }, { turn: 2, id: conflictId, absent: true }],
+    promptExpectations: [{ turn: 1, speakerId: 'yu', text: `"conflictId":"${conflictId}"` },
+      { turn: 2, speakerId: 'bei', text: `"conflictId":"${conflictId}"`, absent: true }],
+    rubricHint: '具体误判已公开道歉并被接受，观察关羽承接和解及原冲突解决写回，刘备随后读取结果。不制造新误会，不要求永久关系数值变化，也不反复索取原谅。',
+  });
   const commitmentResult = scenarios.find((scenario) => scenario.name === 'longzhong_commitment_result_room');
   if (!commitmentResult) throw new Error('Commitment result fixture missing');
   scenarios.push({
@@ -3766,6 +3792,18 @@ function runtimeChatflowScenarios() {
 
 function assertRuntimeChatflowTranscript(scenario, transcript, errors, naturallySettled = false) {
   assertCondition(errors.length === 0, `chatflow ${scenario.name} produced runtime errors`, errors.map((error) => String(error?.message || error)));
+  for (const expected of scenario.conflictExpectations || []) {
+    const turn = transcript.find((item) => item.turn === expected.turn);
+    const state = turn?.conflictStateAfter;
+    const active = [state?.primaryConflict, ...(state?.activeConflicts || [])].filter(Boolean);
+    const exists = active.some((item) => item.id === expected.id);
+    assertCondition(turn && exists === !expected.absent,
+      `chatflow ${scenario.name} turn ${expected.turn} conflict lifecycle mismatch`, { expected, actual: state });
+    if (expected.absent && expected.turn === 1) {
+      assertCondition(turn.conflictUpdates.some((item) => item.conflictFocus.conflictId === expected.id
+        && item.conflictFocus.stage === 'resolved'), 'Conflict disappeared without an explicit resolution', turn.conflictUpdates);
+    }
+  }
   for (const expected of scenario.continuityExpectations || []) {
     const turn = transcript.find((item) => item.turn === expected.turn);
     const item = turn?.conversationContinuityAfter?.items.find((item) => item.key === expected.key);
@@ -3924,10 +3962,11 @@ function createRuntimeChat(runtime, scenario) {
     updatedAt: Date.now(),
     lastMessageAt: Date.now(),
     topicSeed: scenario.chat.topic,
-    ...(scenario.chat.initialRoomState ? {
+    ...(scenario.chat.initialRoomState || scenario.chat.initialConflictState ? {
       worldState: {
         ...draft.worldState,
-        structuredRoomState: scenario.chat.initialRoomState,
+        ...(scenario.chat.initialRoomState ? { structuredRoomState: scenario.chat.initialRoomState } : {}),
+        ...(scenario.chat.initialConflictState ? { conflictState: scenario.chat.initialConflictState } : {}),
       },
     } : {}),
   });

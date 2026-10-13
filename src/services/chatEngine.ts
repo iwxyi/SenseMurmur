@@ -3079,14 +3079,12 @@ function buildStructuredOutputProtocolTrace(params: {
   const rawInteractionHintCount = params.parsedEnvelope?.interactionHints
     ? countRawHintItems(params.parsedEnvelope.interactionHints.primary) + countRawHintItems(params.parsedEnvelope.interactionHints.secondary)
     : countRawHintItems(rawObject?.interactionHints);
-  const hasSocialOuting = socialHints.some((hint) => hint.eventKind === 'social_outing');
   const policyHits = [
     params.parsedEnvelope ? 'structured_output:json_envelope_parsed' : 'structured_output:no_json_envelope',
     `structured_output:social_event_hints:${socialHints.length}`,
     `structured_output:interaction_hints:${interactionHints.length}`,
     rawSocialHintCount > socialHints.length ? `structured_output:social_event_hints_dropped:${rawSocialHintCount - socialHints.length}` : '',
     rawInteractionHintCount > interactionHints.length ? `structured_output:interaction_hints_dropped:${rawInteractionHintCount - interactionHints.length}` : '',
-    params.userGuidance?.beatType === 'invite' && !hasSocialOuting ? 'structured_output:invite_guidance_without_social_outing' : '',
   ].filter(Boolean) as string[];
   const guidanceValidation = [
     `jsonEnvelope=${params.parsedEnvelope ? 'parsed' : rawObject ? 'invalid_visible_contract' : 'missing'}`,
@@ -3094,7 +3092,6 @@ function buildStructuredOutputProtocolTrace(params: {
     `interactionHints=${interactionHints.length}`,
     rawSocialHintCount > socialHints.length ? `droppedSocialEventHints=${rawSocialHintCount - socialHints.length}` : '',
     rawInteractionHintCount > interactionHints.length ? `droppedInteractionHints=${rawInteractionHintCount - interactionHints.length}` : '',
-    params.userGuidance?.beatType === 'invite' && !hasSocialOuting ? 'inviteGuidanceSocialOuting=missing' : '',
   ].filter(Boolean).join(';');
   return {
     policyHits,
@@ -3942,8 +3939,10 @@ function resolveUserGuidanceLockedSpeaker(chatMembers: AICharacter[], directorIn
   const targetIds = directorIntent?.targetActorIds || [];
   if (!targetIds.length) return null;
   if (!guidance) return null;
-  const shouldLock = guidance.actorIds.length > 0
-    && (guidance.kind === 'direct_reply' || guidance.kind === 'media_request');
+  // actorIds is authoritative for the next floor whenever the assessor found
+  // a named execution or speaking target. topic_shift may still be addressed
+  // to one person; its kind must not turn that target into a suggestion.
+  const shouldLock = guidance.actorIds.length > 0;
   if (!shouldLock) return null;
   for (const actorId of targetIds) {
     const speaker = chatMembers.find((member) => member.id === actorId);
@@ -4571,8 +4570,7 @@ export async function generateSpeakerMessage(params: {
     bubbleCount: generated.messageParts?.length || Math.max(1, 1 + (generated.extraMessages?.length || 0)),
   });
   if (structuredOutputTrace.policyHits.includes('structured_output:no_json_envelope')
-    || structuredOutputTrace.policyHits.some((item) => item.includes('_dropped:'))
-    || structuredOutputTrace.policyHits.includes('structured_output:invite_guidance_without_social_outing')) {
+    || structuredOutputTrace.policyHits.some((item) => item.includes('_dropped:'))) {
     logDeveloperDiagnostic('chat-run:structured-output-protocol', {
       chatId: params.chat.id,
       speakerId: params.speaker.id,

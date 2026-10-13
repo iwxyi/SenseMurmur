@@ -242,9 +242,8 @@ function getForcedUserGuidanceActorIds(directorIntent?: DirectorIntent | null) {
   if (directorIntent?.source !== 'user_message') return [];
   const guidance = directorIntent.userGuidance;
   if (guidance) {
-    if (guidance.kind === 'direct_reply') return directorIntent.targetActorIds;
-    if (guidance.kind === 'media_request') return directorIntent.targetActorIds;
-    return [];
+    // actorIds is the assessed floor order for every guidance kind.
+    return guidance.actorIds.length ? directorIntent.targetActorIds : [];
   }
   return directorIntent.beatType === 'answer' ? directorIntent.targetActorIds : [];
 }

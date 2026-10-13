@@ -918,7 +918,7 @@ describe('chatEngine streaming preview', () => {
     expect(contract).not.toContain('char-outside');
   });
 
-  it('records structured output protocol diagnostics for invite guidance without social outing hints', async () => {
+  it('does not treat invite beat guidance as a required social outing', async () => {
     generateResponseMock.mockReset();
     generateResponseMock.mockResolvedValue(JSON.stringify({
       content: '今晚九点半，后巷蓝布门帘那家旧茶馆，大家来不来随意。',
@@ -960,8 +960,8 @@ describe('chatEngine streaming preview', () => {
     const trace = message.metadata?.runtimeDecision?.generationRuntime?.trace as { policyHits?: string[]; guidanceValidation?: string } | undefined;
 
     expect(trace?.policyHits).toContain('structured_output:json_envelope_parsed');
-    expect(trace?.policyHits).toContain('structured_output:invite_guidance_without_social_outing');
-    expect(trace?.guidanceValidation).toContain('inviteGuidanceSocialOuting=missing');
+    expect(trace?.policyHits).not.toContain('structured_output:invite_guidance_without_social_outing');
+    expect(trace?.guidanceValidation).not.toContain('inviteGuidanceSocialOuting=missing');
   });
 
   it('does not locally force detailed chat requests into a professional longform surface', async () => {
