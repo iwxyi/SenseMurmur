@@ -232,6 +232,27 @@ describe('buildSystemPromptWithContext', () => {
     ]);
   });
 
+  it.each(['free', 'roleplay'] as const)('grounds group speaker identity and past accounts in %s style', (style) => {
+    const speaker = buildCharacter();
+    const prompt = buildSystemPromptWithContext(speaker, { ...buildChat(), style }, 0, [
+      buildMessage({ type: 'user', senderId: 'user', senderName: '用户', content: '三弟，你怎么确认的？' }),
+    ], new Map([[speaker.id, speaker]]));
+    expect(prompt).toContain('Follow the named transcript speaker, not the API role');
+    expect(prompt).toContain('only when explicitly established');
+    expect(prompt).toContain('unknown details remain unknown or clearly tentative');
+    expect(prompt).toContain('New present actions may unfold');
+  });
+
+  it('keeps ordinary group continuity rules out of private and story-reader contracts', () => {
+    const speaker = buildCharacter();
+    for (const chat of [buildDirectChat(), normalizeConversation({ ...buildChat(),
+      sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'story-reader', surfaceProfile: 'text' } })]) {
+      const prompt = buildSystemPromptWithContext(speaker, chat, 0, [], new Map([[speaker.id, speaker]]));
+      expect(prompt).not.toContain('Follow the named transcript speaker, not the API role');
+      expect(prompt).not.toContain('unknown details remain unknown or clearly tentative');
+    }
+  });
+
   it('projects direct chat history with the current speaker as assistant', () => {
     const rendered = buildChatMessages([
       buildMessage({ type: 'user', senderId: 'user', senderName: '开发者', content: '能具体讲讲第一章发生了什么吗？', timestamp: 1 }),
@@ -418,6 +439,27 @@ describe('buildSystemPromptWithContext', () => {
 
     expect(trace.targetActorId).toBe('char-b');
     expect(trace.targetReason).toBe('来自上一条消息的最近发言者');
+  });
+
+  it.each(['user', 'god'] as const)('does not retrieve the old AI counterpart after a new %s turn without a character subject', (type) => {
+    const speaker = buildCharacter({ id: 'char-a', name: '张飞' });
+    const other = buildCharacter({ id: 'char-b', name: '关羽' });
+    const members = new Map([[speaker.id, speaker], [other.id, other]]);
+    const room = { ...buildChat(), memberIds: [speaker.id, other.id] };
+    const messages = [
+      buildMessage({ senderId: other.id, senderName: other.name, content: '记录看过了。', timestamp: 1 }),
+      buildMessage({ type, senderId: 'user', senderName: '用户', content: '南门的空当是怎么确认的？', timestamp: 2 }),
+      buildMessage({ type: 'system', content: '系统消息', timestamp: 3 }),
+      buildMessage({ senderId: other.id, content: '已删除消息', isDeleted: true, timestamp: 4 }),
+    ];
+    const assembly = buildPromptAssemblyWithContext(speaker, room, 0, messages, members);
+
+    expect(assembly.memoryTrace.targetActorId).toBeUndefined();
+    expect(assembly.characterMindTrace.targetActorId).toBe('user');
+
+    const withSubject = buildPromptAssemblyWithContext(speaker, room, 0, messages, members, { preferredTargetActorId: other.id });
+    expect(withSubject.memoryTrace.targetActorId).toBe(other.id);
+    expect(withSubject.memoryTrace.targetReason).toBe('来自本回合行为规划的当前对象');
   });
 
   it('keeps the planner target for retrieval without assigning the group reply recipient', () => {

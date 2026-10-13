@@ -767,7 +767,13 @@ function buildResponseRulesPrompt(chat: GroupChat) {
   const lengthRule = usesUnifiedOrdinaryGroupTurnContract(chat)
     ? ''
     : '- Do not default to a fixed medium length. Use the length this character would naturally use in this moment: sometimes one tiny reaction, sometimes one sentence, sometimes a fuller line when pressure, care, defense, or explanation calls for it.';
-  return `\n## Response Rules\n${[...base, ...directRelationshipRule, lengthRule].filter(Boolean).join('\n')}`;
+  const groupContinuityRules = chat.type === 'group' && usesUnifiedOrdinaryGroupTurnContract(chat)
+    ? [
+        '- Follow the named transcript speaker, not the API role: user-side context includes other characters, the human User, and Topic guidance. A familiar form of address does not make User another member. Use an in-scene identity for User only when explicitly established; Topic guidance is an instruction, not a character speaking.',
+        '- Keep accounts of past events grounded in the visible exchange and available continuity. When asked how an established result happened, unknown details remain unknown or clearly tentative; do not invent witnesses, places, timing, actions or motives as remembered evidence. New present actions may unfold without rewriting past events or assigning unspoken actions to other people.',
+      ]
+    : [];
+  return `\n## Response Rules\n${[...base, ...groupContinuityRules, ...directRelationshipRule, lengthRule].filter(Boolean).join('\n')}`;
 }
 
 function traceMemoryItem(item: MemoryItem, members: DisplayTextMember[]): PromptMemoryTraceItem {
@@ -1097,6 +1103,10 @@ function resolvePromptTarget(chat: GroupChat, messages: Message[], characters: M
   if (preferredTargetActorId && preferredTargetActorId !== speaker.id) {
     const preferredTarget = characters.get(preferredTargetActorId);
     if (preferredTarget) return { target: preferredTarget, reason: '来自本回合行为规划的当前对象' };
+  }
+  const latestVisible = messages.filter((item) => !item.isDeleted && item.type !== 'system' && item.type !== 'event').at(-1);
+  if (chat.type === 'group' && usesUnifiedOrdinaryGroupTurnContract(chat) && latestVisible && isHumanDirectedMessage(latestVisible)) {
+    return { target: undefined, reason: '当前人类发言没有明确人物检索对象，禁止回退到旧 AI 发言者' };
   }
   if (chat.type === 'direct') {
     return messages.filter((item) => !item.isDeleted).slice().reverse().find((item) => item.senderId !== speaker.id && item.type !== 'system' && item.type !== 'event')
