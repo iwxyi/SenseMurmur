@@ -635,11 +635,7 @@ export function calculateWeights(
   const flattenedCandidates = weightedCandidates.flat();
   const activeCandidates = flattenedCandidates.filter((candidate) => !candidate.idleStaySilent);
   const baseSelectedCandidates = activeCandidates.length ? activeCandidates : flattenedCandidates;
-  const loopBreakerCandidates = (pendingTwoActorLoop || twoActorDominance) && !forcedUserGuidanceActorIds.length
-    ? baseSelectedCandidates.filter((candidate) => candidate.scoreBreakdown?.reasons.includes('unspoken_member'))
-    : [];
-  const selectedCandidates = loopBreakerCandidates.length ? loopBreakerCandidates : baseSelectedCandidates;
-  return selectedCandidates.map((candidate) => ({
+  return baseSelectedCandidates.map((candidate) => ({
     characterId: candidate.characterId,
     weight: candidate.weight,
     scoreBreakdown: candidate.scoreBreakdown,

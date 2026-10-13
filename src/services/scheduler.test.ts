@@ -395,7 +395,7 @@ describe('scheduler speaker scoring', () => {
     expect(c?.scoreBreakdown?.reasons).not.toContain('unspoken_member');
   });
 
-  it('lets an unspoken member break a two-actor pending-reply loop', () => {
+  it('lets an unspoken member compete without removing the pending responder in a two-actor loop', () => {
     const now = Date.now();
     const latest = buildMessage({ id: 'm3', senderId: 'a', senderName: '甲', content: '乙，那你的规矩是什么？', timestamp: now - 5_000 });
     latest.interactionHints = [{
@@ -432,8 +432,8 @@ describe('scheduler speaker scoring', () => {
 
     const b = candidates.find((candidate) => candidate.characterId === 'b');
     const c = candidates.find((candidate) => candidate.characterId === 'c');
-    expect(candidates.map((candidate) => candidate.characterId)).toEqual(['c']);
-    expect(b).toBeUndefined();
+    expect(candidates.map((candidate) => candidate.characterId)).toEqual(['b', 'c']);
+    expect(b?.scoreBreakdown?.reasons).toContain('pending_reply');
     expect(c?.scoreBreakdown?.reasons).toContain('unspoken_member');
     expect(c?.scoreBreakdown?.reasons).not.toContain('direct_user_address');
   });
@@ -485,7 +485,7 @@ describe('scheduler speaker scoring', () => {
     expect(candidates[0]?.scoreBreakdown?.reasons).toContain('director:answer:target');
   });
 
-  it('lets an unspoken member break a two-actor exchange even without interaction hints', () => {
+  it('lets an unspoken member speak when the other participants prefer silence', () => {
     const now = Date.now();
     const messages = [
       buildMessage({ id: 'm1', senderId: 'a', senderName: '甲', content: '第一天先把规矩定死。', timestamp: now - 25_000 }),
@@ -509,7 +509,32 @@ describe('scheduler speaker scoring', () => {
     );
 
     expect(candidates.map((candidate) => candidate.characterId)).toEqual(['c']);
-    expect(candidates[0]?.scoreBreakdown?.reasons).toContain('unspoken_member');
+    expect(candidates.find((candidate) => candidate.characterId === 'c')?.scoreBreakdown?.reasons).toContain('unspoken_member');
+  });
+
+  it('keeps a user-invited recent speaker eligible instead of giving an unspoken member the whole turn', () => {
+    const now = Date.now();
+    const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙'), buildCharacter('c', '丙')];
+    const messages = [
+      buildMessage({ id: 'm1', senderId: 'a', content: '记录我带回来了。', timestamp: now - 25_000 }),
+      buildMessage({ id: 'm2', senderId: 'a', content: '乙，你看清了吗？', timestamp: now - 15_000 }),
+      buildMessage({ id: 'm3', senderId: 'b', content: '看清了，这份记录能用。', timestamp: now - 5_000 }),
+      buildMessage({ id: 'u1', type: 'user', senderId: 'user', content: '乙，你看甲这趟做得怎么样？', timestamp: now - 1_000 }),
+    ];
+    const intent: DirectorIntent = {
+      source: 'user_message', beatType: 'invite', targetActorIds: ['b'], pressure: 0.5,
+      reason: '用户邀请乙评价。',
+      userGuidance: {
+        kind: 'topic_shift', rawText: messages[3].content, actorIds: ['b'], mentionedActorIds: ['a'],
+        hasHardConstraints: false, focusText: messages[3].content, beatType: 'invite',
+        pressure: 0.5, maxTurns: 1, minTargetTurns: 1, reason: '用户邀请乙评价。',
+      },
+    };
+    const candidates = calculateWeights(characters, messages, {}, 1, 0, null,
+      { ...buildChat(), memberIds: ['a', 'b', 'c'] }, intent);
+
+    expect(candidates.find((candidate) => candidate.characterId === 'b')?.scoreBreakdown?.reasons).toContain('direct_user_address');
+    expect(candidates.find((candidate) => candidate.characterId === 'c')?.scoreBreakdown?.reasons).toContain('unspoken_member');
   });
 
   it('drops low-pressure stay-silent candidates when another actor has a live cue', () => {
