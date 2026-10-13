@@ -3515,6 +3515,26 @@ function runtimeChatflowScenarios() {
     ],
   });
   const underworld = scenarios.find((scenario) => scenario.name === 'underworld_hierarchy_emotion_room');
+  scenarios.push({
+    name: 'longzhong_commitment_result_room',
+    roomKind: 'group',
+    turns: 3,
+    rubricHint: '张飞探路归来，关羽实际收到了他交回的关口记录。观察人物对结果的反应及原承诺的完成写回，不重复索取接受，不要求新增冲突、任务或固定气泡数。',
+    chat: { ...longzhong.chat, id: 'acceptance-longzhong-result', name: '探路归来', topic: '张飞探路归来，把关口记录交到关羽手中。' },
+    characters: longzhong.characters.map((character) => character.id === 'yu'
+      ? { ...character, background: `${character.background} 张飞刚将实地探路的关口记录交到你手里，你实际收到并看清了记录。` }
+      : character),
+    seedMessages: [
+      acceptanceAiMessage('acceptance-longzhong-result', 'fei', '张飞', '俺去探路，回来把关口记录交给二哥。', now - 40_000, {
+        metadata: { conversationUpdate: { items: [{ key: 'fei-scout-report', kind: 'commitment', status: 'established',
+          summary: '张飞承诺探路后将关口记录交给关羽', participantIds: ['fei', 'yu'], evidenceText: '俺去探路，回来把关口记录交给二哥' }] } },
+      }),
+      acceptanceAiMessage('acceptance-longzhong-result', 'fei', '张飞', '二哥，关口都走过了，记录给你。南门换哨时有半刻空当，俺没硬闯，绕回来才看准。你看清了没？', now - 20_000, {
+        addressedTargetIds: ['yu'], primaryAddressedTargetId: 'yu',
+      }),
+    ],
+    continuityExpectations: [{ turn: 1, key: 'fei-scout-report', status: 'resolved' }],
+  });
   if (!underworld) throw new Error('Underworld character fixture missing');
   const backgrounds = {
     yan: '幽都最高裁决者，与夜巡属下共事多年。',

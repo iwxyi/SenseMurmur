@@ -93,6 +93,29 @@ describe('conversation continuity commit boundary', () => {
       .some((line) => line.id === 'continuity:role')).toBe(false);
   });
 
+  it('carries a fulfilled commitment into the next context without resolving a separate issue', () => {
+    const initial = chat();
+    const first = applyConversationUpdate(initial, message({ items: [
+      { ...item, kind: 'commitment' },
+      { ...item, key: 'separate', kind: 'issue', status: 'open' },
+    ] }), null);
+    const existing = { ...initial, worldState: { ...initial.worldState, conversationContinuity: first.continuity } };
+    const next = applyConversationUpdate(existing, message({ items: [{ ...item, kind: 'commitment', status: 'resolved',
+      summary: '关口记录已交回', evidenceText: '关口记录收到了' }] }, {
+      id: 'result', senderId: 'b', content: '关口记录收到了。', timestamp: 20,
+    }), null);
+    const updated = { ...existing, worldState: { ...existing.worldState, conversationContinuity: next.continuity } };
+    expect(next.continuity?.items.find((entry) => entry.key === 'role')).toMatchObject({
+      status: 'resolved', sourceMessageIds: ['sent', 'result'],
+    });
+    expect(next.continuity?.items.find((entry) => entry.key === 'separate')?.status).toBe('open');
+    expect(buildConversationContinuityContext(updated, [{ id: 'a', name: '甲' }, { id: 'b', name: '乙' }]))
+      .toContain('[role] commitment/resolved: 关口记录已交回');
+    expect(projectNarrativeLines({ chat: updated, messages: [] }).filter((line) => line.contextKind === 'unresolved')
+      .map((line) => line.id)).toContain('continuity:separate');
+    expect(projectNarrativeLines({ chat: updated, messages: [] }).some((line) => line.id === 'continuity:role')).toBe(false);
+  });
+
   it('rejects withdrawn, private and nonmember evidence', () => {
     for (const patch of [
       { senderId: 'outsider' },
