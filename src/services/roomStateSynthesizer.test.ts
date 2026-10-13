@@ -31,6 +31,25 @@ describe('roomStateSynthesizer', () => {
     expect(hasRoomShiftSignal(shift)).toBe(true);
   });
 
+  it('does not passively decay model-authored state without a reported delta', () => {
+    const current = {
+      heat: 22,
+      cohesion: 18,
+      topicDrift: 9,
+      dominantThread: null,
+      alliances: [],
+      conflictPairs: [],
+      pileOnTarget: null,
+      silencedActors: [],
+    };
+    const { nextState, shift } = calculateRoomShift(current, buildInteraction({
+      immediateImpact: { roomDelta: { heat: 0, cohesion: 0, topicDrift: 0 } },
+    }), { semanticSource: 'model' });
+    expect(nextState).toMatchObject({ heat: 22, cohesion: 18, topicDrift: 9,
+      alliances: [], conflictPairs: [], pileOnTarget: null, silencedActors: [] });
+    expect(shift.delta).toEqual({ heat: 0, cohesion: 0, topicDrift: 0 });
+  });
+
   it('tracks the dominant thread without treating every challenge as silencing', () => {
     const { nextState } = calculateRoomShift(null, buildInteraction());
     expect(nextState.dominantThread).toEqual(['a', 'b']);
@@ -162,8 +181,8 @@ describe('roomStateSynthesizer', () => {
     }), { semanticSource: 'model' });
 
     expect(shift.delta).toEqual({ heat: 7, cohesion: -3, topicDrift: 2 });
-    expect(nextState.heat).toBe(25);
-    expect(nextState.cohesion).toBe(-6);
+    expect(nextState.heat).toBe(27);
+    expect(nextState.cohesion).toBe(-7);
     expect(nextState.alliances).toEqual([]);
     expect(nextState.conflictPairs).toEqual([]);
   });

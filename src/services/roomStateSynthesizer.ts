@@ -169,13 +169,15 @@ export function calculateRoomShift(
         conflictPairs: normalizePairs(current.conflictPairs || []),
       }
     : createBaseRoomState();
+  const modelAuthored = options.semanticSource === 'model';
   const cooledBase = {
     ...base,
-    heat: coolHeat(base.heat),
-    cohesion: relaxCohesion(base.cohesion),
-    topicDrift: relaxTopicDrift(base.topicDrift),
+    // A model-authored turn owns its explicit room delta. Passive decay here
+    // would change state without evidence and make the submitted delta lie.
+    heat: modelAuthored ? base.heat : coolHeat(base.heat),
+    cohesion: modelAuthored ? base.cohesion : relaxCohesion(base.cohesion),
+    topicDrift: modelAuthored ? base.topicDrift : relaxTopicDrift(base.topicDrift),
   };
-  const modelAuthored = options.semanticSource === 'model';
   const delta = interactions
     .map((item) => modelAuthored
       ? {
