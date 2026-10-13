@@ -58,7 +58,7 @@ export function buildRelationshipPrompt(character: AICharacter, targetCharacter?
 export function buildConflictAxesPrompt(chat: GroupChat) {
   const axes = chat.worldState.conflictAxes || [];
   if (!axes.length) return '';
-  return `\n## Conflict Axes\n${axes.map((axis) => `- ${axis.title}: ${axis.poles[0]} ↔ ${axis.poles[1]}${typeof axis.currentTilt === 'number' ? ` (tilt ${axis.currentTilt > 0 ? '+' : ''}${axis.currentTilt})` : ''}`).join('\n')}`;
+  return `\n## Conflict Axes\nConfiguration references only. Legacy tilt values do not establish actual support, alliances, expression style, or conflict resolution; use recorded room state, conflict state, and visible speech as evidence.\n${axes.map((axis) => `- ${axis.title}: ${axis.poles[0]} ↔ ${axis.poles[1]}${typeof axis.currentTilt === 'number' ? ` (tilt ${axis.currentTilt > 0 ? '+' : ''}${axis.currentTilt})` : ''}`).join('\n')}`;
 }
 
 export function buildGroupDynamicsPrompt(chat: GroupChat, dramaBoost = false) {

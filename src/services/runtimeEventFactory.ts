@@ -284,7 +284,7 @@ export function buildTimelineEntryFromRuntimeEvent(payload: RuntimeEventPayload,
 
 export function buildRuntimeMemoryEntryFromEvent(payload: RuntimeEventPayload): { kind: 'note' | 'artifact'; text: string } | null {
   const event = normalizeRuntimeEvent(payload);
-  if (event.eventType === 'world_state_shift' || event.eventType === 'conflict_axis_shift') {
+  if (event.eventType === 'world_state_shift') {
     return { kind: 'note', text: describeRuntimeEvent(event) };
   }
   return null;

@@ -39,6 +39,17 @@ function buildChat() {
 }
 
 describe('layeredMemoryEngine', () => {
+  it('does not turn axis configuration and its shift event into conflict memories', () => {
+    const chat = buildChat();
+    chat.runtimeEventsV2 = [];
+    chat.worldState.conflictAxes = [{ title: '群体关系', poles: ['结盟', '拆台'], currentTilt: 40 }];
+    const message = { type: 'ai' as const, senderId: 'char-a', content: '继续。' };
+    expect(buildMemoryCandidates(chat, message)).toEqual([]);
+    expect(buildMemoryCandidates(chat, message, [{
+      eventType: 'conflict_axis_shift', title: '会话冲突轴发生偏移', summary: '群体关系 结盟', createdAt: 123,
+    }])).toEqual([]);
+  });
+
   it('sanitizes memory candidate text before writing layered memories', () => {
     const chat = buildChat();
     const candidates = buildMemoryCandidates(chat, {

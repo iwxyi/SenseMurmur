@@ -182,19 +182,6 @@ function compactStructuredSummary(text: string) {
   return sanitizeMemoryText(text).slice(0, 128);
 }
 
-function buildConflictCandidate(chat: GroupChat): MemoryCandidate | null {
-  if (!chat.worldState.conflictAxes?.length) return null;
-  return {
-    scope: 'conversation',
-    layerHint: 'episodic',
-    kind: 'conflict',
-    ownerId: chat.id,
-    text: sanitizeMemoryCandidateText(chat, `${chat.worldState.conflictAxes.map((axis) => `${axis.title}:${axis.currentTilt || 0}`).join('；')}`),
-    sourceEventIds: [],
-    scoreBreakdown: { stability: 0.55, recurrence: 0.6, impact: 0.7, specificity: 0.65, durability: 0.6 },
-  };
-}
-
 function buildWorldStateCandidate(chat: GroupChat): MemoryCandidate | null {
   if (!chat.worldState.focus && !chat.worldState.mood && !chat.worldState.recentEvent) return null;
   return {
@@ -242,18 +229,6 @@ function buildMemoryCandidatesFromRuntimeEvents(chat: GroupChat, events: Runtime
       }];
     }
 
-    if (event.eventType === 'conflict_axis_shift') {
-      return [{
-        scope: 'conversation',
-        layerHint: 'episodic',
-        kind: 'conflict',
-        ownerId: chat.id,
-        text: compactStructuredSummary(event.summary),
-        sourceEventIds: filterLegacyEventIds([event.eventType, String(event.createdAt || '')]),
-        scoreBreakdown: { stability: 0.7, recurrence: 0.6, impact: 0.8, specificity: 0.7, durability: 0.65 },
-      }];
-    }
-
     if (event.eventType === 'world_state_shift') {
       return [{
         scope: 'system_runtime',
@@ -289,7 +264,6 @@ export function buildMemoryCandidates(chat: GroupChat, message: Pick<Message, 'c
   const structuredCandidates = buildMemoryCandidatesFromStructuredRuntime(chat);
   const eventCandidates = buildMemoryCandidatesFromRuntimeEvents(chat, normalizedEvents);
   const fallbackCandidates = shouldUseLegacyFallback(chat, normalizedEvents) ? [
-    buildConflictCandidate(chat),
     buildWorldStateCandidate(chat),
   ].filter(Boolean) as MemoryCandidate[] : [];
   return [...structuredCandidates, ...eventCandidates, ...fallbackCandidates];

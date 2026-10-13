@@ -55,9 +55,7 @@ export function projectConflictPanelItems(chat: GroupChat, members: AICharacter[
       key: `axis-${axis.title}-${index}`,
       title: cleanText(axis.title, displayMembers),
       text: cleanText(`${axis.poles[0]} / ${axis.poles[1]}`, displayMembers),
-      chips: [axis.currentTilt && axis.currentTilt < 0 ? axis.poles[1] : axis.poles[0]]
-        .filter(Boolean)
-        .map((chip) => cleanText(chip, displayMembers)),
+      chips: ['轴配置'],
     }));
   return [...active, ...axes];
 }

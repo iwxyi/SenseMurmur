@@ -89,7 +89,7 @@ describe('conflictPanelProjection', () => {
     expect(items[0]?.key).toBe('c1');
     expect(items[0]?.chips).toEqual(expect.arrayContaining(['升温中', '甲', '乙']));
     expect(items[1]?.title).toBe('效率 vs 稳妥');
-    expect(items[1]?.chips).toContain('稳妥优先');
+    expect(items[1]?.chips).toEqual(['轴配置']);
   });
 
   it('dedupes duplicate conflict ids and skips resolved conflicts', () => {

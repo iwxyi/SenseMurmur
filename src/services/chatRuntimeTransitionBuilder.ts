@@ -14,7 +14,7 @@ import type { ConflictFocusPayload, ConflictFocusState, ConflictRuntimeState, Ru
 import { applyInteractionEmotions, decayEmotionalState, getEmotionalBaseline, getRuntimeAffectEventDriftLine, getRuntimeAffectEventEmotionLines } from './personalityDrift';
 import { accumulateChatRuntime } from './chatRuntime';
 import { accumulateCharacterRuntime } from './characterRuntime';
-import { createDefaultConflictAxes, evolveConflictAxes, summarizeConflictAxes } from './conflictAxisEngine';
+import { createDefaultConflictAxes, summarizeConflictAxes } from './conflictAxisEngine';
 import { appendMemoryCandidateEvents, buildMemoryCandidateEvents, updateLayeredMemoriesWithEvents } from './layeredMemoryEngine';
 import { consolidateMemoryCandidates } from './memoryConsolidation';
 import { createMemoryDistillationRuntimeEvent, debugCharacterMemoryDistillation, debugChatMemoryDistillation, distillChatMemoryCandidates, distillCharacterMemoryCandidates, getLocalDistillationPolicy, localizeDistillationEventInfo, shouldDistillChatMemories, shouldDistillCharacterMemories } from './memoryDistillation';
@@ -359,21 +359,18 @@ function shouldEmitWorldStateShift(previousWorldState: GroupChat['worldState'], 
 export function buildNextWorldState(
   conversation: GroupChat,
   message: Pick<Message, 'content' | 'type' | 'senderId'> & Partial<Pick<Message, 'metadata' | 'isDeleted'>> & { conflictFocus?: ConflictFocusPayload | null; timestamp?: number },
-  config: RuntimeEvolutionConfig = resolveRuntimeEvolutionConfig(conversation.runtimeEvolutionIntensity),
 ) {
   const now = resolveMessageTimestamp(message, conversation.updatedAt || Date.now());
   const existingAxes = (conversation.worldState.conflictAxes || []).length ? (conversation.worldState.conflictAxes || []) : createDefaultConflictAxes(conversation);
   const normalizedConflict = message.type === 'ai' ? normalizeConflictFocus(message.conflictFocus || null, conversation, message, now) : null;
-  const nextConflictAxes = normalizedConflict && message.type === 'ai' && config.worldMultiplier >= 0.7
-    ? evolveConflictAxes(conversation, message.conflictFocus || null)
-    : existingAxes;
+  const nextConflictAxes = existingAxes;
   const nextConflictState = updateConflictRuntimeState(conversation.worldState.conflictState || null, normalizedConflict, now);
   return {
     worldState: {
       ...conversation.worldState,
       conflictAxes: nextConflictAxes,
       conflictState: nextConflictState,
-      recentEvent: normalizedConflict?.summary || conversation.worldState.recentEvent || (nextConflictAxes.length ? summarizeConflictAxes(nextConflictAxes) : conversation.worldState.recentEvent),
+      recentEvent: normalizedConflict?.summary || conversation.worldState.recentEvent,
     },
     nextConflictAxes,
     nextConflictState,

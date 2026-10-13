@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { buildRuntimeEventMessageContent, buildTimelineEntryFromRuntimeEvent, normalizeRuntimeEvent, parseRuntimeEvent } from './runtimeEventFactory';
+import { buildRuntimeEventMessageContent, buildRuntimeMemoryEntryFromEvent, buildTimelineEntryFromRuntimeEvent, normalizeRuntimeEvent, parseRuntimeEvent } from './runtimeEventFactory';
 
 describe('runtime event message content', () => {
+  it('keeps axis changes visible without promoting them to runtime memory', () => {
+    const event = { eventType: 'conflict_axis_shift', title: '轴配置变化', summary: '群体关系 结盟', createdAt: 123 };
+    expect(buildTimelineEntryFromRuntimeEvent(event).text).toContain('群体关系');
+    expect(buildRuntimeMemoryEntryFromEvent(event)).toBeNull();
+  });
+
   it('compacts memory distillation metrics for chat message storage', () => {
     const content = buildRuntimeEventMessageContent({
       eventType: 'memory_distillation',

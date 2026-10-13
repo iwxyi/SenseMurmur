@@ -7,7 +7,7 @@ import {
   DEFAULT_EMOTIONAL_STATE,
   type AICharacter,
 } from '../types/character';
-import type { ConflictDevelopmentHook } from '../types/runtimeEvent';
+import type { ConflictDevelopmentHook, ConflictFocusPayload } from '../types/runtimeEvent';
 import type { MemoryItem } from './memoryTypes';
 import { buildChatPatch, buildNextWorldState, buildRelationshipTransition, buildWorldRuntimeEvents } from './chatRuntimeTransitionBuilder';
 import { resolveRuntimeEvolutionConfig } from './runtimeEvolutionConfig';
@@ -771,6 +771,39 @@ describe('buildWorldRuntimeEvents', () => {
     expect(resolved.worldState.conflictState?.primaryConflict).toBeNull();
     expect(resolved.worldState.conflictState?.activeConflicts).toEqual([]);
   });
+
+  it.each(['goal_conflict', 'value_conflict', 'tone_escalation', 'identity_ownership'] as const)(
+    'records %s without deriving axis poles or alliances from pressure', (type) => {
+      for (const nextPressure of ['cool', 'stabilize', 'escalate'] as const) {
+        const chat = buildChat({
+          style: 'debate',
+          dramaRules: { allowCliques: true, allowMockery: true, allowAlliances: true, allowContempt: true },
+        });
+        const message = { type: 'ai' as const, senderId: 'char-a', content: '这条风险还没有解决。', timestamp: 123456,
+          conflictFocus: {
+            present: true, type, severity: 0.8, stage: 'open', summary: '上线风险尚未解决。',
+            participantIds: ['char-a', 'char-b'], primaryTargetIds: ['char-b'], nextPressure,
+            developmentHooks: ['invite_target_response'], why: '双方还在争议当前方案是否能够上线。',
+            evidenceText: '这条风险还没有解决',
+          } satisfies ConflictFocusPayload,
+        };
+        const result = buildNextWorldState(chat, message);
+        expect(result.nextConflictState?.primaryConflict).toMatchObject({ type, nextPressure, summary: '上线风险尚未解决。' });
+        expect(result.nextConflictAxes.every((axis) => axis.currentTilt === 0)).toBe(true);
+        expect(result.worldState.structuredRoomState?.alliances || []).toEqual([]);
+        const events = buildWorldRuntimeEvents(message, chat.worldState, result.worldState, result.nextConflictAxes,
+          resolveRuntimeEvolutionConfig('balanced'));
+        expect(events.some((event) => event.eventType === 'conflict_axis_shift')).toBe(false);
+        expect(events.some((event) => event.summary?.includes('结盟'))).toBe(false);
+
+        const configured = { ...chat, worldState: { ...chat.worldState,
+          conflictAxes: [{ title: '自定义轴', poles: ['保留', '调整'] as [string, string], currentTilt: -26 }],
+        } };
+        expect(buildNextWorldState(configured, message).nextConflictAxes).toEqual(configured.worldState.conflictAxes);
+        expect(buildNextWorldState(configured, { type: 'ai', senderId: 'char-a', content: '继续。' }).worldState.recentEvent).toBe('');
+      }
+    },
+  );
 
   it('does not adopt high-severity conflict focus into world state without evidence reason', () => {
     const chat = buildChat();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createDefaultConflictAxes, evolveConflictAxes, summarizeConflictAxes } from './conflictAxisEngine';
+import { createDefaultConflictAxes, summarizeConflictAxes } from './conflictAxisEngine';
 
 describe('conflictAxisEngine', () => {
   it('does not summarize neutral conflict axes as the negative pole', () => {
@@ -12,17 +12,13 @@ describe('conflictAxisEngine', () => {
     expect(summarizeConflictAxes(axes)).toBe('');
   });
 
-  it('decays stale conflict tilt back toward neutral across later messages', () => {
-    const chat = {
-      style: 'free',
-      dramaRules: { allowCliques: false, allowMockery: false, allowAlliances: true, allowContempt: false },
-      worldState: {
-        conflictAxes: [{ title: '归属/身份冲突', poles: ['默认认同', '公开争夺'] as [string, string], currentTilt: -26 }],
-      },
-    };
-
-    const nextAxes = evolveConflictAxes(chat as never, { present: false });
-    expect(nextAxes[0]?.currentTilt).toBeGreaterThan(-26);
-    expect(nextAxes[0]?.currentTilt).toBe(-18);
+  it('does not infer expression or method from permissions and room style', () => {
+    const axes = createDefaultConflictAxes({
+      topic: '',
+      style: 'brainstorm',
+      dramaRules: { allowCliques: true, allowMockery: true, allowAlliances: true, allowContempt: true },
+    });
+    expect(axes.every((axis) => axis.currentTilt === 0)).toBe(true);
+    expect(summarizeConflictAxes(axes)).toBe('');
   });
 });

@@ -2075,7 +2075,7 @@ async function onMessageCommitted(params: {
         conflictFocus: null,
       }
     : params.message;
-  const nextWorldStateResult = buildNextWorldState(params.conversation, publicMessage, config);
+  const nextWorldStateResult = buildNextWorldState(params.conversation, publicMessage);
   const senderIsCharacter = params.characters.some((character) => character.id === publicMessage.senderId);
   const senderIsMember = params.conversation.memberIds.includes(publicMessage.senderId);
   const isPlainUserGuidance = publicMessage.type === 'god'

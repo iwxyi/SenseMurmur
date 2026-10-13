@@ -145,8 +145,8 @@ function buildAxisEvidence(axis: NonNullable<GroupChat['worldState']['conflictAx
   const left = cleanRuntimeText(axis.poles[0], members);
   const right = cleanRuntimeText(axis.poles[1], members);
   return [
-    `长期张力轴：${left} vs ${right}。当前偏向来自最近多轮互动对这条轴的累积影响。`,
-    '它不是一场正在发生的争吵，而是群聊长期容易滑向的关系或立场方向。',
+    `轴配置：${left} vs ${right}。保存值不证明实际立场、联盟或冲突进展。`,
+    '当前冲突以有来源的冲突记录和可见发言为准。',
   ].join('\n');
 }
 
@@ -185,8 +185,8 @@ function buildConflictItems(params: BuildSessionMemorySourcePresentationParams, 
     .map((axis, index) => {
       const favoredPole = (axis.currentTilt || 0) > 0 ? axis.poles[0] : axis.poles[1];
       const meta = params.includeDebug
-        ? `长期张力 / 当前偏向：${cleanRuntimeText(favoredPole, members)} / 强度 ${formatAxisBias(axis.currentTilt)}`
-        : `长期张力 / 当前偏向：${cleanRuntimeText(favoredPole, members)}`;
+        ? `轴配置 / 保存偏向：${cleanRuntimeText(favoredPole, members)} / 幅度 ${formatAxisBias(axis.currentTilt)}`
+        : '轴配置';
       return {
         id: `axis-${index}`,
         category: 'axis',

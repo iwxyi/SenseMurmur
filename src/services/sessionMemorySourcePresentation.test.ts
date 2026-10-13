@@ -175,6 +175,10 @@ describe('sessionMemorySourcePresentation', () => {
     });
 
     expect(presentation.conflict.counts).toEqual({ active: 1, axes: 1, history: 1 });
+    const axis = presentation.conflict.items.find((item) => item.category === 'axis');
+    expect(axis?.meta).toBe('轴配置');
+    expect(axis?.tooltip).not.toContain('累积影响');
+    expect(axis?.tooltip).toContain('不证明实际立场');
     const visibleText = presentation.conflict.items.map((item) => `${item.summary} ${item.meta} ${item.tooltip}`).join('\n');
     expect(visibleText).toContain('成员');
     expect(visibleText).toContain('喜羊羊');
