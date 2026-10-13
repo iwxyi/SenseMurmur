@@ -387,6 +387,8 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     const patch = updateChat.mock.calls[0]?.[1] as { runtimeEventsV2?: RuntimeEventV2[] } | undefined;
     const moment = (patch?.runtimeEventsV2 || []).find((event) => event.kind === 'artifact' && (event.payload as { artifactType?: string }).artifactType === 'moment_text');
     expect(moment?.createdAt).toBe(3);
+    expect(moment?.summary).toBe('甲 发布了一条动态。');
+    expect((patch?.runtimeEventsV2 || []).some((event) => ['relationship_delta', 'memory_candidate', 'room_shift'].includes(event.kind))).toBe(false);
   });
 
   it('suppresses existing post moment candidates when moments generation is disabled', async () => {

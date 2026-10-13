@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { normalizeConversation } from '../types/chat';
 import { findLatestAutoPostMomentCandidate, updateSourceChatAfterPostMoment } from './directSessionRuntime';
 import type { SocialEventCandidatePayload } from '../types/runtimeEvent';
+import { createInitialRoomState } from './roomStateSynthesizer';
 
 function buildPayload(overrides: Partial<SocialEventCandidatePayload> = {}): SocialEventCandidatePayload {
   return {
@@ -58,7 +59,7 @@ function buildChat() {
 }
 
 describe('post moment backflow', () => {
-  it('dedupe helper treats same-cluster moment as already backflowed', () => {
+  it('tracks candidate completion by identity rather than a later moment', () => {
     const chat = buildChat();
     chat.runtimeEventsV2?.push({
       id: 'evt-artifact',
@@ -77,6 +78,15 @@ describe('post moment backflow', () => {
         participantIds: ['a'],
       },
     });
+    expect(findLatestAutoPostMomentCandidate(chat)?.id).toBe('evt-post');
+    chat.runtimeEventsV2?.push({
+      id: 'evt-handled',
+      conversationId: chat.id,
+      kind: 'artifact',
+      createdAt: 3,
+      summary: 'handled_social_event:evt-post',
+      payload: { artifactType: 'handled_social_event', eventId: 'evt-post' },
+    });
     expect(findLatestAutoPostMomentCandidate(chat)).toBeNull();
   });
 
@@ -84,18 +94,28 @@ describe('post moment backflow', () => {
     expect(findLatestAutoPostMomentCandidate(buildChat())?.id).toBe('evt-post');
   });
 
-  it('backflows effect, memory, artifact, and room shift into source chat', () => {
+  it('records publication without inventing reactions, memories, or room changes', () => {
     const chat = buildChat();
+    chat.worldState.structuredRoomState = {
+      ...createInitialRoomState(),
+      heat: 31,
+      cohesion: -12,
+      dominantThread: ['a', 'b'],
+      conflictPairs: [['a', 'b']],
+    };
     const patch = updateSourceChatAfterPostMoment(chat, buildPayload(), '甲');
     const kinds = (patch.runtimeEventsV2 || []).map((event) => event.kind);
-    expect(kinds).toContain('relationship_delta');
-    expect(kinds).toContain('memory_candidate');
+    expect(kinds).not.toContain('relationship_delta');
+    expect(kinds).not.toContain('memory_candidate');
     expect(kinds).toContain('artifact');
-    expect(kinds).toContain('room_shift');
-    const effect = (patch.runtimeEventsV2 || []).find((event) => event.kind === 'relationship_delta');
-    expect((effect?.payload as { eventKind?: string; effectType?: string }).eventKind).toBe('post_moment');
-    expect((effect?.payload as { eventKind?: string; effectType?: string }).effectType).toBe('artifact');
-    expect(patch.worldState?.recentEvent).toContain('甲 发了一条动态');
+    expect(kinds).not.toContain('room_shift');
+    expect(patch.worldState?.structuredRoomState).toEqual(chat.worldState.structuredRoomState);
+    expect(patch.lastMessageAt).toBeUndefined();
+    expect(patch.worldState?.recentEvent).toBe('甲 发布了一条动态。');
+    expect(patch.runtimeSeed?.notes).toContain('甲 发布了一条动态。');
+    const artifact = patch.runtimeEventsV2?.find((event) => event.kind === 'artifact');
+    expect(artifact?.summary).not.toContain('配');
+    expect(artifact?.summary).not.toContain('开心');
   });
 
   it('formats event-themed post moment as a real feed text instead of event record prose', () => {
@@ -142,7 +162,7 @@ describe('post moment backflow', () => {
     expect(text).not.toContain('发了一条动态');
   });
 
-  it('backflows companionship residue into structured moment reflection events', () => {
+  it('does not promote expression seeds into new companionship facts', () => {
     const chat = buildChat();
     const patch = updateSourceChatAfterPostMoment(chat, buildPayload({
       dedupeKey: 'moment-companion-1',
@@ -159,24 +179,7 @@ describe('post moment backflow', () => {
       return payload.eventType === 'companionship_moment_reflection';
     });
 
-    expect(reflections).toHaveLength(2);
-    expect(reflections[0]).toMatchObject({
-      kind: 'artifact',
-      actorIds: ['a'],
-      visibility: 'pair_private',
-      payload: expect.objectContaining({
-        eventType: 'companionship_moment_reflection',
-        characterId: 'a',
-        userId: 'user',
-        momentDedupeKey: 'moment-companion-1',
-        reflectionType: 'shared_phrase',
-        participantIds: expect.arrayContaining(['a', 'user']),
-      }),
-    });
-    expect(reflections[1]?.payload).toMatchObject({
-      eventType: 'companionship_moment_reflection',
-      reflectionType: 'promise',
-      participantIds: expect.arrayContaining(['a', 'b']),
-    });
+    expect(reflections).toHaveLength(0);
+    expect(patch.runtimeEventsV2?.filter((event) => event.kind === 'artifact')).toHaveLength(1);
   });
 });
