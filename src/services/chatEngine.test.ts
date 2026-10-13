@@ -241,6 +241,30 @@ describe('chatEngine streaming preview', () => {
     expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
   });
 
+  it('distinguishes a recorded activity from newer circumstances in the actual model request', async () => {
+    const now = Date.now();
+    const chat = buildChat({ runtimeEventsV2: [{
+      id: 'patrol-start', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 60_000,
+      actorIds: ['mei'], visibility: 'public', summary: '巡城',
+      payload: { calendarItemId: 'patrol', title: '巡城', kind: 'activity', status: 'in_progress',
+        participantIds: ['mei'], startAt: now - 60_000, locationHint: '北门' },
+    }] });
+    const speaker = { ...buildCharacter('mei', '美羊羊'), background: '你正在巡城，刚从北门走到南门，仍在巡查，可以聊天。' };
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ messages: [{ content: '刚到南门，还在巡城。' }],
+      activityUpdate: { calendarItemId: 'patrol', title: '巡城', kind: 'activity', status: 'in_progress',
+        locationHint: '南门', evidenceText: '刚到南门' } }));
+    await generateSpeakerMessage({ chat, speaker, characters: [speaker, buildCharacter('hui', '灰太狼')],
+      messages: [], apiConfig: buildProfiles() });
+    const request = generateResponseMock.mock.calls[0]?.[1];
+    expect(request).toContain('刚从北门走到南门');
+    expect(request).toContain('Last recorded ongoing activity: 巡城 at 北门');
+    expect(request).toContain('Explicit current circumstances or newer visible progress can supersede their location/status');
+    expect(request).toContain('a visible report of a changed location, status or remaining duration updates that same activity');
+    expect(request).toContain('Omit unchanged optional timing and participants');
+    expect(request).not.toContain('Current activity: 巡城 at 北门');
+  });
+
   it('retries malformed activity availability instead of silently removing it', async () => {
     generateResponseMock.mockReset();
     const activityUpdate = { title: '巡城', kind: 'activity', status: 'completed', evidenceText: '巡城走完了' };
@@ -573,7 +597,7 @@ describe('chatEngine streaming preview', () => {
     ] });
     const input = { chat, speaker: buildCharacter('mei', '美羊羊'), members: [buildCharacter('mei', '美羊羊')], now };
     const prompt = __chatEngineTestUtils.buildWorldEventContextPrompt(input);
-    expect(prompt).toContain('Current activity: 修器械 at 营里');
+    expect(prompt).toContain('Last recorded ongoing activity: 修器械 at 营里');
     expect(prompt).toContain('Schedule with unconfirmed time: 等探路信 @ 三日之后');
     expect(prompt).not.toContain('旧活动');
     expect(__chatEngineTestUtils.buildWorldEventInfluenceRulesPrompt(input)).not.toContain('within 6 hours');
@@ -588,7 +612,7 @@ describe('chatEngine streaming preview', () => {
           participantIds: ['mei'], startAt: now - 120_000, endAt: now - 60_000, locationHint: '南门' } },
     ] });
     const input = { chat, speaker: buildCharacter('mei', '美羊羊'), members: [buildCharacter('mei', '美羊羊')], now };
-    expect(__chatEngineTestUtils.buildWorldEventContextPrompt(input)).toContain('Current activity: 巡城 at 南门');
+    expect(__chatEngineTestUtils.buildWorldEventContextPrompt(input)).toContain('Last recorded ongoing activity: 巡城 at 南门');
     expect(__chatEngineTestUtils.buildWorldEventInfluenceRulesPrompt(input)).not.toContain('within 6 hours');
     chat.runtimeEventsV2 = [...(chat.runtimeEventsV2 || []),
       { id: 'patrol-done', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now,

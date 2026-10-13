@@ -2054,7 +2054,7 @@ function buildWorldEventContextPrompt(input: {
     lines.push(`- Attention context: ${targetName} may need ${pressure}.`);
   }
   upcomingCalendar.forEach((item) => {
-    const timing = item.status === 'in_progress' ? 'Current activity' : item.startAt == null ? 'Schedule with unconfirmed time' : 'Upcoming schedule';
+    const timing = item.status === 'in_progress' ? 'Last recorded ongoing activity' : item.startAt == null ? 'Schedule with unconfirmed time' : 'Upcoming schedule';
     lines.push(`- ${timing}: ${item.title}${item.timeHint ? ` @ ${item.timeHint}` : ''}${item.locationHint ? ` at ${item.locationHint}` : ''}.`);
   });
   publicActivities.forEach((item) => {
@@ -2077,7 +2077,7 @@ function buildWorldEventContextPrompt(input: {
   recentMoments.forEach((item) => {
     lines.push(`- Recent social signal: ${item.actorName} posted "${item.title}" (${item.kind}).`);
   });
-  return `\n\nWorld event context:\n${lines.join('\n')}\n- Let these signals subtly shape tone and priorities, but do not quote this block directly.`;
+  return `\n\nWorld event context:\n${lines.join('\n')}\n- Calendar entries are last recorded facts. Explicit current circumstances or newer visible progress can supersede their location/status; do not invent a different location or progress.\n- Let these signals subtly shape tone and priorities, but do not quote this block directly.`;
 }
 
 function buildWorldEventInfluenceRulesPrompt(input: {
