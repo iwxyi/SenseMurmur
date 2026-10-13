@@ -145,6 +145,31 @@ describe('openChatEngine runtime context', () => {
 });
 
 describe('openChatEngine.onMessageCommitted', () => {
+  it('retains memory backflow events alongside structured message and continuity events', async () => {
+    const chat = buildChat({ layeredMemories: [{
+      id: 'shared-decision', scope: 'conversation', layer: 'long_term', kind: 'decision', ownerId: 'chat-1',
+      subjectIds: ['a', 'b'], text: '两人约定先探路再议。', salience: 0.8, confidence: 0.9, recency: 1,
+      reinforcementCount: 1, sourceEventIds: [], origin: 'distilled',
+      createdAt: Date.now() - 60_000, updatedAt: Date.now() - 60_000,
+    }] });
+    const result = await openChatEngine.onMessageCommitted({
+      conversation: chat, characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')],
+      message: { id: 'reply', type: 'ai', senderId: 'a', content: '我先去探路。',
+        metadata: { conversationUpdate: { items: [{ key: 'scout', kind: 'commitment', status: 'established',
+          summary: '甲承诺探路', participantIds: ['a'], evidenceText: '我先去探路。' }] } } },
+      previousAiMessage: null, recentMessages: [],
+    });
+    const events = readAppliedRuntimeEvents(chat, result);
+    expect(events).toContainEqual(expect.objectContaining({ id: 'distilled-shared-decision', kind: 'memory_candidate' }));
+    expect(events).toContainEqual(expect.objectContaining({ kind: 'message_generated' }));
+    expect(events).toContainEqual(expect.objectContaining({ payload: expect.objectContaining({ eventType: 'conversation_item_updated' }) }));
+    const next = applyResultToChat(chat, result);
+    const second = await openChatEngine.onMessageCommitted({ conversation: next,
+      characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')],
+      message: { id: 'reply-2', type: 'ai', senderId: 'b', content: '路上仔细。' }, previousAiMessage: { senderId: 'a' }, recentMessages: [] });
+    expect(readAppliedRuntimeEvents(next, second).filter((event) => event.id === 'distilled-shared-decision')).toHaveLength(1);
+  });
+
   it('persists model-assessed user guidance instead of reparsing message prose', async () => {
     generateJsonResponseMock.mockResolvedValue(JSON.stringify({
       kind: 'direct_reply', actorIds: ['a'], mentionedActorIds: ['a', 'b'],

@@ -291,6 +291,29 @@ describe('chatEngine streaming preview', () => {
     expect(prompt).not.toContain('suggested actions');
   });
 
+  it('reads current and untimed activities without treating them as imminent reminders', () => {
+    const now = Date.now();
+    const chat = buildChat({ runtimeEventsV2: [
+      { id: 'current', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 60_000,
+        actorIds: ['mei'], visibility: 'public', summary: '修器械',
+        payload: { calendarItemId: 'current-item', title: '修器械', kind: 'activity', status: 'in_progress',
+          participantIds: ['mei'], startAt: now - 60_000, endAt: now + 60_000, locationHint: '营里' } },
+      { id: 'untimed', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 60_000,
+        actorIds: ['mei'], visibility: 'public', summary: '等探路信',
+        payload: { calendarItemId: 'untimed-item', title: '等探路信', kind: 'activity', status: 'planned',
+          participantIds: ['mei'], timeHint: '三日之后' } },
+      { id: 'completed', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 60_000,
+        actorIds: ['mei'], visibility: 'public', summary: '旧活动',
+        payload: { calendarItemId: 'done-item', title: '旧活动', kind: 'activity', status: 'completed', participantIds: ['mei'] } },
+    ] });
+    const input = { chat, speaker: buildCharacter('mei', '美羊羊'), members: [buildCharacter('mei', '美羊羊')], now };
+    const prompt = __chatEngineTestUtils.buildWorldEventContextPrompt(input);
+    expect(prompt).toContain('Current activity: 修器械 at 营里');
+    expect(prompt).toContain('Schedule with unconfirmed time: 等探路信 @ 三日之后');
+    expect(prompt).not.toContain('旧活动');
+    expect(__chatEngineTestUtils.buildWorldEventInfluenceRulesPrompt(input)).not.toContain('within 6 hours');
+  });
+
   it('builds world influence rules prompt for comfort-first and restraint', () => {
     const now = Date.now();
     const chat = buildChat({
@@ -504,7 +527,7 @@ describe('chatEngine streaming preview', () => {
     });
 
     expect(contract).toContain('- id=user; name=用户/我; aliases=用户,我');
-    expect(contract).toContain('Include "user" when the user is an invited or participating member');
+    expect(contract).toContain('Include "user" when invited or participating');
   });
 
   it('does not list non-members as valid structured event participants', () => {
@@ -4303,6 +4326,27 @@ describe('chatEngine streaming preview', () => {
     expect(prompt).not.toContain('## Turn Plan');
     expect(prompt).not.toContain('## Runtime Role Constraint');
     expect(prompt).not.toContain('## Focused Situational Job Contract');
+  });
+
+  it('keeps conversation interaction rules on a creative roleplay surface', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ messages: [{ content: '二哥，刀先借俺使使。' }, { content: '大哥那边俺自己去说。' }] }));
+    const mei = buildCharacter('mei', '美羊羊');
+    const hui = buildCharacter('hui', '灰太狼');
+    const result = await generateSpeakerMessage({
+      chat: buildChat({ style: 'roleplay', memberIds: ['mei', 'hui'] }),
+      speaker: mei, characters: [mei, hui],
+      messages: [buildAiMessage('hui', '灰太狼', '这事我来办。', 1)], apiConfig: buildProfiles(),
+      generationContext: { promptContext: { responseStyle: 'creative', styleProfile: 'dramatic_room', allowMarkdown: true } },
+    });
+    const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
+    expect(prompt).toContain('## Turn Directive');
+    expect(prompt).not.toContain('## Natural Chat Rhythm');
+    expect(prompt).toContain('Acknowledgement is implicit by default');
+    expect(prompt).not.toContain('Forbidden semantic overlap:');
+    expect(prompt).not.toContain('## Conversation Move Guidance');
+    expect(result.content).toBe('二哥，刀先借俺使使。');
+    expect(result.messageParts?.map((part) => part.content)).toEqual(['二哥，刀先借俺使使。', '大哥那边俺自己去说。']);
   });
 
   it('idles group auto scheduling when fewer than two participants can speak', async () => {

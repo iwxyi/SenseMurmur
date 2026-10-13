@@ -1667,7 +1667,7 @@ function buildAnalysisRoomContractPrompt(chat: GroupChat) {
 }
 
 function buildGenerationConstraints(chat: GroupChat, messages: Message[], speakerId: string, surface: ResponseSurface) {
-  if (surface.kind === 'chat' && shouldUseUnifiedTurnDirective(chat)) {
+  if (shouldUseUnifiedTurnDirective(chat)) {
     return `\nHard constraints for this reply:\n- Write one speaker turn only, never another actor's line or internal planning fields.\n- Stay compact enough for ordinary group flow unless the current task clearly needs depth.`;
   }
   const recentLines = collectRecentConstraintLines(messages, speakerId);
@@ -1992,9 +1992,11 @@ function buildWorldEventContextPrompt(input: {
     .filter((item) => item.status !== 'cancelled' && item.status !== 'completed' && item.participantIds.includes(input.speaker.id))
     .filter((item) => {
       const startAt = item.startAt ?? null;
-      return typeof startAt === 'number' && startAt >= now && startAt - now <= 48 * 60 * 60_000;
+      return item.status === 'in_progress' || startAt == null
+        || (startAt >= now && startAt - now <= 48 * 60 * 60_000);
     })
-    .sort((a, b) => (a.startAt || 0) - (b.startAt || 0))
+    .sort((a, b) => Number(b.status === 'in_progress') - Number(a.status === 'in_progress')
+      || (a.startAt ?? Number.MAX_SAFE_INTEGER) - (b.startAt ?? Number.MAX_SAFE_INTEGER))
     .slice(0, 2);
   const recentMoments = projectWorldMoments([input.chat], input.members)
     .filter((item) => item.actorId !== input.speaker.id)
@@ -2014,7 +2016,8 @@ function buildWorldEventContextPrompt(input: {
     lines.push(`- Attention context: ${targetName} may need ${pressure}.`);
   }
   upcomingCalendar.forEach((item) => {
-    lines.push(`- Upcoming schedule: ${item.title}${item.timeHint ? ` @ ${item.timeHint}` : ''}${item.locationHint ? ` at ${item.locationHint}` : ''}.`);
+    const timing = item.status === 'in_progress' ? 'Current activity' : item.startAt == null ? 'Schedule with unconfirmed time' : 'Upcoming schedule';
+    lines.push(`- ${timing}: ${item.title}${item.timeHint ? ` @ ${item.timeHint}` : ''}${item.locationHint ? ` at ${item.locationHint}` : ''}.`);
   });
   recentMoments.forEach((item) => {
     lines.push(`- Recent social signal: ${item.actorName} posted "${item.title}" (${item.kind}).`);

@@ -231,13 +231,14 @@ export function buildTurnDirectivePrompt(directive: TurnDirective | null | undef
   if (!directive) return '';
   const userLine = directive.userConstraint ? `\n- User constraint: ${directive.userConstraint}.` : '';
   const continuityLine = directive.continuityEvidence?.length
-    ? `\n- Established situation and unfinished matters: ${directive.continuityEvidence.join(' / ')}. Keep the scope of each commitment or decision; completed points may rest, unfinished matters may be deferred.` : '';
+    ? `\n- Recorded situation and unfinished matters: ${directive.continuityEvidence.join(' / ')}. These records may lag behind newer visible speech; the newer exchange takes precedence. Keep the scope of each commitment or decision; completed points may rest, unfinished matters may be deferred.` : '';
   const situationalLine = directive.situationalConstraints.length
     ? `\n- Situational constraints: ${directive.situationalConstraints.join('; ')}.`
     : '';
   // Project evidence, not a locally assigned recipient or expression checklist.
   return `\n## Turn Directive — This Person in This Moment
 Speak as this person among people who share this exchange. Choose what catches their attention and what they actually want to say now. Their words may have warmth, bite, hesitation or delight; the exchange decides the shape.
+Acknowledgement is implicit by default. Name someone or explicitly agree when that itself matters to the relationship; responding does not require announcing agreement, receipt, or a recap. A reaction may reveal relief, reluctance, affection or resistance without adding another condition or task. Let a completed exchange rest. Honor explicit requests for a deliverable and its format.
 - Personal meaning: ${directive.characterDrive.stake}. Felt residue: ${directive.characterDrive.feltReaction}.
 - Attention habits: ${directive.characterDrive.attentionLens}.
 - Emotional and dramatic context: ${directive.emotionalUndercurrent}. ${directive.narrativePressure ? `An unresolved line is present: ${directive.narrativePressure}.` : 'No dramatic escalation is required.'} ${directive.requiredChange}.

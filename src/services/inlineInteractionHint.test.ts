@@ -5,6 +5,20 @@ import { normalizeInteractionHintCollection } from '../types/runtimeEvent';
 import { buildInlineInteractionContract, parseInlineInteractionEnvelope } from './inlineInteractionHint';
 
 describe('parseInlineInteractionEnvelope story events', () => {
+  it('includes the speaker as a valid participant without making them a reply target', () => {
+    const contract = buildInlineInteractionContract({
+      chat: { id: 'room', type: 'group', mode: 'chat', memberIds: ['speaker', 'other'], runtimeEventsV2: [], worldState: {} } as GroupChat,
+      speaker: { id: 'speaker', name: '张飞' } as AICharacter,
+      characters: [{ id: 'speaker', name: '张飞' }, { id: 'other', name: '刘备' }, { id: 'outsider', name: '曹操' }] as AICharacter[],
+      recentMessages: [],
+    });
+    expect(contract).toContain('id=speaker; name=张飞');
+    expect(contract).toContain('current speaker: valid participant, never an outgoing interaction or reply target');
+    expect(contract).toContain('id=other; name=刘备');
+    expect(contract).not.toContain('id=outsider');
+    expect(contract).toContain('include the speaker for their own promise');
+  });
+
   it('preserves calendar fields and a multi-day departure in the production envelope', () => {
     const parsed = parseInlineInteractionEnvelope(JSON.stringify({ messages: [{ content: '我去襄阳，三日后回来。' }],
       activityUpdate: { title: '探路', kind: 'travel', status: 'in_progress', startsNow: true,
@@ -208,7 +222,8 @@ describe('buildInlineInteractionContract analysis room detection', () => {
     expect(contract).not.toContain('first compose the complete thing');
     expect(contract).not.toContain('only when there is a real temporal boundary');
     expect(contract).not.toContain('Keep one coherent response in one bubble');
-    expect(contract).toContain('One send is the usual default');
+    expect(contract).not.toContain('One send is the usual default');
+    expect(contract).toContain('A shift from speaking to one person to speaking to another can be a separate send');
     expect(contract).not.toContain('need not be self-contained');
     expect(contract.match(/Send boundaries:/g)).toHaveLength(1);
     expect(contract.match(/soft ceiling/g)).toHaveLength(1);

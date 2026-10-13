@@ -320,8 +320,8 @@ function hasVisibleEnvelopeContent(envelope: InlineInteractionEnvelope) {
 function buildMemberReference(params: { chat: GroupChat; characters: AICharacter[]; speakerId?: string }) {
   const memberIds = new Set(params.chat.memberIds);
   const characterLines = params.characters
-    .filter((character) => memberIds.has(character.id) && character.id !== params.speakerId)
-    .map((character) => `- id=${character.id}; name=${character.name}; aliases=${[character.name, character.group || ''].filter(Boolean).join(', ')}`);
+    .filter((character) => memberIds.has(character.id))
+    .map((character) => `- id=${character.id}; name=${character.name}; aliases=${[character.name, character.group || ''].filter(Boolean).join(', ')}${character.id === params.speakerId ? '; current speaker: valid participant, never an outgoing interaction or reply target' : ''}`);
   const userLine = params.chat.memberIds.includes('user') ? ['- id=user; name=用户/我; aliases=用户,我'] : [];
   return [...characterLines, ...userLine].join('\n') || '- No valid targets.';
 }
@@ -467,7 +467,7 @@ export function buildInlineInteractionContract(params: {
       : 'Let the exchange decide whether this is a brief reaction, a developed answer, or several conversational beats.';
   const sendBoundaryRule = params.turnPlan?.allowExtraMessages === false
     ? '\nSend boundaries: this turn uses one bubble; paragraphs may organize related thoughts within it.'
-    : `\nSend boundaries: One send is the usual default. ${organizationRule} Use messages[] for the sends this person would actually make; their boundaries may be semantic, expressive, or temporal. The room's soft ceiling is ${turnPlanMaxBubbles}, not a target or hard limit. Honor explicit multi-message requests and preserve meaningful sends rather than splitting mechanically.`;
+    : `\nSend boundaries: ${organizationRule} Use messages[] for the sends this person would actually make; their boundaries may be semantic, expressive, or temporal. A shift from speaking to one person to speaking to another can be a separate send; connected reasoning can stay in one send. Neither one send nor several is the default target. The room's soft ceiling is ${turnPlanMaxBubbles}, not a target or hard limit. Honor explicit multi-message requests and preserve meaningful sends rather than splitting mechanically.`;
   const aiDirectInteractionRules = params.chat.type === 'ai_direct'
     ? '\n8. In AI direct chats, target the other participant when the turn clearly supports, challenges, probes, defends, mocks, or dismisses them; do not target the speaker or the user unless the user is an actual participant.'
     : '';
@@ -575,6 +575,7 @@ Reuse the known key when updating an item. Omitted items remain unchanged. Recor
 Keep each item atomic: its exact quote must support the whole summary, not just one part. participantIds identifies the people responsible for or directly involved in that item; include the speaker for their own promise. Assigning a task to someone else is an open proposal until that person accepts it; the assignment alone cannot establish their commitment. A speaker's own explicit promise can be established immediately. Track a new concrete promise even if the same turn also confirms an older decision; reuse a key only for the same obligation. An open proposal may become an established decision under the same key, with an explicit kind/status update. A partial acceptance must preserve who has not yet accepted; it cannot establish everyone's commitment.
 room optionally reports explicit structural changes: {"addAlliances":[],"removeAlliances":[],"addConflictPairs":[],"removeConflictPairs":[],"pileOnTarget":null,"silencedActors":[],"evidenceText":"short exact quote from this turn"}. Pairs use two valid member ids. Omit unchanged fields; null pileOnTarget explicitly clears it. Agreement alone does not form an alliance; disagreement alone does not form a lasting opposition.
 settled is {"evidenceText":"short exact quote from this turn"} only when the visible exchange can pause here, with no immediate answer still requested. Unfinished matters may remain for later; do not repeatedly reconfirm a completed decision or invent a new issue to keep airtime. This pauses automatic chat, not the unresolved facts. These are internal protocol fields, never visible dialogue.
+Before choosing null, compare known open items with the newer visible exchange and this turn. If this speaker accepts a pending proposal or explicitly confirms that the involved people have accepted it, update that same key with the exact supporting quote. Keep partial acceptance open with an accurate summary of what remains. A recorded summary may lag behind the transcript; do not ask again merely because it still says open. Never fabricate a spoken confirmation just to update bookkeeping.
 Known public continuity (keys are only for writeback):\n${continuityContext || '(none recorded)'}` : '';
   const interactionRule = isOrdinaryConversation
     ? `${compactInteractionRule}${aiDirectInteractionRules}`

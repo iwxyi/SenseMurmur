@@ -2334,7 +2334,16 @@ async function onMessageCommitted(params: {
         });
       })()
     : null;
-  const nextRuntimeEventsV2 = [...runtimeEventsV2, ...continuityEvents, ...(incomingEvent ? [incomingEvent] : []), ...withdrawalRuntimeEventsV2].slice(-MAX_OPEN_CHAT_RUNTIME_EVENTS);
+  const previousEventIds = new Set((params.conversation.runtimeEventsV2 || []).map((event) => event.id));
+  const structuredEventIds = new Set(runtimeEventsV2.map((event) => event.id));
+  // Preserve memory/backflow additions without reviving legacy name-based attention.
+  const memoryBackflowEvents = (chatPatch.runtimeEventsV2 || []).filter((event) =>
+    !previousEventIds.has(event.id) && !structuredEventIds.has(event.id)
+      && (event.kind === 'memory_candidate' || event.kind === 'artifact'));
+  const nextRuntimeEventsV2 = [...new Map([
+    ...runtimeEventsV2, ...memoryBackflowEvents, ...continuityEvents,
+    ...(incomingEvent ? [incomingEvent] : []), ...withdrawalRuntimeEventsV2,
+  ].map((event) => [event.id, event])).values()].slice(-MAX_OPEN_CHAT_RUNTIME_EVENTS);
   const runtimeEventsWithRuleEval = worldInfluenceRuleEvalEvent
     ? mergeCompactedRuntimeEvents(nextRuntimeEventsV2, [], [worldInfluenceRuleEvalEvent]).slice(-MAX_OPEN_CHAT_RUNTIME_EVENTS)
     : nextRuntimeEventsV2;
