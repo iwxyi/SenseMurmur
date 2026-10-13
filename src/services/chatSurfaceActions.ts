@@ -9,6 +9,7 @@ import { canActorRunSessionAction, resolveMemberActorRef } from './memberActionP
 import { getUsablePreferredAIProfile } from '../types/settings';
 import { useChatStore } from '../stores/useChatStore';
 import { logDeveloperDiagnostic } from './developerDiagnostics';
+import { retainRuntimeEvents } from './runtimeEventRetention';
 
 export interface ChatSurfaceActionContext {
   chat: GroupChat | undefined;
@@ -198,7 +199,7 @@ export async function runSessionActionImpl(
       },
     };
     await context.updateChat(chat.id, {
-      runtimeEventsV2: [...(chat.runtimeEventsV2 || []), runtimeEvent].slice(-160),
+      runtimeEventsV2: retainRuntimeEvents([...(chat.runtimeEventsV2 || []), runtimeEvent], 160),
     });
     await context.addMessage({
       chatId: chat.id,
@@ -282,7 +283,7 @@ export async function runSessionActionImpl(
       },
     };
     await context.updateChat(chat.id, {
-      runtimeEventsV2: [...(chat.runtimeEventsV2 || []), runtimeEvent, attentionCandidateEvent].slice(-160),
+      runtimeEventsV2: retainRuntimeEvents([...(chat.runtimeEventsV2 || []), runtimeEvent, attentionCandidateEvent], 160),
     });
     await context.addMessage({
       chatId: chat.id,

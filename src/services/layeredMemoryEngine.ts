@@ -6,6 +6,7 @@ import { retrieveRelevantMemories } from './memoryRetrieval';
 import type { MemoryCandidatePayload, RuntimeEventV2 } from '../types/runtimeEvent';
 import type { RuntimeEventPayload } from './runtimeEventFactory';
 import { normalizeRuntimeEvent } from './runtimeEventFactory';
+import { retainRuntimeEvents } from './runtimeEventRetention';
 import { sanitizeMemoryText } from './distillationText';
 import { sanitizeUserFacingText, type DisplayTextMember } from './displayTextSanitizer';
 
@@ -332,7 +333,7 @@ export function buildMemoryCandidateEvents(params: {
 export function appendMemoryCandidateEvents(existingEvents: RuntimeEventV2[], newEvents: RuntimeEventV2[]) {
   if (!newEvents.length) return existingEvents;
   const existingIds = new Set(existingEvents.map((event) => event.id));
-  return [...existingEvents, ...newEvents.filter((event) => !existingIds.has(event.id))].slice(-160);
+  return retainRuntimeEvents([...existingEvents, ...newEvents.filter((event) => !existingIds.has(event.id))], 160);
 }
 
 export function updateLayeredMemories(existing: MemoryItem[], chat: GroupChat, message: Pick<Message, 'content' | 'type' | 'senderId'>) {

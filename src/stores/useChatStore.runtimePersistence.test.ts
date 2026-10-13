@@ -243,6 +243,22 @@ function message(overrides: Partial<Message>): Message {
 }
 
 describe('chat runtime persistence', () => {
+  it('keeps calendar source and incremental patches outside the cloud and local history budget', async () => {
+    const { __chatRuntimePersistenceForTests } = await import('./useChatStore');
+    const { compactChatPatchForCloud, buildPersistedChatState, limits } = __chatRuntimePersistenceForTests;
+    const calendarEvents: RuntimeEventV2[] = [
+      { ...runtimeEvent(1), id: 'calendar-source', kind: 'artifact', payload: { eventKind: 'travel_plan', dedupeKey: 'trip', title: 'Trip', participantIds: ['char-1'] } },
+      { ...runtimeEvent(2), id: 'calendar-title', kind: 'calendar_item_patch', payload: { calendarItemId: 'trip', title: 'Updated trip' } },
+      { ...runtimeEvent(3), id: 'calendar-cancel', kind: 'calendar_item_patch', payload: { calendarItemId: 'trip', cancelled: true } },
+      { ...runtimeEvent(4), id: 'calendar-handled', kind: 'artifact', summary: 'handled_social_event:calendar-source', payload: {} },
+    ];
+    const sourceChat = chat({ runtimeEventsV2: [...calendarEvents, ...Array.from({ length: limits.runtimeEventsV2 + 10 }, (_, index) => runtimeEvent(index + 100))] });
+    const cloud = compactChatPatchForCloud(sourceChat);
+    const local = buildPersistedChatState({ chats: [sourceChat], currentChatId: 'chat-1', lastSyncedAt: 1, pendingOperations: [] });
+    for (const events of [cloud.runtimeEventsV2, local.chats[0]?.runtimeEventsV2]) {
+      expect(events?.filter((event) => event.id.startsWith('calendar-'))).toEqual(calendarEvents);
+    }
+  });
   beforeEach(() => {
     vi.resetModules();
     vi.stubGlobal('localStorage', createStorageMock());

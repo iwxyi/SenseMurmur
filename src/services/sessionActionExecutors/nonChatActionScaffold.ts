@@ -8,6 +8,7 @@ import { buildActionRuntimeContract } from '../sessionRuntimeContract';
 import { sanitizeStoryChoicePrompt } from '../storyChoices';
 import { recordLearningAttempt } from '../learningProgressRuntime';
 import { deriveLearningNextStep } from '../learningNextStep';
+import { retainRuntimeEvents } from '../runtimeEventRetention';
 
 function truncate(text: string, maxLength: number) {
   const normalized = text.trim();
@@ -212,7 +213,7 @@ function handleDirectorIntervention(chat: GroupChat, action: SessionActionDefini
     ...result,
     chatPatch: {
       ...result.chatPatch,
-      runtimeEventsV2: [...(chat.runtimeEventsV2 || []), event].slice(-160),
+      runtimeEventsV2: retainRuntimeEvents([...(chat.runtimeEventsV2 || []), event], 160),
     },
   };
 }
@@ -607,7 +608,7 @@ function handleQuestionMember(chat: GroupChat, action: SessionActionDefinition) 
         focus: chat.worldState?.focus || chat.scenarioState?.goals?.[0]?.label || chat.topic,
         recentEvent: summary,
       },
-      runtimeEventsV2: [...(chat.runtimeEventsV2 || []), interventionEvent].slice(-160),
+      runtimeEventsV2: retainRuntimeEvents([...(chat.runtimeEventsV2 || []), interventionEvent], 160),
     },
   };
 }

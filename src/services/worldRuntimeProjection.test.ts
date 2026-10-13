@@ -4,6 +4,7 @@ import type { AICharacter } from '../types/character';
 import { DEFAULT_CHARACTER_BEHAVIOR, DEFAULT_CHARACTER_INTERVENTION, DEFAULT_CHARACTER_MEMORY, DEFAULT_PERSONALITY } from '../types/character';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import { projectWorldAttentionCandidates, projectWorldAttentionStates, projectWorldCalendar, projectWorldCalendarItems, projectWorldMoments } from './worldRuntimeProjection';
+import { retainRuntimeEvents } from './runtimeEventRetention';
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -177,6 +178,17 @@ describe('worldRuntimeProjection', () => {
     expect(items[0]?.timeHint).toBe('明晚 20:00');
     expect(items[0]?.locationHint).toBe('静安寺');
     expect(items[0]?.summary).toBe('大家都不去了');
+    const history: RuntimeEventV2[] = Array.from({ length: 300 }, (_, index) => ({
+      id: `history-${index}`, conversationId: 'chat-1', kind: 'room_shift',
+      createdAt: 1000 + index, visibility: 'public', summary: 'history', payload: {},
+    }));
+    const retained = retainRuntimeEvents([...(chats[0].runtimeEventsV2 || []), ...history], 120);
+    expect(retained).toHaveLength(124);
+    expect(projectWorldCalendarItems(
+      [buildChat('chat-1', '群聊一', retained)],
+      [character('a', 'A'), character('b', 'B'), character('c', 'C')],
+    )).toEqual(items);
+    expect(retainRuntimeEvents(retained, 0).map((event) => event.id)).toEqual(['evt-1', 'evt-2', 'evt-3', 'evt-4']);
   });
 
   it('projects participant states from outing events and patch updates', () => {

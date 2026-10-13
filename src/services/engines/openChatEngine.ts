@@ -27,6 +27,7 @@ import { buildMomentPostText } from '../momentTextBuilder';
 import { isCharacterFeatureEnabled } from '../characterGenerationPolicy';
 import { isPostMomentDelaySourceEventKind, resolvePostMomentPublishGuard } from '../postMomentPublishPolicy';
 import { applyConversationUpdate } from '../conversationContinuity';
+import { retainRuntimeEvents } from '../runtimeEventRetention';
 
 const MAX_OPEN_CHAT_RUNTIME_EVENTS = 120;
 
@@ -1448,7 +1449,7 @@ function mergeRuntimeEventsWithCompaction(existingEvents: RuntimeEventV2[], comp
   const base = replaceCompactedExistingCandidates(existingEvents, compactedCandidates);
   const existingIds = new Set(base.map((event) => event.id));
   const newCandidates = compactedCandidates.filter((event) => !existingIds.has(event.id));
-  return [...base, ...newCandidates, ...additions].slice(-MAX_OPEN_CHAT_RUNTIME_EVENTS);
+  return retainRuntimeEvents([...base, ...newCandidates, ...additions], MAX_OPEN_CHAT_RUNTIME_EVENTS);
 }
 
 function buildNonCandidateAdditions(params: { messageGeneratedEvent: RuntimeEventV2; interactionEvent?: RuntimeEventV2 | null; relationshipDeltaEvent?: RuntimeEventV2 | null; roomShiftEvent?: RuntimeEventV2 | null; attentionEvent?: RuntimeEventV2 | null; memoryCandidateEvents?: RuntimeEventV2[]; momentArtifactEvents?: RuntimeEventV2[]; artifactEvent?: RuntimeEventV2 | null }) {
@@ -1477,7 +1478,7 @@ function compactEventCandidateHistory(existingEvents: RuntimeEventV2[], compacte
 
 function mergeCompactedRuntimeEvents(existingEvents: RuntimeEventV2[], compactedCandidates: RuntimeEventV2[], additions: RuntimeEventV2[]) {
   const compactedBase = compactEventCandidateHistory(existingEvents, compactedCandidates);
-  return [...compactedBase, ...compactedCandidates, ...additions].slice(-MAX_OPEN_CHAT_RUNTIME_EVENTS);
+  return retainRuntimeEvents([...compactedBase, ...compactedCandidates, ...additions], MAX_OPEN_CHAT_RUNTIME_EVENTS);
 }
 
 void replaceCompactedExistingCandidates;
@@ -2340,12 +2341,12 @@ async function onMessageCommitted(params: {
   const memoryBackflowEvents = (chatPatch.runtimeEventsV2 || []).filter((event) =>
     !previousEventIds.has(event.id) && !structuredEventIds.has(event.id)
       && (event.kind === 'memory_candidate' || event.kind === 'artifact'));
-  const nextRuntimeEventsV2 = [...new Map([
+  const nextRuntimeEventsV2 = retainRuntimeEvents([...new Map([
     ...runtimeEventsV2, ...memoryBackflowEvents, ...continuityEvents,
     ...(incomingEvent ? [incomingEvent] : []), ...withdrawalRuntimeEventsV2,
-  ].map((event) => [event.id, event])).values()].slice(-MAX_OPEN_CHAT_RUNTIME_EVENTS);
+  ].map((event) => [event.id, event])).values()], MAX_OPEN_CHAT_RUNTIME_EVENTS);
   const runtimeEventsWithRuleEval = worldInfluenceRuleEvalEvent
-    ? mergeCompactedRuntimeEvents(nextRuntimeEventsV2, [], [worldInfluenceRuleEvalEvent]).slice(-MAX_OPEN_CHAT_RUNTIME_EVENTS)
+    ? mergeCompactedRuntimeEvents(nextRuntimeEventsV2, [], [worldInfluenceRuleEvalEvent])
     : nextRuntimeEventsV2;
   setChangedChatPatchField(chatPatch, params.conversation, 'runtimeEventsV2', runtimeEventsWithRuleEval);
   setChangedChatPatchField(chatPatch, params.conversation, 'relationshipLedger', effectiveRelationshipLedger);

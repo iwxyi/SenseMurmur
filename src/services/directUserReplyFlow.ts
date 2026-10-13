@@ -5,6 +5,7 @@ import type { Message } from '../types/message';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import { decayEmotionalState, getEmotionalBaseline } from './personalityDrift';
 import { resolveRuntimeEvolutionConfig } from './runtimeEvolutionConfig';
+import { retainRuntimeEvents } from './runtimeEventRetention';
 import { updateCharacterLayeredMemories } from './characterLayeredMemory';
 import { accumulateCharacterRuntime } from './characterRuntime';
 import { getCharacterGroupLabel } from '../types/character';
@@ -111,10 +112,10 @@ export async function runDirectUserReplyFlow(params: {
       if (!companionshipEvents.length) return;
       if (params.signal?.aborted || (params.shouldContinue && !params.shouldContinue())) return;
       const currentChat = useChatStore.getState().chats.find((item) => item.id === params.chat.id) || latestChat;
-      const runtimeEventsV2 = [
+      const runtimeEventsV2 = retainRuntimeEvents([
         ...(currentChat.runtimeEventsV2 || []).filter((event) => !event.evidenceMessageIds?.includes(params.userMessage.id)),
         ...companionshipEvents,
-      ].slice(-160);
+      ], 160);
       const relationshipLedger = companionshipEvents.reduce(
         (entries, event) => reduceRelationshipLedgerWithCompanionshipEvent(entries, event),
         currentChat.relationshipLedger || [],

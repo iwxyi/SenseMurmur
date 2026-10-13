@@ -4,6 +4,7 @@ import type { GroupChat } from '../types/chat';
 import { normalizeConversation } from '../types/chat';
 import type { Message } from '../types/message';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
+import { getCalendarStateEventIds } from '../services/runtimeEventRetention';
 import { useCharacterStore } from './useCharacterStore';
 import { api, type SyncChangeScope } from '../services/api';
 import { buildApiErrorUserMessage } from '../services/apiErrorMessage';
@@ -334,8 +335,11 @@ function getCompanionshipRuntimeEventStateKey(event: RuntimeEventV2) {
 function compactRuntimeEventsForPersistence(events: RuntimeEventV2[] | undefined, limit: number): RuntimeEventV2[] {
   if (!Array.isArray(events)) return [];
   if (events.length <= limit) return stripLargeInlineMediaForPersistence(events);
+  const calendarIds = getCalendarStateEventIds(events);
+  const calendarEvents = events.filter((event) => calendarIds.has(event.id));
+  const historyEvents = events.filter((event) => !calendarIds.has(event.id));
   const stateHistoryEvents = new Map<string, RuntimeEventV2[]>();
-  for (const event of events) {
+  for (const event of historyEvents) {
     const key = getCompanionshipRuntimeEventStateKey(event);
     if (!key) continue;
     const history = stateHistoryEvents.get(key) || [];
@@ -354,9 +358,10 @@ function compactRuntimeEventsForPersistence(events: RuntimeEventV2[] | undefined
     .sort((left, right) => right.createdAt - left.createdAt)
     .slice(0, limit)
     .forEach(addEvent);
-  for (let index = events.length - 1; index >= 0 && selected.size < limit; index -= 1) {
-    addEvent(events[index]);
+  for (let index = historyEvents.length - 1; index >= 0 && selected.size < limit; index -= 1) {
+    addEvent(historyEvents[index]);
   }
+  calendarEvents.forEach(addEvent);
   return stripLargeInlineMediaForPersistence(
     Array.from(selected.values()).sort((left, right) => left.createdAt - right.createdAt),
   );

@@ -4,7 +4,7 @@ import { normalizeConversation } from '../../types/chat';
 import { DEFAULT_CHARACTER_BEHAVIOR, DEFAULT_CHARACTER_MEMORY, DEFAULT_CHARACTER_INTERVENTION, DEFAULT_EMOTIONAL_STATE, type AICharacter } from '../../types/character';
 import { DEFAULT_API_CONFIG, DEFAULT_COMPANIONSHIP_SETTINGS } from '../../types/settings';
 import type { DriverMessageCommitResult } from '../../types/chat';
-import type { SocialEventCandidatePayload, SocialEventHintEnvelope } from '../../types/runtimeEvent';
+import type { RuntimeEventV2, SocialEventCandidatePayload, SocialEventHintEnvelope } from '../../types/runtimeEvent';
 import { setAIGenerationRuntimeConfig } from '../aiGenerationRuntimeConfig';
 import { setCompanionshipRuntimeConfig } from '../companionshipRuntimeConfig';
 
@@ -145,6 +145,36 @@ describe('openChatEngine runtime context', () => {
 });
 
 describe('openChatEngine.onMessageCommitted', () => {
+  it('preserves old calendar state through a long-history message commit and subsequent update', async () => {
+    const calendar: RuntimeEventV2 = {
+      id: 'old-activity', conversationId: 'chat-1', kind: 'calendar_item_patch',
+      createdAt: 1, visibility: 'public', summary: 'Plan',
+      payload: { calendarItemId: 'activity-1', title: 'Plan', participantIds: ['a'] },
+    };
+    const chat = normalizeConversation({ ...buildChat(), runtimeEventsV2: [calendar,
+      ...Array.from({ length: 180 }, (_, index): RuntimeEventV2 => ({
+        id: `history-${index}`, conversationId: 'chat-1', kind: 'room_shift',
+        createdAt: index + 10, visibility: 'public', summary: 'history', payload: {},
+      })),
+    ] });
+    const params = {
+      characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')],
+      message: { type: 'ai' as const, senderId: 'a', content: '稍后再聊。' },
+      previousAiMessage: null, recentMessages: [],
+    };
+    const first = await openChatEngine.onMessageCommitted({ ...params, conversation: chat });
+    const next = applyResultToChat(chat, first);
+    expect(next.runtimeEventsV2).toContainEqual(calendar);
+    const cancellation: RuntimeEventV2 = { ...calendar, id: 'cancel-activity', createdAt: Date.now(), payload: { calendarItemId: 'activity-1', cancelled: true } };
+    next.runtimeEventsV2 = [...(next.runtimeEventsV2 || []), cancellation];
+    const second = await openChatEngine.onMessageCommitted({ ...params, conversation: next });
+    const events = readAppliedRuntimeEvents(next, second);
+    expect(events).toContainEqual(calendar);
+    expect(events).toContainEqual(cancellation);
+    const historyCount = events.filter((event) => event.kind !== 'calendar_item_patch').length;
+    expect(historyCount).toBeGreaterThan(0);
+    expect(historyCount).toBeLessThanOrEqual(120);
+  });
   it('retains memory backflow events alongside structured message and continuity events', async () => {
     const chat = buildChat({ layeredMemories: [{
       id: 'shared-decision', scope: 'conversation', layer: 'long_term', kind: 'decision', ownerId: 'chat-1',

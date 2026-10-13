@@ -8,6 +8,7 @@ import type { CompanionshipMomentReflectionEventPayload } from '../types/compani
 import { createDefaultConversationFrameworkPatch, mergeSessionChatPatch } from '../types/sessionEngine';
 import { DEFAULT_CONVERSATION_WORLD_STATE } from '../types/chat';
 import { resolveRuntimeEvolutionConfig } from './runtimeEvolutionConfig';
+import { retainRuntimeEvents } from './runtimeEventRetention';
 import { decayEmotionalState, getEmotionalBaseline } from './personalityDrift';
 import { updateCharacterLayeredMemories } from './characterLayeredMemory';
 import { accumulateCharacterRuntime } from './characterRuntime';
@@ -107,7 +108,7 @@ function buildPostMomentExpectedArtifactsForWorldCandidate(chat: GroupChat, acto
 }
 
 function appendStructuredRuntimeEvent(chat: GroupChat, event: RuntimeEventV2) {
-  return [...(chat.runtimeEventsV2 || []), event].slice(-160);
+  return retainRuntimeEvents([...(chat.runtimeEventsV2 || []), event], 160);
 }
 
 function appendStructuredRuntimeEvents(chat: GroupChat, events: RuntimeEventV2[]) {
