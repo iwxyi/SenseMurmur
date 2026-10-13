@@ -3241,14 +3241,15 @@ async function generateWithPrompt(params: {
     elapsedMs: Number((nowMs() - requestStartedAt).toFixed(2)),
   }, 'info', 'chat-run');
   logRawAiResponse({ chat: params.chat, speaker: params.speaker, attempt: params.attempt, response });
-  const parsedEnvelope = parseInlineInteractionEnvelope(response);
+  const isStoryReader = params.chat.sessionKind?.scenarioId === 'story-reader';
+  const requiresGroupEnvelope = !isStoryReader && params.chat.type === 'group'
+    && resolveSessionFamilyKey(params.chat) === 'conversation';
+  const parsedEnvelope = parseInlineInteractionEnvelope(response, { allowContentSalvage: !requiresGroupEnvelope });
   if (streamedProtocolError || containsUnsupportedToolProtocol(response)
     || (parsedEnvelope && containsUnsupportedToolProtocol(JSON.stringify(parsedEnvelope)))) {
     return { protocolError: 'unsupported_tool_protocol' as const };
   }
-  const isStoryReader = params.chat.sessionKind?.scenarioId === 'story-reader';
-  if (!isStoryReader && params.chat.type === 'group' && resolveSessionFamilyKey(params.chat) === 'conversation'
-    && response.trim() && !parsedEnvelope) {
+  if (requiresGroupEnvelope && response.trim() && !parsedEnvelope) {
     return { protocolError: 'missing_json_envelope' as const };
   }
   const narrativeRuntime = isStoryReader ? await loadNarrativeRuntime() : null;
@@ -3297,7 +3298,6 @@ async function generateWithPrompt(params: {
     && !params.chat.memberIds.includes(params.speaker.id);
   let finalResponse = narrativeBlocks.length && !keepStoryEventsAsContent ? '' : finalizedResponse;
   let streamedFallbackUsed = false;
-  const requiresGroupEnvelope = !isStoryReader && params.chat.type === 'group' && resolveSessionFamilyKey(params.chat) === 'conversation';
   if (!isStoryReader && (!requiresGroupEnvelope || parsedEnvelope) && !normalizeForComparison(finalResponse)) {
     const streamedFallback = streamBridge.getLastContent();
     if (normalizeForComparison(streamedFallback)) {

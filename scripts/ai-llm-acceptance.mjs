@@ -2705,7 +2705,7 @@ async function loadRuntimeChatModules() {
         logLevel: 'error',
       });
       try {
-        const [chatEngine, chatTypes, chatDraftBuilder, generatedTurnCommit, sessionEngineLoader, sessionActionExecutors, sessionRunner, settingsStore] = await Promise.all([
+        const [chatEngine, chatTypes, chatDraftBuilder, generatedTurnCommit, sessionEngineLoader, sessionActionExecutors, sessionRunner, settingsStore, continuity] = await Promise.all([
           server.ssrLoadModule('/src/services/chatEngine.ts'),
           server.ssrLoadModule('/src/types/chat.ts'),
           server.ssrLoadModule('/src/services/chatDraftBuilder.ts'),
@@ -2714,6 +2714,7 @@ async function loadRuntimeChatModules() {
           server.ssrLoadModule('/src/services/sessionActionExecutors/sessionActionExecutorRegistry.ts'),
           server.ssrLoadModule('/src/services/sessionRunner.ts'),
           server.ssrLoadModule('/src/stores/useSettingsStore.ts'),
+          server.ssrLoadModule('/src/services/conversationContinuity.ts'),
         ]);
         return {
           server,
@@ -2726,6 +2727,7 @@ async function loadRuntimeChatModules() {
           runSessionActionExecutor: sessionActionExecutors.runSessionActionExecutor,
           shouldPauseSettledConversation: sessionRunner.shouldPauseSettledConversation,
           settingsStore: settingsStore.useSettingsStore,
+          applyConversationUpdate: continuity.applyConversationUpdate,
         };
       } catch (error) {
         await server.close();
@@ -3488,6 +3490,30 @@ function runtimeChatflowScenarios() {
       ],
     },
   ];
+  const longzhong = scenarios.find((scenario) => scenario.name === 'longzhong_continuity_room');
+  if (!longzhong) throw new Error('Longzhong character fixture missing');
+  scenarios.push({
+    name: 'longzhong_partial_acceptance_room',
+    roomKind: 'group',
+    turns: 4,
+    rubricHint: '普通群聊的部分接受：刘备分别提出两项尚待本人接受的差事。张飞本就愿领点卯，关羽是否愿意尚未回答。张飞应自然回应自己的部分，不能替关羽答应；首轮后原点卯事项应 established，关羽的粮册事项仍 open。后续不重复索取已经表达的接受，熟人玩笑和自然暂停均可，不强制冲突、收尾宣誓或固定气泡数。',
+    chat: { ...longzhong.chat, id: 'acceptance-longzhong-partial', name: '新野营务', topic: '三顾归来后，兄弟在营中商量明早的差事。' },
+    characters: longzhong.characters.map((character) => character.id === 'fei'
+      ? { ...character, background: `${character.background} 今早已打算主动领明早点卯，愿意接这件差事；关羽那份粮册差事由关羽自己决定。` }
+      : character),
+    seedMessages: [acceptanceAiMessage('acceptance-longzhong-partial', 'bei', '刘备',
+      '二弟，今晚的粮册可愿帮我看一遍？三弟，明早点卯交给你，可愿接？', now - 20_000, {
+        addressedTargetIds: ['fei'], primaryAddressedTargetId: 'fei',
+        metadata: { conversationUpdate: { items: [
+          { key: 'fei-rollcall', kind: 'decision', status: 'open', summary: '刘备提议张飞负责明早点卯，尚待张飞接受', participantIds: ['bei', 'fei'], evidenceText: '三弟，明早点卯交给你，可愿接' },
+          { key: 'yu-grain-ledger', kind: 'decision', status: 'open', summary: '刘备询问关羽是否愿看今晚粮册，尚待关羽接受', participantIds: ['bei', 'yu'], evidenceText: '二弟，今晚的粮册可愿帮我看一遍' },
+        ] } },
+      })],
+    continuityExpectations: [
+      { turn: 1, key: 'fei-rollcall', status: 'established' },
+      { turn: 1, key: 'yu-grain-ledger', status: 'open' },
+    ],
+  });
   const underworld = scenarios.find((scenario) => scenario.name === 'underworld_hierarchy_emotion_room');
   if (!underworld) throw new Error('Underworld character fixture missing');
   const backgrounds = {
@@ -3520,6 +3546,11 @@ function runtimeChatflowScenarios() {
 
 function assertRuntimeChatflowTranscript(scenario, transcript, errors, naturallySettled = false) {
   assertCondition(errors.length === 0, `chatflow ${scenario.name} produced runtime errors`, errors.map((error) => String(error?.message || error)));
+  for (const expected of scenario.continuityExpectations || []) {
+    const turn = transcript.find((item) => item.turn === expected.turn);
+    const item = turn?.conversationContinuityAfter?.items.find((item) => item.key === expected.key);
+    assertCondition(item?.status === expected.status, `chatflow ${scenario.name} turn ${expected.turn} expected ${expected.key}/${expected.status}`, { expected, actual: item || null });
+  }
   const pausesAfterReply = scenario.chat.type === 'direct' || scenario.chat.type === 'ai_direct' || scenario.roomKind === 'study';
   const availableTurns = pausesAfterReply ? 1 + (scenario.userInjections || []).length : config.chatflowTurns;
   assertCondition(transcript.length >= (naturallySettled ? 1 : Math.min(3, config.chatflowTurns, availableTurns)), `chatflow ${scenario.name} produced too few turns`, transcript);
@@ -4219,11 +4250,19 @@ async function runRuntimeChatflowScenario(model, scenario) {
   const userInjectionLog = [];
   const promptRequests = [];
   const generatedResponses = [];
+  for (const message of messages.filter((item) => item.type === 'ai' && item.metadata?.conversationUpdate)) {
+    const seeded = runtime.applyConversationUpdate(chat, message, chat.worldState.structuredRoomState);
+    assertCondition(seeded.changedItems.length === message.metadata.conversationUpdate.items.length,
+      `chatflow ${scenario.name} rejected seeded public continuity`, { senderName: message.senderName });
+    chat = runtime.normalizeConversation({ ...chat, worldState: { ...chat.worldState,
+      conversationContinuity: seeded.continuity, structuredRoomState: seeded.room } });
+  }
   for (const message of messages.filter((item) => item.type === 'user' || item.type === 'god')) {
     chat = await commitHumanTurn(runtime, chat, characters, messages, message, api);
   }
 
   const conversationRunStart = chat;
+  const seedConversationContinuity = structuredClone(chat.worldState.conversationContinuity || null);
   for (let turn = 1; turn <= turnCount; turn += 1) {
     // The session runner pauses private/study rooms after one generation.
     // Only an explicit user injection unlocks another round in this harness.
@@ -4579,6 +4618,8 @@ async function runRuntimeChatflowScenario(model, scenario) {
     transcript,
     turnReviews,
     finalScenarioState: collectScenarioStateSnapshot(chat),
+    seedConversationContinuity,
+    continuityExpectations: scenario.continuityExpectations || [],
     seedUserMessages: scenario.seedMessages
       .filter((message) => message.type === 'user')
       .map((message) => ({ senderName: message.senderName, content: message.content })),

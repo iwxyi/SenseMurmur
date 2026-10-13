@@ -5,6 +5,14 @@ import { normalizeInteractionHintCollection } from '../types/runtimeEvent';
 import { buildInlineInteractionContract, parseInlineInteractionEnvelope } from './inlineInteractionHint';
 
 describe('parseInlineInteractionEnvelope story events', () => {
+  it('allows callers to reject content salvaged from a malformed envelope', () => {
+    const raw = '{"messages":[{"content":"明早点卯，我接。"},{"content":"二哥，粮册你自己看。"}],"conversationUpdate":';
+    expect(parseInlineInteractionEnvelope(raw)?.content).toBe('明早点卯，我接。');
+    expect(parseInlineInteractionEnvelope(raw, { allowContentSalvage: false })).toBeNull();
+    const valid = JSON.stringify({ messages: [{ content: '明早点卯，我接。' }, { content: '二哥，粮册你自己看。' }], conversationUpdate: null });
+    expect(parseInlineInteractionEnvelope(valid, { allowContentSalvage: false })?.messages).toHaveLength(2);
+  });
+
   it('includes the speaker as a valid participant without making them a reply target', () => {
     const contract = buildInlineInteractionContract({
       chat: { id: 'room', type: 'group', mode: 'chat', memberIds: ['speaker', 'other'], runtimeEventsV2: [], worldState: {} } as GroupChat,

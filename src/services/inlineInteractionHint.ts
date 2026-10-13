@@ -618,7 +618,7 @@ ${toolRule}
 Recent transcript scope: ${transcriptScope}${recentSocialEvents ? `\nRecent social events: ${recentSocialEvents}` : ''}`;
 }
 
-export function parseInlineInteractionEnvelope(raw: string): InlineInteractionEnvelope | null {
+export function parseInlineInteractionEnvelope(raw: string, options: { allowContentSalvage?: boolean } = {}): InlineInteractionEnvelope | null {
   try {
     const jsonMatch = cleanJsonLikeText(raw).match(/\{[\s\S]*\}/);
     if (!jsonMatch) return null;
@@ -626,6 +626,7 @@ export function parseInlineInteractionEnvelope(raw: string): InlineInteractionEn
     if (!parsed || !hasVisibleEnvelopeContent(parsed)) return null;
     return sanitizeEnvelope(parsed);
   } catch {
+    if (options.allowContentSalvage === false) return null;
     const salvaged = salvageContentFromMalformedEnvelope(raw);
     return salvaged ? sanitizeEnvelope(salvaged) : null;
   }

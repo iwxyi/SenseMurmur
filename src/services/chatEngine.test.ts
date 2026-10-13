@@ -254,7 +254,11 @@ describe('chatEngine streaming preview', () => {
     expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
   });
 
-  it.each(['二哥，我先去城头看看。', '{"messages":', '{"unrecognized":"台词"}'])('retries incomplete ordinary group output without committing it: %s', async (invalid) => {
+  it.each([
+    '二哥，我先去城头看看。', '{"messages":', '{"unrecognized":"台词"}',
+    '{"messages":[{"content":"明早点卯，我接。"},{"content":"二哥，粮册你自己看。"}],"interactionHints":{"secondary":[{"targetId":"hui"}}]},"conversationUpdate":{"items":[]}}',
+    '{"content":"明早点卯，我接。","conversationUpdate":',
+  ])('retries incomplete ordinary group output without committing it: %s', async (invalid) => {
     generateResponseMock.mockReset();
     generateResponseMock.mockResolvedValueOnce(invalid).mockResolvedValueOnce(JSON.stringify({
       messages: [{ content: '二哥，刀先借俺使使。' }, { content: '大哥那边俺自己去说。' }],
