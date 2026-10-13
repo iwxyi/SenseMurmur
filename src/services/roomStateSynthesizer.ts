@@ -246,6 +246,16 @@ export function synthesizeRoomState(current: RoomStateSnapshotV2 | null, interac
   return calculateRoomShift(current, interaction).nextState;
 }
 
+/**
+ * A room snapshot is not itself a room event.  Callers should only publish a
+ * shift when the model supplied an actual semantic change; otherwise an
+ * initial zero snapshot becomes a stream of fake "room updated" events.
+ */
+export function hasRoomShiftSignal(shift: RoomShiftPayload): boolean {
+  const delta = shift.delta;
+  return Boolean(delta && (delta.heat !== 0 || delta.cohesion !== 0 || delta.topicDrift !== 0));
+}
+
 export function createInitialRoomState() {
   return createBaseRoomState();
 }

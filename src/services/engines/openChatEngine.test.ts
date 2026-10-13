@@ -257,6 +257,7 @@ describe('openChatEngine.onMessageCommitted', () => {
         tone: 'annoyed' as const,
         evidenceText: '乙，你刚才那个说法不对，我不同意。',
         confidence: 0.92,
+        immediateImpact: { roomDelta: { heat: 8, cohesion: -4, topicDrift: 0 } },
         relationship: {
           delta: { warmth: -2, competence: -1, trust: -2, threat: 1, attachment: 0, deference: 0 },
           labels: ['质疑'],

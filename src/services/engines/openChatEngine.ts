@@ -17,7 +17,7 @@ import { buildChatPatch, buildNextWorldState, buildRelationshipTransition, build
 import { applyInteractionEmotions, getEmotionalBaseline } from '../personalityDrift';
 import { projectInnerLife } from '../innerLifeEngine';
 import { canApplyRelationshipInteraction, getRelationshipLedgerEntry, inferRelationshipDelta, reduceRelationshipLedger, summarizeRelationshipDelta } from '../relationshipLedger';
-import { calculateRoomShift } from '../roomStateSynthesizer';
+import { calculateRoomShift, hasRoomShiftSignal } from '../roomStateSynthesizer';
 import { resolveRuntimeEvolutionConfig } from '../runtimeEvolutionConfig';
 import type { APIConfig } from '../../types/settings';
 import { getGuidanceTargetActorIds } from '../userGuidanceIntent';
@@ -1759,14 +1759,16 @@ async function buildStructuredRuntime(params: {
       })
     : null;
 
-  const roomShiftEvent = createRuntimeEventV2({
-    conversationId: params.conversation.id,
-    kind: 'room_shift',
-    summary: `房间态势更新：热度 ${structuredRoomState.heat} (${roomShift.delta?.heat && roomShift.delta.heat > 0 ? '+' : ''}${roomShift.delta?.heat || 0}) / 凝聚 ${structuredRoomState.cohesion} (${roomShift.delta?.cohesion && roomShift.delta.cohesion > 0 ? '+' : ''}${roomShift.delta?.cohesion || 0})`,
-    actorIds: [interaction.actorId],
-    targetIds: interaction.targetId ? [interaction.targetId] : undefined,
-    payload: roomShift,
-  });
+  const roomShiftEvent = hasRoomShiftSignal(roomShift)
+    ? createRuntimeEventV2({
+        conversationId: params.conversation.id,
+        kind: 'room_shift',
+        summary: `房间态势更新：热度 ${structuredRoomState.heat} (${roomShift.delta?.heat && roomShift.delta.heat > 0 ? '+' : ''}${roomShift.delta?.heat || 0}) / 凝聚 ${structuredRoomState.cohesion} (${roomShift.delta?.cohesion && roomShift.delta.cohesion > 0 ? '+' : ''}${roomShift.delta?.cohesion || 0})`,
+        actorIds: [interaction.actorId],
+        targetIds: interaction.targetId ? [interaction.targetId] : undefined,
+        payload: roomShift,
+      })
+    : null;
 
   const artifactEvent = buildArtifactEvent(params);
   const socialEventCandidateSelection = await buildSocialEventCandidateEvents({
@@ -1785,7 +1787,7 @@ async function buildStructuredRuntime(params: {
     characters: params.characters,
   });
   const allInteractionEvents = [interactionEvent, ...secondaryInteractionEvents];
-  const memoryCandidateEvents = [...allInteractionEvents, roomShiftEvent]
+  const memoryCandidateEvents = [...allInteractionEvents, ...(roomShiftEvent ? [roomShiftEvent] : [])]
     .map(buildMemoryCandidateFromStructuredEvent)
     .filter(Boolean) as RuntimeEventV2[];
   const actorIsChatMember = params.conversation.memberIds.includes(interaction.actorId);
@@ -1985,7 +1987,9 @@ function buildStructuredLegacyEvents(runtimeEventsV2: RuntimeEventV2[], relation
       });
     }
   }
-  if (structuredRoomState) {
+  // A snapshot is a compatibility projection of a real room change.  Do not
+  // emit one merely because the chat now has a normalized baseline state.
+  if (structuredRoomState && runtimeEventsV2.some((event) => event.kind === 'room_shift')) {
     events.push({
       eventType: 'room_state_snapshot_v2',
       title: '房间态势更新',

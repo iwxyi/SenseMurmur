@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { InteractionEventPayload } from '../types/runtimeEvent';
-import { calculateRoomShift } from './roomStateSynthesizer';
+import { calculateRoomShift, hasRoomShiftSignal } from './roomStateSynthesizer';
 
 function buildInteraction(overrides: Partial<InteractionEventPayload> = {}): InteractionEventPayload {
   return {
@@ -16,6 +16,21 @@ function buildInteraction(overrides: Partial<InteractionEventPayload> = {}): Int
 }
 
 describe('roomStateSynthesizer', () => {
+  it('does not treat an all-zero model delta as a room event', () => {
+    const { shift } = calculateRoomShift(null, buildInteraction({
+      kind: 'support',
+      immediateImpact: { roomDelta: { heat: 0, cohesion: 0, topicDrift: 0 } },
+    }), { semanticSource: 'model' });
+    expect(hasRoomShiftSignal(shift)).toBe(false);
+  });
+
+  it('keeps a non-zero model delta as a room event', () => {
+    const { shift } = calculateRoomShift(null, buildInteraction({
+      immediateImpact: { roomDelta: { heat: 2, cohesion: 0, topicDrift: 0 } },
+    }), { semanticSource: 'model' });
+    expect(hasRoomShiftSignal(shift)).toBe(true);
+  });
+
   it('tracks the dominant thread without treating every challenge as silencing', () => {
     const { nextState } = calculateRoomShift(null, buildInteraction());
     expect(nextState.dominantThread).toEqual(['a', 'b']);
