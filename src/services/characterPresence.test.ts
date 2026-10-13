@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Message } from '../types/message';
 import type { AICharacter } from '../types/character';
-import { normalizeConversation } from '../types/chat';
+import { normalizeConversation, type DriverMessageCommitTransition } from '../types/chat';
 import { projectWorldCalendar } from './worldRuntimeProjection';
 import { applyPresenceUpdateToTransition, buildPresencePatchFromMessage, isCharacterAvailableForScheduling } from './characterPresence';
 
@@ -26,6 +26,29 @@ describe('characterPresence', () => {
     modeState: { phase: 'free' }, name: '群聊', topic: '', style: 'free', speed: 1, isActive: false,
     allowIntervention: true, topicSeed: '', createdAt: 1, updatedAt: 1, lastMessageAt: 1 });
   const transition = { chatPatch: {}, characterPatches: [], runtimeEvents: [] };
+
+  it.each(['new', 'baseline', 'legacy'] as const)('preserves the %s event delta contract when adding a calendar activity', (kind) => {
+    const existing = {
+      id: 'existing', conversationId: chat.id, kind: 'message_generated' as const,
+      createdAt: 1, summary: 'existing', payload: {},
+    };
+    const source = { ...chat, runtimeEventsV2: [existing] };
+    const input: DriverMessageCommitTransition = {
+      ...transition,
+      ...(kind === 'new' ? {} : { chatRuntimeDelta: { runtimeEventsV2: {
+        orderedIds: [existing.id], upserts: [],
+        ...(kind === 'baseline' ? { baseIds: ['original-baseline'] } : {}),
+      } } }),
+    };
+    const result = applyPresenceUpdateToTransition({ chat: source, transition: input, now: 1000,
+      message: message({ metadata: { presenceUpdate: { status: 'away' } } }),
+    });
+    expect(result.chatRuntimeDelta?.runtimeEventsV2?.baseIds).toEqual(
+      kind === 'new' ? [existing.id] : kind === 'baseline' ? ['original-baseline'] : undefined,
+    );
+    expect(result.chatRuntimeDelta?.runtimeEventsV2?.orderedIds).toContain(existing.id);
+    expect(result.chatRuntimeDelta?.runtimeEventsV2?.upserts).toHaveLength(1);
+  });
 
   it('commits a three-day solo departure to calendar and availability with location', () => {
     const result = applyPresenceUpdateToTransition({ chat, transition, now: 1000,

@@ -14,6 +14,7 @@ import { reportRecoverableError } from './diagnostics';
 import { applyCalendarAutoPatchForChat, buildCalendarAutoPatchRuntimeEventPayloads, shouldRunCalendarAutoPatchForTransition } from './worldCalendarAutoPatchRuntime';
 import { applyPresenceUpdateToTransition } from './characterPresence';
 import { buildBranchStateWithHead, isMessageBranchingEnabled } from './messageBranching';
+import { buildChatRuntimeDeltaPatch } from './chatRuntimeDelta';
 
 export const __resetDeferredLlmDistillationStateForTests = __resetDeferredMemoryAnalysisStateForTests;
 export const __flushDeferredLlmDistillationForTests = __flushDeferredMemoryAnalysisForTests;
@@ -61,33 +62,8 @@ function applyTransitionToChat(chat: GroupChat, transition: DriverMessageCommitT
   return {
     ...chat,
     ...transition.chatPatch,
-    ...(transition.chatRuntimeDelta?.runtimeEventsV2 ? {
-      runtimeEventsV2: applyRuntimeEventsDelta(chat.runtimeEventsV2 || [], transition.chatRuntimeDelta.runtimeEventsV2),
-    } : {}),
-    ...(transition.chatRuntimeDelta?.relationshipLedger ? {
-      relationshipLedger: applyRelationshipLedgerDelta(chat.relationshipLedger || [], transition.chatRuntimeDelta.relationshipLedger),
-    } : {}),
+    ...(transition.chatRuntimeDelta ? buildChatRuntimeDeltaPatch(chat, transition.chatRuntimeDelta) : {}),
   } as GroupChat;
-}
-
-function applyRuntimeEventsDelta(
-  current: NonNullable<GroupChat['runtimeEventsV2']>,
-  delta: NonNullable<DriverMessageCommitTransition['chatRuntimeDelta']>['runtimeEventsV2'],
-) {
-  if (!delta) return current;
-  const byId = new Map(current.map((item) => [item.id, item] as const));
-  delta.upserts.forEach((item) => byId.set(item.id, item));
-  return delta.orderedIds.map((id) => byId.get(id)).filter(Boolean) as NonNullable<GroupChat['runtimeEventsV2']>;
-}
-
-function applyRelationshipLedgerDelta(
-  current: NonNullable<GroupChat['relationshipLedger']>,
-  delta: NonNullable<DriverMessageCommitTransition['chatRuntimeDelta']>['relationshipLedger'],
-) {
-  if (!delta) return current;
-  const byKey = new Map(current.map((item) => [item.pairKey, item] as const));
-  delta.upserts.forEach((item) => byKey.set(item.pairKey, item));
-  return delta.orderedPairKeys.map((key) => byKey.get(key)).filter(Boolean) as NonNullable<GroupChat['relationshipLedger']>;
 }
 
 function applyTransitionToCharacters(characters: AICharacter[], transition: DriverMessageCommitTransition) {

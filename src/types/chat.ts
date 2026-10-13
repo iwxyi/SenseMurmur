@@ -772,10 +772,14 @@ export interface DriverMessageCommitTransition {
   chatPatch: Partial<GroupChat>;
   chatRuntimeDelta?: {
     runtimeEventsV2?: {
+      // Omitted by legacy producers whose ordered list replaces the entire window.
+      baseIds?: string[];
       orderedIds: string[];
       upserts: RuntimeEventV2[];
     };
     relationshipLedger?: {
+      // Only baseline pairs may be removed; concurrently added pairs are retained.
+      basePairKeys?: string[];
       orderedPairKeys: string[];
       upserts: RelationshipLedgerEntry[];
     };

@@ -297,6 +297,62 @@ describe('chat runtime persistence', () => {
     });
   });
 
+  it('preserves social events committed while ordinary engine finalization waits, locally and in the cloud patch', async () => {
+    const { useChatStore } = await import('./useChatStore');
+    const { openChatEngine } = await import('../services/engines/openChatEngine');
+    const { finalizeChatCommitRuntime } = await import('../services/chatCommitRuntime');
+    const { applyCommitTransition } = await import('../services/sessionCommitContract');
+    const { DEFAULT_API_CONFIG } = await import('../types/settings');
+    const { normalizeCharacter, DEFAULT_PERSONALITY } = await import('../types/character');
+    const base = chat({ memberIds: ['a', 'b'], runtimeEventsV2: [runtimeEvent(1)] });
+    useChatStore.setState({ chats: [base], pendingOperations: [] });
+    let release!: () => void;
+    let signalReady!: () => void;
+    const ready = new Promise<void>((resolve) => { signalReady = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const pending = finalizeChatCommitRuntime({
+      api: DEFAULT_API_CONFIG, chat: base,
+      characters: ['a', 'b'].map((id) => normalizeCharacter({
+        id, name: id, avatar: '', personality: DEFAULT_PERSONALITY, expertise: [],
+        speakingStyle: '', background: '', isPreset: false, createdAt: 1, updatedAt: 1,
+      })),
+      message: { chatId: base.id, type: 'ai', senderId: 'a', senderName: '甲', emotion: 0, content: '今天先到这里。' },
+      previousAiMessage: null, recentMessages: [],
+      onCommit: async (args) => {
+        const result = await openChatEngine.onMessageCommitted(args);
+        signalReady();
+        await gate;
+        return result;
+      },
+    });
+    await Promise.race([ready, pending.then(() => undefined)]);
+    const social = { ...runtimeEvent(2), id: 'concurrent-social-event', createdAt: Date.now() + 1 };
+    await useChatStore.getState().applyChatRuntimePatch(base.id, (current) => ({
+      runtimeEventsV2: [...(current.runtimeEventsV2 || []), social],
+    }));
+    release();
+    const transition = await pending;
+    expect(transition.chatRuntimeDelta?.runtimeEventsV2?.upserts.length).toBeGreaterThan(0);
+    await applyCommitTransition({
+      chatId: base.id, speakerId: 'a', transition,
+      services: {
+        updateCharacter: async () => undefined,
+        appendEventMessages: async () => undefined,
+        appendEventMessage: async () => undefined,
+        updateChat: useChatStore.getState().updateChat,
+        applyChatRuntimeDelta: useChatStore.getState().applyChatRuntimeDelta,
+        recordSpeak: () => undefined,
+      },
+    });
+    const current = useChatStore.getState().getChat(base.id)!;
+    expect(current.runtimeEventsV2).toContainEqual(social);
+    for (const event of transition.chatRuntimeDelta?.runtimeEventsV2?.upserts || []) {
+      expect(current.runtimeEventsV2).toContainEqual(event);
+    }
+    const queued = useChatStore.getState().pendingOperations.find((operation) => operation.targetIds.includes(base.id));
+    expect(queued?.patch.runtimeEventsV2).toEqual(current.runtimeEventsV2);
+  });
+
   it.each(['missing', 'deleted', 'unchanged', 'failed'] as const)('does not queue a %s runtime patch', async (condition) => {
     const { useChatStore } = await import('./useChatStore');
     const base = chat({ deletedAt: condition === 'deleted' ? 10 : undefined });
@@ -656,7 +712,7 @@ describe('chat runtime persistence', () => {
     expect((operation?.patch.latestMessage as Message | undefined)?.id).toBe(previousLatest.id);
   });
 
-  it('queues non-runtime chat patch fields when applying runtime delta', async () => {
+  it('queues both materialized runtime delta and non-runtime chat patch fields', async () => {
     const { useChatStore } = await import('./useChatStore');
     const base = chat({ scenarioState: { deliberationClaims: [] } as GroupChat['scenarioState'] });
     useChatStore.setState({
@@ -702,7 +758,23 @@ describe('chat runtime persistence', () => {
     expect(state.pendingOperations[0]?.patch.scenarioState).toMatchObject({
       deliberationClaims: [expect.objectContaining({ id: 'claim-1' })],
     });
-    expect(state.pendingOperations[0]?.patch.runtimeEventsV2).toBeUndefined();
+    expect(state.pendingOperations[0]?.patch.runtimeEventsV2).toEqual(state.chats[0]?.runtimeEventsV2);
+  });
+
+  it('preserves concurrent ledger pairs while applying and syncing a baseline-aware delta', async () => {
+    const { useChatStore } = await import('./useChatStore');
+    const baseEntry = relationship(1);
+    const concurrentEntry = relationship(2);
+    const nextEntry = { ...baseEntry, current: { ...baseEntry.current, trust: 21 } };
+    const base = chat({ relationshipLedger: [baseEntry, concurrentEntry] });
+    useChatStore.setState({ chats: [base], pendingOperations: [] });
+    await useChatStore.getState().applyChatRuntimeDelta(base.id, {
+      relationshipLedger: {
+        basePairKeys: [baseEntry.pairKey], orderedPairKeys: [baseEntry.pairKey], upserts: [nextEntry],
+      },
+    });
+    expect(useChatStore.getState().getChat(base.id)?.relationshipLedger).toEqual([nextEntry, concurrentEntry]);
+    expect(useChatStore.getState().pendingOperations[0]?.patch.relationshipLedger).toEqual([nextEntry, concurrentEntry]);
   });
 
   it('merges a stale remote chat when only message branch state has a newer field version', async () => {

@@ -104,6 +104,7 @@ function buildRuntimeEventsDelta(conversation: GroupChat, nextEvents: RuntimeEve
   const upserts = nextEvents.filter((event) => !areRuntimeValuesEqual(previousById.get(event.id), event));
   if (!upserts.length && nextEvents.length === (conversation.runtimeEventsV2 || []).length) return undefined;
   return {
+    baseIds: (conversation.runtimeEventsV2 || []).map((event) => event.id),
     orderedIds: nextEvents.map((event) => event.id),
     upserts,
   };
@@ -114,6 +115,7 @@ function buildRelationshipLedgerDelta(conversation: GroupChat, nextLedger: NonNu
   const upserts = nextLedger.filter((entry) => !areRuntimeValuesEqual(previousByKey.get(entry.pairKey), entry));
   if (!upserts.length && nextLedger.length === (conversation.relationshipLedger || []).length) return undefined;
   return {
+    basePairKeys: (conversation.relationshipLedger || []).map((entry) => entry.pairKey),
     orderedPairKeys: nextLedger.map((entry) => entry.pairKey),
     upserts,
   };

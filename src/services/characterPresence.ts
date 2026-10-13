@@ -161,6 +161,8 @@ export function applyPresenceUpdateToTransition(params: {
     ...(events.length ? { chatRuntimeDelta: {
       ...params.transition.chatRuntimeDelta,
       runtimeEventsV2: {
+        ...(previousDelta ? (previousDelta.baseIds ? { baseIds: previousDelta.baseIds } : {})
+          : { baseIds: (params.chat?.runtimeEventsV2 || []).map((event) => event.id) }),
         orderedIds,
         upserts: [...(params.transition.chatRuntimeDelta?.runtimeEventsV2?.upserts || []), ...events],
       },

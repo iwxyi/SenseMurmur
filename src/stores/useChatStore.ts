@@ -39,6 +39,7 @@ import { DEFAULT_BASIC_RETENTION_LIMITS, getCurrentRetentionLimits, takeRecentBy
 import { useLocalWorkspaceStore } from './useLocalWorkspaceStore';
 import { logDeveloperDiagnostic } from '../services/developerDiagnostics';
 import { sanitizeChatLatestMessage } from '../services/chatLatestMessage';
+import { buildChatRuntimeDeltaPatch } from '../services/chatRuntimeDelta';
 
 function createLocalChatId() {
   return `local-chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -685,32 +686,6 @@ function buildChatListSignature(chats: GroupChat[]) {
       chat.relationshipLedger?.length || 0,
     ].join(':'))
     .join('|');
-}
-
-function applyRuntimeEventsDelta(chat: GroupChat, delta: NonNullable<import('../types/chat').DriverMessageCommitTransition['chatRuntimeDelta']>['runtimeEventsV2']) {
-  if (!delta) return chat.runtimeEventsV2 || [];
-  const byId = new Map((chat.runtimeEventsV2 || []).map((item) => [item.id, item] as const));
-  delta.upserts.forEach((item) => byId.set(item.id, item));
-  return delta.orderedIds.map((id) => byId.get(id)).filter(Boolean) as NonNullable<GroupChat['runtimeEventsV2']>;
-}
-
-function applyRelationshipLedgerDelta(chat: GroupChat, delta: NonNullable<import('../types/chat').DriverMessageCommitTransition['chatRuntimeDelta']>['relationshipLedger']) {
-  if (!delta) return chat.relationshipLedger || [];
-  const byKey = new Map((chat.relationshipLedger || []).map((item) => [item.pairKey, item] as const));
-  delta.upserts.forEach((item) => byKey.set(item.pairKey, item));
-  return delta.orderedPairKeys.map((key) => byKey.get(key)).filter(Boolean) as NonNullable<GroupChat['relationshipLedger']>;
-}
-
-function applyLocalChatRuntimeDelta(
-  chat: GroupChat,
-  delta: NonNullable<import('../types/chat').DriverMessageCommitTransition['chatRuntimeDelta']>,
-  patch: Partial<GroupChat> = {},
-) {
-  return applyLocalChatUpdate(chat, {
-    ...patch,
-    ...(delta.runtimeEventsV2 ? { runtimeEventsV2: applyRuntimeEventsDelta(chat, delta.runtimeEventsV2) } : {}),
-    ...(delta.relationshipLedger ? { relationshipLedger: applyRelationshipLedgerDelta(chat, delta.relationshipLedger) } : {}),
-  });
 }
 
 function mergeChatRecord(local: GroupChat | undefined, remote: GroupChat) {
@@ -1934,24 +1909,10 @@ export const useChatStore = create<ChatStore>()(
         },
 
         applyChatRuntimeDelta: async (id, delta, patch = {}) => {
-          const cloudPatch = compactChatPatchForCloud(patch as Record<string, unknown>);
-          const operation = !shouldSkipCloudSync() && Object.keys(cloudPatch).length > 0
-            ? createPendingChatOperation({ kind: 'patch', targetIds: id ? [id] : [], patch: cloudPatch })
-            : null;
-          set((state) => {
-            const pendingOperations = operation
-              ? mergeChatPatchOperations([...state.pendingOperations, operation])
-              : state.pendingOperations;
-            return {
-              chats: state.chats.map((chat) => chat.id === id ? applyLocalChatRuntimeDelta(chat, delta, patch) : chat),
-              ...(operation ? {
-                pendingOperations,
-                pendingEditSyncCount: pendingOperations.length,
-                pendingEditSyncError: latestChatError(pendingOperations),
-              } : {}),
-            };
-          });
-          if (operation) scheduleChatFlush(flushPendingOperations, 120);
+          await get().applyChatRuntimePatch(id, (chat) => ({
+            ...patch,
+            ...buildChatRuntimeDeltaPatch(chat, delta),
+          }));
         },
 
         deleteChat: async (id) => {
