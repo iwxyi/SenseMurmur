@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { normalizeConversation } from '../types/chat';
-import { buildPrivateThreadOpenedEvent, buildStartPrivateThreadExecutionResult, createAiPrivateThread, passesWorldAttentionRestraintPolicy, pickAutoPairPrivateThreadCandidate, runSocialEventAutoFlow } from './directSessionRuntime';
+import { normalizeConversation, type GroupChat } from '../types/chat';
+import { buildPrivateThreadOpenedEvent, buildStartPrivateThreadExecutionResult, createAiPrivateThread, passesWorldAttentionRestraintPolicy, pickAutoPairPrivateThreadCandidate, runSocialEventAutoFlow as executeSocialEventAutoFlow, type SocialEventRuntimeOps } from './directSessionRuntime';
 import type { AICharacter } from '../types/character';
 import type { Message } from '../types/message';
 import type { RuntimeEventV2, SocialEventCandidatePayload } from '../types/runtimeEvent';
@@ -8,6 +8,21 @@ import { setAIGenerationRuntimeConfig } from './aiGenerationRuntimeConfig';
 import { DEFAULT_COMPANIONSHIP_SETTINGS } from '../types/settings';
 import { setCompanionshipRuntimeConfig } from './companionshipRuntimeConfig';
 import * as aiClient from './aiClient';
+
+// Existing effect assertions capture patches; store regressions cover atomic commits.
+function runSocialEventAutoFlow(chat: GroupChat, ops: Omit<SocialEventRuntimeOps, 'applyChatRuntimePatch'> & {
+  updateChat: (id: string, patch: Partial<GroupChat>) => Promise<unknown>;
+}) {
+  return executeSocialEventAutoFlow(chat, {
+    ...ops,
+    applyChatRuntimePatch: async (id, buildPatch) => {
+      const patch = buildPatch(chat);
+      if (!patch) return false;
+      await ops.updateChat(id, patch);
+      return true;
+    },
+  });
+}
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -742,6 +757,26 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     });
     expect(result.handledEventId).toBeTruthy();
     expect(updateChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not commit a world candidate after the running chat pauses during evaluation', async () => {
+    const chat = { ...buildChatWithEvents([{
+      id: 'attention-before-pause', conversationId: 'chat-1', kind: 'attention_candidate',
+      createdAt: Date.now() - 2_000, actorIds: ['user'], targetIds: ['a'], summary: '用户等待回应',
+      visibility: 'derived_public', payload: { source: 'user_group_message', targetIds: ['a'], confidence: 0.9 },
+    }]), isActive: true };
+    const commit = vi.fn(async (_id: string, buildPatch: (current: GroupChat) => Partial<GroupChat> | null) => {
+      void _id;
+      expect(buildPatch({ ...chat, isActive: false })).toBeNull();
+      return false;
+    });
+    const result = await executeSocialEventAutoFlow(chat, {
+      chats: [chat], characters: [buildCharacter('a', '甲')], allowWorldFallback: true,
+      applyChatRuntimePatch: commit, addChat: vi.fn(async () => buildBaseChat()),
+      addMessage: buildAddMessageMock(), appendEventMessage: buildAppendEventMessageMock(),
+    });
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(result.handledEventId).toBeNull();
   });
 
   it('world-driven fallback does not turn user follow-up attention into local outing artifacts', async () => {

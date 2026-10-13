@@ -276,18 +276,23 @@ function stripLargeInlineMediaForPersistence<T>(value: T, key = '', seen = new W
   if (!value || typeof value !== 'object') return value;
   if (seen.has(value)) return undefined as T;
   seen.add(value);
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => stripLargeInlineMediaForPersistence(item, key, seen))
-      .filter((item) => item !== undefined) as T;
+  try {
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => stripLargeInlineMediaForPersistence(item, key, seen))
+        .filter((item) => item !== undefined) as T;
+    }
+    const source = value as Record<string, unknown>;
+    const next: Record<string, unknown> = {};
+    Object.entries(source).forEach(([entryKey, entryValue]) => {
+      const stripped = stripLargeInlineMediaForPersistence(entryValue, entryKey, seen);
+      if (stripped !== undefined) next[entryKey] = stripped;
+    });
+    return next as T;
+  } finally {
+    // Shared references are valid; only an ancestor reference forms a cycle.
+    seen.delete(value);
   }
-  const source = value as Record<string, unknown>;
-  const next: Record<string, unknown> = {};
-  Object.entries(source).forEach(([entryKey, entryValue]) => {
-    const stripped = stripLargeInlineMediaForPersistence(entryValue, entryKey, seen);
-    if (stripped !== undefined) next[entryKey] = stripped;
-  });
-  return next as T;
 }
 
 function getRecordString(record: Record<string, unknown>, key: string) {
@@ -554,6 +559,7 @@ interface ChatStore extends PersistedChatState {
   loadProjectedVisibleChats: () => Promise<GroupChat[]>;
   addChat: (chat: Omit<GroupChat, 'id' | 'createdAt' | 'updatedAt' | 'lastMessageAt'>) => Promise<GroupChat>;
   updateChat: (id: string, updates: Partial<GroupChat>) => Promise<void>;
+  applyChatRuntimePatch: (id: string, buildPatch: (chat: GroupChat) => Partial<GroupChat> | null) => Promise<boolean>;
   applyChatRuntimeDelta: (id: string, delta: NonNullable<import('../types/chat').DriverMessageCommitTransition['chatRuntimeDelta']>, patch?: Partial<GroupChat>) => Promise<void>;
   deleteChat: (id: string) => Promise<void>;
   restoreChats: (ids: string[]) => Promise<void>;
@@ -1894,6 +1900,37 @@ export const useChatStore = create<ChatStore>()(
             return;
           }
           await get().syncPatch(id, cleanUpdates, 'patch');
+        },
+
+        applyChatRuntimePatch: async (id, buildPatch) => {
+          let applied = false;
+          let queued = false;
+          set((state) => {
+            const chat = state.chats.find((item) => item.id === id && item.deletedAt == null);
+            if (!chat) return state;
+            const patch = buildPatch(chat);
+            if (!patch || Object.keys(patch).length === 0) return state;
+            const cleanPatch = sanitizeChatLatestPatch(chat, patch);
+            const cloudPatch = compactChatPatchForCloud(cleanPatch as Record<string, unknown>);
+            const operation = !shouldSkipCloudSync() && Object.keys(cloudPatch).length > 0
+              ? createPendingChatOperation({ kind: 'patch', targetIds: [id], patch: cloudPatch })
+              : null;
+            const pendingOperations = operation
+              ? mergeChatPatchOperations([...state.pendingOperations, operation])
+              : state.pendingOperations;
+            applied = true;
+            queued = Boolean(operation);
+            return {
+              chats: state.chats.map((item) => item.id === id ? applyLocalChatUpdate(item, cleanPatch) : item),
+              ...(operation ? {
+                pendingOperations,
+                pendingEditSyncCount: pendingOperations.length,
+                pendingEditSyncError: latestChatError(pendingOperations),
+              } : {}),
+            };
+          });
+          if (queued) scheduleChatFlush(flushPendingOperations, 120);
+          return applied;
         },
 
         applyChatRuntimeDelta: async (id, delta, patch = {}) => {

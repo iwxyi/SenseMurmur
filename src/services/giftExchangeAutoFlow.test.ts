@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { normalizeConversation } from '../types/chat';
+import { normalizeConversation, type GroupChat } from '../types/chat';
 import type { SocialEventCandidatePayload } from '../types/runtimeEvent';
 import { runSocialEventAutoFlow } from './directSessionRuntime';
 
@@ -63,11 +63,16 @@ function buildChat() {
 describe('gift exchange auto flow', () => {
   it('auto-backflows gift exchange candidates', async () => {
     const chat = buildChat();
-    const updateChat = vi.fn(async () => undefined);
+    const updateChat = vi.fn<(id: string, patch: Partial<GroupChat>) => Promise<void>>(async () => undefined);
     const result = await runSocialEventAutoFlow(chat, {
       chats: [chat],
       characters: [{ id: 'a', name: '甲' }, { id: 'b', name: '乙' }] as never[],
-      updateChat,
+      applyChatRuntimePatch: async (id, buildPatch) => {
+        const patch = buildPatch(chat);
+        if (!patch) return false;
+        await updateChat(id, patch);
+        return true;
+      },
       addChat: vi.fn(async () => chat),
       addMessage: vi.fn(async () => ({})),
       appendEventMessage: vi.fn(async () => undefined),

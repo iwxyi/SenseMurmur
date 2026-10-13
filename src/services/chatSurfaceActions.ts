@@ -451,13 +451,15 @@ export async function runAutoSocialEventFlowImpl(sourceChat: GroupChat, context:
   const { runSocialEventAutoFlow } = await import('./directSessionRuntime');
   const imageModelEnabled = Boolean(getUsablePreferredAIProfile(context.aiProfiles || [], 'image'));
   const textApiConfig = resolveTextApiConfig(context.aiProfiles || []);
-  return runSocialEventAutoFlow(sourceChat, {
-    chats: context.chats,
+  const currentChat = useChatStore.getState().getChat(sourceChat.id);
+  if (!currentChat || currentChat.deletedAt != null) return { handledEventId: null };
+  return runSocialEventAutoFlow(currentChat, {
+    chats: useChatStore.getState().chats,
     characters: context.characters,
     imageModelEnabled,
     textApiConfig,
-    allowWorldFallback: sourceChat.isActive,
-    updateChat: context.updateChat,
+    allowWorldFallback: currentChat.isActive,
+    applyChatRuntimePatch: useChatStore.getState().applyChatRuntimePatch,
     addChat: async (input) => useChatStore.getState().addChat(input as never),
     addMessage: context.addMessage,
     appendEventMessage: context.appendEventMessage,

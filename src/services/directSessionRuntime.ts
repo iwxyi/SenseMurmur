@@ -1114,7 +1114,7 @@ export interface SocialEventRuntimeOps {
   imageModelEnabled?: boolean;
   textApiConfig?: APIConfig | null;
   allowWorldFallback?: boolean;
-  updateChat: (chatId: string, patch: Partial<GroupChat>) => Promise<unknown>;
+  applyChatRuntimePatch: (chatId: string, buildPatch: (chat: GroupChat) => Partial<GroupChat> | null) => Promise<boolean>;
   addChat: (input: Omit<GroupChat, 'id' | 'createdAt' | 'updatedAt' | 'lastMessageAt'>) => Promise<GroupChat>;
   addMessage: (message: SocialRuntimeMessageInput) => Promise<unknown>;
   appendEventMessage: (chatId: string, payload: { eventType: string; title: string; summary: string; pair?: [string, string]; metrics?: unknown; visibilityScope?: 'public' | 'role_private' | 'moderator_only' | 'pair_private' | 'derived_public'; visibleToIds?: string[]; visibleToRoles?: string[] }) => Promise<void>;
@@ -2135,6 +2135,15 @@ async function evaluateWorldDrivenDecision(
 }
 
 export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialEventRuntimeOps): Promise<{ privateChatId?: string | null; handledEventId?: string | null }> {
+  const commitCandidate = (candidate: RuntimeEventV2, buildPatch: (chat: GroupChat) => Partial<GroupChat>) => (
+    ops.applyChatRuntimePatch(sourceChat.id, (currentChat) => {
+      const currentCandidate = currentChat.runtimeEventsV2?.find((event) => event.id === candidate.id && event.kind === 'event_candidate');
+      if (!currentCandidate || hasHandledSocialEvent(currentChat, candidate.id)
+        || !isValidAutoFlowCandidate(currentChat, currentCandidate.payload as SocialEventCandidatePayload)) return null;
+      return appendHandledSocialEvent(currentChat, buildPatch(currentChat), candidate.id,
+        (currentCandidate.payload as SocialEventCandidatePayload).initiatorId);
+    })
+  );
   const coolingPairCandidate = findLatestCoolingCompanionshipPairCandidate(sourceChat);
   if (coolingPairCandidate && !hasHandledSocialEvent(sourceChat, coolingPairCandidate.id)) {
     const payload = coolingPairCandidate.payload as SocialEventCandidatePayload;
@@ -2151,10 +2160,10 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
       action: 'skipped',
       nextAvailableAt,
     });
-    await ops.updateChat(sourceChat.id, appendHandledSocialEvent(sourceChat, withFrameworkPatch(sourceChat, {
-      runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [skippedEvent]),
-    }), coolingPairCandidate.id, payload.initiatorId));
-    return { privateChatId: null, handledEventId: coolingPairCandidate.id };
+    const applied = await commitCandidate(coolingPairCandidate, (chat) => withFrameworkPatch(chat, {
+      runtimeEventsV2: appendStructuredRuntimeEvents(chat, [skippedEvent]),
+    }));
+    return { privateChatId: null, handledEventId: applied ? coolingPairCandidate.id : null };
   }
 
   const pairCandidate = pickAutoPairPrivateThreadCandidate(sourceChat);
@@ -2176,12 +2185,14 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
       appendEventMessage: ops.appendEventMessage,
     });
     if (privateChat) {
-      const openedEvent = buildPrivateThreadOpenedEvent(sourceChat, pairCandidate);
-      const scheduleEvent = buildCompanionshipPrivateThreadOpenedScheduleEvent(sourceChat, pairCandidate, privateChat.id);
-      await ops.updateChat(sourceChat.id, appendHandledSocialEvent(sourceChat, withFrameworkPatch(sourceChat, {
-        runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [openedEvent, ...(scheduleEvent ? [scheduleEvent] : [])]),
-      }), pairCandidate.id, payload.initiatorId));
-      return { privateChatId: privateChat.id, handledEventId: pairCandidate.id };
+      const applied = await commitCandidate(pairCandidate, (chat) => {
+        const openedEvent = buildPrivateThreadOpenedEvent(chat, pairCandidate);
+        const scheduleEvent = buildCompanionshipPrivateThreadOpenedScheduleEvent(chat, pairCandidate, privateChat.id);
+        return withFrameworkPatch(chat, {
+          runtimeEventsV2: appendStructuredRuntimeEvents(chat, [openedEvent, ...(scheduleEvent ? [scheduleEvent] : [])]),
+        });
+      });
+      return { privateChatId: privateChat.id, handledEventId: applied ? pairCandidate.id : null };
     }
   }
 
@@ -2219,13 +2230,13 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
         fromEventKind: 'post_moment',
         nextSuggestedAt: publishGuard.nextSuggestedAt,
       });
-      await ops.updateChat(sourceChat.id, appendHandledSocialEvent(sourceChat, withFrameworkPatch(sourceChat, {
-        runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [suppression, decision]),
-      }), momentCandidate.id, payload.initiatorId));
-      return { handledEventId: momentCandidate.id };
+      const applied = await commitCandidate(momentCandidate, (chat) => withFrameworkPatch(chat, {
+        runtimeEventsV2: appendStructuredRuntimeEvents(chat, [suppression, decision]),
+      }));
+      return { handledEventId: applied ? momentCandidate.id : null };
     }
-    await ops.updateChat(sourceChat.id, appendHandledSocialEvent(sourceChat, updateSourceChatAfterPostMoment(sourceChat, payload, actorName, { createdAt: momentCandidate.createdAt }), momentCandidate.id, payload.initiatorId));
-    return { handledEventId: momentCandidate.id };
+    const applied = await commitCandidate(momentCandidate, (chat) => updateSourceChatAfterPostMoment(chat, payload, actorName, { createdAt: momentCandidate.createdAt }));
+    return { handledEventId: applied ? momentCandidate.id : null };
   }
 
   const outingCandidate = findLatestAutoSocialOutingCandidate(sourceChat);
@@ -2235,8 +2246,8 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
     if (hasHandledSocialEvent(sourceChat, outingCandidate.id)) return { handledEventId: outingCandidate.id };
     if (shouldConsumeCandidateWithRestraint(sourceChat, payload, outingCandidate.createdAt)) {
       const actorNames = payload.participantIds.map((id) => ops.characters.find((item) => item.id === id)?.name || id);
-      await ops.updateChat(sourceChat.id, appendHandledSocialEvent(sourceChat, updateSourceChatAfterSocialOuting(sourceChat, payload, actorNames), outingCandidate.id, payload.initiatorId));
-      return { handledEventId: outingCandidate.id };
+      const applied = await commitCandidate(outingCandidate, (chat) => updateSourceChatAfterSocialOuting(chat, payload, actorNames));
+      return { handledEventId: applied ? outingCandidate.id : null };
     }
   }
 
@@ -2247,8 +2258,8 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
     if (hasHandledSocialEvent(sourceChat, statusCandidate.id)) return { handledEventId: statusCandidate.id };
     if (shouldConsumeCandidateWithRestraint(sourceChat, payload, statusCandidate.createdAt)) {
       const actorName = ops.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-      await ops.updateChat(sourceChat.id, appendHandledSocialEvent(sourceChat, updateSourceChatAfterStatusUpdate(sourceChat, payload, actorName), statusCandidate.id, payload.initiatorId));
-      return { handledEventId: statusCandidate.id };
+      const applied = await commitCandidate(statusCandidate, (chat) => updateSourceChatAfterStatusUpdate(chat, payload, actorName));
+      return { handledEventId: applied ? statusCandidate.id : null };
     }
   }
 
@@ -2259,8 +2270,8 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
     if (hasHandledSocialEvent(sourceChat, checkInCandidate.id)) return { handledEventId: checkInCandidate.id };
     if (shouldConsumeCandidateWithRestraint(sourceChat, payload, checkInCandidate.createdAt)) {
       const actorName = ops.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-      await ops.updateChat(sourceChat.id, appendHandledSocialEvent(sourceChat, updateSourceChatAfterCheckIn(sourceChat, payload, actorName), checkInCandidate.id, payload.initiatorId));
-      return { handledEventId: checkInCandidate.id };
+      const applied = await commitCandidate(checkInCandidate, (chat) => updateSourceChatAfterCheckIn(chat, payload, actorName));
+      return { handledEventId: applied ? checkInCandidate.id : null };
     }
   }
 
@@ -2271,8 +2282,8 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
     if (hasHandledSocialEvent(sourceChat, reactMomentCandidate.id)) return { handledEventId: reactMomentCandidate.id };
     if (shouldConsumeCandidateWithRestraint(sourceChat, payload, reactMomentCandidate.createdAt)) {
       const actorName = ops.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-      await ops.updateChat(sourceChat.id, appendHandledSocialEvent(sourceChat, updateSourceChatAfterReactToMoment(sourceChat, payload, actorName), reactMomentCandidate.id, payload.initiatorId));
-      return { handledEventId: reactMomentCandidate.id };
+      const applied = await commitCandidate(reactMomentCandidate, (chat) => updateSourceChatAfterReactToMoment(chat, payload, actorName));
+      return { handledEventId: applied ? reactMomentCandidate.id : null };
     }
   }
 
@@ -2282,8 +2293,8 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
     if (!isValidAutoFlowCandidate(sourceChat, payload)) return { handledEventId: null };
     if (hasHandledSocialEvent(sourceChat, giftCandidate.id)) return { handledEventId: giftCandidate.id };
     const actorName = ops.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-    await ops.updateChat(sourceChat.id, appendHandledSocialEvent(sourceChat, updateSourceChatAfterGiftExchange(sourceChat, payload, actorName), giftCandidate.id, payload.initiatorId));
-    return { handledEventId: giftCandidate.id };
+    const applied = await commitCandidate(giftCandidate, (chat) => updateSourceChatAfterGiftExchange(chat, payload, actorName));
+    return { handledEventId: applied ? giftCandidate.id : null };
   }
 
   const conflictCandidate = findLatestAutoConflictExpressionCandidate(sourceChat);
@@ -2292,11 +2303,12 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
     if (!isValidAutoFlowCandidate(sourceChat, payload)) return { handledEventId: null };
     if (hasHandledSocialEvent(sourceChat, conflictCandidate.id)) return { handledEventId: conflictCandidate.id };
     const actorName = ops.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-    await ops.updateChat(sourceChat.id, appendHandledSocialEvent(sourceChat, updateSourceChatAfterConflictExpression(sourceChat, payload, actorName), conflictCandidate.id, payload.initiatorId));
-    return { handledEventId: conflictCandidate.id };
+    const applied = await commitCandidate(conflictCandidate, (chat) => updateSourceChatAfterConflictExpression(chat, payload, actorName));
+    return { handledEventId: applied ? conflictCandidate.id : null };
   }
 
   if (ops.allowWorldFallback === false) return { handledEventId: null };
+  const worldRequiresActiveChat = ops.allowWorldFallback === true || sourceChat.isActive;
 
   const worldDrivenDecision = await evaluateWorldDrivenDecision(
     sourceChat,
@@ -2307,69 +2319,68 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
   const worldDrivenCandidate = worldDrivenDecision.candidate;
   if (worldDrivenCandidate) {
     const payload = worldDrivenCandidate.payload as SocialEventCandidatePayload;
-    const seededChat = {
-      ...sourceChat,
-      runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [...worldDrivenDecision.suppressionEvents, ...worldDrivenDecision.decisionEvents, worldDrivenCandidate]),
-    } as GroupChat;
-    const actorName = ops.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-    if (payload.eventKind === 'post_moment') {
-      const actor = ops.characters.find((item) => item.id === payload.initiatorId) || null;
-      const publishGuard = resolvePostMomentPublishGuard({
-        chat: seededChat,
-        payload,
-        actor,
-      });
-      if (!publishGuard.allow) {
-        const suppression = buildWorldSuppressionEvent({
+    const applied = await ops.applyChatRuntimePatch(sourceChat.id, (currentChat) => {
+      if ((worldRequiresActiveChat && !currentChat.isActive) || !isValidAutoFlowCandidate(currentChat, payload)
+        || hasHandledSocialEvent(currentChat, worldDrivenCandidate.id)) return null;
+      const seededChat = {
+        ...currentChat,
+        runtimeEventsV2: appendStructuredRuntimeEvents(currentChat, [...worldDrivenDecision.suppressionEvents, ...worldDrivenDecision.decisionEvents, worldDrivenCandidate]),
+      } as GroupChat;
+      const actorName = ops.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
+      if (payload.eventKind === 'post_moment') {
+        const actor = ops.characters.find((item) => item.id === payload.initiatorId) || null;
+        const publishGuard = resolvePostMomentPublishGuard({
           chat: seededChat,
-          actorId: payload.initiatorId,
-          actorName,
-          reasonType: publishGuard.reasonType,
-          reasonLabel: publishGuard.reasonLabel,
-          reasonDetail: publishGuard.reasonDetail,
-          candidateEventKind: 'post_moment',
-          nextSuggestedAt: publishGuard.nextSuggestedAt,
+          payload,
+          actor,
         });
-        const decision = buildWorldDecisionEvent({
-          chat: seededChat,
-          actorId: payload.initiatorId,
-          actorName,
-          decisionType: 'suppressed',
-          reasonType: publishGuard.reasonType,
-          reasonLabel: publishGuard.reasonLabel,
-          reasonDetail: publishGuard.reasonDetail,
-          fromEventKind: 'post_moment',
-          nextSuggestedAt: publishGuard.nextSuggestedAt,
-        });
-        const blockedPatch = withFrameworkPatch(seededChat, {
-          runtimeEventsV2: appendStructuredRuntimeEvents(seededChat, [suppression, decision]),
-        });
-        await ops.updateChat(sourceChat.id, appendHandledSocialEvent(seededChat, blockedPatch, worldDrivenCandidate.id, payload.initiatorId));
-        return { handledEventId: worldDrivenCandidate.id };
+        if (!publishGuard.allow) {
+          const suppression = buildWorldSuppressionEvent({
+            chat: seededChat,
+            actorId: payload.initiatorId,
+            actorName,
+            reasonType: publishGuard.reasonType,
+            reasonLabel: publishGuard.reasonLabel,
+            reasonDetail: publishGuard.reasonDetail,
+            candidateEventKind: 'post_moment',
+            nextSuggestedAt: publishGuard.nextSuggestedAt,
+          });
+          const decision = buildWorldDecisionEvent({
+            chat: seededChat,
+            actorId: payload.initiatorId,
+            actorName,
+            decisionType: 'suppressed',
+            reasonType: publishGuard.reasonType,
+            reasonLabel: publishGuard.reasonLabel,
+            reasonDetail: publishGuard.reasonDetail,
+            fromEventKind: 'post_moment',
+            nextSuggestedAt: publishGuard.nextSuggestedAt,
+          });
+          const blockedPatch = withFrameworkPatch(seededChat, {
+            runtimeEventsV2: appendStructuredRuntimeEvents(seededChat, [suppression, decision]),
+          });
+          return appendHandledSocialEvent(seededChat, blockedPatch, worldDrivenCandidate.id, payload.initiatorId);
+        }
+        return appendHandledSocialEvent(seededChat, updateSourceChatAfterPostMoment(seededChat, payload, actorName, { createdAt: worldDrivenCandidate.createdAt }), worldDrivenCandidate.id, payload.initiatorId);
       }
-      await ops.updateChat(sourceChat.id, appendHandledSocialEvent(seededChat, updateSourceChatAfterPostMoment(seededChat, payload, actorName, { createdAt: worldDrivenCandidate.createdAt }), worldDrivenCandidate.id, payload.initiatorId));
-      return { handledEventId: worldDrivenCandidate.id };
-    }
-    if (payload.eventKind === 'check_in') {
-      await ops.updateChat(sourceChat.id, appendHandledSocialEvent(seededChat, updateSourceChatAfterCheckIn(seededChat, payload, actorName), worldDrivenCandidate.id, payload.initiatorId));
-      return { handledEventId: worldDrivenCandidate.id };
-    }
-    if (payload.eventKind === 'social_outing') {
-      await ops.updateChat(sourceChat.id, appendHandledSocialEvent(seededChat, updateSourceChatAfterSocialOuting(seededChat, payload, [actorName]), worldDrivenCandidate.id, payload.initiatorId));
-      return { handledEventId: worldDrivenCandidate.id };
-    }
-    if (payload.eventKind === 'react_to_moment') {
-      await ops.updateChat(sourceChat.id, appendHandledSocialEvent(seededChat, updateSourceChatAfterReactToMoment(seededChat, payload, actorName), worldDrivenCandidate.id, payload.initiatorId));
-      return { handledEventId: worldDrivenCandidate.id };
-    }
-    await ops.updateChat(sourceChat.id, appendHandledSocialEvent(seededChat, updateSourceChatAfterStatusUpdate(seededChat, payload, actorName), worldDrivenCandidate.id, payload.initiatorId));
-    return { handledEventId: worldDrivenCandidate.id };
+      if (payload.eventKind === 'check_in') {
+        return appendHandledSocialEvent(seededChat, updateSourceChatAfterCheckIn(seededChat, payload, actorName), worldDrivenCandidate.id, payload.initiatorId);
+      }
+      if (payload.eventKind === 'social_outing') {
+        return appendHandledSocialEvent(seededChat, updateSourceChatAfterSocialOuting(seededChat, payload, [actorName]), worldDrivenCandidate.id, payload.initiatorId);
+      }
+      if (payload.eventKind === 'react_to_moment') {
+        return appendHandledSocialEvent(seededChat, updateSourceChatAfterReactToMoment(seededChat, payload, actorName), worldDrivenCandidate.id, payload.initiatorId);
+      }
+      return appendHandledSocialEvent(seededChat, updateSourceChatAfterStatusUpdate(seededChat, payload, actorName), worldDrivenCandidate.id, payload.initiatorId);
+    });
+    return { handledEventId: applied ? worldDrivenCandidate.id : null };
   }
 
   if (worldDrivenDecision.suppressionEvents.length || worldDrivenDecision.decisionEvents.length) {
-    await ops.updateChat(sourceChat.id, withFrameworkPatch(sourceChat, {
-      runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [...worldDrivenDecision.suppressionEvents, ...worldDrivenDecision.decisionEvents]),
-    }));
+    await ops.applyChatRuntimePatch(sourceChat.id, (chat) => (!worldRequiresActiveChat || chat.isActive) ? withFrameworkPatch(chat, {
+      runtimeEventsV2: appendStructuredRuntimeEvents(chat, [...worldDrivenDecision.suppressionEvents, ...worldDrivenDecision.decisionEvents]),
+    }) : null);
   }
 
   return { privateChatId: null, handledEventId: null };

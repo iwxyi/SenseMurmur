@@ -8,10 +8,12 @@ import {
   DEFAULT_OPEN_CHAT_MODE_STATE,
   type GroupChat,
 } from '../types/chat';
-import type { RelationshipLedgerEntry, RuntimeEventV2 } from '../types/runtimeEvent';
+import type { RelationshipLedgerEntry, RuntimeEventV2, SocialEventCandidatePayload } from '../types/runtimeEvent';
 import type { Message } from '../types/message';
+import type { AICharacter } from '../types/character';
 import type { MemoryItem } from '../services/memoryTypes';
 import { storageKey } from '../constants/brand';
+import { createInitialRoomState } from '../services/roomStateSynthesizer';
 
 function createStorageMock() {
   const data = new Map<string, string>();
@@ -266,6 +268,209 @@ describe('chat runtime persistence', () => {
     localStorage.setItem(storageKey('token'), 'test-token');
   });
 
+  it('builds runtime patches synchronously from the latest state and queues the same merged state', async () => {
+    const { useChatStore } = await import('./useChatStore');
+    const base = chat({ runtimeEventsV2: [runtimeEvent(1)] });
+    useChatStore.setState({ chats: [base], pendingOperations: [] });
+    const first = useChatStore.getState().applyChatRuntimePatch(base.id, (current) => ({
+      runtimeEventsV2: [...(current.runtimeEventsV2 || []), runtimeEvent(2)],
+      worldState: { ...current.worldState, focus: '新的分工' },
+      runtimeSeed: { ...current.runtimeSeed, notes: ['新的承诺'] },
+    }));
+    const second = useChatStore.getState().applyChatRuntimePatch(base.id, (current) => ({
+      runtimeEventsV2: [...(current.runtimeEventsV2 || []), runtimeEvent(3)],
+      worldState: { ...current.worldState, recentEvent: '活动安排' },
+      runtimeSeed: { ...current.runtimeSeed, notes: [...(current.runtimeSeed?.notes || []), '安排已记录'] },
+    }));
+    expect(useChatStore.getState().chats[0]?.runtimeEventsV2?.map((event) => event.id))
+      .toEqual(['event-1', 'event-2', 'event-3']);
+    expect(await first).toBe(true);
+    expect(await second).toBe(true);
+    const state = useChatStore.getState();
+    expect(state.chats[0]?.worldState).toMatchObject({ focus: '新的分工', recentEvent: '活动安排' });
+    expect(state.chats[0]?.runtimeSeed?.notes).toEqual(['新的承诺', '安排已记录']);
+    expect(state.pendingOperations).toHaveLength(1);
+    expect(state.pendingOperations[0]?.patch).toMatchObject({
+      runtimeEventsV2: state.chats[0]?.runtimeEventsV2,
+      worldState: state.chats[0]?.worldState,
+      runtimeSeed: state.chats[0]?.runtimeSeed,
+    });
+  });
+
+  it.each(['missing', 'deleted', 'unchanged', 'failed'] as const)('does not queue a %s runtime patch', async (condition) => {
+    const { useChatStore } = await import('./useChatStore');
+    const base = chat({ deletedAt: condition === 'deleted' ? 10 : undefined });
+    useChatStore.setState({ chats: condition === 'missing' ? [] : [base], pendingOperations: [] });
+    const before = useChatStore.getState().chats;
+    const buildPatch = vi.fn(() => {
+      if (condition === 'failed') throw new Error('effect construction failed');
+      return condition === 'unchanged' ? null : { topic: '不会写入' };
+    });
+    const result = useChatStore.getState().applyChatRuntimePatch(base.id, buildPatch);
+    if (condition === 'failed') await expect(result).rejects.toThrow('effect construction failed');
+    else expect(await result).toBe(false);
+    if (condition === 'missing' || condition === 'deleted') expect(buildPatch).not.toHaveBeenCalled();
+    expect(useChatStore.getState().chats).toBe(before);
+    expect(useChatStore.getState().pendingOperations).toHaveLength(0);
+  });
+
+  it('retains ordinary generation and source notice events while private thread creation waits', async () => {
+    const { useChatStore } = await import('./useChatStore');
+    const { runSocialEventAutoFlow } = await import('../services/directSessionRuntime');
+    const candidate: RuntimeEventV2 = {
+      ...runtimeEvent(1), kind: 'event_candidate',
+      payload: {
+        eventKind: 'pair_private_thread', initiatorId: 'a', participantIds: ['a', 'b'], targetIds: ['b'],
+        reasonType: 'unresolved_question', confidence: 0.9, urgency: 'immediate', seedIntent: '继续私聊',
+        visibilityPlan: 'conversation_private', expectedArtifacts: ['private_thread_summary'],
+      },
+    };
+    const base = chat({ runtimeEventsV2: [candidate] });
+    useChatStore.setState({ chats: [base], pendingOperations: [] });
+    let releaseCreation!: () => void;
+    const creationGate = new Promise<void>((resolve) => { releaseCreation = resolve; });
+    const flow = runSocialEventAutoFlow(base, {
+      chats: [base], characters: [{ id: 'a', name: '甲' }, { id: 'b', name: '乙' }] as AICharacter[],
+      allowWorldFallback: false,
+      applyChatRuntimePatch: useChatStore.getState().applyChatRuntimePatch,
+      addChat: async (input) => {
+        await creationGate;
+        return useChatStore.getState().addChat(input);
+      },
+      addMessage: vi.fn(async () => undefined),
+      appendEventMessage: async (id) => {
+        await useChatStore.getState().applyChatRuntimePatch(id, (current) => ({
+          runtimeEventsV2: [...(current.runtimeEventsV2 || []), runtimeEvent(3)],
+        }));
+      },
+    });
+    const latestMessage = message({ id: 'during-creation', timestamp: 500 });
+    await useChatStore.getState().updateChat(base.id, {
+      runtimeEventsV2: [candidate, runtimeEvent(2)],
+      worldState: {
+        ...base.worldState, focus: '已接受的新分工', recentEvent: '普通发言已提交',
+        structuredRoomState: { ...createInitialRoomState(), heat: 64, dominantThread: 'new-thread' },
+      },
+      runtimeSeed: { notes: ['本人已接受'], artifacts: ['新的日程'] },
+      latestMessage, lastMessageAt: latestMessage.timestamp,
+      isActive: false,
+    });
+    releaseCreation();
+    const result = await flow;
+    expect(result.privateChatId).toBeTruthy();
+    expect(result.handledEventId).toBe(candidate.id);
+    const updated = useChatStore.getState().getChat(base.id)!;
+    expect(updated.runtimeEventsV2?.map((event) => event.id)).toEqual(expect.arrayContaining(['event-1', 'event-2', 'event-3']));
+    expect(updated.runtimeEventsV2?.filter((event) => event.summary === `handled_social_event:${candidate.id}`)).toHaveLength(1);
+    expect(updated.worldState).toMatchObject({ focus: '已接受的新分工', recentEvent: '普通发言已提交' });
+    expect(updated.runtimeSeed).toMatchObject({ notes: ['本人已接受'], artifacts: ['新的日程'] });
+    expect(updated.latestMessage?.id).toBe(latestMessage.id);
+    expect(updated.isActive).toBe(false);
+    const pending = useChatStore.getState().pendingOperations.find((operation) => operation.targetIds.includes(base.id));
+    expect(pending?.patch.runtimeEventsV2).toEqual(updated.runtimeEventsV2);
+    expect(pending?.patch.worldState).toEqual(updated.worldState);
+    expect(pending?.patch.runtimeSeed).toEqual(updated.runtimeSeed);
+  });
+
+  it.each(['post_moment', 'status_update', 'check_in', 'react_to_moment', 'social_outing', 'gift_exchange', 'conflict_expression'] as const)(
+    'applies %s effects to the latest room and seed instead of the selection snapshot', async (eventKind) => {
+      const { useChatStore } = await import('./useChatStore');
+      const { runSocialEventAutoFlow } = await import('../services/directSessionRuntime');
+      const userTarget = eventKind === 'status_update' || eventKind === 'check_in' || eventKind === 'react_to_moment';
+      const payload: SocialEventCandidatePayload = {
+        eventKind, initiatorId: 'a', participantIds: ['a'], targetIds: [userTarget ? 'user' : 'b'],
+        reasonType: 'care_gesture', confidence: 0.9, urgency: 'soon', seedIntent: '模型已提交的社交候选',
+        visibilityPlan: eventKind === 'check_in' || eventKind === 'react_to_moment' ? 'user_private' : 'public',
+        expectedArtifacts: [], dedupeKey: `latest-state-${eventKind}`,
+      };
+      const candidate = { ...runtimeEvent(1), kind: 'event_candidate' as const, payload };
+      const base = chat({ memberIds: ['a', 'b', 'user'], runtimeEventsV2: [candidate] });
+      useChatStore.setState({ chats: [base], pendingOperations: [] });
+      await useChatStore.getState().updateChat(base.id, {
+        runtimeEventsV2: [candidate, runtimeEvent(2)],
+        worldState: { ...base.worldState, focus: '新的事项', structuredRoomState: { ...createInitialRoomState(), heat: 64, dominantThread: 'new-thread' } },
+        runtimeSeed: { notes: ['新的承诺'], artifacts: ['新的安排'] },
+      });
+      const result = await runSocialEventAutoFlow(base, {
+        chats: [base], characters: [{ id: 'a', name: '甲' }, { id: 'b', name: '乙' }] as AICharacter[],
+        allowWorldFallback: false, applyChatRuntimePatch: useChatStore.getState().applyChatRuntimePatch,
+        addChat: vi.fn(async () => base), addMessage: vi.fn(async () => undefined), appendEventMessage: vi.fn(async () => undefined),
+      });
+      expect(result.handledEventId).toBe(candidate.id);
+      const updated = useChatStore.getState().getChat(base.id)!;
+      expect(updated.runtimeEventsV2?.map((event) => event.id)).toContain('event-2');
+      expect(updated.worldState.focus).toBe('新的事项');
+      expect(updated.worldState.structuredRoomState?.heat).toBeGreaterThan(40);
+      expect(updated.runtimeSeed?.notes).toContain('新的承诺');
+      expect(updated.runtimeSeed?.artifacts).toContain('新的安排');
+      const pending = useChatStore.getState().pendingOperations.find((operation) => operation.targetIds.includes(base.id));
+      expect(pending?.patch.worldState).toEqual(updated.worldState);
+      expect(pending?.patch.runtimeSeed).toEqual(updated.runtimeSeed);
+      expect(pending?.patch.runtimeEventsV2).toEqual(updated.runtimeEventsV2);
+    },
+  );
+
+  it.each(['removed', 'handled', 'member-left', 'deleted'] as const)('rejects a candidate that became %s during private thread creation', async (condition) => {
+    const { useChatStore } = await import('./useChatStore');
+    const { runSocialEventAutoFlow } = await import('../services/directSessionRuntime');
+    const candidate: RuntimeEventV2 = {
+      ...runtimeEvent(1), kind: 'event_candidate',
+      payload: {
+        eventKind: 'pair_private_thread', initiatorId: 'a', participantIds: ['a', 'b'], targetIds: ['b'],
+        reasonType: 'unresolved_question', confidence: 0.9, urgency: 'immediate', seedIntent: '继续私聊',
+        visibilityPlan: 'conversation_private', expectedArtifacts: ['private_thread_summary'],
+      },
+    };
+    const base = chat({ runtimeEventsV2: [candidate] });
+    useChatStore.setState({ chats: [base], pendingOperations: [] });
+    let releaseCreation!: () => void;
+    const creationGate = new Promise<void>((resolve) => { releaseCreation = resolve; });
+    const flow = runSocialEventAutoFlow(base, {
+      chats: [base], characters: [{ id: 'a', name: '甲' }, { id: 'b', name: '乙' }] as AICharacter[],
+      allowWorldFallback: false, applyChatRuntimePatch: useChatStore.getState().applyChatRuntimePatch,
+      addChat: async (input) => {
+        await creationGate;
+        return useChatStore.getState().addChat(input);
+      },
+      addMessage: vi.fn(async () => undefined), appendEventMessage: vi.fn(async () => undefined),
+    });
+    const handled: RuntimeEventV2 = { ...runtimeEvent(2), kind: 'artifact', summary: `handled_social_event:${candidate.id}`, payload: {} };
+    await useChatStore.getState().updateChat(base.id, {
+      runtimeEventsV2: condition === 'removed' ? [] : condition === 'handled' ? [candidate, handled] : [candidate],
+      memberIds: condition === 'member-left' ? ['a'] : base.memberIds,
+      deletedAt: condition === 'deleted' ? 10 : undefined,
+    });
+    const before = useChatStore.getState().getChat(base.id);
+    releaseCreation();
+    expect(await flow).toMatchObject({ handledEventId: null });
+    expect(useChatStore.getState().getChat(base.id)).toBe(before);
+    const pending = useChatStore.getState().pendingOperations.find((operation) => operation.targetIds.includes(base.id));
+    expect(pending?.patch.runtimeEventsV2).toEqual(before?.runtimeEventsV2);
+  });
+
+  it('uses current candidates and pause state at the page action entry instead of its stale callback snapshot', async () => {
+    const { useChatStore } = await import('./useChatStore');
+    const { runAutoSocialEventFlowImpl } = await import('../services/chatSurfaceActions');
+    const base = chat();
+    const candidate: RuntimeEventV2 = {
+      ...runtimeEvent(1), kind: 'event_candidate',
+      payload: {
+        eventKind: 'social_outing', initiatorId: 'a', participantIds: ['a', 'b'], targetIds: ['b'],
+        reasonType: 'shared_activity', confidence: 0.9, urgency: 'soon', seedIntent: '一起练兵',
+        visibilityPlan: 'public', expectedArtifacts: ['outing_summary'],
+      },
+    };
+    useChatStore.setState({ chats: [chat({ isActive: false, runtimeEventsV2: [candidate] })], pendingOperations: [] });
+    const updateChat = vi.fn(async () => undefined);
+    expect(await runAutoSocialEventFlowImpl(base, {
+      chats: [base], characters: [{ id: 'a', name: '甲' }, { id: 'b', name: '乙' }] as AICharacter[],
+      updateChat, addMessage: vi.fn(async () => undefined), appendEventMessage: vi.fn(async () => undefined),
+    })).toMatchObject({ handledEventId: candidate.id });
+    expect(updateChat).not.toHaveBeenCalled();
+    expect(useChatStore.getState().getChat(base.id)?.isActive).toBe(false);
+    expect(useChatStore.getState().getChat(base.id)?.runtimeEventsV2?.some((event) => event.summary === `handled_social_event:${candidate.id}`)).toBe(true);
+  });
+
   it('keeps bounded runtime fields in cloud patches', async () => {
     const { __chatRuntimePersistenceForTests } = await import('./useChatStore');
     const { compactChatPatchForCloud, limits } = __chatRuntimePersistenceForTests;
@@ -295,6 +500,27 @@ describe('chat runtime persistence', () => {
     expect(patch.worldState).toMatchObject({ mood: '紧张', focus: '关系变化' });
     expect(patch.updatedAt).toBeUndefined();
     expect(patch.lastMessageAt).toBeUndefined();
+  });
+
+  it('persists repeated references in sibling fields while removing real ancestor cycles', async () => {
+    const { __chatRuntimePersistenceForTests } = await import('./useChatStore');
+    const { compactChatPatchForCloud, buildPersistedChatState } = __chatRuntimePersistenceForTests;
+    const participantIds = ['a', 'b'];
+    const sharedPayload: Record<string, unknown> = { participantIds };
+    sharedPayload.self = sharedPayload;
+    const event: RuntimeEventV2 = {
+      ...runtimeEvent(1), kind: 'artifact', actorIds: participantIds, targetIds: participantIds,
+      payload: { first: sharedPayload, second: sharedPayload },
+    };
+    const base = chat({ runtimeEventsV2: [event] });
+    const cloud = compactChatPatchForCloud({ runtimeEventsV2: [event] });
+    const local = buildPersistedChatState({ chats: [base], currentChatId: base.id, lastSyncedAt: 1, pendingOperations: [] });
+    for (const persisted of [cloud.runtimeEventsV2?.[0], local.chats[0]?.runtimeEventsV2?.[0]]) {
+      expect(persisted).toEqual({
+        ...event, payload: { first: { participantIds }, second: { participantIds } },
+      });
+      expect(() => JSON.stringify(persisted)).not.toThrow();
+    }
   });
 
   it('preserves current companionship state events when runtime events are compacted', async () => {
