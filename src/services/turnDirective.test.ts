@@ -135,6 +135,23 @@ const turnPlan: TurnPlan = {
 };
 
 describe('turnDirective', () => {
+  it('keeps receipt language from standing in for a social result', () => {
+    const directive = buildTurnDirective({
+      chat: chat(),
+      speaker: character('rui', '瑞瑞'),
+      members: [character('rui', '瑞瑞'), character('chen', '陈越')],
+      messages: [message({ senderId: 'chen', content: '那就先等信回来。' })],
+      intent,
+      innerLife,
+      conversationMovePlan: movePlan,
+      turnPlan,
+    });
+    const prompt = buildTurnDirectivePrompt(directive);
+    expect(prompt).toContain('A bare receipt');
+    expect(prompt).toContain('concrete stance, choice, condition, responsibility, question, or immediate action');
+    expect(prompt).toContain('A reaction may still reveal');
+  });
+
   it.each([0, 80])('keeps projected topic context at drift %s out of unresolved task assertions', (topicDrift) => {
     const room = chat({ worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE,
       structuredRoomState: { heat: 0, cohesion: 0, topicDrift, dominantThread: [], alliances: [],
