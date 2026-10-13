@@ -690,7 +690,7 @@ describe('buildWorldRuntimeEvents', () => {
     expect(events[0]?.createdAt).toBe(777);
   });
 
-  it('cools heat without deleting an unresolved conflict and accepts an explicit low-heat resolution', () => {
+  it('preserves conflict state without an evidenced update and accepts an explicit low-heat resolution', () => {
     const developmentHooks: ConflictDevelopmentHook[] = ['invite_target_response'];
     const chat = buildChat({
       worldState: {
@@ -743,16 +743,26 @@ describe('buildWorldRuntimeEvents', () => {
       conflictFocus: null,
     });
 
-    expect(result.worldState.conflictState?.primaryConflict?.severity).toBeLessThan(0.66);
-    expect(result.worldState.conflictState?.primaryConflict?.stage).toBe('open');
+    expect(result.worldState.conflictState).toEqual(chat.worldState.conflictState);
     let next = result.worldState;
     for (let i = 0; i < 30; i += 1) {
       next = buildNextWorldState({ ...chat, worldState: next }, {
         type: 'ai', senderId: 'char-c', content: '别的话题。', conflictFocus: null,
       }).worldState;
     }
-    expect(next.conflictState?.primaryConflict?.id).toBe('conflict-1');
-    expect(next.conflictState?.primaryConflict?.severity).toBe(0);
+    expect(next.conflictState).toEqual(chat.worldState.conflictState);
+    for (const message of [
+      { type: 'user' as const, senderId: 'user', content: '先停一下。' },
+      { type: 'ai' as const, senderId: 'char-a', content: '别的话题。' },
+      { type: 'ai' as const, senderId: 'char-a', content: '已经说清楚。', isDeleted: true },
+      { type: 'ai' as const, senderId: 'char-a', content: '已经说清楚。', metadata: { visibility: 'pair_private' as const } },
+    ]) {
+      const unchanged = buildNextWorldState(chat, { ...message, timestamp: 200,
+        conflictFocus: { present: true, conflictId: 'conflict-1', type: 'authority_challenge', severity: 0,
+          stage: 'resolved', summary: '已经说清楚。', participantIds: ['char-a', 'char-b'], evidenceText: '已经说清楚' },
+      });
+      expect(unchanged.nextConflictState).toEqual(chat.worldState.conflictState);
+    }
     const invalidResolution = buildNextWorldState({ ...chat, worldState: next }, {
       type: 'ai', senderId: 'char-a', content: '明天再谈。',
       conflictFocus: { present: true, conflictId: 'conflict-1', type: 'authority_challenge', severity: 0,
@@ -761,6 +771,7 @@ describe('buildWorldRuntimeEvents', () => {
     });
     expect(invalidResolution.nextConflictState?.primaryConflict?.id).toBe('conflict-1');
     expect(invalidResolution.nextConflictState?.primaryConflict?.stage).toBe('open');
+    expect(invalidResolution.nextConflictState).toEqual(chat.worldState.conflictState);
     const resolved = buildNextWorldState({ ...chat, worldState: next }, {
       type: 'ai', senderId: 'char-a', content: '这次越权的事说清楚了。',
       conflictFocus: { present: true, conflictId: 'conflict-1', type: 'authority_challenge', severity: 0.1,
@@ -770,6 +781,44 @@ describe('buildWorldRuntimeEvents', () => {
     });
     expect(resolved.worldState.conflictState?.primaryConflict).toBeNull();
     expect(resolved.worldState.conflictState?.activeConflicts).toEqual([]);
+  });
+
+  it('updates only the evidenced conflict and keeps multi-bubble state equal to a single send', () => {
+    let chat = buildChat();
+    for (const [type, severity] of [
+      ['authority_challenge', 0.8], ['goal_conflict', 0.6],
+    ] as const) {
+      chat = { ...chat, worldState: buildNextWorldState(chat, {
+        type: 'ai', senderId: 'char-a', content: '这件事仍有争议。', timestamp: 100,
+        conflictFocus: { present: true, type, severity, stage: 'open', summary: '这件事仍有争议。',
+          participantIds: ['char-a', 'char-b'], evidenceText: '仍有争议', why: '双方仍然公开争论此事。' },
+      }).worldState };
+    }
+    const untouched = chat.worldState.conflictState?.activeConflicts.find((item) => item.type === 'authority_challenge');
+    const goalId = chat.worldState.conflictState?.primaryConflict?.id;
+    expect(untouched).toBeDefined();
+    const cooled = buildNextWorldState(chat, {
+      type: 'ai', senderId: 'char-a', content: '目标分歧缓和了，还没解决。', timestamp: 200,
+      conflictFocus: { present: true, conflictId: goalId, type: 'goal_conflict', severity: 0.2, stage: 'cooling',
+        summary: '目标分歧缓和了，还没解决。', participantIds: ['char-a', 'char-b'], nextPressure: 'cool',
+        evidenceText: '目标分歧缓和了，还没解决' },
+    });
+    expect(cooled.nextConflictState?.primaryConflict).toMatchObject({ id: goalId, severity: 0.2, stage: 'cooling' });
+    expect(cooled.nextConflictState?.activeConflicts.find((item) => item.id === untouched?.id)).toEqual(untouched);
+    let multiBubble = cooled.worldState;
+    for (let i = 0; i < 4; i += 1) {
+      multiBubble = buildNextWorldState({ ...chat, worldState: multiBubble }, {
+        type: 'ai', senderId: 'char-a', content: '另一条消息。', timestamp: 201 + i,
+      }).worldState;
+    }
+    expect(multiBubble.conflictState).toEqual(cooled.nextConflictState);
+    const resolved = buildNextWorldState({ ...chat, worldState: multiBubble }, {
+      type: 'ai', senderId: 'char-a', content: '目标分歧已经解决。', timestamp: 300,
+      conflictFocus: { present: true, conflictId: goalId, type: 'goal_conflict', severity: 0, stage: 'resolved',
+        summary: '目标分歧已经解决。', participantIds: ['char-a', 'char-b'], evidenceText: '目标分歧已经解决' },
+    });
+    expect(resolved.nextConflictState?.primaryConflict).toEqual(untouched);
+    expect(resolved.nextConflictState?.activeConflicts).toEqual([untouched]);
   });
 
   it.each(['goal_conflict', 'value_conflict', 'tone_escalation', 'identity_ownership'] as const)(

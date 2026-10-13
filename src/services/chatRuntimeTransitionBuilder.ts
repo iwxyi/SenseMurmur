@@ -28,8 +28,6 @@ import { buildSharedPhraseEventsFromCompanionshipEvents } from './companionshipS
 import { usesConversationContinuity } from './conversationContinuity';
 
 const { chatGap: CHAT_DISTILLATION_TURN_COUNT, characterGap: CHARACTER_DISTILLATION_TURN_COUNT } = getLocalDistillationPolicy();
-const PRIMARY_CONFLICT_DECAY_STEP = 0.06;
-const SECONDARY_CONFLICT_DECAY_STEP = 0.04;
 
 function resolveMessageTimestamp(message: { timestamp?: number }, fallback: number) {
   return typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)
@@ -232,40 +230,13 @@ function sameConflictBranch(left: ConflictFocusState | null | undefined, right: 
   return Boolean(leftIdentity && rightIdentity && JSON.stringify(leftIdentity) === JSON.stringify(rightIdentity));
 }
 
-function decayConflictFocus(conflict: ConflictFocusState, step: number): ConflictFocusState | null {
-  if (conflict.stage === 'resolved') return null;
-  const severity = Math.max(0, Number((conflict.severity - step).toFixed(2)));
-  return {
-    ...conflict,
-    severity,
-  };
-}
-
 function updateConflictRuntimeState(previous: ConflictRuntimeState | null | undefined, nextConflict: ConflictFocusState | null, now: number): ConflictRuntimeState | null {
-  if (!nextConflict) {
-    const decayedActiveConflicts = [...new Map([previous?.primaryConflict, ...(previous?.activeConflicts || [])]
-      .filter((item): item is ConflictFocusState => Boolean(item)).map((item) => [item.id, item])).values()]
-      .map((item) => decayConflictFocus(item, PRIMARY_CONFLICT_DECAY_STEP))
-      .filter((item): item is ConflictFocusState => Boolean(item))
-      .slice(0, 6);
-    if (!decayedActiveConflicts.length) return null;
-    const primaryConflict = decayedActiveConflicts[0] || null;
-    return {
-      primaryConflict,
-      activeConflicts: decayedActiveConflicts,
-      developmentHooks: primaryConflict?.developmentHooks || [],
-      volatility: Math.max(0, Number(((previous?.volatility || 0) - 0.12).toFixed(2))),
-      cooling: Math.min(1, Number(((previous?.cooling || 0) + 0.18).toFixed(2))),
-      updatedAt: now,
-    };
-  }
+  if (!nextConflict) return previous ?? null;
 
-  const decayedPreviousConflicts = [...new Map([previous?.primaryConflict, ...(previous?.activeConflicts || [])]
+  const otherConflicts = [...new Map([previous?.primaryConflict, ...(previous?.activeConflicts || [])]
     .filter((item): item is ConflictFocusState => Boolean(item)).map((item) => [item.id, item])).values()]
-    .filter((item) => !sameConflictBranch(item, nextConflict))
-    .map((item) => decayConflictFocus(item, SECONDARY_CONFLICT_DECAY_STEP))
-    .filter((item): item is ConflictFocusState => Boolean(item));
-  const activeConflicts = [...(nextConflict.stage === 'resolved' ? [] : [nextConflict]), ...decayedPreviousConflicts].slice(0, 6);
+    .filter((item) => item.stage !== 'resolved' && !sameConflictBranch(item, nextConflict));
+  const activeConflicts = [...(nextConflict.stage === 'resolved' ? [] : [nextConflict]), ...otherConflicts].slice(0, 6);
   const primaryConflict = activeConflicts[0] || null;
   return {
     primaryConflict,
