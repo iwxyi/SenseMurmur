@@ -562,6 +562,17 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     expect(chat.runtimeEventsV2?.some((event) => event.kind === 'artifact'
       && (event.payload as { dedupeKey?: string }).dedupeKey === 'pending-older')).toBe(true);
 
+    if (eventKind !== 'post_moment' && eventKind !== 'social_outing') {
+      const added = chat.runtimeEventsV2?.filter((event) => event.createdAt > 4) || [];
+      expect(added.some((event) => ['relationship_delta', 'memory_candidate', 'room_shift'].includes(event.kind))).toBe(false);
+      expect(added.find((event) => (event.payload as { artifactType?: string }).artifactType === artifactType))
+        .toMatchObject({
+          visibility: visibilityPlan === 'public' ? 'derived_public' : 'pair_private',
+          payload: { status: 'tentative', seedIntent: payload.seedIntent },
+        });
+      expect(ops.addMessage).not.toHaveBeenCalled();
+    }
+
     expect(await runSocialEventAutoFlow(chat, ops)).toEqual({ handledEventId: null });
     expect(updateChat).toHaveBeenCalledTimes(1);
   });

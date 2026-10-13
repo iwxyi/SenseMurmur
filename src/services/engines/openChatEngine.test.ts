@@ -4383,6 +4383,8 @@ describe('openChatEngine.onMessageCommitted', () => {
     const events = readRuntimeEvents(result);
     expect(events.some((event) => event.kind === 'event_candidate' && (event.payload as { eventKind?: string }).eventKind === 'status_update')).toBe(true);
     expect(events.some((event) => event.kind === 'artifact' && (event.payload as { artifactType?: string }).artifactType === 'status_note')).toBe(true);
+    expect(events.find((event) => event.kind === 'artifact' && (event.payload as { artifactType?: string }).artifactType === 'status_note')?.payload)
+      .toMatchObject({ status: 'tentative', seedIntent: '想同步一下最近状态。', sourceText: expect.any(String), candidateId: expect.any(String) });
   });
 
   it('adds conflict expression candidate/events for confrontational messages', async () => {
@@ -4423,6 +4425,8 @@ describe('openChatEngine.onMessageCommitted', () => {
     const events = readRuntimeEvents(result);
     expect(events.some((event) => event.kind === 'event_candidate' && (event.payload as { eventKind?: string }).eventKind === 'conflict_expression')).toBe(true);
     expect(events.some((event) => event.kind === 'artifact' && (event.payload as { artifactType?: string }).artifactType === 'conflict_note')).toBe(true);
+    expect(events.find((event) => event.kind === 'artifact' && (event.payload as { artifactType?: string }).artifactType === 'conflict_note')?.payload)
+      .toMatchObject({ status: 'tentative', seedIntent: '想把刚才的不满直接说开。', sourceText: expect.any(String), candidateId: expect.any(String) });
   });
 
   it('adds gift exchange candidate/events for caring gift messages', async () => {
@@ -4463,6 +4467,8 @@ describe('openChatEngine.onMessageCommitted', () => {
     const events = readRuntimeEvents(result);
     expect(events.some((event) => event.kind === 'event_candidate' && (event.payload as { eventKind?: string }).eventKind === 'gift_exchange')).toBe(true);
     expect(events.some((event) => event.kind === 'artifact' && (event.payload as { artifactType?: string }).artifactType === 'gift_note')).toBe(true);
+    expect(events.find((event) => event.kind === 'artifact' && (event.payload as { artifactType?: string }).artifactType === 'gift_note')?.payload)
+      .toMatchObject({ status: 'tentative', seedIntent: '想送个小礼物表达心意。', sourceText: expect.any(String), candidateId: expect.any(String) });
   });
 
   it('adds artifact events for summary-like messages', async () => {

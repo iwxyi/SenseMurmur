@@ -1394,6 +1394,21 @@ describe('worldRuntimeProjection', () => {
     expect(attention[0]?.targetRefs).toEqual([{ kind: 'system_agent', id: 'unknown-target' }]);
   });
 
+  it.each([
+    ['status_update', 'status_note'],
+    ['check_in', 'check_in_note'],
+    ['react_to_moment', 'moment_reaction_note'],
+  ])('keeps tentative %s out of published moments', (eventKind, artifactType) => {
+    const chats = [buildChat('chat-1', '群聊一', [{
+      id: 'intent-1', conversationId: 'chat-1', kind: 'artifact', createdAt: 200,
+      actorIds: ['a'], targetIds: ['user'], visibility: 'derived_public', summary: '待定意图',
+      payload: { eventKind, artifactType, status: 'tentative', seedIntent: '想问问近况', text: '待定意图' },
+    }])];
+    expect(projectWorldMoments(chats, [character('a', 'A')])).toEqual([]);
+    expect(projectWorldMoments(chats, [character('a', 'A')], { includeCandidates: true }))
+      .toMatchObject([{ debugState: 'candidate' }]);
+  });
+
   it('projects check_in and react_to_moment as world moments', () => {
     const chats = [buildChat('chat-1', '群聊一', [
       {

@@ -8,6 +8,7 @@ import type { CompanionshipMomentReflectionEventPayload } from '../types/compani
 import { createDefaultConversationFrameworkPatch, mergeSessionChatPatch } from '../types/sessionEngine';
 import { DEFAULT_CONVERSATION_WORLD_STATE } from '../types/chat';
 import { retainRuntimeEvents } from './runtimeEventRetention';
+import { buildSocialIntentArtifact } from './socialIntentArtifact';
 import { accumulateChatRuntime } from './chatRuntime';
 import { getRelationshipLedgerEntry } from './relationshipLedger';
 import { calculateRoomShift } from './roomStateSynthesizer';
@@ -628,241 +629,35 @@ function findLatestAutoReactToMomentCandidate(chat: GroupChat) {
   return findLatestPendingSocialCandidate(chat, 'react_to_moment', 0.75);
 }
 
-export function updateSourceChatAfterStatusUpdate(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string) {
-  const summary = `${actorName} 在群里同步了自己的近况。`;
-  const shiftedRoom = calculateRoomShift(sourceChat.worldState.structuredRoomState || null, {
-    kind: 'side_comment',
-    actorId: payload.initiatorId,
-    targetId: payload.targetIds?.[0] || null,
-    intensity: 1,
-    tone: 'warm',
-    evidenceText: (payload.sourceText || summary).slice(0, 120),
-    confidence: payload.confidence,
-  });
-  const effectEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'relationship_delta',
-    summary: `状态回流：${summary}`,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      eventKind: 'status_update',
-      effectType: 'artifact',
-      summary: `状态回流：${summary}`,
-      confidence: payload.confidence,
-    },
-  });
-  const memoryEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'memory_candidate',
-    summary,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      kind: 'fact',
-      text: summary,
-      salience: 0.62,
-      confidence: payload.confidence,
-    },
-  });
+function recordSocialIntent(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string, candidateId?: string) {
+  if (candidateId && sourceChat.runtimeEventsV2?.some((event) => event.kind === 'artifact'
+    && (event.payload as { candidateId?: string }).candidateId === candidateId)) {
+    return withFrameworkPatch(sourceChat, {});
+  }
+  const intent = buildSocialIntentArtifact(payload, actorName, candidateId);
+  if (!intent) throw new Error(`Unsupported social intent: ${payload.eventKind}`);
   const artifactEvent = createRuntimeEventV2({
     conversationId: sourceChat.id,
     kind: 'artifact',
-    summary,
     actorIds: [payload.initiatorId],
     targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      artifactType: 'status_note',
-      eventKind: 'status_update',
-      text: summary,
-      title: payload.title,
-      activityType: payload.activityType,
-      expectedArtifacts: payload.expectedArtifacts || [],
-      dedupeKey: payload.dedupeKey,
-    },
-  });
-  const roomShiftEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'room_shift',
-    summary: `状态更新后房间态势微调：热度 ${shiftedRoom.nextState.heat} / 凝聚 ${shiftedRoom.nextState.cohesion}`,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: shiftedRoom.shift,
+    ...intent,
   });
   return withFrameworkPatch(sourceChat, {
-    lastMessageAt: Date.now(),
-    runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [effectEvent, memoryEvent, artifactEvent, roomShiftEvent]),
-    worldState: {
-      ...DEFAULT_CONVERSATION_WORLD_STATE,
-      ...(sourceChat.worldState || {}),
-      structuredRoomState: shiftedRoom.nextState,
-      recentEvent: summary.slice(0, 120),
-    },
-    ...accumulateChatRuntime(sourceChat, { type: 'event', content: summary }),
-    runtimeSeed: mergeRuntimeSeedWithSummary(sourceChat, summary),
+    runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [artifactEvent]),
   });
 }
 
-export function updateSourceChatAfterCheckIn(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string) {
-  const summary = `${actorName} 主动问候了用户近况。`;
-  const shiftedRoom = calculateRoomShift(sourceChat.worldState.structuredRoomState || null, {
-    kind: 'support',
-    actorId: payload.initiatorId,
-    targetId: payload.targetIds?.[0] || null,
-    intensity: 1,
-    tone: 'warm',
-    evidenceText: (payload.sourceText || summary).slice(0, 120),
-    confidence: payload.confidence,
-  });
-  const effectEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'relationship_delta',
-    summary: `问候回流：${summary}`,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      eventKind: 'check_in',
-      effectType: 'artifact',
-      summary: `问候回流：${summary}`,
-      confidence: payload.confidence,
-    },
-  });
-  const memoryEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'memory_candidate',
-    summary,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      kind: 'relationship',
-      text: summary,
-      salience: 0.64,
-      confidence: payload.confidence,
-    },
-  });
-  const artifactEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'artifact',
-    summary,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      artifactType: 'check_in_note',
-      eventKind: 'check_in',
-      text: summary,
-      title: payload.title,
-      activityType: payload.activityType,
-      expectedArtifacts: payload.expectedArtifacts || [],
-      dedupeKey: payload.dedupeKey,
-    },
-  });
-  const roomShiftEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'room_shift',
-    summary: `问候后房间态势微调：热度 ${shiftedRoom.nextState.heat} / 凝聚 ${shiftedRoom.nextState.cohesion}`,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: shiftedRoom.shift,
-  });
-  return withFrameworkPatch(sourceChat, {
-    lastMessageAt: Date.now(),
-    runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [effectEvent, memoryEvent, artifactEvent, roomShiftEvent]),
-    worldState: {
-      ...DEFAULT_CONVERSATION_WORLD_STATE,
-      ...(sourceChat.worldState || {}),
-      structuredRoomState: shiftedRoom.nextState,
-      recentEvent: summary.slice(0, 120),
-    },
-    ...accumulateChatRuntime(sourceChat, { type: 'event', content: summary }),
-    runtimeSeed: mergeRuntimeSeedWithSummary(sourceChat, summary),
-  });
+export function updateSourceChatAfterStatusUpdate(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string, candidateId?: string) {
+  return recordSocialIntent(sourceChat, payload, actorName, candidateId);
 }
 
-export function updateSourceChatAfterReactToMoment(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string) {
-  const summary = `${actorName} 回应了用户最近的动态。`;
-  const shiftedRoom = calculateRoomShift(sourceChat.worldState.structuredRoomState || null, {
-    kind: 'support',
-    actorId: payload.initiatorId,
-    targetId: payload.targetIds?.[0] || null,
-    intensity: 1,
-    tone: 'warm',
-    evidenceText: (payload.sourceText || summary).slice(0, 120),
-    confidence: payload.confidence,
-  });
-  const effectEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'relationship_delta',
-    summary: `动态回应回流：${summary}`,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      eventKind: 'react_to_moment',
-      effectType: 'artifact',
-      summary: `动态回应回流：${summary}`,
-      confidence: payload.confidence,
-    },
-  });
-  const memoryEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'memory_candidate',
-    summary,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      kind: 'relationship',
-      text: summary,
-      salience: 0.66,
-      confidence: payload.confidence,
-    },
-  });
-  const artifactEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'artifact',
-    summary,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      artifactType: 'moment_reaction_note',
-      eventKind: 'react_to_moment',
-      text: summary,
-      title: payload.title,
-      activityType: payload.activityType,
-      expectedArtifacts: payload.expectedArtifacts || [],
-      dedupeKey: payload.dedupeKey,
-    },
-  });
-  const roomShiftEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'room_shift',
-    summary: `动态回应后房间态势微调：热度 ${shiftedRoom.nextState.heat} / 凝聚 ${shiftedRoom.nextState.cohesion}`,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: shiftedRoom.shift,
-  });
-  return withFrameworkPatch(sourceChat, {
-    lastMessageAt: Date.now(),
-    runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [effectEvent, memoryEvent, artifactEvent, roomShiftEvent]),
-    worldState: {
-      ...DEFAULT_CONVERSATION_WORLD_STATE,
-      ...(sourceChat.worldState || {}),
-      structuredRoomState: shiftedRoom.nextState,
-      recentEvent: summary.slice(0, 120),
-    },
-    ...accumulateChatRuntime(sourceChat, { type: 'event', content: summary }),
-    runtimeSeed: mergeRuntimeSeedWithSummary(sourceChat, summary),
-  });
+export function updateSourceChatAfterCheckIn(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string, candidateId?: string) {
+  return recordSocialIntent(sourceChat, payload, actorName, candidateId);
+}
+
+export function updateSourceChatAfterReactToMoment(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string, candidateId?: string) {
+  return recordSocialIntent(sourceChat, payload, actorName, candidateId);
 }
 
 function findLatestAutoSocialOutingCandidate(chat: GroupChat) {
@@ -881,162 +676,12 @@ function findLatestAutoConflictExpressionCandidate(chat: GroupChat) {
   ));
 }
 
-export function updateSourceChatAfterGiftExchange(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string) {
-  const summary = `${actorName} 刚刚送出了一个小礼物或心意。`;
-  const shiftedRoom = calculateRoomShift(sourceChat.worldState.structuredRoomState || null, {
-    kind: 'support',
-    actorId: payload.initiatorId,
-    targetId: payload.targetIds?.[0] || null,
-    intensity: 2,
-    tone: 'warm',
-    evidenceText: (payload.sourceText || summary).slice(0, 120),
-    confidence: payload.confidence,
-  });
-  const effectEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'relationship_delta',
-    summary: `礼物回流：${summary}`,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      eventKind: 'gift_exchange',
-      effectType: 'artifact',
-      summary: `礼物回流：${summary}`,
-      confidence: payload.confidence,
-    },
-  });
-  const memoryEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'memory_candidate',
-    summary,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      kind: 'preference',
-      text: summary,
-      salience: 0.7,
-      confidence: payload.confidence,
-    },
-  });
-  const artifactEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'artifact',
-    summary,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      artifactType: 'gift_note',
-      eventKind: 'gift_exchange',
-      text: summary,
-      title: payload.title,
-      activityType: payload.activityType,
-      expectedArtifacts: payload.expectedArtifacts || [],
-      dedupeKey: payload.dedupeKey,
-    },
-  });
-  const roomShiftEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'room_shift',
-    summary: `礼物互动后房间态势微调：热度 ${shiftedRoom.nextState.heat} / 凝聚 ${shiftedRoom.nextState.cohesion}`,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: shiftedRoom.shift,
-  });
-  return withFrameworkPatch(sourceChat, {
-    lastMessageAt: Date.now(),
-    runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [effectEvent, memoryEvent, artifactEvent, roomShiftEvent]),
-    worldState: {
-      ...DEFAULT_CONVERSATION_WORLD_STATE,
-      ...(sourceChat.worldState || {}),
-      structuredRoomState: shiftedRoom.nextState,
-      recentEvent: summary.slice(0, 120),
-    },
-    ...accumulateChatRuntime(sourceChat, { type: 'event', content: summary }),
-    runtimeSeed: mergeRuntimeSeedWithSummary(sourceChat, summary),
-  });
+export function updateSourceChatAfterGiftExchange(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string, candidateId?: string) {
+  return recordSocialIntent(sourceChat, payload, actorName, candidateId);
 }
 
-export function updateSourceChatAfterConflictExpression(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string) {
-  const summary = `${actorName} 把刚才的不满直接摊开说了。`;
-  const shiftedRoom = calculateRoomShift(sourceChat.worldState.structuredRoomState || null, {
-    kind: 'challenge',
-    actorId: payload.initiatorId,
-    targetId: payload.targetIds?.[0] || null,
-    intensity: 2,
-    tone: 'annoyed',
-    evidenceText: (payload.sourceText || summary).slice(0, 120),
-    confidence: payload.confidence,
-  });
-  const effectEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'relationship_delta',
-    summary: `冲突回流：${summary}`,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      eventKind: 'conflict_expression',
-      effectType: 'artifact',
-      summary: `冲突回流：${summary}`,
-      confidence: payload.confidence,
-    },
-  });
-  const memoryEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'memory_candidate',
-    summary,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      kind: 'relationship',
-      text: summary,
-      salience: 0.74,
-      confidence: payload.confidence,
-    },
-  });
-  const artifactEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'artifact',
-    summary,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: {
-      artifactType: 'conflict_note',
-      eventKind: 'conflict_expression',
-      text: summary,
-      title: payload.title,
-      activityType: payload.activityType,
-      expectedArtifacts: payload.expectedArtifacts || [],
-      dedupeKey: payload.dedupeKey,
-    },
-  });
-  const roomShiftEvent = createRuntimeEventV2({
-    conversationId: sourceChat.id,
-    kind: 'room_shift',
-    summary: `冲突表达后房间态势微调：热度 ${shiftedRoom.nextState.heat} / 凝聚 ${shiftedRoom.nextState.cohesion}`,
-    actorIds: [payload.initiatorId],
-    targetIds: payload.targetIds,
-    visibility: 'derived_public',
-    payload: shiftedRoom.shift,
-  });
-  return withFrameworkPatch(sourceChat, {
-    lastMessageAt: Date.now(),
-    runtimeEventsV2: appendStructuredRuntimeEvents(sourceChat, [effectEvent, memoryEvent, artifactEvent, roomShiftEvent]),
-    worldState: {
-      ...DEFAULT_CONVERSATION_WORLD_STATE,
-      ...(sourceChat.worldState || {}),
-      structuredRoomState: shiftedRoom.nextState,
-      recentEvent: summary.slice(0, 120),
-    },
-    ...accumulateChatRuntime(sourceChat, { type: 'event', content: summary }),
-    runtimeSeed: mergeRuntimeSeedWithSummary(sourceChat, summary),
-  });
+export function updateSourceChatAfterConflictExpression(sourceChat: GroupChat, payload: SocialEventCandidatePayload, actorName: string, candidateId?: string) {
+  return recordSocialIntent(sourceChat, payload, actorName, candidateId);
 }
 
 
@@ -2258,7 +1903,7 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
     if (hasHandledSocialEvent(sourceChat, statusCandidate.id)) return { handledEventId: statusCandidate.id };
     if (shouldConsumeCandidateWithRestraint(sourceChat, payload, statusCandidate.createdAt)) {
       const actorName = ops.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-      const applied = await commitCandidate(statusCandidate, (chat) => updateSourceChatAfterStatusUpdate(chat, payload, actorName));
+      const applied = await commitCandidate(statusCandidate, (chat) => updateSourceChatAfterStatusUpdate(chat, payload, actorName, statusCandidate.id));
       return { handledEventId: applied ? statusCandidate.id : null };
     }
   }
@@ -2270,7 +1915,7 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
     if (hasHandledSocialEvent(sourceChat, checkInCandidate.id)) return { handledEventId: checkInCandidate.id };
     if (shouldConsumeCandidateWithRestraint(sourceChat, payload, checkInCandidate.createdAt)) {
       const actorName = ops.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-      const applied = await commitCandidate(checkInCandidate, (chat) => updateSourceChatAfterCheckIn(chat, payload, actorName));
+      const applied = await commitCandidate(checkInCandidate, (chat) => updateSourceChatAfterCheckIn(chat, payload, actorName, checkInCandidate.id));
       return { handledEventId: applied ? checkInCandidate.id : null };
     }
   }
@@ -2282,7 +1927,7 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
     if (hasHandledSocialEvent(sourceChat, reactMomentCandidate.id)) return { handledEventId: reactMomentCandidate.id };
     if (shouldConsumeCandidateWithRestraint(sourceChat, payload, reactMomentCandidate.createdAt)) {
       const actorName = ops.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-      const applied = await commitCandidate(reactMomentCandidate, (chat) => updateSourceChatAfterReactToMoment(chat, payload, actorName));
+      const applied = await commitCandidate(reactMomentCandidate, (chat) => updateSourceChatAfterReactToMoment(chat, payload, actorName, reactMomentCandidate.id));
       return { handledEventId: applied ? reactMomentCandidate.id : null };
     }
   }
@@ -2293,7 +1938,7 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
     if (!isValidAutoFlowCandidate(sourceChat, payload)) return { handledEventId: null };
     if (hasHandledSocialEvent(sourceChat, giftCandidate.id)) return { handledEventId: giftCandidate.id };
     const actorName = ops.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-    const applied = await commitCandidate(giftCandidate, (chat) => updateSourceChatAfterGiftExchange(chat, payload, actorName));
+    const applied = await commitCandidate(giftCandidate, (chat) => updateSourceChatAfterGiftExchange(chat, payload, actorName, giftCandidate.id));
     return { handledEventId: applied ? giftCandidate.id : null };
   }
 
@@ -2303,7 +1948,7 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
     if (!isValidAutoFlowCandidate(sourceChat, payload)) return { handledEventId: null };
     if (hasHandledSocialEvent(sourceChat, conflictCandidate.id)) return { handledEventId: conflictCandidate.id };
     const actorName = ops.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-    const applied = await commitCandidate(conflictCandidate, (chat) => updateSourceChatAfterConflictExpression(chat, payload, actorName));
+    const applied = await commitCandidate(conflictCandidate, (chat) => updateSourceChatAfterConflictExpression(chat, payload, actorName, conflictCandidate.id));
     return { handledEventId: applied ? conflictCandidate.id : null };
   }
 
@@ -2364,15 +2009,15 @@ export async function runSocialEventAutoFlow(sourceChat: GroupChat, ops: SocialE
         return appendHandledSocialEvent(seededChat, updateSourceChatAfterPostMoment(seededChat, payload, actorName, { createdAt: worldDrivenCandidate.createdAt }), worldDrivenCandidate.id, payload.initiatorId);
       }
       if (payload.eventKind === 'check_in') {
-        return appendHandledSocialEvent(seededChat, updateSourceChatAfterCheckIn(seededChat, payload, actorName), worldDrivenCandidate.id, payload.initiatorId);
+        return appendHandledSocialEvent(seededChat, updateSourceChatAfterCheckIn(seededChat, payload, actorName, worldDrivenCandidate.id), worldDrivenCandidate.id, payload.initiatorId);
       }
       if (payload.eventKind === 'social_outing') {
         return appendHandledSocialEvent(seededChat, updateSourceChatAfterSocialOuting(seededChat, payload, [actorName]), worldDrivenCandidate.id, payload.initiatorId);
       }
       if (payload.eventKind === 'react_to_moment') {
-        return appendHandledSocialEvent(seededChat, updateSourceChatAfterReactToMoment(seededChat, payload, actorName), worldDrivenCandidate.id, payload.initiatorId);
+        return appendHandledSocialEvent(seededChat, updateSourceChatAfterReactToMoment(seededChat, payload, actorName, worldDrivenCandidate.id), worldDrivenCandidate.id, payload.initiatorId);
       }
-      return appendHandledSocialEvent(seededChat, updateSourceChatAfterStatusUpdate(seededChat, payload, actorName), worldDrivenCandidate.id, payload.initiatorId);
+      return appendHandledSocialEvent(seededChat, updateSourceChatAfterStatusUpdate(seededChat, payload, actorName, worldDrivenCandidate.id), worldDrivenCandidate.id, payload.initiatorId);
     });
     return { handledEventId: applied ? worldDrivenCandidate.id : null };
   }

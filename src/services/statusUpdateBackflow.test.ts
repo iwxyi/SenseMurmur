@@ -65,17 +65,18 @@ describe('status update backflow', () => {
     expect(findLatestAutoStatusUpdateCandidate(buildChat())?.id).toBe('evt-status');
   });
 
-  it('backflows effect, memory, artifact, and room shift into source chat', () => {
+  it('records intent without fabricating completed behavior or character effects', () => {
     const chat = buildChat();
-    const patch = updateSourceChatAfterStatusUpdate(chat, buildPayload(), '甲');
-    const kinds = (patch.runtimeEventsV2 || []).map((event) => event.kind);
-    expect(kinds).toContain('relationship_delta');
-    expect(kinds).toContain('memory_candidate');
-    expect(kinds).toContain('artifact');
-    expect(kinds).toContain('room_shift');
-    const effect = (patch.runtimeEventsV2 || []).find((event) => event.kind === 'relationship_delta');
-    expect((effect?.payload as { eventKind?: string; effectType?: string }).eventKind).toBe('status_update');
-    expect((effect?.payload as { eventKind?: string; effectType?: string }).effectType).toBe('artifact');
-    expect(patch.worldState?.recentEvent).toContain('甲');
+    const payload = buildPayload();
+    const patch = updateSourceChatAfterStatusUpdate(chat, payload, '甲');
+    const additions = (patch.runtimeEventsV2 || []).filter((event) => !chat.runtimeEventsV2?.some((existing) => existing.id === event.id));
+    expect(additions).toHaveLength(1);
+    expect(additions[0]).toMatchObject({
+      kind: 'artifact',
+      payload: { eventKind: 'status_update', status: 'tentative', seedIntent: payload.seedIntent, sourceText: payload.sourceText },
+    });
+    expect(patch.worldState).toBeUndefined();
+    expect(patch.runtimeSeed).toBeUndefined();
+    expect(patch.lastMessageAt).toBeUndefined();
   });
 });

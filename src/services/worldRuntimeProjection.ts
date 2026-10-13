@@ -1028,10 +1028,12 @@ export function projectWorldMoments(chats: GroupChat[], characters: AICharacter[
       const isCheckIn = isCheckInArtifact || isCheckInCandidate;
       const isReactMoment = isReactMomentArtifact || isReactMomentCandidate;
       if (!isMoment && !isStatus && !isCheckIn && !isReactMoment) return;
+      const isTentativeArtifact = event.kind === 'artifact' && payload.status === 'tentative';
+      if (isTentativeArtifact && !options.includeCandidates) return;
       if (isMomentArtifact && isLegacyMomentRecordText(getString(payload.text)) && !options.includeCandidates) return;
       const actorId = event.actorIds?.[0];
       const dedupeKey = getString(payload.dedupeKey);
-      if (event.kind === 'event_candidate') {
+      if (event.kind === 'event_candidate' || isTentativeArtifact) {
         if (dedupeKey) {
           const candidateRefs = candidateRefsByDedupeKey.get(dedupeKey) || [];
           mergeMomentSourceRef(candidateRefs, chat, event);

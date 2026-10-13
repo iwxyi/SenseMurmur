@@ -61,6 +61,34 @@ function buildChat() {
 }
 
 describe('gift exchange auto flow', () => {
+  it('reuses the engine artifact for the same candidate without adding effects', async () => {
+    const chat = buildChat();
+    chat.runtimeEventsV2!.push({
+      id: 'intent-1', conversationId: chat.id, kind: 'artifact', createdAt: 2,
+      actorIds: ['a'], targetIds: ['b'], summary: '待定礼物意图', visibility: 'derived_public',
+      payload: { artifactType: 'gift_note', eventKind: 'gift_exchange', status: 'tentative', candidateId: 'evt-gift' },
+    });
+    const updateChat = vi.fn<(id: string, patch: Partial<GroupChat>) => Promise<void>>(async () => undefined);
+    const result = await runSocialEventAutoFlow(chat, {
+      chats: [chat], characters: [{ id: 'a', name: '甲' }, { id: 'b', name: '乙' }] as never[],
+      allowWorldFallback: false,
+      applyChatRuntimePatch: async (id, buildPatch) => {
+        const patch = buildPatch(chat);
+        if (!patch) return false;
+        await updateChat(id, patch);
+        return true;
+      },
+      addChat: vi.fn(async () => chat), addMessage: vi.fn(async () => ({})),
+      appendEventMessage: vi.fn(async () => undefined),
+    });
+    expect(result.handledEventId).toBe('evt-gift');
+    const patch = updateChat.mock.calls[0][1];
+    expect(patch.runtimeEventsV2?.filter((event) => (event.payload as { artifactType?: string }).artifactType === 'gift_note'))
+      .toHaveLength(1);
+    expect(patch.runtimeEventsV2?.some((event) => ['memory_candidate', 'relationship_delta', 'room_shift'].includes(event.kind))).toBe(false);
+    expect(patch.worldState).toBeUndefined();
+  });
+
   it('auto-backflows gift exchange candidates', async () => {
     const chat = buildChat();
     const updateChat = vi.fn<(id: string, patch: Partial<GroupChat>) => Promise<void>>(async () => undefined);

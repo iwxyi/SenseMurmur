@@ -28,6 +28,7 @@ import { isCharacterFeatureEnabled } from '../characterGenerationPolicy';
 import { isPostMomentDelaySourceEventKind, resolvePostMomentPublishGuard } from '../postMomentPublishPolicy';
 import { applyConversationUpdate } from '../conversationContinuity';
 import { retainRuntimeEvents } from '../runtimeEventRetention';
+import { buildSocialIntentArtifact } from '../socialIntentArtifact';
 
 const MAX_OPEN_CHAT_RUNTIME_EVENTS = 120;
 
@@ -346,100 +347,38 @@ function buildStatusUpdateCandidate(params: {
   return buildStatusUpdateCandidateFromHint(params);
 }
 
-function buildStatusUpdateArtifactEvents(params: {
+function buildSocialIntentArtifactEvents(params: {
   conversation: GroupChat;
   socialEventCandidates: RuntimeEventV2[];
   characters: AICharacter[];
-}): RuntimeEventV2[] {
+}, eventKind: SocialEventCandidatePayload['eventKind']): RuntimeEventV2[] {
   return params.socialEventCandidates
-    .filter((event) => (event.payload as SocialEventCandidatePayload).eventKind === 'status_update')
+    .filter((event) => (event.payload as SocialEventCandidatePayload).eventKind === eventKind)
     .map((event) => {
       const payload = event.payload as SocialEventCandidatePayload;
       const actorName = params.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-      const text = `${actorName} 更新了一下自己的近况：${payload.activityType || payload.title || '状态更新'}`;
+      const intent = buildSocialIntentArtifact(payload, actorName, event.id);
+      if (!intent) throw new Error(`Unsupported social intent: ${eventKind}`);
       return createRuntimeEventV2({
         conversationId: params.conversation.id,
         kind: 'artifact',
-        summary: text,
         actorIds: [payload.initiatorId],
         targetIds: payload.targetIds,
-        visibility: 'derived_public',
-        payload: {
-          artifactType: 'status_note',
-          eventKind: 'status_update',
-          text,
-          candidateId: event.id,
-          title: payload.title,
-          activityType: payload.activityType,
-          expectedArtifacts: payload.expectedArtifacts || [],
-          dedupeKey: payload.dedupeKey,
-        },
+        ...intent,
       });
     });
 }
 
-function buildCheckInArtifactEvents(params: {
-  conversation: GroupChat;
-  socialEventCandidates: RuntimeEventV2[];
-  characters: AICharacter[];
-}): RuntimeEventV2[] {
-  return params.socialEventCandidates
-    .filter((event) => (event.payload as SocialEventCandidatePayload).eventKind === 'check_in')
-    .map((event) => {
-      const payload = event.payload as SocialEventCandidatePayload;
-      const actorName = params.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-      const text = `${actorName} 给用户发了一句简短问候，确认近况。`;
-      return createRuntimeEventV2({
-        conversationId: params.conversation.id,
-        kind: 'artifact',
-        summary: text,
-        actorIds: [payload.initiatorId],
-        targetIds: payload.targetIds,
-        visibility: 'derived_public',
-        payload: {
-          artifactType: 'check_in_note',
-          eventKind: 'check_in',
-          text,
-          candidateId: event.id,
-          title: payload.title || '问候跟进',
-          activityType: payload.activityType,
-          expectedArtifacts: payload.expectedArtifacts || [],
-          dedupeKey: payload.dedupeKey,
-        },
-      });
-    });
+function buildStatusUpdateArtifactEvents(params: Parameters<typeof buildSocialIntentArtifactEvents>[0]): RuntimeEventV2[] {
+  return buildSocialIntentArtifactEvents(params, 'status_update');
 }
 
-function buildReactToMomentArtifactEvents(params: {
-  conversation: GroupChat;
-  socialEventCandidates: RuntimeEventV2[];
-  characters: AICharacter[];
-}): RuntimeEventV2[] {
-  return params.socialEventCandidates
-    .filter((event) => (event.payload as SocialEventCandidatePayload).eventKind === 'react_to_moment')
-    .map((event) => {
-      const payload = event.payload as SocialEventCandidatePayload;
-      const actorName = params.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-      const text = `${actorName} 对刚刚的动态补了一句回应。`;
-      return createRuntimeEventV2({
-        conversationId: params.conversation.id,
-        kind: 'artifact',
-        summary: text,
-        actorIds: [payload.initiatorId],
-        targetIds: payload.targetIds,
-        visibility: 'derived_public',
-        payload: {
-          artifactType: 'moment_reaction_note',
-          eventKind: 'react_to_moment',
-          text,
-          candidateId: event.id,
-          title: payload.title || '动态回应',
-          activityType: payload.activityType,
-          expectedArtifacts: payload.expectedArtifacts || [],
-          dedupeKey: payload.dedupeKey,
-        },
-      });
-    });
+function buildCheckInArtifactEvents(params: Parameters<typeof buildSocialIntentArtifactEvents>[0]): RuntimeEventV2[] {
+  return buildSocialIntentArtifactEvents(params, 'check_in');
+}
+
+function buildReactToMomentArtifactEvents(params: Parameters<typeof buildSocialIntentArtifactEvents>[0]): RuntimeEventV2[] {
+  return buildSocialIntentArtifactEvents(params, 'react_to_moment');
 }
 
 function buildGiftExchangeCandidateFromHint(params: {
@@ -488,36 +427,8 @@ function buildGiftExchangeCandidate(params: {
   return buildGiftExchangeCandidateFromHint(params);
 }
 
-function buildGiftExchangeArtifactEvents(params: {
-  conversation: GroupChat;
-  socialEventCandidates: RuntimeEventV2[];
-  characters: AICharacter[];
-}): RuntimeEventV2[] {
-  return params.socialEventCandidates
-    .filter((event) => (event.payload as SocialEventCandidatePayload).eventKind === 'gift_exchange')
-    .map((event) => {
-      const payload = event.payload as SocialEventCandidatePayload;
-      const actorName = params.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-      const text = `${actorName} 送出了一个小礼物或心意。`;
-      return createRuntimeEventV2({
-        conversationId: params.conversation.id,
-        kind: 'artifact',
-        summary: text,
-        actorIds: [payload.initiatorId],
-        targetIds: payload.targetIds,
-        visibility: 'derived_public',
-        payload: {
-          artifactType: 'gift_note',
-          eventKind: 'gift_exchange',
-          text,
-          candidateId: event.id,
-          title: payload.title,
-          activityType: payload.activityType,
-          expectedArtifacts: payload.expectedArtifacts || [],
-          dedupeKey: payload.dedupeKey,
-        },
-      });
-    });
+function buildGiftExchangeArtifactEvents(params: Parameters<typeof buildSocialIntentArtifactEvents>[0]): RuntimeEventV2[] {
+  return buildSocialIntentArtifactEvents(params, 'gift_exchange');
 }
 
 function shouldAutoBackflowGiftExchange(chat: GroupChat, payload: SocialEventCandidatePayload, createdAt: number) {
@@ -568,40 +479,8 @@ function buildConflictExpressionCandidateFromHint(params: {
   });
 }
 
-function buildConflictExpressionArtifactEvents(params: {
-  conversation: GroupChat;
-  socialEventCandidates: RuntimeEventV2[];
-  characters: AICharacter[];
-}): RuntimeEventV2[] {
-  return params.socialEventCandidates
-    .filter((event) => (event.payload as SocialEventCandidatePayload).eventKind === 'conflict_expression')
-    .map((event) => {
-      const payload = event.payload as SocialEventCandidatePayload;
-      const actorName = params.characters.find((item) => item.id === payload.initiatorId)?.name || payload.initiatorId;
-      const targetName = params.characters.find((item) => item.id === payload.targetIds?.[0])?.name || payload.targetIds?.[0] || '对方';
-      const text = payload.reasonType === 'companionship_group_mediation'
-        ? (payload.openingMessage || `${actorName} 公开替 ${targetName} 递了一个台阶，让群聊气氛没有继续变重。`)
-        : `${actorName} 把刚才的矛盾直接摊开说了。`;
-      return createRuntimeEventV2({
-        conversationId: params.conversation.id,
-        kind: 'artifact',
-        summary: text,
-        actorIds: [payload.initiatorId],
-        targetIds: payload.targetIds,
-        visibility: 'derived_public',
-        payload: {
-          artifactType: 'conflict_note',
-          eventKind: 'conflict_expression',
-          text,
-          candidateId: event.id,
-          title: payload.title,
-          activityType: payload.activityType,
-          reasonType: payload.reasonType,
-          expectedArtifacts: payload.expectedArtifacts || [],
-          dedupeKey: payload.dedupeKey,
-        },
-      });
-    });
+function buildConflictExpressionArtifactEvents(params: Parameters<typeof buildSocialIntentArtifactEvents>[0]): RuntimeEventV2[] {
+  return buildSocialIntentArtifactEvents(params, 'conflict_expression');
 }
 
 function shouldAutoBackflowStatusUpdate(chat: GroupChat, payload: SocialEventCandidatePayload, createdAt: number) {
