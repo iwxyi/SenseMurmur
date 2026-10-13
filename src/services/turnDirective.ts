@@ -231,7 +231,7 @@ export function buildTurnDirectivePrompt(directive: TurnDirective | null | undef
   if (!directive) return '';
   const userLine = directive.userConstraint ? `\n- User constraint: ${directive.userConstraint}.` : '';
   const continuityLine = directive.continuityEvidence?.length
-    ? `\n- Recorded situation and unfinished matters: ${directive.continuityEvidence.join(' / ')}. These records may lag behind newer visible speech; the newer exchange takes precedence. Keep the scope of each commitment or decision; completed points may rest, unfinished matters may be deferred.` : '';
+    ? `\n- Recorded situation and unfinished matters: ${directive.continuityEvidence.join(' / ')}. These records may lag behind newer visible speech; the newer exchange takes precedence. Keep the scope of each commitment or decision; completed points may rest, unfinished matters may be deferred. An established commitment or decision is already accepted: do not ask for acceptance again or restate that acceptance as the substance of this turn. Mention it again only for concrete progress, a result, a changed condition, a real obstacle, or a present reaction that matters between these people.` : '';
   const situationalLine = directive.situationalConstraints.length
     ? `\n- Situational constraints: ${directive.situationalConstraints.join('; ')}.`
     : '';

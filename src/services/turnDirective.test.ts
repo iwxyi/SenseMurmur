@@ -211,8 +211,11 @@ describe('turnDirective', () => {
     const before = buildTurnDirective({ ...input, chat: room,
       narrativeLines: projectNarrativeLines({ chat: room, messages: [reply], now: 20 }) });
     expect(before.continuityEvidence?.[0]).toContain('commitment/established: 瑞瑞答应把书还给陈越');
-    expect(buildTurnDirectivePrompt(before)).toContain('已接受，尚未报告兑现');
-    expect(buildTurnDirectivePrompt(before)).toContain('it does not require action or resolution this turn');
+    const beforePrompt = buildTurnDirectivePrompt(before);
+    expect(beforePrompt).toContain('已接受，尚未报告兑现');
+    expect(beforePrompt).toContain('it does not require action or resolution this turn');
+    expect(beforePrompt).toContain('An established commitment or decision is already accepted');
+    expect(beforePrompt).toContain('do not ask for acceptance again or restate that acceptance');
     const applied = applyConversationUpdate(room, reply, room.worldState.structuredRoomState);
     const ended = { ...room, worldState: { ...room.worldState, conversationContinuity: applied.continuity } };
     const after = buildTurnDirectivePrompt(buildTurnDirective({ ...input, chat: ended,
