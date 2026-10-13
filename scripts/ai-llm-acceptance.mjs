@@ -2705,7 +2705,7 @@ async function loadRuntimeChatModules() {
         logLevel: 'error',
       });
       try {
-        const [chatEngine, chatTypes, chatDraftBuilder, generatedTurnCommit, sessionEngineLoader, sessionActionExecutors, sessionRunner, settingsStore, continuity] = await Promise.all([
+        const [chatEngine, chatTypes, chatDraftBuilder, generatedTurnCommit, sessionEngineLoader, sessionActionExecutors, sessionRunner, settingsStore, continuity, presence, worldProjection] = await Promise.all([
           server.ssrLoadModule('/src/services/chatEngine.ts'),
           server.ssrLoadModule('/src/types/chat.ts'),
           server.ssrLoadModule('/src/services/chatDraftBuilder.ts'),
@@ -2715,6 +2715,8 @@ async function loadRuntimeChatModules() {
           server.ssrLoadModule('/src/services/sessionRunner.ts'),
           server.ssrLoadModule('/src/stores/useSettingsStore.ts'),
           server.ssrLoadModule('/src/services/conversationContinuity.ts'),
+          server.ssrLoadModule('/src/services/characterPresence.ts'),
+          server.ssrLoadModule('/src/services/worldRuntimeProjection.ts'),
         ]);
         return {
           server,
@@ -2728,6 +2730,8 @@ async function loadRuntimeChatModules() {
           shouldPauseSettledConversation: sessionRunner.shouldPauseSettledConversation,
           settingsStore: settingsStore.useSettingsStore,
           applyConversationUpdate: continuity.applyConversationUpdate,
+          applyPresenceUpdateToTransition: presence.applyPresenceUpdateToTransition,
+          projectWorldCalendar: worldProjection.projectWorldCalendar,
         };
       } catch (error) {
         await server.close();
@@ -3516,6 +3520,25 @@ function runtimeChatflowScenarios() {
   });
   const underworld = scenarios.find((scenario) => scenario.name === 'underworld_hierarchy_emotion_room');
   scenarios.push({
+    name: 'longzhong_activity_update_room',
+    roomKind: 'group', turns: 2,
+    rubricHint: '张飞仍在执行同一项巡城活动，本轮只报告从北门走到南门，继续巡查。他可以边巡边聊，不必下线、重复承诺或另建活动。检查已有活动的地点更新，不凭时间到期宣称任务完成。',
+    chat: { ...longzhong.chat, id: 'acceptance-longzhong-activity', name: '巡城途中', topic: '张飞巡城途中，兄弟询问他走到了哪里。' },
+    characters: longzhong.characters.map((character) => character.id === 'fei'
+      ? { ...character, background: `${character.background} 你正在巡城，刚从北门走到南门，巡查还未结束；可以边巡边与兄长交谈。` }
+      : character),
+    seedMessages: [
+      acceptanceAiMessage('acceptance-longzhong-activity', 'fei', '张飞', '俺先从北门巡起，走完这一圈再回来。', now - 40_000, {
+        metadata: { activityUpdate: { calendarItemId: null, title: '巡城', kind: 'activity', status: 'in_progress',
+          startsNow: true, availability: 'online', locationHint: '北门', evidenceText: '俺先从北门巡起' } },
+      }),
+      acceptanceAiMessage('acceptance-longzhong-activity', 'bei', '刘备', '三弟，走到哪儿了？', now - 20_000, {
+        addressedTargetIds: ['fei'], primaryAddressedTargetId: 'fei',
+      }),
+    ],
+    activityExpectations: [{ turn: 1, title: '巡城', status: 'in_progress', locationHint: '南门', preserveSeedId: true }],
+  });
+  scenarios.push({
     name: 'longzhong_commitment_result_room',
     roomKind: 'group',
     turns: 3,
@@ -3571,6 +3594,17 @@ function assertRuntimeChatflowTranscript(scenario, transcript, errors, naturally
     const item = turn?.conversationContinuityAfter?.items.find((item) => item.key === expected.key);
     assertCondition(item?.status === expected.status, `chatflow ${scenario.name} turn ${expected.turn} expected ${expected.key}/${expected.status}`, { expected, actual: item || null });
   }
+  for (const expected of scenario.activityExpectations || []) {
+    const turn = transcript.find((item) => item.turn === expected.turn);
+    const items = (turn?.calendarAfter || []).filter((item) => item.title === expected.title);
+    assertCondition(items.length === 1 && items[0].status === expected.status && items[0].locationHint === expected.locationHint,
+      `chatflow ${scenario.name} turn ${expected.turn} activity update mismatch`, { expected, actual: items });
+    if (expected.preserveSeedId) {
+      const seed = turn.seedCalendar?.find((item) => item.title === expected.title);
+      assertCondition(seed && seed.id === items[0].id && seed.startAt === items[0].startAt && seed.endAt === items[0].endAt,
+        `chatflow ${scenario.name} replaced or retimed the seeded activity`, { seed, actual: items[0] });
+    }
+  }
   const pausesAfterReply = scenario.chat.type === 'direct' || scenario.chat.type === 'ai_direct' || scenario.roomKind === 'study';
   const availableTurns = pausesAfterReply ? 1 + (scenario.userInjections || []).length : config.chatflowTurns;
   assertCondition(transcript.length >= (naturallySettled ? 1 : Math.min(3, config.chatflowTurns, availableTurns)), `chatflow ${scenario.name} produced too few turns`, transcript);
@@ -3623,6 +3657,9 @@ function summarizeRuntimeTurn(message) {
     conflictUpdates: message.conflictUpdates || [],
     conversationContinuityAfter: message.conversationContinuityAfter || null,
     conversationUpdates: message.conversationUpdates || [],
+    calendarAfter: message.calendarAfter || [],
+    seedCalendar: message.seedCalendar || [],
+    activityUpdates: message.activityUpdates || [],
     roomShiftSignals: message.committedRoomShiftSignals || [],
     speakerSelection: runtimeDecision.speakerSelection || null,
     speakerScore: runtimeDecision.speakerScore || null,
@@ -4281,6 +4318,17 @@ async function runRuntimeChatflowScenario(model, scenario) {
     chat = await commitHumanTurn(runtime, chat, characters, messages, message, api);
   }
 
+  for (const message of messages.filter((item) => item.type === 'ai' && item.metadata?.activityUpdate)) {
+    const seeded = runtime.applyPresenceUpdateToTransition({ chat, characters, message,
+      transition: { chatPatch: {}, characterPatches: [], runtimeEvents: [] }, now: message.timestamp });
+    assertCondition(seeded.chatRuntimeDelta?.runtimeEventsV2?.upserts?.length,
+      `chatflow ${scenario.name} rejected seeded activity`);
+    chat = applyRuntimeTransition(runtime, chat, seeded);
+    characters = characters.map((character) => ({ ...character,
+      ...(seeded.characterPatches.find((item) => item.id === character.id)?.patch || {}) }));
+  }
+  const seedCalendar = runtime.projectWorldCalendar([chat], characters, { inferTemporalStatus: false }).items;
+
   const conversationRunStart = chat;
   const seedConversationContinuity = structuredClone(chat.worldState.conversationContinuity || null);
   for (let turn = 1; turn <= turnCount; turn += 1) {
@@ -4452,6 +4500,9 @@ async function runRuntimeChatflowScenario(model, scenario) {
         .map((item) => ({ content: item.content, conflictFocus: item.conflictFocus })),
       conversationContinuityAfter: chat.worldState?.conversationContinuity || null,
       conversationUpdates: logicalTurnMessages.map((item) => item.metadata?.conversationUpdate).filter(Boolean),
+      calendarAfter: runtime.projectWorldCalendar([chat], characters, { inferTemporalStatus: false }).items,
+      seedCalendar,
+      activityUpdates: logicalTurnMessages.map((item) => item.metadata?.activityUpdate).filter(Boolean),
     });
     summarized.addressedTargetNames = summarized.addressedTargetIds
       .map((targetId) => targetId === 'user' ? '用户' : characters.find((character) => character.id === targetId)?.name)

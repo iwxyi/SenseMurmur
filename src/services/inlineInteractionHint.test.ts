@@ -2,7 +2,79 @@ import { describe, expect, it } from 'vitest';
 import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
 import { normalizeInteractionHintCollection } from '../types/runtimeEvent';
+import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import { buildInlineInteractionContract, hasInvalidStateEvidence, parseInlineInteractionEnvelope } from './inlineInteractionHint';
+
+describe('known activity writeback context', () => {
+  const speaker = { id: 'speaker', name: '张飞' } as AICharacter;
+  const other = { id: 'other', name: '刘备' } as AICharacter;
+  function context(events: RuntimeEventV2[]) {
+    const contract = buildInlineInteractionContract({
+      chat: { id: 'room', type: 'group', mode: 'chat', memberIds: ['speaker', 'other'], runtimeEventsV2: events, worldState: {} } as GroupChat,
+      speaker, characters: [speaker, other], recentMessages: [],
+    });
+    const match = contract.match(/Known speaker activity records: (\[.*\])\./);
+    expect(match).not.toBeNull();
+    return JSON.parse(match![1]);
+  }
+  const invitation: RuntimeEventV2 = {
+    id: 'invite', conversationId: 'room', kind: 'artifact', createdAt: 100,
+    actorIds: ['other'], targetIds: ['speaker'], visibility: 'derived_public', summary: '明日巡城',
+    payload: { eventKind: 'social_outing', title: '巡城', participantIds: ['other', 'speaker'],
+      participantStates: { other: 'going', speaker: 'invited' }, dedupeKey: 'patrol',
+      timeHint: '明日', locationHint: '北门', autoTravel: false },
+  };
+  const patch = (payload: Record<string, unknown>, createdAt = 200): RuntimeEventV2 => ({
+    id: `patch-${createdAt}`, conversationId: 'room', kind: 'calendar_item_patch', createdAt,
+    actorIds: ['other'], visibility: 'derived_public', summary: '活动更新',
+    payload: { calendarItemId: 'patrol', ...payload },
+  });
+
+  it('reads invitations and merges title-free changes made by another participant', () => {
+    const records = context([invitation, patch({ addParticipantStates: { speaker: 'going' },
+      startAt: 1000, endAt: 2000, status: 'in_progress', timeHint: '现在', locationHint: '南门' })]);
+    expect(records).toEqual([{ calendarItemId: 'patrol', writebackChannel: 'socialEventHints', title: '巡城', kind: 'activity',
+      status: 'in_progress', startAt: 1000, endAt: 2000, timeHint: '现在', locationHint: '南门',
+      participantStates: { other: 'going', speaker: 'going' } }]);
+    expect(records[0]).not.toHaveProperty('durationMinutes');
+    expect(records[0]).not.toHaveProperty('sourceRefs');
+  });
+
+  it.each([{ status: 'completed' }, { cancelled: true }])('reads terminal changes without a repeated title: %j', (change) => {
+    expect(context([invitation, patch(change)])[0]?.status).toBe(change.status || 'cancelled');
+  });
+
+  it('offers the activity channel only for a speaker-owned public record', () => {
+    const own = { ...patch({ participantIds: ['speaker'], title: '探路', status: 'in_progress' }),
+      actorIds: ['speaker'], visibility: 'public' as const };
+    expect(context([own])[0]?.writebackChannel).toBe('activityUpdate');
+  });
+
+  it('excludes private activity patches from public generation context', () => {
+    const privatePatch = { ...patch({ title: '私下密会', participantIds: ['speaker'] }), visibility: 'pair_private' as const };
+    expect(context([privatePatch])).toEqual([]);
+    expect(context([invitation, privatePatch])[0]?.title).toBe('巡城');
+  });
+
+  it('does not offer inferred preparation and rest as separate shared activities to update', () => {
+    const event = { ...invitation, payload: { ...invitation.payload, startAt: Date.now() + 60_000,
+      durationMinutes: 120, autoPreparationRest: true } };
+    expect(context([event]).map((item: { calendarItemId: string }) => item.calendarItemId)).toEqual(['patrol']);
+  });
+
+  it('does not expose an event merely because the speaker authored its patch', () => {
+    const event = { ...patch({ participantIds: ['other'], title: '留守' }), actorIds: ['speaker'] };
+    expect(context([event])).toEqual([]);
+  });
+
+  it('orders recent activity updates first and retains individual withdrawal', () => {
+    const own = patch({ participantIds: ['speaker'], title: '探路', status: 'planned' });
+    own.payload = { ...own.payload, calendarItemId: 'scout' };
+    const records = context([invitation, own, patch({ addParticipantStates: { speaker: 'withdrawn' } }, 300)]);
+    expect(records.map((item: { calendarItemId: string }) => item.calendarItemId)).toEqual(['patrol', 'scout']);
+    expect(records[0].participantStates.speaker).toBe('withdrawn');
+  });
+});
 
 describe('state evidence source boundary', () => {
   const item = (evidenceText: string) => ({ key: 'report', kind: 'commitment', status: 'resolved',

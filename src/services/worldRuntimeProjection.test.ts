@@ -125,6 +125,18 @@ describe('worldRuntimeProjection', () => {
     expect(items[0]?.sourceRefs[0]?.conversationId).toBe('chat-2');
   });
 
+  it('can read explicit activity state without treating an elapsed window as fulfillment', () => {
+    const now = Date.now();
+    const chats = [buildChat('chat-1', '群聊一', [{
+      id: 'activity', conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now - 120_000,
+      actorIds: ['a'], visibility: 'derived_public', summary: '正在探路',
+      payload: { calendarItemId: 'scout', title: '探路', participantIds: ['a'], status: 'in_progress',
+        startAt: now - 120_000, endAt: now - 60_000 },
+    }])];
+    expect(projectWorldCalendar(chats, [character('a', 'A')], { now }).items[0]?.status).toBe('completed');
+    expect(projectWorldCalendar(chats, [character('a', 'A')], { now, inferTemporalStatus: false }).items[0]?.status).toBe('in_progress');
+  });
+
   it('applies calendar patch updates for participants, details, and cancellation', () => {
     const chats = [buildChat('chat-1', '群聊一', [
       {

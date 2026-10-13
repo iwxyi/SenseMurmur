@@ -16,6 +16,7 @@ export interface WorldCalendarSourceRef {
 
 export interface WorldCalendarItem {
   id: string;
+  derivedFromItemId?: string;
   kind: 'activity' | 'travel' | 'reminder' | 'blocked_time' | 'rest' | 'preparation';
   status: 'tentative' | 'planned' | 'confirmed' | 'in_progress' | 'completed' | 'cancelled';
   title: string;
@@ -727,7 +728,7 @@ function buildPatchDraftQueue(items: WorldCalendarItem[]) {
   });
 }
 
-export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter[], options: { conversationId?: string | null; now?: number } = {}): WorldCalendarProjectionResult {
+export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter[], options: { conversationId?: string | null; now?: number; inferTemporalStatus?: boolean } = {}): WorldCalendarProjectionResult {
   const now = typeof options.now === 'number' ? options.now : Date.now();
   const names = characterNameMap(characters);
   const items = new Map<string, WorldCalendarItem>();
@@ -792,6 +793,7 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
         const restId = `${item.id}::rest`;
         const prepItem: WorldCalendarItem = {
           id: prepId,
+          derivedFromItemId: item.id,
           kind: 'preparation',
           status: item.status,
           title: getString(payload.preparationTitle) || '活动准备',
@@ -818,6 +820,7 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
         };
         const restItem: WorldCalendarItem = {
           id: restId,
+          derivedFromItemId: item.id,
           kind: 'rest',
           status: item.status,
           title: getString(payload.restTitle) || '活动后休整',
@@ -862,6 +865,7 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
           const travelId = `${item.id}::travel`;
           const travelItem: WorldCalendarItem = {
             id: travelId,
+            derivedFromItemId: item.id,
             kind: 'travel',
             status: item.status,
             title: getString(payload.travelTitle) || '前往活动地点',
@@ -898,6 +902,7 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
             const restId = `${item.id}::rest`;
             const prepItem: WorldCalendarItem = {
               id: prepId,
+              derivedFromItemId: item.id,
               kind: 'preparation',
               status: item.status,
               title: getString(payload.preparationTitle) || '到场准备',
@@ -924,6 +929,7 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
             };
             const restItem: WorldCalendarItem = {
               id: restId,
+              derivedFromItemId: item.id,
               kind: 'rest',
               status: item.status,
               title: getString(payload.restTitle) || '活动后休整',
@@ -969,7 +975,7 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
   const projectedItems = detectConflicts(Array.from(items.values()))
     .map((item) => ({
       ...item,
-      status: deriveTemporalCalendarStatus(item.status, item.startAt, item.endAt, now),
+      status: options.inferTemporalStatus === false ? item.status : deriveTemporalCalendarStatus(item.status, item.startAt, item.endAt, now),
     }))
     .filter((item) => !options.conversationId || item.sourceRefs.some((ref) => ref.conversationId === options.conversationId))
     .sort((left, right) => right.updatedAt - left.updatedAt);

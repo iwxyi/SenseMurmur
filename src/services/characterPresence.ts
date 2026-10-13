@@ -48,6 +48,15 @@ export function buildPresencePatchFromMessage(params: {
   return { presence };
 }
 
+export function canUpdateSpeakerActivity(chat: GroupChat, speaker: Pick<AICharacter, 'id' | 'presence'>, calendarItemId: string): boolean {
+  return speaker.presence?.calendarItemId === calendarItemId || Boolean(chat.runtimeEventsV2?.some((event) => (
+    event.kind === 'calendar_item_patch'
+    && (!event.visibility || event.visibility === 'public')
+    && (event.payload as Record<string, unknown>).calendarItemId === calendarItemId
+    && event.actorIds?.includes(speaker.id)
+  )));
+}
+
 export function applyPresenceUpdateToTransition(params: {
   transition: DriverMessageCommitTransition;
   message: PresenceMessage;
@@ -77,13 +86,8 @@ export function applyPresenceUpdateToTransition(params: {
     const currentEvents = new Map((params.transition.chatPatch.runtimeEventsV2 || params.chat.runtimeEventsV2 || []).map((event) => [event.id, event]));
     params.transition.chatRuntimeDelta?.runtimeEventsV2?.upserts.forEach((event) => currentEvents.set(event.id, event));
     const currentChat = { ...params.chat, runtimeEventsV2: [...currentEvents.values()] };
-    const ownedEvent = validActivity.calendarItemId && currentChat.runtimeEventsV2.find((event) => (
-      event.kind === 'calendar_item_patch'
-      && (!event.visibility || event.visibility === 'public')
-      && (event.payload as Record<string, unknown>).calendarItemId === validActivity.calendarItemId
-      && event.actorIds?.includes(params.message.senderId)
-    ));
-    if (validActivity.calendarItemId && !ownedEvent && speaker?.presence?.calendarItemId !== validActivity.calendarItemId) return params.transition;
+    if (validActivity.calendarItemId && !canUpdateSpeakerActivity(currentChat,
+      speaker || { id: params.message.senderId }, validActivity.calendarItemId)) return params.transition;
     const existing = validActivity.calendarItemId
       ? projectWorldCalendar([currentChat], params.characters || [], { now }).items.find((item) => item.id === calendarItemId)
       : undefined;
