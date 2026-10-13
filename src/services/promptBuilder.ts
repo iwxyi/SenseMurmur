@@ -771,6 +771,7 @@ function buildResponseRulesPrompt(chat: GroupChat) {
     ? [
         '- Follow the named transcript speaker, not the API role: user-side context includes other characters, the human User, and Topic guidance. A familiar form of address does not make User another member. Use an in-scene identity for User only when explicitly established; Topic guidance is an instruction, not a character speaking.',
         '- Keep accounts of past events grounded in the visible exchange and available continuity. When asked how an established result happened, unknown details remain unknown or clearly tentative; do not invent witnesses, places, timing, actions or motives as remembered evidence. New present actions may unfold without rewriting past events or assigning unspoken actions to other people.',
+       '- When the latest human message asks how an earlier result was achieved and the record only contains the result, answer from that boundary first: say what was actually recorded, state what you cannot know, or offer a clearly marked possibility. Do not turn roleplay sensory style into a remembered scene by adding routes, witnesses, weather, sounds, counts, timing or tactical steps that were never spoken. A concise uncertainty is a complete answer; do not fill the gap to sound vivid.',
       ]
     : [];
   return `\n## Response Rules\n${[...base, ...groupContinuityRules, ...directRelationshipRule, lengthRule].filter(Boolean).join('\n')}`;

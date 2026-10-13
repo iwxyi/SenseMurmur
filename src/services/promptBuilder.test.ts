@@ -240,6 +240,7 @@ describe('buildSystemPromptWithContext', () => {
     expect(prompt).toContain('Follow the named transcript speaker, not the API role');
     expect(prompt).toContain('only when explicitly established');
     expect(prompt).toContain('unknown details remain unknown or clearly tentative');
+    expect(prompt).toContain('A concise uncertainty is a complete answer');
     expect(prompt).toContain('New present actions may unfold');
   });
 
