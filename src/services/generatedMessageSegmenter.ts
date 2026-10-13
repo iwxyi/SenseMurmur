@@ -86,6 +86,8 @@ export function splitGeneratedRoundMessage(message: GeneratedRoundMessage) {
       incomingInteractionHint: index === 0 ? message.incomingInteractionHint : null,
       addressedTargetIds: index === 0 ? message.addressedTargetIds : null,
       primaryAddressedTargetId: index === 0 ? message.primaryAddressedTargetId : null,
+      replyDebtTargetIds: index === 0 ? message.replyDebtTargetIds : null,
+      primaryReplyDebtTargetId: index === 0 ? message.primaryReplyDebtTargetId : null,
       socialEventHints: index === 0 ? message.socialEventHints : null,
       conflictFocus: stateUpdateForSegment(message.conflictFocus || undefined, parts.map((item) => item.content), index) || null,
     }));
@@ -132,6 +134,8 @@ export function splitGeneratedRoundMessage(message: GeneratedRoundMessage) {
     incomingInteractionHint: index === 0 ? message.incomingInteractionHint : null,
     addressedTargetIds: index === 0 ? message.addressedTargetIds : null,
     primaryAddressedTargetId: index === 0 ? message.primaryAddressedTargetId : null,
+    replyDebtTargetIds: index === 0 ? message.replyDebtTargetIds : null,
+    primaryReplyDebtTargetId: index === 0 ? message.primaryReplyDebtTargetId : null,
     socialEventHints: index === 0 ? message.socialEventHints : null,
     conflictFocus: stateUpdateForSegment(message.conflictFocus || undefined, parts, index) || null,
   }));

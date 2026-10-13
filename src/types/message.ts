@@ -578,6 +578,12 @@ export interface Message {
   interactionHint?: InteractionEventPayload | null;
   interactionHints?: InteractionEventPayload[] | null;
   incomingInteractionHint?: InteractionEventPayload | null;
+  /** Who the visible turn is speaking to; this is not necessarily a request for another turn. */
+  addressedTargetIds?: string[] | null;
+  primaryAddressedTargetId?: string | null;
+  /** Who the speaker explicitly leaves an unanswered next-reply obligation for. */
+  replyDebtTargetIds?: string[] | null;
+  primaryReplyDebtTargetId?: string | null;
   emotion: number;           // -1 to 1
   timestamp: number;
   isDeleted: boolean;

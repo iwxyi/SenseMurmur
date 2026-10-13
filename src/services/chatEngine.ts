@@ -6,7 +6,7 @@ import type { MediaGenerationDecision, MessageAttachment, MessageMetadata, Narra
 import type { SessionEngineDefinition, SessionGenerationPromptContext, SessionGenerationRuntimeBundle } from '../types/sessionEngine';
 import type { MemoryItem } from './memoryTypes';
 import { getPreferredAIProfile, inferTextInputCapabilities, isAIProfileUsable } from '../types/settings';
-import type { AddressedTargetHintEnvelope, ConflictFocusPayload, InteractionEventPayload, SocialEventHintEnvelope } from '../types/runtimeEvent';
+import type { AddressedTargetHintEnvelope, ConflictFocusPayload, InteractionEventPayload, ReplyDebtTargetHintEnvelope, SocialEventHintEnvelope } from '../types/runtimeEvent';
 import { isReplyWorthyInteractionKind, normalizeInteractionHintCollection, normalizeInteractionHintPayload, normalizeSocialEventHints } from '../types/runtimeEvent';
 import { generateResponse } from './aiClient';
 import { buildSystemPromptWithContext, buildPromptAssemblyWithContext, buildChatMessages, buildPromptMemoryTrace, buildPromptCharacterMindTrace, type PromptAssemblyWithContext, type PromptCharacterMindTrace, type PromptMemoryTrace } from './promptBuilder';
@@ -65,6 +65,8 @@ export interface GeneratedRoundMessage extends Omit<Message, 'id' | 'timestamp' 
   incomingInteractionHint?: InteractionEventPayload | null;
   addressedTargetIds?: string[] | null;
   primaryAddressedTargetId?: string | null;
+  replyDebtTargetIds?: string[] | null;
+  primaryReplyDebtTargetId?: string | null;
   socialEventHints?: SocialEventHintEnvelope[] | null;
   conflictFocus?: ConflictFocusPayload | null;
 }
@@ -81,11 +83,12 @@ type ReconciledAddressedTargets = {
   primaryTargetId: string | null;
 };
 
+type ReconciledReplyDebt = ReconciledAddressedTargets;
+
 /**
- * Keep the model's reply-debt signal as the sole semantic source, while
- * making the same validated value available to message metadata and runtime
- * turn parameters. This intentionally does not infer targets from prose or
- * interaction effects: those are different model-authored channels.
+ * Validate the model-authored current addressee without inferring it from
+ * prose. Reply debt is validated separately because a reply can be directed
+ * at someone without asking that person to take the next turn.
  */
 function reconcileAddressedTargets(
   envelope: AddressedTargetHintEnvelope | null | undefined,
@@ -107,6 +110,19 @@ function reconcileAddressedTargets(
   }
   const primaryTargetId = typeof envelope?.primaryTargetId === 'string'
     && targetIds.includes(envelope.primaryTargetId)
+    ? envelope.primaryTargetId
+    : targetIds[0] || null;
+  return { targetIds, primaryTargetId };
+}
+
+function reconcileReplyDebt(
+  envelope: ReplyDebtTargetHintEnvelope | null | undefined,
+  validTargetIds: ReadonlySet<string>,
+): ReconciledReplyDebt {
+  const targetIds = Array.from(new Set((envelope?.targetIds || []).filter((id): id is string => (
+    typeof id === 'string' && id.trim().length > 0 && validTargetIds.has(id)
+  ))));
+  const primaryTargetId = typeof envelope?.primaryTargetId === 'string' && targetIds.includes(envelope.primaryTargetId)
     ? envelope.primaryTargetId
     : targetIds[0] || null;
   return { targetIds, primaryTargetId };
@@ -3823,6 +3839,7 @@ function buildCompletedMessage(params: {
   emotion: number;
   parsedEnvelope: ReturnType<typeof parseInlineInteractionEnvelope>;
   addressedTargets?: ReconciledAddressedTargets;
+  replyDebt?: ReconciledReplyDebt;
   previousVisibleMessage?: Message | null;
   metadata?: MessageMetadata;
 }) {
@@ -3834,6 +3851,8 @@ function buildCompletedMessage(params: {
     : null;
   const addressedTargetIds = params.addressedTargets?.targetIds || [];
   const primaryAddressedTargetId = params.addressedTargets?.primaryTargetId || null;
+  const replyDebtTargetIds = params.replyDebt?.targetIds || [];
+  const primaryReplyDebtTargetId = params.replyDebt?.primaryTargetId || null;
   return {
     chatId: params.chat.id,
     type: 'ai' as const,
@@ -3849,6 +3868,8 @@ function buildCompletedMessage(params: {
     incomingInteractionHint,
     addressedTargetIds: addressedTargetIds.length ? addressedTargetIds : null,
     primaryAddressedTargetId,
+    replyDebtTargetIds: replyDebtTargetIds.length ? replyDebtTargetIds : null,
+    primaryReplyDebtTargetId,
     socialEventHints: params.parsedEnvelope?.socialEventHints || null,
     conflictFocus: params.parsedEnvelope?.conflictFocus || null,
   };
@@ -4411,6 +4432,10 @@ export async function generateSpeakerMessage(params: {
     normalizeInteractionHintCollection(generated.parsedEnvelope?.interactionHints || null, params.speaker.id, generated.fullResponse || generated.rawResponse || ''),
     soleConversationPartnerId,
   );
+  const replyDebt = reconcileReplyDebt(
+    generated.parsedEnvelope?.replyDebtTargets,
+    new Set([...params.chat.memberIds.filter((memberId) => memberId !== params.speaker.id), ...(params.chat.type === 'direct' ? ['user'] : [])]),
+  );
 
   const emotionSource = generated.fullResponse || generated.rawResponse || generatedStoryResponse;
   const modelInteractions = normalizeInteractionHintCollection(
@@ -4605,6 +4630,7 @@ export async function generateSpeakerMessage(params: {
     emotion: getEmotion(params.speaker.id),
     parsedEnvelope: generated.parsedEnvelope,
     addressedTargets,
+    replyDebt,
     previousVisibleMessage: activeMessages.filter((message) => !message.isDeleted && message.type !== 'system' && message.type !== 'event').at(-1) || null,
     metadata: baseMetadata,
   });

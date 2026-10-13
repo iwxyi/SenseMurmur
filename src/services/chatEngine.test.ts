@@ -1602,6 +1602,31 @@ describe('chatEngine streaming preview', () => {
     expect(message.primaryAddressedTargetId).toBe('xutang');
   });
 
+  it('keeps a direct reply separate from a new reply debt', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({
+      content: '大哥，这一趟我听明白了。',
+      addressedTargets: { targetIds: ['liubei'], primaryTargetId: 'liubei', confidence: 0.9, reason: '正在回应大哥' },
+      replyDebtTargets: null,
+      interactionHints: null,
+      socialEventHints: null,
+      conflictFocus: null,
+    }));
+    const fei = buildCharacter('fei', '张飞');
+    const liubei = buildCharacter('liubei', '刘备');
+    const message = await generateSpeakerMessage({
+      chat: buildChat({ memberIds: ['fei', 'liubei'] }),
+      speaker: fei,
+      characters: [fei, liubei],
+      messages: [buildAiMessage('liubei', '刘备', '三弟，你怎么看？', 1)],
+      apiConfig: buildProfiles(),
+    });
+
+    expect(message.addressedTargetIds).toEqual(['liubei']);
+    expect(message.replyDebtTargetIds).toBeNull();
+    expect(message.primaryReplyDebtTargetId).toBeNull();
+  });
+
   it('uses an explicit reply-worthy interaction target when addressedTargets is omitted', async () => {
     generateResponseMock.mockReset();
     generateResponseMock.mockResolvedValue(JSON.stringify({

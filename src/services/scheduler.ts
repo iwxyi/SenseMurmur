@@ -262,8 +262,13 @@ export function resolvePendingReplyContext(characters: AICharacter[], recentMess
   }> = [];
   for (let sourceIndex = recentWindow.length - 1; sourceIndex >= 0; sourceIndex -= 1) {
     const candidate = recentWindow[sourceIndex] as Message & { addressedTargetIds?: string[] | null; primaryAddressedTargetId?: string | null };
-    const explicit = (candidate.primaryAddressedTargetId ? [candidate.primaryAddressedTargetId] : [])
+    const legacyExplicit = (candidate.primaryAddressedTargetId ? [candidate.primaryAddressedTargetId] : [])
       .concat(candidate.addressedTargetIds || []);
+    // New messages distinguish the current addressee from an unanswered
+    // request. Persisted pre-split messages keep the old field as debt.
+    const explicit = ('replyDebtTargetIds' in candidate)
+      ? (candidate.primaryReplyDebtTargetId ? [candidate.primaryReplyDebtTargetId] : []).concat(candidate.replyDebtTargetIds || [])
+      : legacyExplicit;
     const possibleTargets = explicit
       .concat(getReplyWorthyInteractionTargetIds(candidate, characters))
       .filter((targetId, index, array): targetId is string => Boolean(targetId) && array.indexOf(targetId) === index)

@@ -104,6 +104,14 @@ export interface AddressedTargetHintEnvelope {
   reason?: string;
 }
 
+/** A separate channel for a new, explicit expectation of a next reply. */
+export interface ReplyDebtTargetHintEnvelope {
+  targetIds?: string[] | null;
+  primaryTargetId?: string | null;
+  confidence?: number;
+  reason?: string;
+}
+
 export interface AddressedTargetHint {
   actorId: string;
   targetIds: string[];

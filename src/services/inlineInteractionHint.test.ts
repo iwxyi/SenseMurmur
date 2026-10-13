@@ -392,9 +392,10 @@ describe('buildInlineInteractionContract analysis room detection', () => {
     });
 
     expect(contract).toContain('"addressedTargets":null');
-    expect(contract).toContain('addressedTargets tracks reply debt');
-    expect(contract).toContain('not every person mentioned or emotionally affected');
-    expect(contract).toContain('merely affected by the line is not addressed');
+    expect(contract).toContain('addressedTargets records the current visible addressee');
+    expect(contract).toContain('replyDebtTargets is a separate field');
+    expect(contract).toContain('A member merely mentioned or affected is not addressed');
+    expect(contract).toContain('Use null for replyDebtTargets when no next answer is expected');
   });
 
   it('shortens conversation guidance without removing the shared runtime protocol', () => {

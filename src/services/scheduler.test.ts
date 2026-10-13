@@ -293,6 +293,16 @@ describe('scheduler speaker scoring', () => {
     });
   });
 
+  it('does not turn a current addressee into reply debt when the new field is present', () => {
+    const addressed = buildMessage({ id: 'reply-only', senderId: 'a', senderName: '甲', content: '乙，我听明白了。', timestamp: 1 }) as Message;
+    addressed.addressedTargetIds = ['b'];
+    addressed.primaryAddressedTargetId = 'b';
+    addressed.replyDebtTargetIds = null;
+    addressed.primaryReplyDebtTargetId = null;
+
+    expect(resolvePendingReplyContext([buildCharacter('a', '甲'), buildCharacter('b', '乙')], [addressed])).toBeNull();
+  });
+
   it('keeps an explicit reply debt open when another member interrupts', () => {
     const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙'), buildCharacter('c', '丙')];
     const addressed = buildMessage({ id: 'm1', senderId: 'a', senderName: '甲', content: '乙，这件事你来答。', timestamp: 1 }) as Message & {
