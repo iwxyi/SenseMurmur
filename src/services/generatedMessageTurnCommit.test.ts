@@ -72,6 +72,20 @@ describe('commitGeneratedMessageTurn', () => {
       chat: { messageBranchState: { activeLeafNodeId: 'local-1' } }, currentMessages: committed,
     });
     expect(params.upsertMessage).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'local-1', isDeleted: true }));
+    expect(params.upsertMessage).toHaveBeenCalledWith(expect.objectContaining({ isStreaming: true, isDeleted: true }));
+  });
+
+  it('keeps a locally saved bubble when subsequent runtime work fails', async () => {
+    const params = baseParams();
+    const streamingMessage = buildPersistedMessage('输入中', 1);
+    runSessionCommitPipelineMock.mockImplementation(async (args: { upsertMessage: (message: Message) => void }) => {
+      args.upsertMessage({ ...streamingMessage, content: '已保存', isStreaming: false });
+      throw new Error('runtime failed');
+    });
+    await expect(commitGeneratedMessageTurn({ ...params, streamingMessage,
+      message: { ...streamingMessage, content: '已保存' },
+    } as never)).rejects.toThrow('runtime failed');
+    expect(params.upsertMessage).not.toHaveBeenCalledWith(expect.objectContaining({ isDeleted: true }));
   });
 
   it('commits each explicit message part through the normal session pipeline', async () => {

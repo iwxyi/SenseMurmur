@@ -1,6 +1,5 @@
 import type { GroupChat, MessageBranchState } from '../types/chat';
 import type { Message, MessageMetadata } from '../types/message';
-import { logDeveloperDiagnostic } from './developerDiagnostics';
 
 export interface ResolvedBranchingNode {
   message: Message;
@@ -26,7 +25,7 @@ const DISABLED_SCENARIO_IDS = new Set(['story-reader', 'werewolf-classic', 'murd
 const DISABLED_MODES = new Set(['scripted_play', 'werewolf', 'murder_mystery', 'board_game']);
 const missingParentLogKeys = new Set<string>();
 
-type BranchableChat = Pick<GroupChat, 'sessionKind' | 'messageBranchState'> & Partial<Pick<GroupChat, 'mode'>>;
+type BranchableChat = Pick<GroupChat, 'sessionKind' | 'messageBranchState'> & Partial<Pick<GroupChat, 'mode' | 'id'>>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
@@ -213,7 +212,6 @@ export function projectActiveBranchMessages(
   messages: Message[],
   options?: { fallbackMessages?: Message[] },
 ) {
-  void options;
   const visible = messages.filter((message) => !message.isDeleted);
   if (!isMessageBranchingEnabled(chat)) return visible.slice().sort(compareMessageOrder);
   // Some older/seeded chats may carry an enabled branch flag without any
@@ -224,7 +222,8 @@ export function projectActiveBranchMessages(
   // A single branch-marked message is not enough evidence to hide an ordinary
   // timeline. This occurs when a sync window contains one newer message but
   // older messages/metadata have not arrived yet.
-  if (branchingMessageCount <= 1 && visible.length > branchingMessageCount) {
+  if (branchingMessageCount <= 1 && visible.length > branchingMessageCount
+    && !visible.some((message) => getBranchingMetadata(message)?.revisionOfNodeId || getBranchingMetadata(message)?.revisionOfMessageId)) {
     return visible.slice().sort(compareMessageOrder);
   }
   const nodes = resolveMessageBranchNodes(visible);
@@ -236,45 +235,99 @@ export function projectActiveBranchMessages(
   const path: ResolvedBranchingNode[] = [];
   const seen = new Set<string>();
   let cursor: string | null = headId;
-  let parentUnavailable = false;
+  let failure: string | null = null;
   while (cursor) {
     if (seen.has(cursor)) {
-      logDeveloperDiagnostic('message-branch:invalid', { reason: 'cycle', nodeId: cursor }, 'error', 'message-window');
+      failure = 'cycle';
       break;
     }
     seen.add(cursor);
     const node = byId.get(cursor);
     if (!node) {
-      const logKey = `${headId}:${cursor}:${nodes.length}`;
-      if (!missingParentLogKeys.has(logKey)) {
-        missingParentLogKeys.add(logKey);
-        if (missingParentLogKeys.size > 200) missingParentLogKeys.delete(missingParentLogKeys.values().next().value as string);
-        logDeveloperDiagnostic('message-branch:parent-not-loaded', { reason: 'parent-not-loaded', nodeId: cursor, headNodeId: headId, loadedNodes: nodes.length }, 'info', 'message-window');
-      }
-      parentUnavailable = true;
+      failure = path.length ? 'parent-not-loaded' : 'head-not-loaded';
       break;
     }
     path.push(node);
     cursor = node.parentNodeId;
   }
-  if (parentUnavailable) {
-    // The active head is valid, but its ancestry is outside the current
-    // retained window. A missing parent is a sync/data-integrity condition,
-    // not a reason to hide messages. Show every received message in timeline
-    // order; a later sync can restore the graph and re-enable branch projection.
-    const fallbackLogKey = `fallback:${headId}:${nodes.length}`;
-    if (!missingParentLogKeys.has(fallbackLogKey)) {
-      missingParentLogKeys.add(fallbackLogKey);
-      logDeveloperDiagnostic('message-branch:partial-fallback', {
-        reason: 'parent-not-loaded',
-        headNodeId: headId,
-        loadedNodes: nodes.length,
-        visibleMessages: visible.length,
-      }, 'info', 'message-window');
+  // Exclude known alternative paths, even when the retained window lacks a
+  // common ancestor. Independent severed roots are not assumed to be revisions.
+  const pathIds = new Set(path.map((node) => node.nodeId));
+  const pathParents = new Set(path.map((node) => node.parentNodeId).filter((id): id is string => Boolean(id)));
+  const replacedIds = new Set(path.map((node) => node.revisionOfMessageId).filter((id): id is string => Boolean(id)));
+  const excluded = new Set<string>();
+  for (const node of nodes) {
+    if (pathIds.has(node.nodeId)) continue;
+    if ((node.parentNodeId && (pathIds.has(node.parentNodeId) || pathParents.has(node.parentNodeId)))
+      || (node.revisionOfMessageId && pathIds.has(node.revisionOfMessageId))
+      || replacedIds.has(node.nodeId)) excluded.add(node.nodeId);
+  }
+  const state = normalizeBranchState(chat?.messageBranchState);
+  for (const [name, ref] of Object.entries(state.refs || {})) {
+    if (name === state.activeBranchName) continue;
+    let other = ref.headNodeId ? byId.get(ref.headNodeId) : undefined;
+    const visited = new Set<string>();
+    while (other && !pathIds.has(other.nodeId) && !excluded.has(other.nodeId) && !visited.has(other.nodeId)) {
+      visited.add(other.nodeId);
+      other = other.parentNodeId ? byId.get(other.parentNodeId) : undefined;
     }
-    return visible.slice().sort(compareMessageOrder);
+    // A missing active ancestor may also be the shared prefix of another ref.
+    // Only discard its loaded path once the divergence can be established.
+    if (!failure || (other && (pathIds.has(other.nodeId) || excluded.has(other.nodeId)))) {
+      for (const nodeId of visited) excluded.add(nodeId);
+    }
+  }
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const node of nodes) {
+      if (!pathIds.has(node.nodeId) && !excluded.has(node.nodeId)
+        && node.parentNodeId && excluded.has(node.parentNodeId)) {
+        excluded.add(node.nodeId);
+        expanded = true;
+      }
+    }
+  }
+  const oldestPathNode = path.at(-1);
+  if (!failure && oldestPathNode && isRecord(oldestPathNode.message.metadata?.branching)
+    && nodes.some((node) => !pathIds.has(node.nodeId) && !excluded.has(node.nodeId)
+      && compareMessageOrder(node.message, oldestPathNode.message) < 0)) failure = 'disconnected-history';
+  if (failure) {
+    const liveIds = new Set(messages.flatMap((message) => [message.id, stableMessageId(message), resolveMessageNodeId(message)]));
+    const fallback = [
+      ...(options?.fallbackMessages || []).filter((message) => message.chatId === visible[0]?.chatId
+        && !message.isDeleted && !liveIds.has(message.id) && !liveIds.has(resolveMessageNodeId(message))),
+      ...visible,
+    ].filter((message) => !excluded.has(resolveMessageNodeId(message))).sort(compareMessageOrder);
+    const logKey = `${chat?.id || visible[0]?.chatId}:${headId}:${failure}:${cursor}:${nodes.length}:${fallback.length}`;
+    if (!missingParentLogKeys.has(logKey)) {
+      missingParentLogKeys.add(logKey);
+      if (missingParentLogKeys.size > 200) missingParentLogKeys.delete(missingParentLogKeys.values().next().value as string);
+      console.error('[message-branch:projection-fallback]', {
+        reason: failure, loadedMessages: visible.length, ancestorMessages: path.length,
+        fallbackMessages: fallback.length, excludedAlternatives: excluded.size,
+        head: headId.slice(-12), missingNode: cursor?.slice(-12) || null,
+        windowBoundaryPossible: failure === 'parent-not-loaded',
+        activeBranch: state.activeBranchName,
+        graph: nodes.slice(-40).map((node) => ({
+          node: node.nodeId.slice(-12), parent: node.parentNodeId?.slice(-12) || null,
+          type: node.message.type, streaming: Boolean(node.message.isStreaming),
+          timestamp: node.message.timestamp, onActivePath: pathIds.has(node.nodeId),
+          excluded: excluded.has(node.nodeId), revisionOf: node.revisionOfMessageId?.slice(-12) || null,
+        })),
+      });
+    }
+    return fallback;
   }
   path.reverse();
+  const oldest = path[0];
+  // Legacy messages have a chronological timeline but no explicit edges.
+  // Preserve that prefix when new nodes attach to its last message.
+  if (oldest && !isRecord(oldest.message.metadata?.branching)) {
+    const prefix = visible.filter((message) => !isRecord(message.metadata?.branching)
+      && compareMessageOrder(message, oldest.message) < 0).sort(compareMessageOrder);
+    return [...prefix, ...path.map((node) => node.message)];
+  }
   return path.map((node) => node.message);
 }
 
@@ -305,7 +358,7 @@ export function attachMessageToActiveBranch<const T extends { metadata?: Message
   const existingBranching = message.metadata?.branching;
   const parentNodeId = typeof existingBranching?.parentNodeId === 'string' || existingBranching?.parentNodeId === null
     ? existingBranching.parentNodeId
-    : (parent?.nodeId || null);
+    : (parent?.nodeId || headId || null);
   const rootNodeId = typeof existingBranching?.rootNodeId === 'string'
     ? existingBranching.rootNodeId
     : (parent?.rootNodeId || undefined);

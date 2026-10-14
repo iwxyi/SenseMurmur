@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { GroupChat } from '../types/chat';
 import type { Message } from '../types/message';
 import {
@@ -37,6 +37,69 @@ function message(id: string, type: Message['type'], parentNodeId: string | null,
 }
 
 describe('messageBranching v2', () => {
+  it('shows severed historical roots chronologically and reports the contraction without developer mode', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const messages = [message('severed-ai', 'ai', null, 1), message('severed-user', 'user', null, 2), message('severed-reply', 'ai', null, 3)];
+      const current = chat({ messageBranchState: buildBranchStateWithHead({ enabled: true }, 'severed-reply') });
+      expect(projectActiveBranchMessages(current, messages).map((item) => item.id)).toEqual(messages.map((item) => item.id));
+      expect(error).toHaveBeenCalledWith('[message-branch:projection-fallback]', expect.objectContaining({ reason: 'disconnected-history', fallbackMessages: 3 }));
+    } finally { error.mockRestore(); }
+  });
+
+  it('uses the stable timeline on a partial window while excluding known alternative revisions and descendants', () => {
+    const messages = [message('selected', 'ai', 'unloaded', 2), message('alternative', 'ai', 'unloaded', 3, 'other', 'selected'), message('other-tail', 'user', 'alternative', 4)];
+    const current = chat({ messageBranchState: buildBranchStateWithHead({ enabled: true }, 'selected') });
+    const fallback = [message('unloaded', 'user', null, 1), messages[0]];
+    expect(projectActiveBranchMessages(current, messages, { fallbackMessages: fallback }).map((item) => item.id)).toEqual(['unloaded', 'selected']);
+  });
+
+  it('falls back for cycles instead of returning an incomplete ancestor traversal', () => {
+    const messages = [message('cycle-history', 'user', null, 1), message('cycle-a', 'ai', 'cycle-b', 2), message('cycle-b', 'user', 'cycle-a', 3)];
+    const current = chat({ messageBranchState: buildBranchStateWithHead({ enabled: true }, 'cycle-b') });
+    expect(projectActiveBranchMessages(current, messages).map((item) => item.id)).toEqual(messages.map((item) => item.id));
+  });
+
+  it('does not restore deleted messages from the stable fallback', () => {
+    const removed = message('removed-prefix', 'user', null, 1);
+    const tail = message('deleted-test-tail', 'ai', 'missing-prefix', 2);
+    const current = chat({ messageBranchState: buildBranchStateWithHead({ enabled: true }, tail.id) });
+    expect(projectActiveBranchMessages(current, [{ ...removed, isDeleted: true }, tail], { fallbackMessages: [removed, tail] }).map((item) => item.id)).toEqual([tail.id]);
+  });
+
+  it('excludes sibling paths even when their shared ancestor is outside the window and no revision label exists', () => {
+    const nodes = [message('window-a', 'ai', 'window-missing', 1), message('window-b', 'ai', 'window-missing', 2), message('window-b-tail', 'user', 'window-b', 3)];
+    const current = chat({ messageBranchState: buildBranchStateWithHead({ enabled: true }, 'window-a') });
+    expect(projectActiveBranchMessages(current, nodes).map((item) => item.id)).toEqual(['window-a']);
+  });
+
+  it('does not discard a potentially shared prefix of an inactive ref when the active bridge is unloaded', () => {
+    const nodes = [message('shared-prefix', 'user', null, 1), message('original-ref', 'ai', 'shared-prefix', 2), message('active-with-gap', 'ai', 'unloaded-bridge', 3)];
+    let state = buildBranchStateWithHead({ enabled: true }, 'active-with-gap');
+    state = forkBranchState(state, 'original-ref', 'original');
+    const current = chat({ messageBranchState: state });
+    expect(projectActiveBranchMessages(current, nodes).map((item) => item.id)).toContain('shared-prefix');
+  });
+
+  it('retains the legacy prefix after multiple new messages acquire branch edges', () => {
+    const legacy = [message('old-user', 'user', null, 1), message('old-ai', 'ai', null, 2)].map((item) => ({ ...item, metadata: undefined }));
+    const messages = [...legacy, message('u2', 'user', 'old-ai', 3), message('a2', 'ai', 'u2', 4), message('revision', 'ai', 'u2', 5, '另一回复', 'a2')];
+    const current = chat({ messageBranchState: buildBranchStateWithHead({ enabled: true }, 'a2') });
+    expect(projectActiveBranchMessages(current, messages).map((item) => item.id)).toEqual(['old-user', 'old-ai', 'u2', 'a2']);
+  });
+
+  it('preserves an unloaded active parent across alternating sends and reload', () => {
+    let current = chat({ messageBranchState: buildBranchStateWithHead({ enabled: true }, 'a1') });
+    const first = message('a1', 'ai', null, 1);
+    const draft = attachMessageToActiveBranch(current, [], { ...message('u2', 'user', null, 2), metadata: undefined });
+    expect(draft.metadata?.branching?.parentNodeId).toBe('a1');
+    current = { ...current, messageBranchState: buildBranchStateWithHead(current.messageBranchState, draft.metadata!.branching!.nodeId!) };
+    const reply = attachMessageToActiveBranch(current, [draft], { ...message('a2', 'ai', null, 3), metadata: undefined });
+    current = { ...current, messageBranchState: buildBranchStateWithHead(current.messageBranchState, reply.metadata!.branching!.nodeId!) };
+    const reloaded = JSON.parse(JSON.stringify([first, draft, reply])) as Message[];
+    expect(projectActiveBranchMessages(current, reloaded).map((item) => item.id)).toEqual(['a1', 'u2', 'a2']);
+  });
+
   it('projects only the active ref ancestor path', () => {
     const messages = [message('u1', 'user', null, 1), message('a1', 'ai', 'u1', 2), message('u2', 'user', 'a1', 3), message('a2', 'ai', 'u2', 4)];
     const state = buildBranchStateWithHead({ enabled: true }, 'a2');

@@ -6,8 +6,10 @@ import { getUsablePreferredAIProfile, resolveAIModelInputCapabilities } from '..
 import { createStreamingLocalMessage, persistLocalFirstMessage } from './chatCommitMessage';
 import { generateResponse } from './aiClient';
 import { GenerationCancelledError } from './generationCancellation';
-import { attachMessageToActiveBranch, buildBranchStateWithHead } from './messageBranching';
+import { attachMessageToActiveBranch, buildBranchStateWithHead, isMessageBranchingEnabled } from './messageBranching';
 import { useChatStore } from '../stores/useChatStore';
+import { useSettingsStore } from '../stores/useSettingsStore';
+import { createStreamingMessageDisplay } from './streamingMessageDisplay';
 import { useAuthStore } from '../stores/useAuthStore';
 import { api, ApiError, type AiSearchResponse, type AiSearchResultItem } from './api';
 import { resolveRoomCapabilities } from './capabilityRuntime';
@@ -1381,6 +1383,7 @@ export async function runAssistantChatReplyFlow(params: {
   forceArtifact?: boolean;
 }) {
   ensureAssistantReplyStillCurrent(params);
+  params = { ...params, chat: useChatStore.getState().chats.find((chat) => chat.id === params.chatId) || params.chat };
   const { api: resolvedApi, inputCapabilities } = resolveTextProfile(params.api, params.aiProfiles);
   if ((params.chat.modeState.agentCapabilities?.enabled || params.chat.modeState.assistantCapabilities?.agent) && !isLearningProgressChat(params.chat)) {
     const userMessage = latestUserMessage(params.currentMessages);
@@ -1411,6 +1414,12 @@ export async function runAssistantChatReplyFlow(params: {
           await params.updateChat(params.chatId, {
             lastMessageAt: persisted.timestamp,
             latestMessage: persisted,
+            ...(isMessageBranchingEnabled(params.chat) ? {
+              messageBranchState: buildBranchStateWithHead(
+                (useChatStore.getState().chats.find((chat) => chat.id === params.chatId) || params.chat).messageBranchState,
+                persisted.metadata?.branching?.nodeId || persisted.clientKey || persisted.id,
+              ),
+            } : {}),
           });
           void maybeGenerateAssistantChatTitle({
             api: resolvedApi,
@@ -1487,7 +1496,17 @@ export async function runAssistantChatReplyFlow(params: {
     { timestamp: params.timestamp },
   );
   let streamingMessage = { ...placeholder, isStreaming: true };
-  params.upsertMessage(streamingMessage);
+  const display = createStreamingMessageDisplay({
+    upsertMessage: (message) => {
+      if (params.signal?.aborted || params.shouldContinue?.() === false) {
+        display.freeze();
+        return;
+      }
+      params.upsertMessage(message);
+    },
+    isAnimationEnabled: () => useSettingsStore.getState().enableStreamingDisplayAnimation,
+  });
+  display.update(streamingMessage, { immediate: true });
   const promptImageState = getAssistantPromptImageState(params.currentMessages, inputCapabilities);
   const shouldStreamVisibleReply = !promptImageState.projectedImageAttachments;
   let replyPersisted = false;
@@ -1503,7 +1522,7 @@ export async function runAssistantChatReplyFlow(params: {
         ? (content) => {
           ensureAssistantReplyStillCurrent(params);
           streamingMessage = { ...streamingMessage, content, isStreaming: true };
-          params.upsertMessage(streamingMessage);
+          display.update(streamingMessage);
         }
         : undefined,
       {
@@ -1525,14 +1544,17 @@ export async function runAssistantChatReplyFlow(params: {
     );
     const content = visionReply.content.trim();
     if (!content) throw new Error('助手没有生成有效内容');
+    display.freeze();
     const persisted = await persistLocalFirstMessage({
       message: {
         ...streamingMessage,
         content,
         isStreaming: false,
       },
-      existingLocalMessage: streamingMessage,
+      existingLocalMessage: display.getDisplayed() || streamingMessage,
       upsertMessage: params.upsertMessage,
+      localReveal: useSettingsStore.getState().enableStreamingDisplayAnimation,
+      shouldContinue: () => !params.signal?.aborted && (params.shouldContinue?.() ?? true),
     });
     replyPersisted = true;
     ensureAssistantReplyStillCurrent(params);
@@ -1561,5 +1583,7 @@ export async function runAssistantChatReplyFlow(params: {
       params.upsertMessage({ ...streamingMessage, content: '', isStreaming: true, isDeleted: true });
     }
     throw error;
+  } finally {
+    display.clear();
   }
 }

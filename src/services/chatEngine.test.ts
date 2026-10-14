@@ -443,7 +443,30 @@ describe('chatEngine streaming preview', () => {
     expect(generateResponseMock).toHaveBeenCalledTimes(3);
     expect(callbacks.onSpeakerSelected).toHaveBeenCalledTimes(1);
     expect(callbacks.onMessageComplete).not.toHaveBeenCalled();
-    expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
+    expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid', protocolReason: 'missing_json_envelope' });
+  });
+
+  it('reports parser failures outside developer mode without printing response text', async () => {
+    useSettingsStore.setState({ developerMode: false });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const raw = 'private conversation prose';
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(raw);
+    const callbacks = { onSpeakerSelected: vi.fn(), onMessageChunk: vi.fn(), onMessageComplete: vi.fn(), onError: vi.fn() };
+    try {
+      await runOneRound(buildChat(), [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')],
+        [buildUserMessage('你们继续聊。')], buildProfiles(), callbacks);
+      const logs = warn.mock.calls.filter(([label]) => label === '[ai-generation-failure:json]')
+        .map(([, json]) => JSON.parse(String(json)));
+      expect(logs).toHaveLength(3);
+      expect(logs[2]).toMatchObject({ reason: 'missing_json_envelope',
+        details: { responseLength: raw.length, parseFailure: { stage: 'json_extraction' } } });
+      expect(logs[2].details.rawResponse).toBeUndefined();
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(raw);
+      expect(callbacks.onMessageComplete).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('logs each rejected response with parser details and redacts credentials without truncating the tail', async () => {

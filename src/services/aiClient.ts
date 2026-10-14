@@ -472,9 +472,10 @@ function buildOpenAICompatibleAdvancedRequestFields(config: APIConfig): Record<s
   return {};
 }
 
-async function parseSSEStream(
+export async function parseSSEStream(
   response: Response,
   onData: (parsed: Record<string, unknown>) => void,
+  idleTimeoutMs = 120_000,
 ) {
   if (!response.ok || !response.body) {
     throw await createPublicAiRequestError(response, 'Streaming request failed');
@@ -489,31 +490,59 @@ async function parseSSEStream(
 
     for (const line of dataLines) {
       const data = line.slice(5).trim();
-      if (!data || data === '[DONE]') continue;
+      if (!data) continue;
+      if (data === '[DONE]') return true;
+      let parsed: Record<string, unknown>;
       try {
-        onData(JSON.parse(data) as Record<string, unknown>);
-      } catch {
-        // Some proxies send keepalive or diagnostic data lines; they are not model deltas.
+        const value: unknown = JSON.parse(data);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid SSE object');
+        parsed = value as Record<string, unknown>;
+      } catch (error) {
+        console.error('[ai-stream:invalid-frame]', { dataLength: data.length, errorType: error instanceof Error ? error.name : typeof error });
+        throw new Error('AI 流式响应包含无效 JSON，本次生成未完成');
       }
+      if (parsed.error || parsed.type === 'error') {
+        console.error('[ai-stream:upstream-error]', {
+          type: parsed.type,
+          detail: redactAiDiagnosticText(JSON.stringify(parsed.error ?? parsed)),
+        });
+        throw new Error('AI 服务在流式回复期间返回错误，本次生成未完成');
+      }
+      onData(parsed);
+      if (parsed.type === 'message_stop') return true;
     }
+    return false;
   };
 
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const { done, value } = await Promise.race([
+        reader.read(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            console.error('[ai-stream:idle-timeout]', { idleTimeoutMs });
+            reject(new Error('AI 流式响应长时间没有数据，本次生成已停止，请重试'));
+          }, idleTimeoutMs);
+        }),
+      ]).finally(() => { if (timer !== undefined) clearTimeout(timer); });
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      const parts = buffer.split('\n\n');
+      const parts = buffer.split(/\r?\n\r?\n/);
       buffer = parts.pop() || '';
 
       for (const part of parts) {
-        processFrame(part);
+        if (processFrame(part)) return;
       }
     }
     if (buffer.trim()) processFrame(buffer);
   } finally {
     decoder.decode();
+    // Cancel the unread tail: some providers keep the connection open after DONE.
+    void reader.cancel().catch((error: unknown) => {
+      console.error('[ai-stream:cancel-failed]', error);
+    });
     reader.releaseLock();
   }
 }
@@ -1423,6 +1452,26 @@ export async function transcribeAudio(config: APIConfig, options: AudioTranscrip
   };
 }
 
+async function withTextRequestDeadline<T>(
+  config: APIConfig,
+  options: GenerateResponseOptions,
+  task: (options: GenerateResponseOptions) => Promise<T>,
+): Promise<T> {
+  const timeoutMs = 300_000;
+  const timed = withTimeoutSignal(options.signal, timeoutMs, 'AI 请求超过五分钟未完成，已停止，请重试');
+  try {
+    return await task({ ...options, signal: timed.signal });
+  } catch (error) {
+    if (timed.signal?.aborted && !options.signal?.aborted) {
+      console.error('[ai-request:timeout]', { provider: config.provider, model: config.model, timeoutMs });
+      throw timed.signal.reason;
+    }
+    throw error;
+  } finally {
+    timed.cleanup();
+  }
+}
+
 export const generateResponse = async (
   config: APIConfig,
   systemPrompt: string,
@@ -1435,17 +1484,27 @@ export const generateResponse = async (
     ? `${systemPrompt}\n\nReturn exactly one valid json object. Do not wrap it in markdown.`
     : systemPrompt;
   assertTextInputWithinBudget(effectiveSystemPrompt, messages, effectiveOptions);
-  if (usesOfficialProxy(config)) {
-    return generateOfficialResponse(config, effectiveSystemPrompt, messages, onChunk, effectiveOptions);
-  }
-  if (isOpenAICompatibleEndpoint(config)) {
-    return generateOpenAICompatibleResponse(config, effectiveSystemPrompt, messages, onChunk, effectiveOptions);
-  }
-  const handler = providerHandlers[config.provider] || generateOpenAICompatibleResponse;
-  return handler(config, effectiveSystemPrompt, messages, onChunk, effectiveOptions);
+  return withTextRequestDeadline(config, effectiveOptions, async (timedOptions) => {
+    if (usesOfficialProxy(config)) {
+      return generateOfficialResponse(config, effectiveSystemPrompt, messages, onChunk, timedOptions);
+    }
+    if (isOpenAICompatibleEndpoint(config)) {
+      return generateOpenAICompatibleResponse(config, effectiveSystemPrompt, messages, onChunk, timedOptions);
+    }
+    const handler = providerHandlers[config.provider] || generateOpenAICompatibleResponse;
+    return handler(config, effectiveSystemPrompt, messages, onChunk, timedOptions);
+  });
 };
 
 export const generateJsonResponse = async (
+  config: APIConfig,
+  systemPrompt: string,
+  messages: ChatMessage[],
+  options: GenerateResponseOptions = {},
+): Promise<string> => withTextRequestDeadline(config, options, (timedOptions) =>
+  generateJsonResponseWithinDeadline(config, systemPrompt, messages, timedOptions));
+
+const generateJsonResponseWithinDeadline = async (
   config: APIConfig,
   systemPrompt: string,
   messages: ChatMessage[],
@@ -1476,6 +1535,7 @@ export const generateJsonResponse = async (
       return await generateGeminiResponse(config, jsonPrompt, messages, undefined, jsonOptions);
     }
   } catch (error) {
+    if (options.signal?.aborted) throw error;
     const message = error instanceof Error ? error.message : String(error);
     if (!/response_format|json_object|json/i.test(message)) throw error;
   }

@@ -92,6 +92,29 @@ async function waitForAssertion(assertion: () => void, attempts = 20) {
 }
 
 describe('useMessageStore', () => {
+  it('keeps the parent edge when syncing after the active page has closed', async () => {
+    localStorage.setItem(storageKey('auth-mode'), 'cloud');
+    const { useAuthStore } = await import('./useAuthStore');
+    vi.stubGlobal('window', { setTimeout, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    vi.stubGlobal('navigator', { onLine: true });
+    const { useMessageStore } = await import('./useMessageStore');
+    useAuthStore.setState({ authMode: 'cloud', isLoggedIn: true, token: 'token' });
+    const { api } = await import('../services/api');
+    const chatId = 'closed-page-parent-chain';
+    localStorage.setItem(storageKey(`messages-cleared-at-${chatId}`), '1');
+    const parent = buildMessage(2, chatId);
+    const child: Message = { ...buildMessage(3, chatId), metadata: { branching: { nodeId: 'child', parentNodeId: parent.id, rootNodeId: parent.id, sequence: 3 } } };
+    vi.mocked(api.createMessage).mockResolvedValue({ ...child, id: 'remote-child' });
+    useMessageStore.setState({ messages: [], activeChatId: null,
+      messageWindowsByChatId: { [chatId]: { messages: [parent, child], lastSyncedAt: 0, updatedAt: 3 } },
+      pendingOperations: [{ id: 'closed-page-create', kind: 'create', chatId, localMessageId: child.id, messageId: child.id, payload: child, createdAt: Date.now(), attemptCount: 0, status: 'pending' }],
+    });
+    await useMessageStore.getState().flushPendingOperations();
+    expect(api.createMessage).toHaveBeenCalledWith(chatId, expect.objectContaining({ metadata: expect.objectContaining({ branching: expect.objectContaining({ parentNodeId: parent.id }) }) }));
+    expect(useMessageStore.getState().pendingOperations).toEqual([]);
+    expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.find((item) => item.id === child.id)?.metadata?.branching?.parentNodeId).toBe(parent.id);
+  });
+
   beforeEach(() => {
     vi.resetModules();
     getMessagesMock.mockReset();
@@ -571,6 +594,33 @@ describe('useMessageStore', () => {
 
     expect(useMessageStore.getState().messages.map((message) => message.content)).toEqual(cloudMessages.map((message) => message.content));
     expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.map((message) => message.content)).toEqual(cloudMessages.map((message) => message.content));
+  });
+
+  it('retains messages added and confirmed during an older complete cloud fetch', async () => {
+    localStorage.setItem(storageKey('auth-mode'), 'cloud');
+    const { useMessageStore } = await import('./useMessageStore');
+    const chatId = 'chat-fetch-concurrent-send';
+    const first = buildMessage(1, chatId);
+    let resolveFetch!: (messages: Message[]) => void;
+    let signalFetch!: () => void;
+    const started = new Promise<void>((resolve) => { signalFetch = resolve; });
+    getSyncChangesMock.mockResolvedValueOnce({ status: 'modified', changes: [] });
+    getMessagesMock.mockImplementationOnce(() => {
+      signalFetch();
+      return new Promise<Message[]>((resolve) => { resolveFetch = resolve; });
+    });
+    useMessageStore.setState({ messages: [first], activeChatId: chatId, pendingOperations: [],
+      messageWindowsByChatId: { [chatId]: { messages: [first], lastSyncedAt: 0, updatedAt: 1 } } });
+    const loading = useMessageStore.getState().loadMessages(chatId, { limit: 40 });
+    await started;
+    const user = { ...buildMessage(2, chatId), serverId: 'confirmed-user' };
+    const reply = { ...buildMessage(3, chatId), serverId: 'confirmed-ai' };
+    useMessageStore.getState().upsertMessage(user);
+    useMessageStore.getState().upsertMessage(reply);
+    resolveFetch([first]);
+    await loading;
+    expect(useMessageStore.getState().messages.map((message) => message.id)).toEqual([first.id, user.id, reply.id]);
+    expect(useMessageStore.getState().messageWindowsByChatId[chatId].messages.map((message) => message.id)).toEqual([first.id, user.id, reply.id]);
   });
 
   it('uses the cloud message window snapshot on first device load so branch history is not lost', async () => {

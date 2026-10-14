@@ -13,7 +13,7 @@ import type { MessageAttachment } from '../../types/message';
 import type { AIModelInputCapabilities } from '../../types/settings';
 import { buildImageAttachmentHoverInfo } from '../../services/messageAttachmentHoverInfo';
 import { normalizeInputCapabilities } from '../../types/settings';
-import type { ComposerState } from '../../types/composerState';
+import { resolveComposerControls, type ComposerState } from '../../types/composerState';
 import { useSettingsStore } from '../../stores/useSettingsStore';
 import { readUploadedChatFiles } from '../../services/chatFileTransfer';
 import VoiceInputButton from '../common/VoiceInputButton';
@@ -97,9 +97,10 @@ export default function ChatInput({ mode, characterName, onSend, onClose, placeh
   const maxAttachments = capabilities.multiImageInput ? capabilities.maxAttachments : 1;
   const acceptMimeTypes = capabilities.supportedMimeTypes.join(',');
   const hasDraftContent = Boolean(text.trim() || attachments.length > 0);
-  const effectivePending = Boolean(isReplyPending || (composerState && composerState.phase !== 'idle' && composerState.phase !== 'error'));
-  const showStopReply = Boolean(effectivePending && composerState?.canCancel !== false && onStopReply);
-  const effectiveDisabled = disabled || composerState?.canSend === false;
+  const { pending: effectivePending, showStop: showStopReply, sendDisabled: effectiveDisabled, buttonDisabled } = resolveComposerControls({
+    state: composerState, legacyPending: isReplyPending, canStop: Boolean(onStopReply),
+    disabled, submitting: isSending, hasDraft: hasDraftContent,
+  });
   const panelHandleDragRef = useRef<{ startY: number; latestY: number; moved: boolean; lastDirection: 'up' | 'down' | null } | null>(null);
   const textInputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -167,7 +168,7 @@ export default function ChatInput({ mode, characterName, onSend, onClose, placeh
   const handleSend = async () => {
     const content = text.trim();
     const outgoingAttachments = attachments;
-    if (disabled || (!content && outgoingAttachments.length === 0) || isSending || showStopReply) return;
+    if (effectiveDisabled || (!content && outgoingAttachments.length === 0) || isSending || effectivePending) return;
     setIsSending(true);
     setText('');
     setAttachments([]);
@@ -666,7 +667,7 @@ export default function ChatInput({ mode, characterName, onSend, onClose, placeh
                 void handleSend();
               }}
               onMouseDown={(event) => event.preventDefault()}
-              disabled={effectiveDisabled || (!hasDraftContent && !showStopReply) || isSending}
+              disabled={buttonDisabled}
               sx={{
                 flexShrink: 0,
                 width: 42,
@@ -689,7 +690,7 @@ export default function ChatInput({ mode, characterName, onSend, onClose, placeh
                   />
                   <StopRoundedIcon fontSize="small" />
                 </>
-              ) : isSending ? <CircularProgress size={22} /> : <SendIcon />}
+              ) : isSending || effectivePending ? <CircularProgress size={22} /> : <SendIcon />}
             </IconButton>
           </span>
         </Tooltip>

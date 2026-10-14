@@ -48,6 +48,12 @@ export function useManualInputQueue(params: {
       await new Promise((resolve) => window.setTimeout(resolve, 80));
     }
     if (hasPendingTurnWork()) {
+      console.error('[manual-input:wait-turn-timeout]', {
+        elapsedMs: Date.now() - startedAt,
+        waitTimeoutMs,
+        isRunning: isRunningRef.current,
+        isPaused: isPausedRef.current,
+      });
       logDeveloperDiagnostic('manual-input:wait-turn-timeout', {
         elapsedMs: Date.now() - startedAt,
         waitTimeoutMs,
@@ -59,7 +65,7 @@ export function useManualInputQueue(params: {
         elapsedMs: Date.now() - startedAt,
       }, 'info', 'chat-run');
     }
-  }, [hasPendingTurnWork, waitTimeoutMs]);
+  }, [hasPendingTurnWork, waitTimeoutMs, isRunningRef, isPausedRef]);
 
   const enqueueManualInput = useCallback((task: () => Promise<void>) => {
     const enqueuedAt = Date.now();

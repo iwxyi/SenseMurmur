@@ -197,6 +197,7 @@ export async function persistLocalFirstMessage(params: PersistLocalFirstMessageP
       tickMs: params.localRevealTickMs,
       startDelayMs: params.localRevealStartDelayMs,
       initialContent: params.existingLocalMessage?.content,
+      shouldContinue: params.shouldContinue,
     });
   } else {
     ensureCurrent();

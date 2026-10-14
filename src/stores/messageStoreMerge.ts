@@ -136,6 +136,7 @@ function mergeAttachmentPair(local: MessageAttachment | undefined, incoming: Mes
 
 function mergeMetadataPair(existing: MessageMetadata | undefined, incoming: MessageMetadata | undefined) {
   if (!incoming || Object.keys(incoming as Record<string, unknown>).length === 0) return existing;
+  if (existing?.branching && !incoming.branching) incoming = { ...incoming, branching: existing.branching };
   if (!existing?.attachments?.length || !incoming.attachments?.length) return incoming;
 
   const existingAttachments = new Map(existing.attachments.map((attachment) => [attachment.id, attachment]));

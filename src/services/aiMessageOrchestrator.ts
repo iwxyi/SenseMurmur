@@ -5,9 +5,9 @@ import type { APIConfig, AIModelProfile } from '../types/settings';
 import type { SessionGenerationPromptContext } from '../types/sessionEngine';
 import { createStreamingLocalMessage } from './chatCommitMessage';
 import { commitGeneratedMessageTurn } from './generatedMessageTurnCommit';
-import { EmptyGeneratedResponseError, generateSpeakerMessage, type LocalInterceptionEvent } from './chatEngine';
+import { generateSpeakerMessage, type LocalInterceptionEvent } from './chatEngine';
 import { attachMessageToActiveBranch } from './messageBranching';
-import { GenerationCancelledError, isGenerationCancelledError } from './generationCancellation';
+import { GenerationCancelledError } from './generationCancellation';
 import { hasRenderableStreamingContent } from './streamingContentGuard';
 import { createStreamingMessageDisplay } from './streamingMessageDisplay';
 import { useSettingsStore } from '../stores/useSettingsStore';
@@ -56,7 +56,8 @@ export async function generateAndCommitAiMessage(params: {
   getCurrentCharacters?: () => AICharacter[];
 }) {
   ensureGenerationStillCurrent(params);
-  const placeholder = params.streamingMessage || createStreamingLocalMessage(attachMessageToActiveBranch(params.chat, params.currentMessages, {
+  const generationChat = params.getCurrentChat?.(params.chatId) || params.chat;
+  const placeholder = params.streamingMessage || createStreamingLocalMessage(attachMessageToActiveBranch(generationChat, params.currentMessages, {
     chatId: params.chatId,
     type: 'ai',
     senderId: params.speaker.id,
@@ -74,7 +75,7 @@ export async function generateAndCommitAiMessage(params: {
 
   try {
     const message = await generateSpeakerMessage({
-      chat: params.chat,
+      chat: generationChat,
       speaker: params.speaker,
       characters: params.characters,
       messages: params.currentMessages,
@@ -98,7 +99,7 @@ export async function generateAndCommitAiMessage(params: {
     return await commitGeneratedMessageTurn({
       api: params.api,
       chatId: params.chatId,
-      chat: params.chat,
+      chat: generationChat,
       characters: params.characters,
       message,
       streamingMessage: display.getDisplayed(),
@@ -119,7 +120,7 @@ export async function generateAndCommitAiMessage(params: {
     });
   } catch (error) {
     display.freeze();
-    if (!commitStarted && (isGenerationCancelledError(error) || error instanceof EmptyGeneratedResponseError)) {
+    if (!commitStarted) {
       params.upsertMessage({ ...(display.getDisplayed() || streamingMessage), content: '', isDeleted: true, isStreaming: true });
     }
     throw error;

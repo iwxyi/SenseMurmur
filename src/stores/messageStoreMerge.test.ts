@@ -20,6 +20,12 @@ function buildMessage(patch: Partial<Message> = {}): Message {
 }
 
 describe('mergeMessages rich media metadata', () => {
+  it('retains branch edges when cloud metadata only updates media generation', () => {
+    const branching = { nodeId: 'node-1', parentNodeId: 'older-parent', rootNodeId: 'root', sequence: 5 };
+    const local = buildMessage({ metadata: { branching } });
+    const remote = buildMessage({ metadata: { generation: { status: 'ready', updatedAt: 200 } } });
+    expect(mergeMessages([local], [remote])[0].metadata?.branching).toEqual(branching);
+  });
   it('keeps a local ready data-url image when the cloud copy only has an unresolved placeholder', () => {
     const local = buildMessage({
       metadata: {

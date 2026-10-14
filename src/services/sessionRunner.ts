@@ -555,6 +555,7 @@ export async function runSessionLoop(params: {
                   appendEventMessage: params.appendEventMessage,
                   onLoopError: params.onLoopError,
                 });
+                if (isActiveLoop(params)) params.pauseLoop?.();
               }
             } finally {
               logDeveloperDiagnostic('chat-run:commit-finished', {
@@ -634,8 +635,10 @@ export async function runSessionLoop(params: {
       }
       } catch (error) {
         if (isGenerationCancelledError(error) || params.signal?.aborted) {
-          params.onClearStreamingState();
-          params.pauseLoop?.();
+          if (isActiveLoop(params)) {
+            params.onClearStreamingState();
+            params.pauseLoop?.();
+          }
           return;
         }
         if (typeof console !== 'undefined' && typeof console.error === 'function') {
@@ -659,8 +662,8 @@ export async function runSessionLoop(params: {
           appendEventMessage: params.appendEventMessage,
           onLoopError: params.onLoopError,
         });
-        markSessionLoop(params.loopId, { phase: 'error_sleeping' });
-        await new Promise((resolve) => setTimeout(resolve, getLoopErrorWaitTime()));
+        if (isActiveLoop(params)) params.pauseLoop?.();
+        return;
       }
     }
   } finally {

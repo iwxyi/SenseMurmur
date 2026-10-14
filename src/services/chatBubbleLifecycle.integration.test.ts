@@ -7,7 +7,7 @@ import { useSettingsStore } from '../stores/useSettingsStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { generateAndCommitAiMessage } from './aiMessageOrchestrator';
 import { commitGeneratedMessageTurn } from './generatedMessageTurnCommit';
-import { projectActiveBranchMessages } from './messageBranching';
+import { attachMessageToActiveBranch, buildBranchStateWithHead, projectActiveBranchMessages } from './messageBranching';
 import type { GeneratedRoundMessage } from './chatEngine';
 
 const generate = vi.hoisted(() => vi.fn());
@@ -84,6 +84,45 @@ afterEach(() => {
 });
 
 describe('shared generated bubble lifecycle', () => {
+  it('keeps both user turns when generation receives an older chat snapshot', async () => {
+    useSettingsStore.setState({ enableStreamingDisplayAnimation: false });
+    const context = fixture('direct');
+    const history: Message[] = [];
+    for (let turn = 0; turn < 2; turn += 1) {
+      const user = await useMessageStore.getState().addMessage(attachMessageToActiveBranch(
+        context.getChat(), history,
+        { chatId: context.params.chatId, type: 'user', senderId: 'user', senderName: '我', content: `问题${turn}`, emotion: 0 },
+      ));
+      await context.params.updateChat(context.params.chatId, {
+        messageBranchState: buildBranchStateWithHead(context.getChat().messageBranchState, user.metadata!.branching!.nodeId!),
+      });
+      history.push(user);
+      generate.mockResolvedValue({ ...context.message, content: `回答${turn}`, messageParts: undefined });
+      const firstWrite = context.writes.length;
+      await generateAndCommitAiMessage({ ...context.params, currentMessages: [...history] });
+      const draft = context.writes[firstWrite];
+      const committed = context.synced.at(-1)!;
+      expect(draft.metadata?.branching?.parentNodeId).toBe(user.metadata?.branching?.nodeId);
+      expect(committed.metadata?.branching).toEqual(draft.metadata?.branching);
+      history.push(committed);
+      expect(projectActiveBranchMessages(context.getChat(), useMessageStore.getState().messages).map((message) => message.content))
+        .toEqual(history.map((message) => message.content));
+    }
+  });
+
+  it('removes the typing bubble after a network failure and allows the next reply', async () => {
+    useSettingsStore.setState({ enableStreamingDisplayAnimation: false });
+    const context = fixture('direct');
+    generate.mockRejectedValueOnce(new Error('服务不可用'));
+    await expect(generateAndCommitAiMessage(context.params)).rejects.toThrow('服务不可用');
+    expect(useMessageStore.getState().messages.filter((message) => !message.isDeleted)).toEqual([]);
+    expect(context.synced).toHaveLength(0);
+    generate.mockResolvedValue({ ...context.message, messageParts: undefined });
+    await generateAndCommitAiMessage(context.params);
+    expect(projectActiveBranchMessages(context.getChat(), useMessageStore.getState().messages).map((message) => message.content))
+      .toEqual([context.message.content]);
+  });
+
   it.each(['direct', 'ai_direct', 'group'] as const)('%s reveals and persists three bubbles on one visible branch', async (type) => {
     const context = fixture(type);
     generate.mockResolvedValue(context.message);

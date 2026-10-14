@@ -235,8 +235,9 @@ async function buildCompanionshipTraceIfNeeded(params: {
 export class EmptyGeneratedResponseError extends Error {
   localInterceptionReported: boolean;
   reason: string;
+  protocolReason?: string;
 
-  constructor(speakerName: string, options?: { localInterceptionReported?: boolean; reason?: string; message?: string }) {
+  constructor(speakerName: string, options?: { localInterceptionReported?: boolean; reason?: string; message?: string; protocolReason?: string }) {
     const reason = options?.reason || 'duplicate_content';
     super(options?.message || (reason === 'story_protocol_invalid'
       ? `${speakerName} 没有按故事房格式生成结构化正文，本轮已跳过。`
@@ -246,6 +247,7 @@ export class EmptyGeneratedResponseError extends Error {
     this.name = 'EmptyGeneratedResponseError';
     this.localInterceptionReported = Boolean(options?.localInterceptionReported);
     this.reason = reason;
+    this.protocolReason = options?.protocolReason;
   }
 }
 
@@ -845,7 +847,9 @@ function logAiGenerationFailure(params: {
   draft?: string;
   details?: Record<string, unknown>;
 }) {
-  if (!isDeveloperModeEnabled() || typeof console === 'undefined' || typeof console.warn !== 'function') return;
+  if (typeof console === 'undefined' || typeof console.warn !== 'function') return;
+  const detailed = isDeveloperModeEnabled();
+  const failureDetails = Object.fromEntries(Object.entries(params.details || {}).filter(([key]) => key !== 'rawResponse'));
   const payload = {
     chatId: params.chat.id,
     chatName: params.chat.name,
@@ -855,8 +859,8 @@ function logAiGenerationFailure(params: {
     reason: params.reason,
     message: params.message,
     attempt: params.attempt,
-    draft: params.draft,
-    details: params.details,
+    draft: detailed ? params.draft : undefined,
+    details: detailed ? params.details : failureDetails,
   };
   const diagnosticJson = JSON.stringify(payload, (_key, value: unknown) => typeof value === 'string'
     ? redactAiDiagnosticText(value, Infinity) : value, 2);
@@ -3522,7 +3526,8 @@ async function generateNonDuplicateResponse(params: {
         continue;
       }
       throw new EmptyGeneratedResponseError(params.speaker.name, {
-        reason: 'output_protocol_invalid', message: `${params.speaker.name} 连续返回了无效回复，本轮未发送，请稍后重试。`,
+        reason: 'output_protocol_invalid', protocolReason: generated.protocolError,
+        message: `${params.speaker.name} 连续返回了无效回复，本轮未发送，请稍后重试。`,
       });
     }
     lastParsedEnvelope = generated.parsedEnvelope;

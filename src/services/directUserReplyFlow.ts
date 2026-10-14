@@ -80,7 +80,6 @@ export async function runDirectUserReplyFlow(params: {
     cachedWindow: useMessageStore.getState().messageWindowsByChatId[params.chatId],
   });
   const textApiConfig = Array.isArray(params.api) ? params.api[0] : params.api;
-  const chatForGeneration = params.chat;
   const scheduleDirectRuntimeAssessment = () => {
     void (async () => {
       if (params.signal?.aborted || (params.shouldContinue && !params.shouldContinue())) return;
@@ -169,7 +168,8 @@ export async function runDirectUserReplyFlow(params: {
     totalElapsedMs: elapsed(),
   }, 'debug', 'chat-run');
   ensureDirectReplyStillCurrent(params);
-  const sessionEngine = resolveSessionEngine(params.chat);
+  const chatForGeneration = useChatStore.getState().chats.find((item) => item.id === params.chatId) || params.chat;
+  const sessionEngine = resolveSessionEngine(chatForGeneration);
   const projectedMessagesForGeneration = getProjectedMessages();
   logDeveloperDiagnostic('direct-reply:generation-start', {
     chatId: params.chatId,

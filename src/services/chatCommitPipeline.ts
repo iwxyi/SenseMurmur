@@ -12,6 +12,8 @@ import { parseRuntimeEvent } from './runtimeEventFactory';
 import { attachMessageToActiveBranch, buildBranchStateWithHead, isMessageBranchingEnabled } from './messageBranching';
 import { applyPresenceUpdateToTransition } from './characterPresence';
 import { useSettingsStore } from '../stores/useSettingsStore';
+import { logDeveloperDiagnostic } from './developerDiagnostics';
+import { isGenerationCancelledError } from './generationCancellation';
 
 export interface ChatCommitPipelineResult {
   persistedMessage: Message;
@@ -51,7 +53,23 @@ export async function runChatCommitPipeline(params: {
   localReveal?: boolean;
   localRevealStartDelayMs?: number;
   localMessageIdentitySalt?: string;
+  getCurrentChat?: (id: string) => GroupChat | undefined;
 }): Promise<ChatCommitPipelineResult> {
+  const startedAt = Date.now();
+  let phase = 'persist-message';
+  let locallyPersisted = false;
+  const enterPhase = (next: string) => {
+    phase = next;
+    logDeveloperDiagnostic('chat-run:commit-stage', {
+      chatId: params.chatId,
+      phase,
+      elapsedMs: Date.now() - startedAt,
+      locallyPersisted,
+      node: params.streamingMessage?.metadata?.branching?.nodeId?.slice(-12) || null,
+      parent: params.streamingMessage?.metadata?.branching?.parentNodeId?.slice(-12) || null,
+      loadedMessages: params.currentMessages.length,
+    }, 'debug', 'chat-run');
+  };
   const timer = createRuntimeMemoryTimer('chat-commit', {
     chatId: params.chatId,
     speakerId: params.message.senderId,
@@ -61,6 +79,7 @@ export async function runChatCommitPipeline(params: {
   });
 
   try {
+    enterPhase('persist-message');
     const nextMessages = params.currentMessages.filter((message) => !message.isDeleted && message.id !== params.streamingMessage?.id && !isLocalInterceptionMessage(message));
     let mediaProcessingStarted = false;
     const startMediaProcessing = (message: Message) => {
@@ -82,7 +101,15 @@ export async function runChatCommitPipeline(params: {
     const localReveal = params.localReveal ?? Boolean(params.streamingMessage && streamingAnimationEnabled);
     const localRevealStartDelayMs = params.localRevealStartDelayMs ?? (localReveal ? 260 : undefined);
     const persistedMessage = await persistStreamingMessage({
-      message: attachMessageToActiveBranch(params.chat, nextMessages, params.message),
+      message: attachMessageToActiveBranch(params.chat, nextMessages, {
+        ...params.message,
+        metadata: {
+          ...params.message.metadata,
+          ...(params.streamingMessage?.metadata?.branching
+            ? { branching: params.streamingMessage.metadata.branching }
+            : {}),
+        },
+      }),
       upsertMessage: params.upsertMessage,
       existingLocalMessage: params.streamingMessage,
       shouldContinue: params.shouldContinue,
@@ -94,10 +121,14 @@ export async function runChatCommitPipeline(params: {
         if (!isLocalOnlyMediaMode()) startMediaProcessing(message);
       },
     });
+    locallyPersisted = true;
+    enterPhase('advance-branch-head');
     if (isMessageBranchingEnabled(params.chat)) {
       const nodeId = persistedMessage.metadata?.branching?.nodeId || persistedMessage.clientKey || persistedMessage.id;
       await params.updateChat(params.chatId, {
-        messageBranchState: buildBranchStateWithHead(params.chat.messageBranchState, nodeId),
+        messageBranchState: buildBranchStateWithHead(
+          (params.getCurrentChat?.(params.chatId) || params.chat).messageBranchState, nodeId,
+        ),
       });
     }
     if (params.aiProfiles?.length && persistedMessage.metadata?.attachments?.some((item) => item.status === 'queued')) {
@@ -126,6 +157,7 @@ export async function runChatCommitPipeline(params: {
     });
 
     const commitContext = buildChatCommitContext(nextMessages);
+    enterPhase('finalize-runtime');
     const transition = applyPresenceUpdateToTransition({
       message: persistedMessage,
       chat: params.chat,
@@ -142,6 +174,7 @@ export async function runChatCommitPipeline(params: {
     });
     timer.mark('after-finalize-runtime', { transition });
 
+    enterPhase('apply-runtime');
     await applyChatCommitRuntime({
       chatId: params.chatId,
       transition,
@@ -158,11 +191,21 @@ export async function runChatCommitPipeline(params: {
     timer.mark('after-apply-runtime', { transition });
 
     timer.finish({ transition });
+    enterPhase('finished');
     return {
       persistedMessage,
       transition,
     };
   } catch (error) {
+    if (!isGenerationCancelledError(error)) {
+      console.error('[chat-commit:failed]', {
+        phase,
+        elapsedMs: Date.now() - startedAt,
+        locallyPersisted,
+        loadedMessages: params.currentMessages.length,
+        error,
+      });
+    }
     timer.mark('error', {
       extra: {
         error: error instanceof Error ? error.message : String(error),

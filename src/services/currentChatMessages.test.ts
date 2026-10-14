@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../types/message';
-import { projectCurrentChatMessages } from './currentChatMessages';
+import { projectCurrentChatMessages, projectMergedChatMessages } from './currentChatMessages';
 
 function message(patch: Partial<Message>): Message {
   return {
@@ -18,6 +18,19 @@ function message(patch: Partial<Message>): Message {
 }
 
 describe('projectCurrentChatMessages', () => {
+  it('does not deduplicate distinct branch nodes with equal content and timestamps', () => {
+    const original = message({ id: 'original', timestamp: 2, metadata: { branching: { nodeId: 'original', parentNodeId: 'root' } } });
+    const revision = message({ id: 'revision', timestamp: 2, metadata: { branching: { nodeId: 'revision', parentNodeId: 'root', revisionOfNodeId: 'original' } } });
+    const root = message({ id: 'root', timestamp: 1 });
+    expect(projectMergedChatMessages({ chatId: 'chat-1', activeMessages: [root, revision], cachedWindow: { messages: [root, original] } }).map((item) => item.id)).toEqual(['root', 'original', 'revision']);
+  });
+
+  it('retains severed history inside the dynamic viewport without expanding it to all cached messages', () => {
+    const chat = { messageBranchState: { enabled: true, activeLeafNodeId: 'severed-4' } } as never;
+    const cached = Array.from({ length: 5 }, (_, index) => message({ id: `severed-${index}`, timestamp: index,
+      metadata: { branching: { nodeId: `severed-${index}`, parentNodeId: null } } }));
+    expect(projectCurrentChatMessages({ chatId: 'chat-1', chat, activeMessages: cached.slice(-3), cachedWindow: { messages: cached } }).map((item) => item.id)).toEqual(['severed-2', 'severed-3', 'severed-4']);
+  });
   it('preserves branch ancestry for non-render callers even without an explicit cache flag', () => {
     const chat = {
       sessionKind: { scenarioId: 'open-chat' },

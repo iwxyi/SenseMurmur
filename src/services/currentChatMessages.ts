@@ -93,6 +93,9 @@ function removeHydratedCacheDuplicates(cachedMessages: Message[], activeMessages
     const activeIndexes = activeBySignature.get(signature) || [];
     return !activeIndexes.some((activeIndex) => {
       const activeMessage = activeMessages[activeIndex];
+      // Text similarity is a legacy hydration aid, not branch identity.
+      // Distinct graph nodes must survive even if their reply text is equal.
+      if (message.metadata?.branching || activeMessage.metadata?.branching) return messagesShareIdentity(message, activeMessage);
       return activeMessage.timestamp === message.timestamp || hasMatchingNeighbor({
         cachedMessages,
         activeMessages,
@@ -149,12 +152,14 @@ export function projectMergedChatMessages(params: {
   const cachedWindowLimit = params.cachedWindow?.activeLimit && params.cachedWindow.activeLimit > 0
     ? params.cachedWindow.activeLimit
     : 40;
+  const preserveBranchContext = params.cachedWindow?.preserveBranchContext
+    || params.cachedWindow?.messages?.some((message) => message.chatId === params.chatId && Boolean(message.metadata?.branching));
   const cachedWindowMessages = (params.cachedWindow?.messages || [])
     .filter((message) => message.chatId === params.chatId)
-    .slice(params.cachedWindow?.preserveBranchContext ? undefined : -cachedWindowLimit);
+    .slice(preserveBranchContext ? undefined : -cachedWindowLimit);
   const activeIdentityKeys = buildMessageIdentitySet(activeMessages);
   const cachedMessages = removeHydratedCacheDuplicates(
-    shouldUseCachedWindowBase(cachedWindowMessages, activeMessages)
+    preserveBranchContext || shouldUseCachedWindowBase(cachedWindowMessages, activeMessages)
       ? cachedWindowMessages
       : cachedWindowMessages.filter((message) => sharesIdentityWithAnyActiveMessage(message, activeIdentityKeys)),
     activeMessages,
@@ -165,10 +170,10 @@ export function projectMergedChatMessages(params: {
   ];
 
   for (const message of candidates) {
-    let identity = buildMessageIdentityKeys(message)
+    const identity = buildMessageIdentityKeys(message)
       .map((key) => identityIndex.get(key))
       .find((candidate): candidate is string => Boolean(candidate)) || null;
-    let existing = identity ? byId.get(identity) || null : null;
+    const existing = identity ? byId.get(identity) || null : null;
 
     if (!existing || !identity) {
       const nextIdentity = getMessageRenderIdentity(message);
@@ -192,6 +197,7 @@ export function projectCurrentChatMessages(params: {
   chat?: Pick<GroupChat, 'sessionKind' | 'messageBranchState'> & Partial<Pick<GroupChat, 'mode'>> | null;
   activeMessages: Message[];
   cachedWindow?: MessageWindowLike | null;
+  fallbackMessages?: Message[];
 }) {
   const branchAwareParams = params.chat && isMessageBranchingEnabled(params.chat)
     ? {
@@ -204,7 +210,7 @@ export function projectCurrentChatMessages(params: {
   const projected = projectMergedChatMessages(branchAwareParams);
   if (!isMessageBranchingEnabled(params.chat)) return projected;
   const activeRange = getMessageRange(params.activeMessages.filter((message) => message.chatId === params.chatId));
-  const branched = projectActiveBranchMessages(params.chat, projected);
+  const branched = projectActiveBranchMessages(params.chat, projected, { fallbackMessages: params.fallbackMessages });
   if (!activeRange || !params.activeMessages.length) return branched;
   // Branch selection needs the complete retained cache, but rendering should
   // stay within the store's current paging window. Use the active window's

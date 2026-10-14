@@ -20,6 +20,7 @@ import { completeLocalOutboxWorkerOperation, markLocalOutboxWorkerOperation, mir
 import { useSettingsStore } from './useSettingsStore';
 import { compactMessage, compactMessageMetadata } from '../services/messageMetadataCompaction';
 import { logDeveloperDiagnostic } from '../services/developerDiagnostics';
+import { buildMessageIdentityKeys } from '../services/messageIdentity';
 import { canRecreateMissingCloudChat } from '../services/chatAvailability';
 import {
   type CachedMessageWindow,
@@ -911,28 +912,6 @@ export const useMessageStore = create<MessageStore>()(
               if (clearBarrier && Number(localMessage.timestamp || 0) <= clearBarrier) {
                 return null as never;
               }
-              if (clearBarrier) {
-                const branching = localMessage.metadata?.branching;
-                const parentId = typeof branching?.parentNodeId === 'string' ? branching.parentNodeId : null;
-                if (parentId) {
-                  const currentMessages = get().messages.filter((item) => item.chatId === localMessage.chatId);
-                  const parentPresent = currentMessages.some((item) => {
-                    const node = item.metadata?.branching;
-                    return item.id === parentId || item.clientKey === parentId || item.serverId === parentId
-                      || node?.nodeId === parentId;
-                  });
-                  if (!parentPresent) {
-                    localMessage.metadata = {
-                      ...(localMessage.metadata || {}),
-                      branching: {
-                        ...(branching || {}),
-                        parentNodeId: null,
-                        rootNodeId: branching?.nodeId || localMessage.clientKey || localMessage.id,
-                      },
-                    };
-                  }
-                }
-              }
               if (hasPendingChatCreate(localMessage.chatId)) {
                 scheduleChatSyncFirst();
                 if (await reconcilePendingChatCreate(localMessage.chatId)) {
@@ -1221,6 +1200,13 @@ export const useMessageStore = create<MessageStore>()(
         try {
           await uploadGuestMessagesToCloud();
           const currentWindowBeforeFetch = get().messageWindowsByChatId[chatId];
+          const identitiesBeforeFetch = new Set([
+            ...(currentWindowBeforeFetch?.messages || []),
+            ...get().messages.filter((message) => message.chatId === chatId),
+          ].flatMap(buildMessageIdentityKeys));
+          const pendingIdentitiesBeforeFetch = new Set(get().pendingOperations
+            .filter((operation) => operation.chatId === chatId && operation.kind === 'create')
+            .flatMap((operation) => operation.payload ? buildMessageIdentityKeys(operation.payload) : [operation.localMessageId || '']));
           const isAroundWindow = options?.aroundTimestamp !== undefined;
           const limit = getRequestedWindowLimit(options?.limit ?? DEFAULT_MESSAGE_WINDOW_LIMIT);
           const fetchStrategy = selectCloudMessageFetchStrategy(options, currentWindowBeforeFetch);
@@ -1242,7 +1228,8 @@ export const useMessageStore = create<MessageStore>()(
           const shouldForceWindowSnapshot = canUseWindowSnapshot && !currentWindowBeforeFetch?.messages?.length;
           const changeProbe = canUseWindowSnapshot ? await probeMessageWindowChanges(chatId, { forceSnapshot: shouldForceWindowSnapshot }) : null;
           if (changeProbe?.status === 'not_modified' && currentWindowBeforeFetch?.messages?.length) {
-            const activeMessages = activeMessageWindow(currentWindowBeforeFetch?.messages || [], limit);
+            const liveWindow = get().messageWindowsByChatId[chatId];
+            const activeMessages = activeMessageWindow(liveWindow?.messages || [], limit);
             messageSyncScopes.markChecked(messageWindowScope(chatId), {
               cursor: changeProbe.cursor,
                   revision: changeProbe?.revision,
@@ -1255,8 +1242,8 @@ export const useMessageStore = create<MessageStore>()(
               isLoading: false,
               isLoadingOlder: false,
               isLoadingNewer: false,
-              hasMore: canLoadMoreFromWindow(currentWindowBeforeFetch, activeMessages, limit),
-              hasMoreNewer: canLoadNewerFromWindow(currentWindowBeforeFetch, activeMessages, limit),
+              hasMore: canLoadMoreFromWindow(liveWindow, activeMessages, limit),
+              hasMoreNewer: canLoadNewerFromWindow(liveWindow, activeMessages, limit),
             }));
             return;
           }
@@ -1297,10 +1284,18 @@ export const useMessageStore = create<MessageStore>()(
           });
           set((state) => {
             const currentWindow = state.messageWindowsByChatId[chatId];
-            const current = shouldReplaceCompleteCloudWindow ? [] : currentWindow?.messages || [];
             const activeMessagesForChat = state.messages.filter((message) => message.chatId === chatId);
+            // A response describes the server at request time. A completed
+            // upload during the request must not make its new local row stale.
+            const liveMessages = mergeMessages(currentWindow?.messages || [], activeMessagesForChat);
+            const concurrentMessages = liveMessages.filter((message) => {
+              const keys = buildMessageIdentityKeys(message);
+              return !keys.some((key) => identitiesBeforeFetch.has(key))
+                || keys.some((key) => pendingIdentitiesBeforeFetch.has(key));
+            });
+            const current = shouldReplaceCompleteCloudWindow ? concurrentMessages : currentWindow?.messages || [];
             const activeCurrent = shouldReplaceCompleteCloudWindow
-              ? []
+              ? concurrentMessages
               : activeMessagesForChat.length ? activeMessagesForChat : activeMessageWindow(current, limit);
             const merged = mergeMessages(current, normalizedFetched);
             const trimmed = trimMessagesWithBranchContext(merged);

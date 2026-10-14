@@ -3,6 +3,7 @@ import type { AssistantAgentPatchSet } from '../types/assistantArtifact';
 import type { Message } from '../types/message';
 import type { GroupChat } from '../types/chat';
 import { useChatStore } from '../stores/useChatStore';
+import { useSettingsStore } from '../stores/useSettingsStore';
 import { buildAssistantChatDraft } from './chatDraftBuilder';
 import { generateResponse } from './aiClient';
 import { api } from './api';
@@ -107,6 +108,37 @@ describe('assistantChatFlow failed regeneration', () => {
     expect(upsertMessage.mock.calls.at(-1)?.[0]).toMatchObject({ isStreaming: true, isDeleted: true });
   });
 
+});
+
+describe('assistant reply display', () => {
+  it('reveals a network chunk gradually and persists the same branch node', async () => {
+    const wasEnabled = useSettingsStore.getState().enableStreamingDisplayAnimation;
+    useSettingsStore.setState({ enableStreamingDisplayAnimation: true });
+    try {
+      const chat = assistantChat();
+      chat.name = '逐字测试';
+      chat.modeState.assistantCapabilities = { ...chat.modeState.assistantCapabilities, agent: false, artifacts: false };
+      const content = '这是一条逐字显示的助手回复';
+      const frames: Message[] = [];
+      generateResponseMock.mockImplementation(async (_api, _prompt, _messages, onStream) => {
+        onStream?.(content);
+        await new Promise((resolve) => setTimeout(resolve, 65));
+        expect(frames.at(-1)?.content.length).toBeGreaterThan(0);
+        expect(frames.at(-1)?.content.length).toBeLessThan(content.length);
+        return content;
+      });
+      const result = await runAssistantChatReplyFlow({
+        api: { provider: 'openai', apiKey: 'test', model: 'test', baseUrl: '' }, aiProfiles: [], chat, chatId: chat.id,
+        currentMessages: [], upsertMessage: (message) => frames.push(message), updateChat: vi.fn(async () => undefined),
+      });
+      expect(result?.content).toBe(content);
+      expect(frames.at(-1)?.isStreaming).toBe(false);
+      expect(new Set(frames.map((frame) => frame.id)).size).toBe(1);
+      expect(new Set(frames.map((frame) => frame.metadata?.branching?.nodeId)).size).toBe(1);
+    } finally {
+      useSettingsStore.setState({ enableStreamingDisplayAnimation: wasEnabled });
+    }
+  });
 });
 
 describe('assistantChatFlow network download discovery', () => {

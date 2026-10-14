@@ -409,6 +409,18 @@ describe('runSessionLoop', () => {
     expect(params.onEngineError).not.toHaveBeenCalled();
   });
 
+  it('does not clear or pause a replacement loop when the old round is cancelled', async () => {
+    const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    params.pauseLoop = vi.fn();
+    runOneRoundMock.mockImplementation(async () => {
+      params.isActiveLoop = () => false;
+      throw new GenerationCancelledError();
+    });
+    await runSessionLoop(params as never);
+    expect(params.onClearStreamingState).not.toHaveBeenCalled();
+    expect(params.pauseLoop).not.toHaveBeenCalled();
+  });
+
   it('idles blocked interview actions when no executable schema action is available', async () => {
     const params = buildLoopParams(buildChat({ mode: 'interview', worldState: { phase: 'idle', mood: '', focus: '', recentEvent: '', conflictAxes: [] } as never }));
     await runSessionLoop(params as never);
@@ -631,6 +643,8 @@ describe('runSessionLoop', () => {
       await hooks.onMessageComplete({ id: 'msg-1', chatId: 'chat-1', type: 'ai', senderId: 'a', senderName: '甲', content: '完整回复', emotion: 0 });
     });
     const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' }, worldState: { phase: 'warming', mood: '', focus: '', recentEvent: '', conflictAxes: [] } as never }));
+    const pause = params.pauseLoop;
+    params.pauseLoop = vi.fn(pause);
 
     await runSessionLoop(params as never);
 
@@ -642,6 +656,7 @@ describe('runSessionLoop', () => {
       visibilityScope: 'public',
     }), undefined);
     expect(params.onClearStreamingState).toHaveBeenCalledTimes(1);
+    expect(params.pauseLoop).toHaveBeenCalled();
   });
 
   it('passes engine prompt context through to chat rounds', async () => {

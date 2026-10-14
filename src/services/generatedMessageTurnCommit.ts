@@ -8,7 +8,7 @@ import { runSessionCommitPipeline, type SessionCommitPipelineResult } from './se
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { createStreamingLocalMessage, revealMessageInPlace } from './chatCommitMessage';
 import { attachMessageToActiveBranch } from './messageBranching';
-import { GenerationCancelledError, isGenerationCancelledError } from './generationCancellation';
+import { GenerationCancelledError } from './generationCancellation';
 
 export async function commitGeneratedMessageTurn(params: {
   api: APIConfig;
@@ -55,6 +55,7 @@ export async function commitGeneratedMessageTurn(params: {
         ...segmentMessage,
         content: '',
       }), { identitySalt: `${turnIdentitySalt}:${index}` });
+    let locallyCommitted = false;
     try {
       if (animateLocalReveal) {
         await revealMessageInPlace({
@@ -67,43 +68,46 @@ export async function commitGeneratedMessageTurn(params: {
         });
       }
       if (params.shouldContinue?.() === false) throw new GenerationCancelledError();
+      const result = await runSessionCommitPipeline({
+        api: params.api,
+        chatId: params.chatId,
+        chat: workingChat,
+        characters: workingCharacters,
+        message: segmentMessage,
+        streamingMessage,
+        // All entry points reveal here; persistence must not start another animation.
+        localReveal: false,
+        localRevealStartDelayMs: undefined,
+        localMessageIdentitySalt: `${turnIdentitySalt}:${index}`,
+        currentMessages: workingMessages,
+        onCommit: params.onCommit,
+        upsertMessage: (message) => {
+          if (message.id === streamingMessage.id && !message.isStreaming && !message.isDeleted) locallyCommitted = true;
+          params.upsertMessage(message);
+        },
+        updateCharacter: params.updateCharacter,
+        updateCharacters: params.updateCharacters,
+        appendEventMessage: params.appendEventMessage,
+        appendEventMessages: params.appendEventMessages,
+        updateChat: params.updateChat,
+        applyChatRuntimeDelta: params.applyChatRuntimeDelta,
+        recordSpeak: params.recordSpeak,
+        aiProfiles: params.aiProfiles,
+        getCurrentChat: params.getCurrentChat,
+        getCurrentCharacters: params.getCurrentCharacters,
+        shouldContinue: params.shouldContinue,
+      });
+      results.push(result);
+      workingChat = result.nextChat;
+      workingCharacters = result.nextCharacters;
+      workingMessages = workingMessages.concat(result.persistedMessage);
+      if (result.persistedMessage.metadata?.withdrawal?.withdrawn) break;
     } catch (error) {
-      if (isGenerationCancelledError(error)) {
-        params.upsertMessage({ ...streamingMessage, isDeleted: true, isStreaming: true });
-      }
+      // Runtime work can fail after the bubble has been saved. Only remove
+      // the uncommitted preview, leaving saved history intact.
+      if (!locallyCommitted) params.upsertMessage({ ...streamingMessage, isDeleted: true, isStreaming: true });
       throw error;
     }
-    const result = await runSessionCommitPipeline({
-      api: params.api,
-      chatId: params.chatId,
-      chat: workingChat,
-      characters: workingCharacters,
-      message: segmentMessage,
-      streamingMessage,
-      // All entry points reveal here; persistence must not start another animation.
-      localReveal: false,
-      localRevealStartDelayMs: undefined,
-      localMessageIdentitySalt: `${turnIdentitySalt}:${index}`,
-      currentMessages: workingMessages,
-      onCommit: params.onCommit,
-      upsertMessage: params.upsertMessage,
-      updateCharacter: params.updateCharacter,
-      updateCharacters: params.updateCharacters,
-      appendEventMessage: params.appendEventMessage,
-      appendEventMessages: params.appendEventMessages,
-      updateChat: params.updateChat,
-      applyChatRuntimeDelta: params.applyChatRuntimeDelta,
-      recordSpeak: params.recordSpeak,
-      aiProfiles: params.aiProfiles,
-      getCurrentChat: params.getCurrentChat,
-      getCurrentCharacters: params.getCurrentCharacters,
-      shouldContinue: params.shouldContinue,
-    });
-    results.push(result);
-    workingChat = result.nextChat;
-    workingCharacters = result.nextCharacters;
-    workingMessages = workingMessages.concat(result.persistedMessage);
-    if (result.persistedMessage.metadata?.withdrawal?.withdrawn) break;
   }
 
   return {

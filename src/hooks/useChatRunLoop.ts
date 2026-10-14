@@ -1,4 +1,5 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
+import { createTurnWorkTracker } from '../services/turnWorkTracker';
 import type { AICharacter } from '../types/character';
 import type { DriverMessageCommitResult, GroupChat } from '../types/chat';
 import type { Message } from '../types/message';
@@ -112,8 +113,8 @@ export function useChatRunLoop(params: {
   const [runLoopError, setRunLoopError] = useState<string | null>(null);
   const paramsRef = useRef(params);
   const activeRunLoopTokenRef = useRef<string | null>(null);
-  const pendingCommitCountRef = useRef(0);
-  const pendingTurnWorkCountRef = useRef(0);
+  const [workTracker] = useState(createTurnWorkTracker);
+  useSyncExternalStore(workTracker.subscribe, workTracker.getSnapshot, workTracker.getSnapshot);
   const runLoopRef = useRef<((loopId: string) => Promise<void>) | null>(null);
   const lastPauseGateLogKeyRef = useRef<string | null>(null);
   const ignoreReaderPositionLoopTokenRef = useRef<string | null>(null);
@@ -122,12 +123,12 @@ export function useChatRunLoop(params: {
   const activeAbortControllerRef = useRef<AbortController | null>(null);
 
   paramsRef.current = params;
-  const isCommitSettled = useCallback(() => pendingCommitCountRef.current === 0, []);
+  const isCommitSettled = useCallback(() => workTracker.getSnapshot().commit === 0, [workTracker]);
   const hasPendingTurnWork = useCallback(() => Boolean(
     paramsRef.current.streamingMessageRef.current
-    || pendingCommitCountRef.current > 0
-    || pendingTurnWorkCountRef.current > 0,
-  ), []);
+    || workTracker.getSnapshot().commit > 0
+    || workTracker.getSnapshot().turn > 0,
+  ), [workTracker]);
 
   const runLoop = useCallback(async (loopId: string) => {
     const current = paramsRef.current;
@@ -144,20 +145,20 @@ export function useChatRunLoop(params: {
       return;
     }
     activeRunLoopTokenRef.current = loopId;
-    const moduleLoadStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    const [{ loadSessionEngine }] = await Promise.all([
-      import('../services/sessionEngineLoader'),
-    ]);
-    const sessionEngine = await loadSessionEngine(loopChat);
-    logDeveloperDiagnostic('chat-run:modules-ready', {
-      chatId: current.chatId,
-      loopId,
-      engineKey: sessionEngine.key,
-      elapsedMs: Number(((typeof performance !== 'undefined' ? performance.now() : Date.now()) - moduleLoadStartedAt).toFixed(2)),
-    }, 'debug', 'chat-run');
+    workTracker.activate(loopId);
     const abortController = new AbortController();
     activeAbortControllerRef.current = abortController;
     try {
+      const moduleLoadStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const { loadSessionEngine } = await import('../services/sessionEngineLoader');
+      const sessionEngine = await loadSessionEngine(loopChat);
+      logDeveloperDiagnostic('chat-run:modules-ready', {
+        chatId: current.chatId,
+        loopId,
+        engineKey: sessionEngine.key,
+        elapsedMs: Number(((typeof performance !== 'undefined' ? performance.now() : Date.now()) - moduleLoadStartedAt).toFixed(2)),
+      }, 'debug', 'chat-run');
+      if (abortController.signal.aborted) return;
       await runChatLoop({
         loopId,
         chatId: current.chatId,
@@ -187,14 +188,14 @@ export function useChatRunLoop(params: {
             cachedWindow: useMessageStore.getState().messageWindowsByChatId[current.chatId!],
           });
           const storyChoiceGate = getStoryChoiceGateState(latestChat, latestMessages);
-          const manualInputPending = current.isManualInputPending() && !current.streamingMessageRef.current && pendingCommitCountRef.current === 0;
+          const manualInputPending = current.isManualInputPending() && !current.streamingMessageRef.current && workTracker.getSnapshot().commit === 0;
           const storyReadPositionPaused = latestChat?.sessionKind?.scenarioId === 'story-reader'
             && !storyChoiceGate.waiting
             && ignoreReaderPositionLoopTokenRef.current !== loopId
             && Boolean(current.isStoryReaderAtTail && !current.isStoryReaderAtTail())
             && !current.streamingMessageRef.current
-            && pendingCommitCountRef.current === 0
-            && pendingTurnWorkCountRef.current === 0;
+            && workTracker.getSnapshot().commit === 0
+            && workTracker.getSnapshot().turn === 0;
           const paused = current.isPausedRef.current || storyChoiceGate.waiting || manualInputPending || storyReadPositionPaused;
           if (paused) {
             const logKey = [
@@ -213,8 +214,8 @@ export function useChatRunLoop(params: {
                 manualInputPending,
                 storyReadPositionPaused,
                 storyChoiceGate,
-                pendingCommitCount: pendingCommitCountRef.current,
-                pendingTurnWorkCount: pendingTurnWorkCountRef.current,
+                pendingCommitCount: workTracker.getSnapshot().commit,
+                pendingTurnWorkCount: workTracker.getSnapshot().turn,
               }, storyChoiceGate.mismatch === 'none' ? 'info' : 'warn');
             }
           }
@@ -223,21 +224,22 @@ export function useChatRunLoop(params: {
         isActiveLoop: (currentLoopId) => current.activeChatIdRef.current === current.chatId && current.loopTokenRef.current === currentLoopId,
         onCommitSettled: isCommitSettled,
         onCommitStarted: () => {
-          pendingCommitCountRef.current += 1;
+          workTracker.change(loopId, 'commit', 1);
         },
         onCommitFinished: () => {
-          pendingCommitCountRef.current = Math.max(0, pendingCommitCountRef.current - 1);
+          workTracker.change(loopId, 'commit', -1);
         },
         pauseLoop: () => {
+          if (current.loopTokenRef.current !== loopId) return;
           current.isPausedRef.current = true;
           current.pause();
           void current.updateChat(current.chatId!, { isActive: false });
         },
         onTurnWorkStarted: () => {
-          pendingTurnWorkCountRef.current += 1;
+          workTracker.change(loopId, 'turn', 1);
         },
         onTurnWorkFinished: () => {
-          pendingTurnWorkCountRef.current = Math.max(0, pendingTurnWorkCountRef.current - 1);
+          workTracker.change(loopId, 'turn', -1);
         },
         onSpeakerSelected: (charId: string, speaker?: AICharacter) => {
           if (!shouldCreateSpeakerStreamingPlaceholder(loopChat)) {
@@ -296,11 +298,13 @@ export function useChatRunLoop(params: {
           setRunLoopError(null);
         },
         onClearStreamingState: () => {
+          if (current.loopTokenRef.current !== loopId) return;
           current.clearStreamingMessageRef();
           setThinkingId(null);
           current.setCurrentSpeaker(null);
         },
         onEngineError: async (error) => {
+          if (current.loopTokenRef.current !== loopId) return;
           logDeveloperDiagnostic('story-run:engine-error', {
             error,
             chatId: current.chatId,
@@ -335,6 +339,7 @@ export function useChatRunLoop(params: {
           await current.updateChat(current.chatId!, { isActive: false });
         },
         onLoopError: (error) => {
+          if (current.loopTokenRef.current !== loopId) return;
           logDeveloperDiagnostic('story-run:loop-error', {
             error,
             chatId: current.chatId,
@@ -360,6 +365,12 @@ export function useChatRunLoop(params: {
           const message = error instanceof Error ? error.message : String(error);
           const safeMessage = message || current.t('common.error');
           setRunLoopError(safeMessage);
+          current.discardStreamingMessage();
+          setThinkingId(null);
+          current.setCurrentSpeaker(null);
+          current.isPausedRef.current = true;
+          current.pause();
+          if (current.chatId) void current.updateChat(current.chatId, { isActive: false });
         },
         onCommit: async (args) => {
           return await (sessionEngine.onMessageCommitted as (commitArgs: {
@@ -384,12 +395,19 @@ export function useChatRunLoop(params: {
         signal: abortController.signal,
       });
     } finally {
+      const remaining = workTracker.clear(loopId);
+      if (remaining && (remaining.turn || remaining.commit)) {
+        console.error('[chat-run:unfinished-work]', { counts: remaining, aborted: abortController.signal.aborted });
+        setRunLoopError('聊天回合未正常结束，请重试');
+        current.isPausedRef.current = true;
+        current.pause();
+      }
       if (activeAbortControllerRef.current === abortController) activeAbortControllerRef.current = null;
       if (ignoreReaderPositionLoopTokenRef.current === loopId) ignoreReaderPositionLoopTokenRef.current = null;
       pendingStartChatByLoopTokenRef.current.delete(loopId);
       if (activeRunLoopTokenRef.current === loopId) activeRunLoopTokenRef.current = null;
     }
-  }, [isCommitSettled]);
+  }, [isCommitSettled, workTracker]);
   runLoopRef.current = runLoop;
 
   const startConversationLoopIfNeeded = useCallback((conversationChat: GroupChat, options: ConversationLoopStartOptions = {}) => {
@@ -466,7 +484,15 @@ export function useChatRunLoop(params: {
           loopId: newLoopToken,
           error: error instanceof Error ? error.message : String(error),
         }, 'error', 'chat-run');
-        setRunLoopError(error instanceof Error ? error.message : String(error));
+        console.error('[chat-run:startup-failed]', error);
+        if (paramsRef.current.loopTokenRef.current === newLoopToken) {
+          setRunLoopError(error instanceof Error ? error.message : String(error));
+          paramsRef.current.isPausedRef.current = true;
+          paramsRef.current.pause();
+          setThinkingId(null);
+          paramsRef.current.setCurrentSpeaker(null);
+          paramsRef.current.discardStreamingMessage();
+        }
       });
     };
     if (startDelayMs <= 0) {
@@ -490,8 +516,8 @@ export function useChatRunLoop(params: {
       reason,
       hasAbortController: Boolean(activeAbortControllerRef.current),
       hasStreamingMessage: Boolean(current.streamingMessageRef.current),
-      pendingCommitCount: pendingCommitCountRef.current,
-      pendingTurnWorkCount: pendingTurnWorkCountRef.current,
+      pendingCommitCount: workTracker.getSnapshot().commit,
+      pendingTurnWorkCount: workTracker.getSnapshot().turn,
     }, 'info');
     activeAbortControllerRef.current?.abort();
     activeRunLoopTokenRef.current = null;
@@ -510,25 +536,25 @@ export function useChatRunLoop(params: {
     // belongs to the active conversation branch, so manual input must not wait
     // for its bookkeeping callbacks; the commit itself is guarded by the
     // shouldContinue token passed through the persistence pipeline.
-    pendingCommitCountRef.current = 0;
-    pendingTurnWorkCountRef.current = 0;
+    workTracker.clear();
     setThinkingId(null);
     current.setCurrentSpeaker(null);
     current.stop();
     if (current.chatId) void current.updateChat(current.chatId, { isActive: false });
-  }, []);
+  }, [workTracker]);
 
   const resetRunLoopUiState = useCallback(() => {
     activeAbortControllerRef.current?.abort();
     activeAbortControllerRef.current = null;
     activeRunLoopTokenRef.current = null;
+    workTracker.clear();
     pendingStartTimerByLoopTokenRef.current.forEach((timer) => window.clearTimeout(timer));
     pendingStartTimerByLoopTokenRef.current.clear();
     pendingStartChatByLoopTokenRef.current.clear();
     setThinkingId(null);
     setChatError(null);
     setRunLoopError(null);
-  }, []);
+  }, [workTracker]);
 
   return {
     thinkingId,
