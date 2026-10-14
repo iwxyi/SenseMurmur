@@ -98,7 +98,7 @@ describe('assistantChatFlow failed regeneration', () => {
       throw new Error('AI 服务不可用');
     });
     await expect(runAssistantChatReplyFlow({
-      api: { provider: 'openai', apiKey: 'test', model: 'test' }, aiProfiles: [], chat, chatId: chat.id,
+      api: { provider: 'openai', apiKey: 'test', model: 'test', baseUrl: '' }, aiProfiles: [], chat, chatId: chat.id,
       currentMessages: [], upsertMessage, updateChat, revisionOfNodeId: original.id, signal: controller.signal,
     })).rejects.toThrow();
     expect(Array.from(visible.values())).toEqual([original]);

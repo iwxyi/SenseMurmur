@@ -69,7 +69,7 @@ const MAX_ARTIFACTS_PER_CHAT = 80;
 const MAX_VERSIONS_PER_ARTIFACT = 12;
 const ASSISTANT_ARTIFACT_SYNC_TTL_MS = 30_000;
 let assistantArtifactHydrationPromise: Promise<void> | null = null;
-const htmlAutosaveCloudPushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const htmlAutosaveCloudPushTimers = new Map<string, number>();
 const assistantArtifactSyncScopes = createSyncScopeMetadata(ASSISTANT_ARTIFACT_SYNC_TTL_MS, {
   getStorageKey: () => scopedStorageKey(`assistant-artifact-sync-scopes-${getLocalDataUserId()}`),
 });

@@ -373,7 +373,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
 
   it('runs unified auto social flow for post moment candidates', async () => {
     const chat = buildChatWithEvents([buildCandidateEvent(buildCandidatePayload({ eventKind: 'post_moment', participantIds: ['a'], confidence: 0.9, reasonType: 'celebration', visibilityPlan: 'public', dedupeKey: 'moment-1' }))]);
-    const updateChat = vi.fn(async () => undefined);
+    const updateChat = vi.fn<(id: string, patch: Partial<GroupChat>) => Promise<void>>(async () => undefined);
     const result = await runSocialEventAutoFlow(chat, {
       chats: [chat],
       characters: [buildCharacter('a', '甲')],
@@ -393,7 +393,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
 
   it('suppresses existing post moment candidates when moments generation is disabled', async () => {
     const chat = buildChatWithEvents([buildCandidateEvent(buildCandidatePayload({ eventKind: 'post_moment', participantIds: ['a'], confidence: 0.9, reasonType: 'celebration', visibilityPlan: 'public', dedupeKey: 'moment-disabled-existing' }))]);
-    const updateChat = vi.fn(async () => undefined);
+    const updateChat = vi.fn<(id: string, patch: Partial<GroupChat>) => Promise<void>>(async () => undefined);
     setAIGenerationRuntimeConfig({ enableMoments: false, enableDiaries: true });
     try {
       const result = await runSocialEventAutoFlow(chat, {
@@ -493,7 +493,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
 
   it('runs unified auto social flow for outing candidates', async () => {
     const chat = buildChatWithEvents([buildCandidateEvent(buildCandidatePayload({ eventKind: 'social_outing', participantIds: ['a', 'b'], confidence: 0.9, reasonType: 'celebration', visibilityPlan: 'public', dedupeKey: 'outing-1' }))]);
-    const updateChat = vi.fn(async () => undefined);
+    const updateChat = vi.fn<(id: string, patch: Partial<GroupChat>) => Promise<void>>(async () => undefined);
     const result = await runSocialEventAutoFlow(chat, {
       chats: [chat],
       characters: [],
@@ -505,7 +505,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     });
     expect(result.handledEventId).toBe('evt-candidate-1');
     expect(updateChat).toHaveBeenCalledTimes(1);
-    const patch = (updateChat.mock.calls[0] as [string, Partial<typeof chat>] | undefined)?.[1];
+    const patch = updateChat.mock.calls[0]?.[1];
     const events = patch?.runtimeEventsV2 || [];
     expect(events.some((event) => ['relationship_delta', 'memory_candidate', 'room_shift'].includes(event.kind))).toBe(false);
     expect(events.find((event) => (event.payload as { artifactType?: string }).artifactType === 'outing_summary')?.payload)
@@ -2199,7 +2199,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
         lastUpdatedAt: now - 1_000,
       }],
     };
-    const updateChat = vi.fn(async () => undefined);
+    const updateChat = vi.fn<(id: string, patch: Partial<GroupChat>) => Promise<void>>(async () => undefined);
     await runSocialEventAutoFlow(chat, {
       chats: [chat],
       characters: [buildCharacter('a', '甲')],
@@ -2301,7 +2301,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
         lastUpdatedAt: lastChatAt + 2_000,
       }],
     };
-    const updateChat = vi.fn(async () => undefined);
+    const updateChat = vi.fn<(id: string, patch: Partial<GroupChat>) => Promise<void>>(async () => undefined);
     await runSocialEventAutoFlow(chat, {
       chats: [chat],
       characters: [buildCharacter('a', '甲')],

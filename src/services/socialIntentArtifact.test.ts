@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeConversation } from '../types/chat';
+import { createTestChat } from '../test/fixtures';
 import type { RuntimeEventV2, SocialEventCandidatePayload } from '../types/runtimeEvent';
 import { buildPendingSocialIntentContext, buildSocialIntentArtifact, buildSocialIntentOutcomes, getPendingSocialIntents, isCompletedSocialArtifact } from './socialIntentArtifact';
 import { splitGeneratedRoundMessage } from './generatedMessageSegmenter';
@@ -11,7 +12,7 @@ function intent(eventKind: SocialEventCandidatePayload['eventKind'] = 'check_in'
   return { id: 'intent', conversationId: 'chat', kind: 'artifact', actorIds: ['a'], targetIds: ['b'], createdAt: 1, ...artifact };
 }
 
-const chat = (events: RuntimeEventV2[]) => normalizeConversation({ id: 'chat', memberIds: ['a', 'b', 'user'], runtimeEventsV2: events });
+const chat = (events: RuntimeEventV2[]) => createTestChat({ id: 'chat', memberIds: ['a', 'b', 'user'], runtimeEventsV2: events });
 const outcomeHint = { eventKind: 'check_in' as const, intentId: 'intent', outcome: 'completed' as const, evidenceText: '昨晚睡得好吗？' };
 const reply = { id: 'reply', senderId: 'a', content: '昨晚睡得好吗？', socialEventHints: [outcomeHint] };
 

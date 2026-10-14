@@ -150,6 +150,8 @@ describe('MessageBubble event rendering', () => {
   it('uses the compact media layout for sticker-only messages', () => {
     const message: Message = {
       id: 'm-sticker',
+      emotion: 0,
+      isDeleted: false,
       chatId: 'c1',
       senderId: 'assistant',
       senderName: '助手',

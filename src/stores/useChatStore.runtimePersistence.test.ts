@@ -236,6 +236,7 @@ function message(overrides: Partial<Message>): Message {
     chatId: 'chat-1',
     type: overrides.type || 'ai',
     senderId: overrides.senderId || 'a',
+    senderName: '甲',
     content: overrides.content || '继续聊。',
     emotion: 0,
     timestamp: overrides.timestamp || 100,
@@ -405,7 +406,7 @@ describe('chat runtime persistence', () => {
       runtimeEventsV2: [candidate, runtimeEvent(2)],
       worldState: {
         ...base.worldState, focus: '已接受的新分工', recentEvent: '普通发言已提交',
-        structuredRoomState: { ...createInitialRoomState(), heat: 64, dominantThread: 'new-thread' },
+        structuredRoomState: { ...createInitialRoomState(), heat: 64, dominantThread: ['a', 'b'] },
       },
       runtimeSeed: { notes: ['本人已接受'], artifacts: ['新的日程'] },
       latestMessage, lastMessageAt: latestMessage.timestamp,
@@ -444,7 +445,7 @@ describe('chat runtime persistence', () => {
       useChatStore.setState({ chats: [base], pendingOperations: [] });
       await useChatStore.getState().updateChat(base.id, {
         runtimeEventsV2: [candidate, runtimeEvent(2)],
-        worldState: { ...base.worldState, focus: '新的事项', structuredRoomState: { ...createInitialRoomState(), heat: 64, dominantThread: 'new-thread' } },
+        worldState: { ...base.worldState, focus: '新的事项', structuredRoomState: { ...createInitialRoomState(), heat: 64, dominantThread: ['a', 'b'] } },
         runtimeSeed: { notes: ['新的承诺'], artifacts: ['新的安排'] },
       });
       const result = await runSocialEventAutoFlow(base, {

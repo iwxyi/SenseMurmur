@@ -32,7 +32,7 @@ describe('characterTurnDrive', () => {
     }
   });
   it('gives the same moment distinct stakes and lenses without hard-coding one-axis reactions', () => {
-    const message = { id: 'm', chatId: 'c', senderId: 'zhang', type: 'ai' as const, content: '地界和收成明天再慢慢问，先把摊子支起来。', timestamp: 1, isDeleted: false };
+    const message = { id: 'm', chatId: 'c', senderId: 'zhang', senderName: '张', emotion: 0, type: 'ai' as const, content: '地界和收成明天再慢慢问，先把摊子支起来。', timestamp: 1, isDeleted: false };
     const protective = deriveCharacterTurnDrive({ speaker: character('guan', { coreProfile: { coreDesire: '不让自己人替别人吞下代价', interactionHabits: ['先看最后是谁吃亏'] }, relationships: [{ characterId: 'zhang', warmth: 28, trust: 20, competence: 12, threat: 2 }] }), messages: [message], innerLife });
     const suspicious = deriveCharacterTurnDrive({ speaker: character('liu', { coreProfile: { coreFear: '好听的承诺最后又变成空话', perceptionBiases: ['听见含糊的安排就想先看人心'] }, relationships: [{ characterId: 'zhang', warmth: 8, trust: 4, competence: 18, threat: 16 }] }), messages: [message], innerLife });
     const detached = deriveCharacterTurnDrive({ speaker: character('li', { coreProfile: { values: ['不拿别人的焦灼当自己的差事'], sensitivities: ['讨厌被推去替大家收场'] } }), messages: [message], innerLife });
@@ -55,7 +55,7 @@ describe('characterTurnDrive', () => {
   it('changes scheduling urgency without changing the supplied psychological evidence', () => {
     const input = { speaker: character('a'), messages: [], innerLife };
     const quiet = deriveCharacterTurnDrive(input);
-    const urgent = deriveCharacterTurnDrive({ ...input, innerLife: { ...innerLife, impulse: 'mock', tone: 'annoyed', pressure: 0.9 } });
+    const urgent = deriveCharacterTurnDrive({ ...input, innerLife: { ...innerLife, impulse: 'mock', tone: 'teasing', pressure: 0.9 } });
     expect(quiet.speakingNecessity).toBe('let_silence_stand');
     expect(urgent.speakingNecessity).toBe('strong');
     const { speakingNecessity: quietUrgency, ...quietEvidence } = quiet;
@@ -78,7 +78,7 @@ describe('characterTurnDrive', () => {
       speaker: character('a', {
         relationships: [{ characterId: 'b', warmth: 45, competence: 30, trust: 40, threat: 0, attachment: 20, deference: 0 }],
       }),
-      messages: [{ id: 'm', chatId: 'c', senderId: 'b', senderName: '乙', type: 'ai', content: '那就先这样。', timestamp: 1, isDeleted: false }],
+      messages: [{ id: 'm', chatId: 'c', senderId: 'b', senderName: '乙', emotion: 0, type: 'ai', content: '那就先这样。', timestamp: 1, isDeleted: false }],
       innerLife,
       targetActorId: 'b',
       targetMessageId: 'm',
@@ -86,6 +86,30 @@ describe('characterTurnDrive', () => {
     });
 
     expect(drive.relationalAction).toBe('situated');
+    expect(drive.speakingNecessity).toBe('let_silence_stand');
+  });
+
+  it('keeps an addressee as context without priority when the model requests no answer', () => {
+    const drive = deriveCharacterTurnDrive({
+      speaker: character('a'), innerLife,
+      messages: [{ id: 'm', chatId: 'c', senderId: 'b', senderName: '乙', emotion: 0, type: 'ai',
+        content: '改之前先算工时费。', timestamp: 1, isDeleted: false,
+        addressedTargetIds: ['a'], replyDebtTargetIds: null }],
+    });
+    expect(drive.evidence).toContain('direct_address');
+    expect(drive.speakingNecessity).toBe('let_silence_stand');
+  });
+
+  it('does not give a previously answered request fresh priority', () => {
+    const drive = deriveCharacterTurnDrive({
+      speaker: character('a'), innerLife,
+      messages: [
+        { id: 'm1', chatId: 'c', senderId: 'b', senderName: '乙', emotion: 0, type: 'ai', content: '要改吗？',
+          timestamp: 1, isDeleted: false, replyDebtTargetIds: ['a'] },
+        { id: 'm2', chatId: 'c', senderId: 'a', senderName: '甲', emotion: 0, type: 'ai', content: '不改。',
+          timestamp: 2, isDeleted: false },
+      ],
+    });
     expect(drive.speakingNecessity).toBe('let_silence_stand');
   });
 
@@ -99,7 +123,7 @@ describe('characterTurnDrive', () => {
     });
     const drive = deriveCharacterTurnDrive({
       speaker: subordinate,
-      messages: [{ id: 'm', chatId: 'c', senderId: superior.id, senderName: '阎君', type: 'ai', content: '西巷是谁巡的？', timestamp: 1, isDeleted: false }],
+      messages: [{ id: 'm', chatId: 'c', senderId: superior.id, senderName: '阎君', emotion: 0, type: 'ai', content: '西巷是谁巡的？', timestamp: 1, isDeleted: false }],
       innerLife,
       targetActorId: superior.id,
       targetName: '阎君',
@@ -124,7 +148,7 @@ describe('characterTurnDrive', () => {
     const drive = deriveCharacterTurnDrive({
       speaker: superior,
       counterpart: subordinate,
-      messages: [{ id: 'm', chatId: 'c', senderId: subordinate.id, senderName: '牛头', type: 'ai', content: '这趟差事我没办妥。', timestamp: 1, isDeleted: false }],
+      messages: [{ id: 'm', chatId: 'c', senderId: subordinate.id, senderName: '牛头', emotion: 0, type: 'ai', content: '这趟差事我没办妥。', timestamp: 1, isDeleted: false }],
       innerLife: showOffLife,
       targetActorId: subordinate.id,
       targetName: '牛头',
@@ -153,7 +177,7 @@ describe('characterTurnDrive', () => {
     const drive = deriveCharacterTurnDrive({
       speaker: subordinate,
       counterpart: superior,
-      messages: [{ id: 'm', chatId: 'c', senderId: 'yan', senderName: '阎君', type: 'ai', content: '再去查一遍。', timestamp: 1, isDeleted: false }],
+      messages: [{ id: 'm', chatId: 'c', senderId: 'yan', senderName: '阎君', emotion: 0, type: 'ai', content: '再去查一遍。', timestamp: 1, isDeleted: false }],
       innerLife: irritatedLife,
       targetActorId: 'yan',
       targetName: '阎君',

@@ -166,6 +166,23 @@ describe('aiClient multimodal requests', () => {
     expect(body.modelOptions).toBeUndefined();
   });
 
+  it('sends native JSON format through official DeepSeek proxy without changing historical JSON examples', async () => {
+    const calls: RequestInit[] = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init || {});
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"messages":[{"content":"看看袖口。"}]}' } }] }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const prior = JSON.stringify({ messages: [{ content: '先别扔。' }] });
+    await generateResponse({ provider: 'official-1', apiKey: '', baseUrl: '/api/ai', model: 'deepseek-v4-flash' },
+      'Return one JSON object.', [{ role: 'assistant', content: prior }, { role: 'user', content: '阿强: 袖口还能改。' }],
+      undefined, { responseFormat: 'json' });
+    const body = JSON.parse(String(calls[0]?.body));
+    expect(body.response_format).toEqual({ type: 'json_object' });
+    expect(body.messages.find((item: { role: string }) => item.role === 'assistant').content).toBe(prior);
+    expect(body.thinking).toEqual({ type: 'disabled' });
+  });
+
   it('defaults DeepSeek V4 thinking to disabled when advanced options are missing', async () => {
     const calls: RequestInit[] = [];
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {

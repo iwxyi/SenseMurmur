@@ -1,22 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
+import { createTestCharacter } from '../test/fixtures';
 import { buildConversationMemberFingerprint, createConversationInitializationState, getConversationInitializationRequirement } from './conversationInitialization';
 
 function character(id: string): AICharacter {
-  return {
-    id,
-    name: id,
-    avatar: '',
-    background: '',
-    speakingStyle: '',
-    personality: '',
-    expertise: [],
-    relationships: [],
-    runtimeTimeline: [],
-    createdAt: 1,
-    updatedAt: 1,
-  } as AICharacter;
+  return createTestCharacter({ id, name: id });
 }
 
 function group(modeState: GroupChat['modeState'] = { phase: 'free' }, memberIds = ['a', 'b', 'user']): Pick<GroupChat, 'type' | 'memberIds' | 'modeState'> {

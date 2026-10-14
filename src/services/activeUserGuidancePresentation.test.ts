@@ -6,6 +6,7 @@ import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import { DEFAULT_CONVERSATION_DIRECTOR_CONTROLS, DEFAULT_CONVERSATION_DRAMA_RULES, DEFAULT_CONVERSATION_GOVERNANCE, DEFAULT_CONVERSATION_WORLD_STATE } from '../types/chat';
 import type { AIModelProfile } from '../types/settings';
 import { projectActiveUserGuidance } from './activeUserGuidancePresentation';
+import type { UserGuidanceIntent } from './userGuidanceIntent';
 
 function buildCharacter(id: string, name: string, patch: Partial<AICharacter> = {}): AICharacter {
   return {
@@ -87,6 +88,26 @@ function imageProfile(): AIModelProfile {
   };
 }
 
+function guidanceMessage(patch: Partial<Message>, intent: Partial<UserGuidanceIntent> = {}) {
+  const guidance: UserGuidanceIntent = {
+    kind: 'direct_reply', rawText: patch.content || '', focusText: patch.content || '',
+    actorIds: ['mei'], mentionedActorIds: ['mei', 'hui'], beatType: 'answer',
+    pressure: 0.9, maxTurns: 2, reason: '入口模型已识别用户要求', ...intent,
+  };
+  return buildMessage({ ...patch, metadata: { runtimeDecision: {
+    directorIntent: { source: 'user_message', beatType: guidance.beatType, userGuidance: guidance },
+  } } });
+}
+
+function imageGuidanceMessage(patch: Partial<Message>) {
+  return guidanceMessage(patch, { kind: 'media_request',
+    mediaRequest: { kind: 'image', subjectActorIds: ['hui'], subjectText: '灰太狼', actionText: '发证件照图片' } });
+}
+
+function topicGuidanceMessage(patch: Partial<Message>) {
+  return guidanceMessage(patch, { kind: 'topic_shift', actorIds: [], mentionedActorIds: [], hasHardConstraints: true });
+}
+
 describe('activeUserGuidancePresentation', () => {
   const members = [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')];
 
@@ -94,8 +115,8 @@ describe('activeUserGuidancePresentation', () => {
     const projection = projectActiveUserGuidance({
       chat: buildChat(),
       members,
-      messages: [buildMessage({ type: 'god', senderName: '开发者', content: '美羊羊发个灰太狼证件照的图片' })],
-      aiProfiles: [],
+      messages: [imageGuidanceMessage({ type: 'god', senderName: '开发者', content: '美羊羊发个灰太狼证件照的图片' })],
+      aiProfiles: [imageProfile()],
       now: 40,
     });
 
@@ -120,7 +141,7 @@ describe('activeUserGuidancePresentation', () => {
     const projection = projectActiveUserGuidance({
       chat: buildChat(),
       members,
-      messages: [buildMessage({ type: 'god', senderName: '开发者', content: '美羊羊说说你怎么看灰太狼' })],
+      messages: [guidanceMessage({ type: 'god', senderName: '开发者', content: '美羊羊说说你怎么看灰太狼' })],
       aiProfiles: [],
       now: 40,
     });
@@ -139,7 +160,7 @@ describe('activeUserGuidancePresentation', () => {
       members,
       messages: [
         buildMessage({ id: 'old', type: 'ai', senderId: 'hui', senderName: '灰太狼', content: '香蕉证件照也不是不行。', timestamp: 30 }),
-        buildMessage({ id: 'guide', type: 'god', senderName: '开发者', content: '新话题：狼抓羊有过错吗？狼应该抓羊吗？', timestamp: 40 }),
+        topicGuidanceMessage({ id: 'guide', type: 'god', senderName: '开发者', content: '新话题：狼抓羊有过错吗？狼应该抓羊吗？', timestamp: 40 }),
       ],
       aiProfiles: [],
       now: 50,
@@ -161,7 +182,7 @@ describe('activeUserGuidancePresentation', () => {
     const projection = projectActiveUserGuidance({
       chat: buildChat({ memberIds: ['user', 'mei', 'hui'] }),
       members,
-      messages: [buildMessage({ type: 'user', senderId: 'user', senderName: '我', content: '新话题：今晚还继续讨论这个方案吗？', timestamp: 40 })],
+      messages: [topicGuidanceMessage({ type: 'user', senderId: 'user', senderName: '我', content: '新话题：今晚还继续讨论这个方案吗？', timestamp: 40 })],
       aiProfiles: [],
       now: 50,
     });
@@ -251,7 +272,7 @@ describe('activeUserGuidancePresentation', () => {
       chat: buildChat(),
       members,
       messages: [
-        buildMessage({ id: 'guide', type: 'god', senderName: '开发者', content: '美羊羊发个灰太狼证件照的图片', timestamp: 30 }),
+        imageGuidanceMessage({ id: 'guide', type: 'god', senderName: '开发者', content: '美羊羊发个灰太狼证件照的图片', timestamp: 30 }),
         buildMessage({ id: 'banter', type: 'ai', senderId: 'mei', senderName: '美羊羊', content: '蕉太狼你怎么又想到香蕉啦～', timestamp: 40 }),
       ],
       aiProfiles: [imageProfile()],
@@ -317,7 +338,7 @@ describe('activeUserGuidancePresentation', () => {
     const projection = projectActiveUserGuidance({
       chat: buildChat(),
       members,
-      messages: [buildMessage({ type: 'god', senderName: '开发者', content: `新话题：${uuid} 对 {"eventType":"room_state_snapshot_v2"}`, timestamp: 60 })],
+      messages: [topicGuidanceMessage({ type: 'god', senderName: '开发者', content: `新话题：${uuid} 对 {"eventType":"room_state_snapshot_v2"}`, timestamp: 60 })],
       aiProfiles: [],
       now: 70,
     });
@@ -333,7 +354,7 @@ describe('activeUserGuidancePresentation', () => {
     const projection = projectActiveUserGuidance({
       chat: buildChat(),
       members,
-      messages: [buildMessage({ type: 'god', senderName: '开发者', content: '别公开我们的秘密暗号：雨夜便利店，让美羊羊回应', timestamp: 80 })],
+      messages: [guidanceMessage({ type: 'god', senderName: '开发者', content: '别公开我们的秘密暗号：雨夜便利店，让美羊羊回应', timestamp: 80 })],
       aiProfiles: [],
       now: 90,
     });

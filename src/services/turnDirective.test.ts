@@ -147,10 +147,10 @@ describe('turnDirective', () => {
       turnPlan,
     });
     const prompt = buildTurnDirectivePrompt(directive);
-    expect(prompt).toContain('A brief acknowledgement can be the whole response');
+    expect(prompt).toContain('A brief reaction can be the whole response');
     expect(prompt).toContain('Do not attach a new condition');
-    expect(prompt).toContain('Let a completed exchange rest');
-    expect(prompt).toContain('Optional attention cue: if useful, add one condition, cost, or limit that changes the next response');
+    expect(prompt).toContain('Let completed exchanges rest');
+    expect(prompt).toContain('Optional attention cue: if useful, choose whether and how to respond');
     expect(prompt).not.toContain('changes the next response to 陈越');
     expect(prompt).toContain('latest speaker is context, not recipient');
     expect(prompt).toContain('do not explain the whole topic');
@@ -158,7 +158,7 @@ describe('turnDirective', () => {
 
   it.each([0, 80])('keeps projected topic context at drift %s out of unresolved task assertions', (topicDrift) => {
     const room = chat({ worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE,
-      structuredRoomState: { heat: 0, cohesion: 0, topicDrift, dominantThread: [], alliances: [],
+      structuredRoomState: { heat: 0, cohesion: 0, topicDrift, dominantThread: null, alliances: [],
         conflictPairs: [], pileOnTarget: null, silencedActors: [] } } });
     const messages = [message({ senderId: 'rui', content: '今天的晚霞好看。' })];
     const directive = buildTurnDirective({ chat: room, speaker: character('rui', '瑞瑞'),
@@ -214,7 +214,7 @@ describe('turnDirective', () => {
       messages: [reply], intent, innerLife, conversationMovePlan: movePlan, turnPlan };
     const before = buildTurnDirective({ ...input, chat: room,
       narrativeLines: projectNarrativeLines({ chat: room, messages: [reply], now: 20 }) });
-    expect(before.continuityEvidence?.[0]).toContain('commitment/established: 瑞瑞答应把书还给陈越');
+    expect(before?.continuityEvidence?.[0]).toContain('commitment/established: 瑞瑞答应把书还给陈越');
     const beforePrompt = buildTurnDirectivePrompt(before);
     expect(beforePrompt).toContain('已接受，尚未报告兑现');
     expect(beforePrompt).toContain('it does not require action or resolution this turn');
@@ -239,7 +239,7 @@ describe('turnDirective', () => {
         intent, innerLife, conversationMovePlan: movePlan, turnPlan,
         directorIntent: { source: 'conversation_reply', targetLineId: 'current', beatType: 'answer', targetActorIds: ['rui'], pressure: 0.8, reason: '回应债' },
         narrativeLines: [{ ...focused, participantIds }, { ...focused, id: 'unrelated', summary: '另一个更高热度的事项', salience: 0.9, participantIds: ['rui'] },
-          { ...focused, id: 'private', summary: '私密事实', visibility: 'pair_private', salience: 1, participantIds: ['rui'] }],
+          { ...focused, id: 'private', summary: '私密事实', visibility: 'role_private', salience: 1, participantIds: ['rui'] }],
       });
       expect(directive?.narrativePressure).toContain('未决定开战');
       expect(directive?.narrativePressure).not.toContain('私密事实');
@@ -306,7 +306,7 @@ describe('turnDirective', () => {
     }))).toBe(false);
   });
 
-  it('turns backing into independent support instead of forced agreement', () => {
+  it('leaves the response act to the model rather than translating a backing estimate into an instruction', () => {
     const directive = buildTurnDirective({
       chat: chat(),
       speaker: character('rui', '瑞瑞'),
@@ -320,7 +320,7 @@ describe('turnDirective', () => {
     });
 
     expect(directive?.targetName).toBe('陈越');
-    expect(directive?.socialJob).toContain('condition');
+    expect(directive?.socialJob).toContain('choose whether and how to respond');
     expect(directive?.relationshipEffect).toContain('not a fixed tone');
     expect(directive?.relationshipEffect).not.toContain('warm warmth');
     expect(directive?.relationshipEffect).toContain('relational consequence');
@@ -330,6 +330,17 @@ describe('turnDirective', () => {
     expect(prompt).toContain('not an assigned recipient');
     expect(prompt).not.toContain('live attention is on');
     expect(prompt).not.toContain('Active target: 陈越');
+    for (const stance of ['back_up', 'challenge', 'comfort'] as const) {
+      for (const moveType of ['add_boundary_condition', 'ask_followup', 'counterexample'] as const) {
+        const varied = buildTurnDirective({
+          chat: chat(), speaker: character('rui', '瑞瑞'),
+          members: [character('rui', '瑞瑞'), character('chen', '陈越')],
+          messages: [message()], styleProfile: 'casual_room', innerLife, turnPlan,
+          intent: { ...intent, stance }, conversationMovePlan: { ...movePlan, moveType },
+        });
+        expect(buildTurnDirectivePrompt(varied)).toBe(prompt);
+      }
+    }
   });
 
   it('marks an ordinary group cue as optional so a landed exchange does not become a task', () => {
@@ -338,7 +349,7 @@ describe('turnDirective', () => {
       speaker: character('rui', '瑞瑞'),
       members: [character('rui', '瑞瑞'), character('chen', '陈越')],
       messages: [message({ senderId: 'chen', content: '这事先这样，回头再看。' })],
-      intent: { ...intent, target: undefined, stance: 'side_comment' },
+      intent: { ...intent, target: '', stance: 'side_comment' },
       innerLife,
       conversationMovePlan: { ...movePlan, targetActorId: 'chen', moveType: 'react_lightly', reason: 'default_room_move' },
       turnPlan,
@@ -366,6 +377,8 @@ describe('turnDirective', () => {
 
     expect(directive?.socialJobRequired).toBe(true);
     expect(buildTurnDirectivePrompt(directive)).toContain('- Live:');
+    expect(buildTurnDirectivePrompt(directive)).toContain('respond to the actual addressed need');
+    expect(buildTurnDirectivePrompt(directive)).not.toContain('add one condition');
   });
 
   it('projects structured room atmosphere into ordinary group turns without assigning a speaker', () => {

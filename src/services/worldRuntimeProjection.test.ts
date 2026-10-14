@@ -731,6 +731,56 @@ describe('worldRuntimeProjection', () => {
     expect(items[0]?.durationMinutes).toBe(90);
   });
 
+  it('preserves explicit timing across mentions and replaces estimates with explicit patches', () => {
+    const startAt = 1800000000000;
+    const outing = (id: string, createdAt: number, timing: Record<string, unknown>): RuntimeEventV2 => ({
+      id, createdAt, conversationId: 'chat-1', kind: 'artifact',
+      actorIds: ['a'], summary: '吃火锅', visibility: 'derived_public',
+      payload: { eventKind: 'social_outing', title: '吃火锅', participantIds: ['a'], dedupeKey: 'outing', startAt, ...timing },
+    });
+    const project = (events: RuntimeEventV2[]) => projectWorldCalendarItems(
+      [buildChat('chat-1', '群聊', events)], [character('a', 'A')],
+    ).find((item) => item.id === 'outing');
+    const explicit = outing('first', 100, { durationMinutes: 45 });
+    expect(project([explicit, outing('mention', 200, {})])).toMatchObject({
+      durationMinutes: 45, endAt: startAt + 45 * 60_000, durationEstimated: false,
+    });
+    expect(project([outing('estimate', 100, {}), {
+      id: 'patch', createdAt: 200, conversationId: 'chat-1', kind: 'calendar_item_patch',
+      actorIds: ['a'], summary: '明确时长', visibility: 'derived_public',
+      payload: { calendarItemId: 'outing', durationMinutes: 30 },
+    }])).toMatchObject({ durationMinutes: 30, endAt: startAt + 30 * 60_000, durationEstimated: false });
+    expect(project([outing('end-only', 100, { endAt: startAt + 20 * 60_000 })])).toMatchObject({
+      durationMinutes: 20, durationEstimated: false,
+    });
+    expect(project([explicit, outing('duration-only', 200, { startAt: undefined, durationMinutes: 15 })])).toMatchObject({
+      durationMinutes: 15, endAt: startAt + 15 * 60_000, durationEstimated: false,
+    });
+    expect(project([outing('estimate', 100, {}), {
+      id: 'reschedule', createdAt: 200, conversationId: 'chat-1', kind: 'calendar_item_patch',
+      actorIds: ['a'], summary: '改期', visibility: 'derived_public',
+      payload: { calendarItemId: 'outing', startAt: startAt + 60 * 60_000 },
+    }])).toMatchObject({ startAt: startAt + 60 * 60_000, endAt: startAt + 180 * 60_000, durationEstimated: true });
+  });
+
+  it('keeps inferred activity windows out of conflicts and preparation/rest occupancy', () => {
+    const startAt = 1800000000000;
+    const events: RuntimeEventV2[] = ['estimate', 'explicit'].map((id, index) => ({
+      id, createdAt: 100 + index, conversationId: 'chat-1', kind: 'artifact',
+      actorIds: ['a'], summary: '活动', visibility: 'derived_public',
+      payload: {
+        eventKind: 'social_outing', title: id, participantIds: ['a'], dedupeKey: id, startAt,
+        ...(index === 1 ? { durationMinutes: 30 } : {
+          autoPreparationRest: true, autoPreparationRestAfterTravel: true,
+          participantOrigins: { a: '北京' }, destinationCity: '上海', travelDurationMinutes: 60,
+        }),
+      },
+    }));
+    const items = projectWorldCalendarItems([buildChat('chat-1', '群聊', events)], [character('a', 'A')]);
+    expect(items.some((item) => item.kind === 'preparation' || item.kind === 'rest')).toBe(false);
+    expect(items.filter((item) => item.kind === 'activity').every((item) => !item.conflict?.hasConflict)).toBe(true);
+  });
+
   it('estimates activity duration when durationMinutes is missing', () => {
     const chats = [buildChat('chat-1', '群聊一', [
       {
@@ -756,6 +806,7 @@ describe('worldRuntimeProjection', () => {
     const activity = items.find((item) => item.id === 'outing-hg');
     expect(activity?.durationMinutes).toBe(120);
     expect(activity?.endAt).toBe(1800007200000);
+    expect(activity?.durationEstimated).toBe(true);
   });
 
   it('auto-creates travel item before activity for cross-city participants', () => {

@@ -538,7 +538,7 @@ describe('sessionProjection', () => {
     });
   });
 
-  it('keeps attention followup action pending when actor replies without matching the followup focus', () => {
+  it('records an actor response without inferring semantic fulfillment from its text', () => {
     const chat = normalizeConversation({
       ...buildChat(),
       memberIds: ['a', 'b'],
@@ -572,7 +572,8 @@ describe('sessionProjection', () => {
     const followupMeta = followupItem ? readAttentionFollowupMeta(followupItem) : null;
     expect(followupMeta).toMatchObject({
       actorId: 'a',
-      status: 'pending_response',
+      status: 'completed',
+      completedAt: 22,
     });
   });
 

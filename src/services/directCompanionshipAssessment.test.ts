@@ -4,6 +4,7 @@ import { normalizeConversation } from '../types/chat';
 import type { Message } from '../types/message';
 import { generateJsonResponse } from './aiClient';
 import { resolveDirectCompanionshipAssessmentEvents } from './directCompanionshipAssessment';
+import { buildUserCompanionshipProjection } from './companionshipProjection';
 
 vi.mock('./aiClient', () => ({
   generateJsonResponse: vi.fn(),
@@ -268,6 +269,54 @@ describe('directCompanionshipAssessment', () => {
       decisionSource: 'model',
     });
     expect(events.at(-3)?.evidenceMessageIds).toEqual(['msg-1']);
+  });
+
+  it('carries explicit promise effects from model assessment into intimacy projection', async () => {
+    generateJsonResponseMock.mockResolvedValueOnce(JSON.stringify({
+      promises: [{
+        shouldCreate: true,
+        action: 'fulfilled',
+        promiseText: '一起把误会说开',
+        promiseKind: 'repair_agreement',
+        relationshipEffects: { fulfilled: { intimacy: 5, security: 8 } },
+        confidence: 0.9,
+        evidence: '我们已经一起把误会说开了',
+      }],
+    }));
+    const directChat = chat();
+    const events = await resolveDirectCompanionshipAssessmentEvents({
+      chat: directChat,
+      character: character(),
+      message: message('我们已经一起把误会说开了'),
+      textApiConfig: { provider: 'openai', apiKey: 'key', baseUrl: 'https://example.test', model: 'model' },
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0].payload).toMatchObject({ relationshipEffects: { fulfilled: { intimacy: 5, security: 8 } } });
+    const withoutEffects = events.map((event) => ({ ...event, payload: { ...event.payload, relationshipEffects: undefined } }));
+    const project = (runtimeEventsV2: typeof events) => buildUserCompanionshipProjection({
+      chat: { ...directChat, runtimeEventsV2 }, character: character(), messages: [], now: 1_000,
+    }).userBond!.intimacy;
+    expect(project(events).intimacy - project(withoutEffects).intimacy).toBe(5);
+    expect(project(events).security - project(withoutEffects).security).toBe(8);
+  });
+
+  it.each([{ intimacy: '5' }, { intimacy: 101 }, { unknownAxis: 1 }])('reports invalid promise effects instead of applying them: %j', async (fulfilled) => {
+    generateJsonResponseMock.mockResolvedValueOnce(JSON.stringify({
+      promises: [{ shouldCreate: true, action: 'fulfilled', promiseText: '一起散步', confidence: 0.9, relationshipEffects: { fulfilled } }],
+    }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const events = await resolveDirectCompanionshipAssessmentEvents({
+        chat: chat(), character: character(), message: message('已经一起散步了'),
+        textApiConfig: { provider: 'openai', apiKey: 'key', baseUrl: 'https://example.test', model: 'model' },
+      });
+      expect(events).toEqual([]);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('companionship:direct-assessment-model'), expect.objectContaining({
+        error: expect.objectContaining({ message: expect.stringContaining('Invalid promise relationshipEffects') }),
+      }));
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('skips local shared phrase and intimate conflict writes when the model assessment fails', async () => {

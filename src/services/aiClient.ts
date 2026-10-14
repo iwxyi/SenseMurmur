@@ -2,6 +2,7 @@ import type { APIConfig, AIModelProfile } from '../types/settings';
 import { normalizeAIModelAdvancedOptions, normalizeMaxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS } from '../types/settings';
 import { api } from './api';
 import { backendUrl } from './backendUrl';
+import { redactAiDiagnosticText } from './aiDiagnosticText';
 
 type ChatRole = 'user' | 'assistant' | 'system';
 export interface ChatMessageImageAttachment {
@@ -534,14 +535,6 @@ export interface AiRequestDiagnostic {
 
 export interface PublicAiRequestError extends Error {
   diagnostic?: AiRequestDiagnostic;
-}
-
-function redactAiDiagnosticText(value: string) {
-  return value
-    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s,"}]+/gi, '$1[REDACTED]')
-    .replace(/(["']?(?:api[_-]?key|token|password|secret)["']?\s*[:=]\s*["'])[^"']+/gi, '$1[REDACTED]')
-    .replace(/data:image\/[\w.+-]+;base64,[a-z0-9+/=]+/gi, '[IMAGE_DATA_REDACTED]')
-    .slice(0, 2_000);
 }
 
 function parseAiErrorDiagnostic(rawBody: string, response: Response): AiRequestDiagnostic {

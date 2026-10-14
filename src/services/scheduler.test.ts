@@ -327,7 +327,7 @@ describe('scheduler speaker scoring', () => {
 
   it('does not recreate explicitly empty reply debt from an interaction tag', () => {
     const message: Message = { ...buildMessage({ senderId: 'a' }), replyDebtTargetIds: null,
-      primaryReplyDebtTargetId: null, interactionHint: { kind: 'apologize', targetId: 'b',
+      primaryReplyDebtTargetId: null, interactionHint: { kind: 'apologize', actorId: 'a', targetId: 'b', tone: 'warm',
         confidence: 0.9, intensity: 0.5, evidenceText: '方才误会你了。' } };
     const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙'), buildCharacter('c', '丙')];
     expect(resolvePendingReplyContext(characters, [message])).toBeNull();

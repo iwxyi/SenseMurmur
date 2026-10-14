@@ -1,16 +1,35 @@
 import { describe, expect, it } from 'vitest';
 import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
+import { createTestChat } from '../test/fixtures';
 import { normalizeInteractionHintCollection } from '../types/runtimeEvent';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import { buildInlineInteractionContract, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope } from './inlineInteractionHint';
+
+describe('envelope rejection diagnostics', () => {
+  it.each([
+    ['', 'json_extraction'],
+    ['plain text', 'json_extraction'],
+    ['{"messages":[}', 'json_parse'],
+    ['{"messages":[]}', 'visible_content'],
+    ['{"content":"你好"}', 'conversation_update'],
+    ['{"content":"你好","conversationUpdate":{}}', 'conversation_update'],
+  ])('explains the actual rejection of %s', (raw, stage) => {
+    const failures: Array<{ stage: string; message: string }> = [];
+    expect(parseInlineInteractionEnvelope(raw, { allowContentSalvage: false, requireConversationUpdate: true,
+      onFailure: (failure) => failures.push(failure) })).toBeNull();
+    expect(failures).toHaveLength(1);
+    expect(failures[0].stage).toBe(stage);
+    expect(failures[0].message).not.toBe('');
+  });
+});
 
 describe('known activity writeback context', () => {
   const speaker = { id: 'speaker', name: '张飞' } as AICharacter;
   const other = { id: 'other', name: '刘备' } as AICharacter;
   function context(events: RuntimeEventV2[]) {
     const contract = buildInlineInteractionContract({
-      chat: { id: 'room', type: 'group', mode: 'chat', memberIds: ['speaker', 'other'], runtimeEventsV2: events, worldState: {} } as GroupChat,
+      chat: createTestChat({ id: 'room', memberIds: ['speaker', 'other'], runtimeEventsV2: events }),
       speaker, characters: [speaker, other], recentMessages: [],
     });
     const match = contract.match(/Known speaker activity records: (\[.*\])\./);
@@ -117,8 +136,8 @@ describe('state evidence source boundary', () => {
   it('requires a quote to assign a social event to one send while accepting legacy single sends', () => {
     const socialEventHints = [{ eventKind: 'social_outing' as const }];
     expect(hasInvalidStateEvidence({ content: '去逛逛？', socialEventHints })).toBe(false);
-    expect(hasInvalidStateEvidence({ messages: [{ content: '吃过了。' }, { content: '去逛逛？' }], socialEventHints })).toBe(true);
-    expect(hasInvalidStateEvidence({ messages: [{ content: '吃过了。' }, { content: '去逛逛？' }],
+    expect(hasInvalidStateEvidence({ content: '吃过了。', messages: [{ content: '吃过了。' }, { content: '去逛逛？' }], socialEventHints })).toBe(true);
+    expect(hasInvalidStateEvidence({ content: '吃过了。', messages: [{ content: '吃过了。' }, { content: '去逛逛？' }],
       socialEventHints: [{ ...socialEventHints[0], evidenceText: '去逛逛' }] })).toBe(false);
   });
 });
@@ -210,7 +229,7 @@ describe('parseInlineInteractionEnvelope story events', () => {
 
   it('includes the speaker as a valid participant without making them a reply target', () => {
     const contract = buildInlineInteractionContract({
-      chat: { id: 'room', type: 'group', mode: 'chat', memberIds: ['speaker', 'other'], runtimeEventsV2: [], worldState: {} } as GroupChat,
+      chat: createTestChat({ id: 'room', memberIds: ['speaker', 'other'] }),
       speaker: { id: 'speaker', name: '张飞' } as AICharacter,
       characters: [{ id: 'speaker', name: '张飞' }, { id: 'other', name: '刘备' }, { id: 'outsider', name: '曹操' }] as AICharacter[],
       recentMessages: [],
@@ -476,6 +495,8 @@ describe('buildInlineInteractionContract analysis room detection', () => {
     const contract = buildInlineInteractionContract(params);
     expect(contract).not.toContain("Before writing, appraise the latest visible human turn's immediate effect");
     expect(contract).toContain('"primary":interaction,"secondary":[]');
+    expect(contract).toContain('then report only effects supported by a short exact evidenceText quote');
+    expect(contract).toContain('Do not add an agreement, concession, apology, or named preface');
     expect(contract).toContain('speakerEmotionDelta/targetEmotionDelta');
     expect(contract).toContain('Short-term emotion is not a lasting relationship change');
     expect(contract).toContain('"presenceUpdate":null');

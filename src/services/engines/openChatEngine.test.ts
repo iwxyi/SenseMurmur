@@ -236,7 +236,7 @@ describe('openChatEngine.onMessageCommitted', () => {
       apiConfig: buildApiConfig(),
     });
     const event = readRuntimeEvents(result).find((item) => item.kind === 'director_intervention');
-    expect(event?.payload.userGuidance).toMatchObject({ actorIds: ['a'], suppressedActorIds: ['b'], minTargetTurns: 2 });
+    expect(event?.payload).toMatchObject({ userGuidance: { actorIds: ['a'], suppressedActorIds: ['b'], minTargetTurns: 2 } });
   });
 
   it('records a user-directed spike and partial release without changing the slow relationship', async () => {
@@ -257,8 +257,8 @@ describe('openChatEngine.onMessageCommitted', () => {
     expect(emotion?.irritation).toBeLessThan(55);
     expect(result.characterPatches.find((entry) => entry.characterId === 'a')?.patch.relationships).toBeUndefined();
     const events = readAppliedRuntimeEvents(chat, result);
-    expect(events.some((event) => event.kind === 'interaction' && event.actorIds.includes('user') && event.targetIds?.includes('a'))).toBe(true);
-    expect(events.some((event) => event.kind === 'relationship_delta' && event.actorIds.includes('user'))).toBe(false);
+    expect(events.some((event) => event.kind === 'interaction' && event.actorIds?.includes('user') && event.targetIds?.includes('a'))).toBe(true);
+    expect(events.some((event) => event.kind === 'relationship_delta' && event.actorIds?.includes('user'))).toBe(false);
   });
 
   it('produces structured runtime events for message, interaction, room shift, and memory', async () => {
@@ -480,7 +480,7 @@ describe('openChatEngine.onMessageCommitted', () => {
     expect(guidance?.targetIds).toEqual(['a']);
     expect((guidance?.payload as { userGuidance?: { actorIds?: string[] } }).userGuidance?.actorIds).toEqual(['a']);
     expect(events.some((event) => event.kind === 'attention_candidate' && event.targetIds?.includes('a'))).toBe(true);
-    expect(events.some((event) => event.kind === 'interaction' && event.actorIds.includes('user'))).toBe(false);
+    expect(events.some((event) => event.kind === 'interaction' && event.actorIds?.includes('user'))).toBe(false);
   });
 
   it('does not infer user mention as participant interaction without model-authored interaction data', async () => {

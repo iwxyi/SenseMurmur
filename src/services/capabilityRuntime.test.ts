@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeConversation } from '../types/chat';
+import { DEFAULT_OPEN_CHAT_MODE_CONFIG, DEFAULT_OPEN_CHAT_MODE_STATE, normalizeConversation } from '../types/chat';
 import { resolveRoomCapabilities, resolveStudyParticipantProfile } from './capabilityRuntime';
 
 function chat(patch: Record<string, unknown> = {}) {
   return normalizeConversation({
-    id: 'capability-room', type: 'group', mode: 'classroom', modeConfig: {}, modeState: {},
+    id: 'capability-room', type: 'group', mode: 'classroom', modeConfig: DEFAULT_OPEN_CHAT_MODE_CONFIG, modeState: DEFAULT_OPEN_CHAT_MODE_STATE,
     name: '学习进步验证房', topic: '学习目标', style: 'free', runtimeEvolutionIntensity: 'slow',
     memberIds: ['user', 'teacher'], speed: 1, isActive: true, allowIntervention: false,
     topicSeed: '', createdAt: 1, updatedAt: 1, lastMessageAt: 1,

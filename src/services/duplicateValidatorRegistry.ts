@@ -11,7 +11,6 @@ const defaultValidator: SessionDuplicateValidator = {
       messages: context.recentMessages,
       speakerId: context.speakerId,
       intentionalRepeat: false,
-      includeRoomNearDuplicates: context.channelType === 'group',
     });
     return {
       allowed: !result.blocked,
@@ -28,7 +27,6 @@ const companionValidator: SessionDuplicateValidator = {
       messages: context.recentMessages.slice(-2),
       speakerId: context.speakerId,
       intentionalRepeat: false,
-      includeRoomNearDuplicates: false,
     });
     return {
       allowed: !result.blocked,
@@ -81,7 +79,6 @@ const analyticalValidator: SessionDuplicateValidator = {
       messages: context.recentMessages,
       speakerId: context.speakerId,
       intentionalRepeat: false,
-      includeRoomNearDuplicates: context.channelType === 'group',
     });
     return {
       allowed: !result.blocked,

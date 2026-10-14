@@ -169,7 +169,6 @@ export function buildRuntimeTimelineBody(item: ProjectedRuntimeTimelineItem, mem
   const relation = readRelationshipDeltaMeta(item);
   const distillation = readMemoryDistillationMeta(item);
   const followup = readAttentionFollowupMeta(item);
-  const attentionSource = readAttentionSourceMeta(item);
   const suppression = readCandidateSuppressionMeta(item);
   const worldDecision = readWorldAttentionDecisionMeta(item);
   const worldDecisionUnified = readUnifiedWorldDecisionMeta(item);
@@ -178,7 +177,7 @@ export function buildRuntimeTimelineBody(item: ProjectedRuntimeTimelineItem, mem
   const topicSnippet = projectionInfo?.topicSnippet || null;
   const participantNames = projectionInfo?.participantNames || [];
   if (followup) {
-    const statusLabel = followup.status === 'completed' ? '已完成' : '待响应';
+    const statusLabel = followup.status === 'completed' ? '已发言' : '待响应';
     const focus = followup.focus ? ` · ${followup.focus}` : '';
     const targetLabel = followup.kind === 'member'
       ? (followup.targetName || '成员')
@@ -271,7 +270,7 @@ export function buildRuntimeTimelineMeta(item: ProjectedRuntimeTimelineItem, mem
   const actorAudit = readActorAuditMeta(item);
   const projectionKind = readProjectionInfoMeta(item)?.projectionKind || null;
   if (followup) {
-    const statusLabel = followup.status === 'completed' ? '已完成' : '待响应';
+    const statusLabel = followup.status === 'completed' ? '已发言' : '待响应';
     const scopeLabel = followup.kind === 'member'
       ? `成员跟进动作 · ${followup.actorName} → ${followup.targetName || '成员'}`
       : `用户跟进动作 · ${followup.actorName}`;

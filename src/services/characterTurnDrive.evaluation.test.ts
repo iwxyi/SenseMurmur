@@ -28,7 +28,7 @@ describe('character turn drive structural evaluation', () => {
     const pressures = ['地界和收成明天再慢慢问，先把摊子支起来。', '这件事谁都别争了，我已经替大家答应。', '账先别算，人情以后总会还。', '他不在场，先把责任记到他头上。'];
     const outputs = pressures.flatMap((content) => cast.map((speaker) => deriveCharacterTurnDrive({
       speaker,
-      messages: [{ id: content, chatId: 'c', senderId: 'speaker', type: 'ai', content, timestamp: 1, isDeleted: false }],
+      messages: [{ id: content, chatId: 'c', senderId: 'speaker', senderName: 'Speaker', emotion: 0, type: 'ai', content, timestamp: 1, isDeleted: false }],
       innerLife: quiet,
     })));
     const perPressure = pressures.map((_, index) => outputs.slice(index * cast.length, (index + 1) * cast.length));

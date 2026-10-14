@@ -471,7 +471,7 @@ describe('companionshipProjection', () => {
     setCompanionshipRuntimeConfig(DEFAULT_COMPANIONSHIP_SETTINGS);
   });
 
-  it('projects a direct user bond from relationship ledger and user memory without confirming romance', () => {
+  it('projects a direct user bond from relationship ledger and user memory without inferring romance from scores', () => {
     const projection = buildUserCompanionshipProjection({
       chat: chat('direct', [relationship({ warmth: 68, trust: 64, competence: 10, threat: 4 })]),
       character: character({ memory: { shortTermSummary: '', longTerm: [], secrets: [], obsessions: [], tabooTopics: [], userMemories: ['用户说过明天面试会紧张。'] } }),
@@ -479,8 +479,8 @@ describe('companionshipProjection', () => {
       now: 200 + 6 * 60 * 60 * 1000,
     });
 
-    expect(projection.userBond?.phase).toBe('ambiguous');
-    expect(projection.userBond?.style).toBe('ambiguous');
+    expect(projection.userBond?.phase).toBe('fond');
+    expect(projection.userBond?.style).toBe('friend');
     expect(projection.userBond?.intimacy.security).toBeGreaterThan(60);
     expect(projection.userBond?.pendingCareTopics[0]?.text).toContain('明天面试');
     expect(projection.promptLines.join('\n')).toContain('Do not claim a confirmed romantic relationship');
@@ -497,10 +497,10 @@ describe('companionshipProjection', () => {
     expect(projection.userBond?.phase).not.toBe('confirmed');
     expect(projection.userBond?.phase).not.toBe('passionate');
     expect(projection.userBond?.phase).not.toBe('deep');
-    expect(projection.userBond?.style).toBe('ambiguous');
+    expect(projection.userBond?.style).toBe('friend');
   });
 
-  it('uses explicit shared confession anchors to infer confirmed relationship phase', () => {
+  it('does not treat confession anchor prose as relationship confirmation', () => {
     const projection = buildUserCompanionshipProjection({
       chat: chat('direct', [relationship({ warmth: 58, trust: 56, competence: 10, threat: 2 })]),
       character: character({
@@ -527,10 +527,10 @@ describe('companionshipProjection', () => {
       now: 900,
     });
 
-    expect(projection.userBond?.phase).toBe('confirmed');
-    expect(projection.userBond?.style).toBe('romantic');
+    expect(projection.userBond?.phase).toBe('confessing');
+    expect(projection.userBond?.style).toBe('ambiguous');
     expect(projection.userBond?.phaseEvidence.join('\n')).toContain('shared anchor');
-    expect(projection.promptLines.join('\n')).toContain('confirmed relationship');
+    expect(projection.promptLines.join('\n')).not.toContain('confirmed relationship');
   });
 
   it('treats confession anchors as confessing without claiming confirmed relationship', () => {
@@ -725,7 +725,7 @@ describe('companionshipProjection', () => {
     expect(projection.promptLines.join('\n')).not.toContain('confirmed relationship');
   });
 
-  it('uses long-term positive companionship events as a conservative deep phase candidate', () => {
+  it('keeps positive event trends numeric without manufacturing a deep phase', () => {
     const baseLedger = relationship({ warmth: 88, trust: 84, competence: 20, threat: 2 });
     baseLedger.derived = {
       semantic: {
@@ -773,13 +773,14 @@ describe('companionshipProjection', () => {
       now: 1_200,
     });
 
-    expect(projection.userBond?.phase).toBe('deep');
-    expect(projection.userBond?.style).toBe('romantic');
-    expect(projection.userBond?.phaseEvidence.join('\n')).toContain('long-term phase candidate deep');
+    expect(projection.userBond?.phase).toBe('stranger');
+    expect(projection.userBond?.style).toBe('friend');
+    expect(projection.userBond?.phaseEvidence.join('\n')).not.toContain('long-term phase candidate');
+    expect(projection.userBond?.phaseEvidence.join('\n')).toContain('long_term_intimacy_trend=');
     expect(projection.promptLines.join('\n')).not.toContain('confirmed relationship');
   });
 
-  it('uses long-term conflict and broken promises as conservative cooling/crisis phase candidates', () => {
+  it('projects explicit conflict anchors without reviving count-based phase candidates', () => {
     const baseLedger = relationship({ warmth: 38, trust: 28, competence: 10, threat: 24 });
     baseLedger.derived = {
       semantic: {
@@ -846,8 +847,11 @@ describe('companionshipProjection', () => {
       now: 1_200,
     });
 
-    expect(['cooling', 'crisis']).toContain(projection.userBond?.phase);
-    expect(projection.userBond?.phaseEvidence.join('\n')).toContain('long-term phase candidate');
+    expect(projection.userBond?.phase).toBe('cooling');
+    expect(projection.userBond?.phaseEvidence.join('\n')).toContain('shared anchor');
+    expect(projection.userBond?.intimateConflict?.kind).toBe('silent_treatment');
+    expect(projection.userBond?.intimacy.security).toBeLessThan(48);
+    expect(projection.userBond?.phaseEvidence.join('\n')).not.toContain('long-term phase candidate');
     expect(projection.userBond?.carePolicy.allowMissYou).toBe(false);
   });
 
@@ -936,7 +940,7 @@ describe('companionshipProjection', () => {
     expect(projection.promptLines.join('\n')).not.toContain('confirmed relationship');
   });
 
-  it('reduces security and moves to crisis when threat is high', () => {
+  it('reduces security without manufacturing crisis from threat scores', () => {
     const projection = buildUserCompanionshipProjection({
       chat: chat('direct', [relationship({ warmth: 10, trust: -12, competence: 0, threat: 60 })]),
       character: character(),
@@ -944,9 +948,25 @@ describe('companionshipProjection', () => {
       now: 300,
     });
 
-    expect(projection.userBond?.phase).toBe('crisis');
+    expect(projection.userBond?.phase).toBe('fond');
     expect(projection.userBond?.intimacy.security).toBeLessThanOrEqual(22);
     expect(projection.userBond?.unresolvedTensions.length).toBeGreaterThan(0);
+  });
+
+  it('uses percentage anchor scores without saturating intimacy or rewarding conflict anchors', () => {
+    const ledger = [relationship({ warmth: 30, trust: 30, competence: 10, threat: 0 })];
+    const project = (events: RuntimeEventV2[]) => buildUserCompanionshipProjection({
+      chat: chat('direct', ledger, events), character: character(), messages: [], now: 1_200,
+    }).userBond!.intimacy;
+    const positive = sharedAnchorEvent();
+    const conflict = sharedAnchorEvent({
+      payload: { ...positive.payload, kind: 'conflict', text: '一次争执', title: '争执' },
+    });
+    const base = project([]);
+    const anchored = project([positive]);
+    expect(anchored.intimacy - base.intimacy).toBe(5);
+    expect(anchored.security - base.security).toBe(3);
+    expect(project([conflict])).toEqual(base);
   });
 
   it('adjusts intimacy projection from shared repair anchors', () => {
@@ -1065,7 +1085,7 @@ describe('companionshipProjection', () => {
     expect(coolingProjection.userBond?.intimacy.security || 0).toBeLessThan(baseProjection.userBond?.intimacy.security || 100);
   });
 
-  it('uses user boundaries to restrain romantic and exclusive intimacy projection', () => {
+  it('applies boundaries to care without rewriting numeric feelings', () => {
     const warmLedger = [relationship({ warmth: 86, trust: 82, competence: 10, threat: 4 })];
     const unrestricted = buildUserCompanionshipProjection({
       chat: chat('direct', warmLedger),
@@ -1105,8 +1125,8 @@ describe('companionshipProjection', () => {
       now: 500,
     });
 
-    expect(restrained.userBond?.intimacy.attraction || 0).toBeLessThan(unrestricted.userBond?.intimacy.attraction || 0);
-    expect(restrained.userBond?.intimacy.exclusivity || 0).toBeLessThan(unrestricted.userBond?.intimacy.exclusivity || 0);
+    expect(restrained.userBond?.intimacy.attraction || 0).toBe(unrestricted.userBond?.intimacy.attraction || 0);
+    expect(restrained.userBond?.intimacy.exclusivity || 0).toBe(unrestricted.userBond?.intimacy.exclusivity || 0);
     expect(restrained.userBond?.carePolicy.allowMissYou).toBe(false);
   });
 
@@ -1255,7 +1275,7 @@ describe('companionshipProjection', () => {
     };
 
     const projection = buildUserCompanionshipProjection({
-      chat: chat('direct', [relationship({ warmth: 72, trust: 66, competence: 10, threat: 2 })], [upsertEvent, revokeEvent]),
+      chat: chat('direct', [relationship({ warmth: 72, trust: 66, competence: 10, threat: 2 })], [phaseEvent(), upsertEvent, revokeEvent]),
       character: character(),
       messages: [message({ content: '今天也想聊。', timestamp: 400 })],
       now: 500,
@@ -1268,7 +1288,7 @@ describe('companionshipProjection', () => {
     expect(projection.promptLines.join('\n')).not.toContain('用户不希望被早安晚安打扰');
 
     const trace = buildCompanionshipRuntimeTrace({
-      chat: chat('direct', [relationship({ warmth: 72, trust: 66, competence: 10, threat: 2 })], [upsertEvent, revokeEvent]),
+      chat: chat('direct', [relationship({ warmth: 72, trust: 66, competence: 10, threat: 2 })], [phaseEvent(), upsertEvent, revokeEvent]),
       character: character(),
       messages: [message({ content: '今天也想聊。', timestamp: 400 })],
       now: 500,
@@ -1559,7 +1579,7 @@ describe('companionshipProjection', () => {
 
   it('falls back to neutral addressing during crisis while preserving private preference', () => {
     const projection = buildUserCompanionshipProjection({
-      chat: chat('direct', [relationship({ warmth: 10, trust: -12, competence: 0, threat: 60 })]),
+      chat: chat('direct', [relationship({ warmth: 10, trust: -12, competence: 0, threat: 60 })], [phaseEvent({ createdAt: 100, payload: { eventType: 'companionship_phase_event', characterId: 'char-a', userId: 'user', phase: 'crisis' } })]),
       character: character({
         memory: {
           shortTermSummary: '',
@@ -1737,6 +1757,13 @@ describe('companionshipProjection', () => {
       sourceMessageIds: ['msg-open'],
     });
     expect(openProjection.promptLines.join('\n')).toContain('Pending care topics');
+    const unrelatedClosure = buildUserCompanionshipProjection({
+      chat: chat('direct', [], opened),
+      character: character(),
+      messages: [message({ content: '午饭已经搞定了。', timestamp: 250 })],
+      now: 300,
+    });
+    expect(unrelatedClosure.userBond?.pendingCareTopics.map((topic) => topic.id)).toContain('care-char-a-interview');
     const openTrace = buildCompanionshipRuntimeTrace({
       chat: chat('direct', [relationship({ warmth: 68, trust: 64, competence: 10, threat: 4 })], opened),
       character: character(),
@@ -2086,6 +2113,13 @@ describe('companionshipProjection', () => {
       source: 'runtime_event',
       evidence: '她没急着问，但那件事压在心里。',
     });
+    const closed = buildUserCompanionshipProjection({
+      chat: directChat,
+      character: character(),
+      messages: [message({ content: '面试已经结束了。', timestamp: 1_300 })],
+      now: 1_400,
+    });
+    expect(closed.userBond?.pendingCareTopics).toEqual([]);
   });
 
   it('reads diary reflection backflow as shared phrases', () => {
@@ -2481,6 +2515,7 @@ describe('companionshipProjection', () => {
           action: 'fulfilled',
           participantIds: ['char-a', 'user'],
           promiseKind: 'repair_agreement',
+          relationshipEffects: { fulfilled: { security: 8, intimacy: 5 } },
           evidence: '这次他们真的先冷静，然后把话说开了。',
           confidence: 0.9,
           decisionSource: 'model',
@@ -2500,6 +2535,7 @@ describe('companionshipProjection', () => {
           action: 'blocked',
           participantIds: ['char-a', 'user'],
           promiseKind: 'boundary_agreement',
+          relationshipEffects: { missed: { security: -12, intimacy: -4 } },
           evidence: '这次还是越界了。',
           confidence: 0.9,
           decisionSource: 'model',
@@ -2645,7 +2681,7 @@ describe('companionshipProjection', () => {
     expect(projection.promptLines.join('\n')).not.toContain('Pending promises/unfinished shared plans');
   });
 
-  it('projects intimate conflict state from model-led crisis phase events', () => {
+  it('does not infer a conflict kind from crisis phase evidence', () => {
     const crisis = phaseEvent({
       id: 'evt-crisis-1',
       createdAt: 900,
@@ -2685,17 +2721,14 @@ describe('companionshipProjection', () => {
       now: 1_000,
     });
 
-    expect(projection.userBond?.intimateConflict).toMatchObject({
-      kind: 'vulnerability_burst',
-      participantIds: ['char-a', 'user'],
-    });
-    expect(projection.userBond?.intimateConflict?.severity).toBeGreaterThanOrEqual(70);
-    expect(projection.promptLines.join('\n')).toContain('Current intimate conflict/repair state');
-    expect(status?.debugLines.join('\n')).toContain('conflict=vulnerability_burst');
-    expect(trace?.intimateConflict?.summary).toContain('受伤');
+    expect(projection.userBond?.phase).toBe('crisis');
+    expect(projection.userBond?.intimateConflict).toBeUndefined();
+    expect(projection.promptLines.join('\n')).not.toContain('Current intimate conflict/repair state');
+    expect(status?.debugLines.join('\n')).not.toContain('conflict=');
+    expect(trace?.intimateConflict).toBeUndefined();
   });
 
-  it('projects repair state from reconciling phase events and repair anchors', () => {
+  it('keeps reconciling phase evidence without inventing conflict details', () => {
     const repairCharacter = character({
       layeredMemories: [{
         id: 'repair-anchor',
@@ -2742,10 +2775,8 @@ describe('companionshipProjection', () => {
       now: 1_000,
     });
 
-    expect(projection.userBond?.intimateConflict).toMatchObject({
-      kind: 'reconciliation',
-    });
-    expect(projection.userBond?.intimateConflict?.repairReadiness).toBeGreaterThan(50);
+    expect(projection.userBond?.phase).toBe('reconciling');
+    expect(projection.userBond?.intimateConflict).toBeUndefined();
     expect(projection.evidence.join('\n')).toContain('慢慢说开');
   });
 
@@ -2784,7 +2815,7 @@ describe('companionshipProjection', () => {
 
     expect(projection.userBond?.phase).toBe('reconciling');
     expect(projection.userBond?.phaseEvidence.join('\n')).toContain('shared anchor');
-    expect(projection.userBond?.intimateConflict?.kind).toBe('reconciliation');
+    expect(projection.userBond?.intimateConflict).toBeUndefined();
   });
 
   it('prioritizes explicit intimate conflict runtime events over inferred conflict projection', () => {
@@ -3819,7 +3850,7 @@ describe('companionshipProjection', () => {
     ]));
   });
 
-  it('turns leaked user shared secrets into intimate conflict consequences', () => {
+  it('does not infer a conflict from leaked secret memory prose', () => {
     const secretCharacter = character({
       layeredMemories: [{
         id: 'secret-leaked',
@@ -3852,16 +3883,11 @@ describe('companionshipProjection', () => {
       now: 1_000,
     });
 
-    expect(projection.userBond?.intimateConflict).toMatchObject({
-      kind: 'accusation',
-      participantIds: ['char-a', 'user'],
-    });
-    expect(projection.userBond?.intimateConflict?.severity).toBeGreaterThan(60);
-    expect(projection.userBond?.intimateConflict?.evidence.join('\n')).toContain('秘密泄露后果');
-    expect(projection.promptLines.join('\n')).toContain('Current intimate conflict/repair state');
+    expect(projection.userBond?.intimateConflict).toBeUndefined();
+    expect(projection.promptLines.join('\n')).not.toContain('Current intimate conflict/repair state');
   });
 
-  it('turns confessed user shared secrets into repair consequences', () => {
+  it('does not infer a repair conflict from confessed secret memory prose', () => {
     const secretCharacter = character({
       layeredMemories: [{
         id: 'secret-confessed',
@@ -3894,12 +3920,8 @@ describe('companionshipProjection', () => {
       now: 1_000,
     });
 
-    expect(projection.userBond?.intimateConflict).toMatchObject({
-      kind: 'repair_attempt',
-      participantIds: ['char-a', 'user'],
-    });
-    expect(projection.userBond?.intimateConflict?.repairReadiness).toBeGreaterThan(45);
-    expect(projection.userBond?.intimateConflict?.evidence.join('\n')).toContain('秘密坦白后果');
+    expect(projection.userBond?.intimateConflict).toBeUndefined();
+    expect(projection.promptLines.join('\n')).not.toContain('Current intimate conflict/repair state');
   });
 
   it('adapts care policy for anxious attachment cues without exposing labels in prompt', () => {
@@ -3933,7 +3955,7 @@ describe('companionshipProjection', () => {
     });
 
     expect(projection.userBond?.attachmentProfile.inferredStyle).toBe('anxious');
-    expect(projection.userBond?.carePolicy.silenceAnxietyThresholdHours).toBeLessThan(24);
+    expect(projection.userBond?.carePolicy.silenceAnxietyThresholdHours).toBeLessThan(48);
     expect(projection.promptLines.join('\n')).toContain('User attachment adaptation');
     expect(projection.promptLines.join('\n')).not.toContain('anxious');
     expect(trace?.attachmentProfile?.adaptations.join('\n')).toContain('reassurance');
@@ -4019,7 +4041,7 @@ describe('companionshipProjection', () => {
       confidence: 96,
       adaptations: ['keep a steady reciprocal pace'],
     });
-    expect(projection.userBond?.carePolicy.silenceAnxietyThresholdHours).toBe(24);
+    expect(projection.userBond?.carePolicy.silenceAnxietyThresholdHours).toBe(48);
     expect(projection.promptLines.join('\n')).toContain('keep a steady reciprocal pace');
   });
 
@@ -4202,7 +4224,7 @@ describe('companionshipProjection', () => {
       confidence: 0,
       adaptations: [],
     });
-    expect(projection.userBond?.carePolicy.silenceAnxietyThresholdHours).toBe(24);
+    expect(projection.userBond?.carePolicy.silenceAnxietyThresholdHours).toBe(48);
     expect(projection.promptLines.join('\n')).not.toContain('User attachment adaptation');
     expect(trace?.attachmentProfile?.evidence.join('\n')).toContain('用户关闭依恋适配');
   });
@@ -4761,8 +4783,8 @@ describe('companionshipProjection', () => {
 
     expect(signature?.text).toContain('小夏');
     expect(signature?.text).toContain('面试');
-    expect(signature?.chips).toEqual(expect.arrayContaining(['暧昧未确认', '有关心事项']));
-    expect(signature?.debugLines.join('\n')).toContain('phase=ambiguous');
+    expect(signature?.chips).toEqual(expect.arrayContaining(['关系升温', '有关心事项']));
+    expect(signature?.debugLines.join('\n')).toContain('phase=fond');
     expect(signature?.debugLines.join('\n')).toContain('intimacy attraction=');
     expect(signature?.addressing?.currentAddress).toBe('小夏');
   });
@@ -5565,7 +5587,7 @@ describe('companionshipProjection', () => {
     expect(projection.userBond?.intimateConflict?.evidence.join('\n') || '').not.toContain('秘密泄露后果');
   });
 
-  it('turns leaked shared secret runtime events into intimate conflict consequences', () => {
+  it('preserves a leaked secret event without inventing a conflict event', () => {
     const directChat = chat('direct', [relationship({ warmth: 64, trust: 60, competence: 10, threat: 6 })], [
       sharedSecretEvent({
         id: 'evt-shared-secret-leaked',
@@ -5593,9 +5615,9 @@ describe('companionshipProjection', () => {
       now: 1_200,
     });
 
-    expect(projection.userBond?.intimateConflict?.severity).toBeGreaterThan(0);
-    expect(projection.userBond?.intimateConflict?.evidence.join('\n')).toContain('秘密泄露后果');
-    expect(projection.promptLines.join('\n')).toContain('Current intimate conflict/repair state');
+    expect(buildSharedSecrets(character(), 1_200, directChat)[0]?.leakState).toBe('leaked');
+    expect(projection.userBond?.intimateConflict).toBeUndefined();
+    expect(projection.promptLines.join('\n')).not.toContain('Current intimate conflict/repair state');
   });
 
   it('classifies shared secret misunderstanding as a softer leak consequence', () => {
@@ -5659,12 +5681,12 @@ describe('companionshipProjection', () => {
 
     expect(misunderstandingSecrets[0].consequenceKind).toBe('misunderstanding');
     expect(breachSecrets[0].consequenceKind).toBe('intentional_breach');
-    expect(misunderstandingProjection.userBond?.intimateConflict?.evidence.join('\n')).toContain('误会');
-    expect(misunderstandingProjection.userBond?.intimateConflict?.severity || 0).toBeLessThan(breachProjection.userBond?.intimateConflict?.severity || 0);
-    expect(misunderstandingProjection.userBond?.intimateConflict?.repairReadiness || 0).toBeGreaterThan(breachProjection.userBond?.intimateConflict?.repairReadiness || 0);
+    expect(misunderstandingProjection.userBond?.intimateConflict).toBeUndefined();
+    expect(breachProjection.userBond?.intimateConflict).toBeUndefined();
+    expect(misunderstandingProjection.userBond?.intimacy.security || 0).toBeGreaterThan(breachProjection.userBond?.intimacy.security || 0);
   });
 
-  it('treats protective shared secret confession as repair evidence', () => {
+  it('preserves protective confession without inventing conflict repair details', () => {
     const directChat = chat('direct', [relationship({ warmth: 64, trust: 60, competence: 10, threat: 6 })], [
       sharedSecretEvent({
         id: 'evt-shared-secret-protective-confession',
@@ -5695,9 +5717,8 @@ describe('companionshipProjection', () => {
     const secrets = buildSharedSecrets(character(), 1_200, directChat);
 
     expect(secrets[0].consequenceKind).toBe('protective_confession');
-    expect(projection.userBond?.intimateConflict?.kind).toMatch(/repair_attempt|reconciliation/);
-    expect(projection.userBond?.intimateConflict?.evidence.join('\n')).toContain('保护关系');
-    expect(projection.userBond?.intimateConflict?.repairReadiness || 0).toBeGreaterThan(40);
+    expect(secrets[0]?.leakState).toBe('confessed');
+    expect(projection.userBond?.intimateConflict).toBeUndefined();
   });
 
   it('adjusts intimacy projection from shared secrets, conflict, and attachment adaptation', () => {
@@ -5763,7 +5784,7 @@ describe('companionshipProjection', () => {
     expect(sealedProjection.userBond?.intimacy.intimacy || 0).toBeGreaterThan(baseProjection.userBond?.intimacy.intimacy || 0);
     expect(sealedProjection.userBond?.intimacy.security || 0).toBeGreaterThan(baseProjection.userBond?.intimacy.security || 0);
     expect(leakedProjection.userBond?.intimacy.security || 0).toBeLessThan(sealedProjection.userBond?.intimacy.security || 0);
-    expect(leakedProjection.userBond?.intimateConflict?.severity || 0).toBeGreaterThan(0);
+    expect(leakedProjection.userBond?.intimateConflict).toBeUndefined();
     expect(anxiousProjection.userBond?.intimacy.longing || 0).toBeGreaterThan(baseProjection.userBond?.intimacy.longing || 0);
   });
 

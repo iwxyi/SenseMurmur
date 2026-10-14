@@ -9,6 +9,7 @@ import { getPreferredAIProfile, inferTextInputCapabilities, isAIProfileUsable } 
 import type { AddressedTargetHintEnvelope, ConflictFocusPayload, InteractionEventPayload, ReplyDebtTargetHintEnvelope, SocialEventHintEnvelope } from '../types/runtimeEvent';
 import { isReplyWorthyInteractionKind, normalizeInteractionHintCollection, normalizeInteractionHintPayload, normalizeSocialEventHints } from '../types/runtimeEvent';
 import { generateResponse } from './aiClient';
+import { redactAiDiagnosticText } from './aiDiagnosticText';
 import { buildSystemPromptWithContext, buildPromptAssemblyWithContext, buildChatMessages, buildPromptMemoryTrace, buildPromptCharacterMindTrace, type PromptAssemblyWithContext, type PromptCharacterMindTrace, type PromptMemoryTrace } from './promptBuilder';
 import { buildEngineAwarePrompt } from './promptContextAssembler';
 import { resolveSessionDefinition } from '../types/sessionEngine';
@@ -32,7 +33,7 @@ import { buildHumanizationPrompt, postProcessHumanChat } from './dialogueHumaniz
 import { buildInnerLifeMetadata, buildInnerLifePromptBlock, projectInnerLife, type InnerLifeProjection } from './innerLifeEngine';
 import { maybeAutoWithdrawMessage } from './messageWithdrawal';
 import { BASE_COOLDOWN_MS, MAX_HISTORY_FOR_PROMPT } from '../constants/defaults';
-import { buildInlineInteractionContract, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope, type InlineStoryAssets } from './inlineInteractionHint';
+import { buildInlineInteractionContract, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope, type InlineEnvelopeParseFailure, type InlineStoryAssets } from './inlineInteractionHint';
 import { getExpressionFeedbackCategoryLabel, summarizeExpressionFeedbackInfluence } from './expressionFeedbackInfluence';
 import type { UserGuidanceIntent } from './userGuidanceIntent';
 import { collectGuidanceProgressAfterTimestamp, evaluateGuidanceGeneratedContent, type GuidanceExecutionReason, type GuidanceRejectionReason } from './guidanceExecution';
@@ -831,7 +832,7 @@ function logRawAiResponse(params: {
     speakerId: params.speaker.id,
     speakerName: params.speaker.name,
     attempt: params.attempt,
-    response: params.response,
+    response: redactAiDiagnosticText(params.response, Infinity),
   });
 }
 
@@ -857,8 +858,10 @@ function logAiGenerationFailure(params: {
     draft: params.draft,
     details: params.details,
   };
-  console.warn('[ai-generation-failure]', payload);
-  console.warn('[ai-generation-failure:json]', JSON.stringify(payload, null, 2));
+  const diagnosticJson = JSON.stringify(payload, (_key, value: unknown) => typeof value === 'string'
+    ? redactAiDiagnosticText(value, Infinity) : value, 2);
+  console.warn('[ai-generation-failure]', JSON.parse(diagnosticJson));
+  console.warn('[ai-generation-failure:json]', diagnosticJson);
 }
 
 function buildRetryPrompt(basePrompt: string, priorAttempt: string) {
@@ -1194,27 +1197,6 @@ function normalizeCompact(content: string) {
   return normalizeForComparison(content).replace(/\s+/g, '');
 }
 
-function collectCharBigrams(content: string) {
-  const normalized = normalizeCompact(content);
-  const grams = new Set<string>();
-  for (let index = 0; index < normalized.length - 1; index += 1) {
-    grams.add(normalized.slice(index, index + 2));
-  }
-  return grams;
-}
-
-function calculateBigramSimilarity(a: string, b: string) {
-  const aGrams = collectCharBigrams(a);
-  const bGrams = collectCharBigrams(b);
-  if (!aGrams.size || !bGrams.size) return 0;
-  let intersection = 0;
-  aGrams.forEach((gram) => {
-    if (bGrams.has(gram)) intersection += 1;
-  });
-  const union = new Set([...aGrams, ...bGrams]).size;
-  return union ? intersection / union : 0;
-}
-
 function buildRecentEchoProfile(messages: Message[]) {
   const recentAi = messages.filter((message) => message.type === 'ai' && !message.isDeleted).slice(-12);
   return {
@@ -1246,17 +1228,6 @@ function evaluateHiddenEchoDraft(content: string, messages: Message[], speakerId
     if (!normalizedRecent) continue;
     if (normalizedDraft === normalizedRecent) {
       return `The draft exactly repeats a recent line from ${message.senderName}.`;
-    }
-    if (normalizedDraft.length >= 10 && normalizedRecent.includes(normalizedDraft)) {
-      return `The draft is a substring of a recent line from ${message.senderName}.`;
-    }
-    if (normalizedRecent.length >= 10 && normalizedDraft.includes(normalizedRecent)) {
-      return `The draft copies a recent line from ${message.senderName}.`;
-    }
-    const similarity = calculateBigramSimilarity(content, message.content);
-    const threshold = message.senderId === speakerId ? 0.58 : 0.66;
-    if (normalizedDraft.length >= 12 && normalizedRecent.length >= 12 && similarity >= threshold) {
-      return `The draft is too close to ${message.senderName}'s recent wording (${Math.round(similarity * 100)}% surface overlap).`;
     }
   }
   return null;
@@ -3181,9 +3152,14 @@ function isDeepSeekLikeConfig(config: Pick<APIConfig, 'provider' | 'model'>) {
     || /deepseek/i.test(config.model || '');
 }
 
-function shouldUseJsonResponseFormat(chat: Pick<GroupChat, 'mode' | 'sessionKind'>, config: Pick<APIConfig, 'provider' | 'model'>) {
+function requiresOrdinaryGroupEnvelope(chat: Pick<GroupChat, 'type' | 'mode' | 'sessionKind'>) {
+  return chat.type === 'group' && chat.sessionKind?.scenarioId !== 'story-reader'
+    && resolveSessionFamilyKey(chat) === 'conversation';
+}
+
+function shouldUseJsonResponseFormat(chat: Pick<GroupChat, 'type' | 'mode' | 'sessionKind'>, config: Pick<APIConfig, 'provider' | 'model'>) {
+  if (requiresOrdinaryGroupEnvelope(chat)) return true;
   if (isDeepSeekLikeConfig(config)) return false;
-  void chat;
   return true;
 }
 
@@ -3223,11 +3199,18 @@ async function generateWithPrompt(params: {
     : 'The response must be exactly one valid JSON object. Do not wrap it in markdown.';
   const jsonPrompt = `${params.systemPrompt}\n\n${protocolReminder}`;
   const useJsonResponseFormat = shouldUseJsonResponseFormat(params.chat, params.resolvedApi);
-  const requestMessages = params.chatMessages;
+  const requiresGroupEnvelope = requiresOrdinaryGroupEnvelope(params.chat);
+  // Past visible speech is context, but assistant examples must follow the
+  // current wire format or they teach the model to keep replying in prose.
+  const requestMessages = requiresGroupEnvelope
+    ? params.chatMessages.map((message) => message.role === 'assistant'
+      ? { ...message, content: JSON.stringify({ messages: [{ content: message.content }] }) }
+      : message)
+    : params.chatMessages;
   const requestStartedAt = nowMs();
   let firstRawChunkLogged = false;
   let streamedProtocolError = false;
-  const rawChunkHandler = !useJsonResponseFormat && params.onChunk
+  const rawChunkHandler = params.onChunk
     ? (raw: string) => {
         const visible = extractPartialJsonStringField(raw, 'narrativeText')
           ?? extractPartialJsonStringField(raw, 'content');
@@ -3292,27 +3275,40 @@ async function generateWithPrompt(params: {
   }, 'info', 'chat-run');
   logRawAiResponse({ chat: params.chat, speaker: params.speaker, attempt: params.attempt, response });
   const isStoryReader = params.chat.sessionKind?.scenarioId === 'story-reader';
-  const requiresGroupEnvelope = !isStoryReader && params.chat.type === 'group'
-    && resolveSessionFamilyKey(params.chat) === 'conversation';
   const requiresConversationUpdate = requiresGroupEnvelope && Boolean(params.chat.worldState?.conversationContinuity?.items?.length);
+  let parseFailure: InlineEnvelopeParseFailure | undefined;
   const parsedEnvelope = parseInlineInteractionEnvelope(response, {
     allowContentSalvage: !requiresGroupEnvelope,
     requireConversationUpdate: requiresConversationUpdate,
     validateActivityUpdate: requiresGroupEnvelope,
+    onFailure: (failure) => { parseFailure = failure; },
+  });
+  const protocolFailure = <T extends string>(protocolError: T) => ({
+    protocolError,
+    diagnostic: {
+      provider: params.resolvedApi.provider,
+      model: params.resolvedApi.model,
+      responseFormat: useJsonResponseFormat ? 'json' : 'text',
+      responseLength: response.length,
+      elapsedMs: Number((nowMs() - requestStartedAt).toFixed(2)),
+      requirements: { requiresGroupEnvelope, requiresConversationUpdate },
+      parseFailure,
+      rawResponse: response,
+    },
   });
   if (streamedProtocolError || containsUnsupportedToolProtocol(response)
     || (parsedEnvelope && containsUnsupportedToolProtocol(JSON.stringify(parsedEnvelope)))) {
-    return { protocolError: 'unsupported_tool_protocol' as const };
+    return protocolFailure('unsupported_tool_protocol');
   }
   if (requiresGroupEnvelope && response.trim() && !parsedEnvelope) {
-    return { protocolError: 'missing_json_envelope' as const };
+    return protocolFailure('missing_json_envelope');
   }
   if (requiresGroupEnvelope && parsedEnvelope && hasInvalidStateEvidence(parsedEnvelope)) {
-    return { protocolError: 'invalid_state_evidence' as const };
+    return protocolFailure('invalid_state_evidence');
   }
   if (requiresGroupEnvelope && parsedEnvelope
     && hasInvalidConversationMemberReferences(parsedEnvelope, params.chat.memberIds)) {
-    return { protocolError: 'invalid_member_reference' as const };
+    return protocolFailure('invalid_member_reference');
   }
   const narrativeRuntime = isStoryReader ? await loadNarrativeRuntime() : null;
   const rawStoryEvents = narrativeRuntime
@@ -3432,7 +3428,8 @@ async function generateNonDuplicateResponse(params: {
   let finalReason: GuidanceExecutionReason = params.guidance ? 'empty_content' : 'matched';
   const requestUsesJsonResponseFormat = shouldUseJsonResponseFormat(params.chat, params.resolvedApi);
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const shouldStreamAttempt = !requestUsesJsonResponseFormat && !isStoryReader && !params.guidance && attempt === 0;
+    const shouldStreamAttempt = (!requestUsesJsonResponseFormat || requiresOrdinaryGroupEnvelope(params.chat))
+      && !isStoryReader && !params.guidance && attempt === 0;
     let generated = await generateWithPrompt({ ...params, characters: params.characters || [], systemPrompt: prompt, attempt: attempt + 1, onChunk: shouldStreamAttempt ? params.onChunk : undefined });
     const webSearchRequest = !generated.protocolError && attempt === 0 && !isStoryReader && params.chat.modeState.assistantCapabilities?.webSearch
       ? normalizeWebSearchToolRequest(generated.parsedEnvelope?.toolRequest)
@@ -3510,6 +3507,7 @@ async function generateNonDuplicateResponse(params: {
       const invalidMemberReference = generated.protocolError === 'invalid_member_reference';
       logAiGenerationFailure({
         chat: params.chat, speaker: params.speaker, reason: generated.protocolError,
+        details: generated.diagnostic,
         message: unsupportedTool ? 'AI 返回了不支持的工具调用协议，本次生成未提交。'
           : invalidStateEvidence ? 'AI 状态更新的证据不属于本轮发言，本次生成未提交。'
             : invalidMemberReference ? 'AI 状态更新引用了不存在的群成员，本次生成未提交。'

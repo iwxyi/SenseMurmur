@@ -93,7 +93,7 @@ describe('relationshipLedger', () => {
       tone: 'cold',
       evidenceText: '这个推断我不同意，证据还不够。',
       confidence: 0.9,
-      relationship: { delta: { competence: 1, trust: -1, threat: 4 }, stance: '质疑证据' },
+      relationship: { delta: { warmth: 0, competence: 1, trust: -1, threat: 4 }, stance: '质疑证据' },
     };
 
     const result = reduceRelationshipLedger([], interaction, buildEvent(interaction));
@@ -126,7 +126,7 @@ describe('relationshipLedger', () => {
       tone: 'warm',
       evidenceText: '这个方向我支持，继续往下拆。',
       confidence: 0.94,
-      relationship: { delta: { warmth: 4, competence: 1, trust: 4 }, stance: '支持推进' },
+      relationship: { delta: { warmth: 4, competence: 1, trust: 4, threat: 0 }, stance: '支持推进' },
     };
 
     const result = reduceRelationshipLedger([{
@@ -161,10 +161,10 @@ describe('relationshipLedger', () => {
 
   it('replays ledger deterministically from interaction history', () => {
     const first: InteractionEventPayload = {
-      kind: 'support', actorId: 'a', targetId: 'b', intensity: 4, tone: 'warm', evidenceText: '这个点我站你。', confidence: 0.93, relationship: { delta: { warmth: 3, trust: 3 }, stance: '站在对方一边' },
+      kind: 'support', actorId: 'a', targetId: 'b', intensity: 4, tone: 'warm', evidenceText: '这个点我站你。', confidence: 0.93, relationship: { delta: { warmth: 3, trust: 3, competence: 0, threat: 0 }, stance: '站在对方一边' },
     };
     const second: InteractionEventPayload = {
-      kind: 'challenge', actorId: 'a', targetId: 'b', intensity: 4, tone: 'annoyed', evidenceText: '但你后面这句我不同意。', confidence: 0.91, relationship: { delta: { trust: -2, threat: 3 }, stance: '提出反对' },
+      kind: 'challenge', actorId: 'a', targetId: 'b', intensity: 4, tone: 'annoyed', evidenceText: '但你后面这句我不同意。', confidence: 0.91, relationship: { delta: { warmth: 0, competence: 0, trust: -2, threat: 3 }, stance: '提出反对' },
     };
 
     const replayed = replayRelationshipLedger([
@@ -186,7 +186,7 @@ describe('relationshipLedger', () => {
       tone: 'annoyed',
       evidenceText: '你这句我不同意，而且理由站不住。',
       confidence: 0.93,
-      relationship: { delta: { trust: -2, threat: 4 }, stance: '认为理由站不住' },
+      relationship: { delta: { warmth: 0, competence: 0, trust: -2, threat: 4 }, stance: '认为理由站不住' },
     };
 
     const heavyEvent: RuntimeEventV2 = {
@@ -219,7 +219,7 @@ describe('relationshipLedger', () => {
       tone: 'annoyed',
       evidenceText: '你这句我不同意，而且理由站不住。',
       confidence: 0.93,
-      relationship: { delta: { trust: -2, threat: 4 }, stance: '认为理由站不住' },
+      relationship: { delta: { warmth: 0, competence: 0, trust: -2, threat: 4 }, stance: '认为理由站不住' },
     };
     const event = buildEvent(interaction);
     const first = reduceRelationshipLedger([], interaction, event);

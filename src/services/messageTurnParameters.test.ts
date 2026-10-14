@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { captureTurnParameters, finishTurnParameters } from './messageTurnParameters';
 import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
+import { createTestChat } from '../test/fixtures';
 import type { InnerLifeProjection } from './innerLifeEngine';
 
 const character = (id: string, name = id, relationships: AICharacter['relationships'] = []): AICharacter => ({
@@ -16,7 +17,7 @@ const innerLife = (): InnerLifeProjection => ({
   expressionPlan: { tone: 'defensive', length: 'short', messageCount: 2, typoLevel: 0, delayMs: 0, allowWithdraw: false },
 });
 
-const chat = (ledger: GroupChat['relationshipLedger'] = []): GroupChat => ({ id: 'chat', name: 'test', memberIds: ['speaker', 'target'], messages: [], relationshipLedger: ledger } as GroupChat);
+const chat = (ledger: GroupChat['relationshipLedger'] = []): GroupChat => createTestChat({ id: 'chat', name: 'test', memberIds: ['speaker', 'target'], relationshipLedger: ledger });
 
 describe('message turn parameters', () => {
   it('does not create a snapshot when developer mode is disabled', () => {

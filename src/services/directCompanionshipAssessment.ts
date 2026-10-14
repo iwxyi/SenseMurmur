@@ -7,17 +7,14 @@ import type { APIConfig } from '../types/settings';
 import { generateJsonResponse } from './aiClient';
 import {
   buildCompanionshipCareTopicEventsFromDecision,
-  buildCompanionshipCareTopicEventsFromDirectUserMessage,
   readActiveCompanionshipCareTopicsFromEvents,
   type CompanionshipCareTopicDecision,
 } from './directCompanionshipCare';
 import {
-  buildCompanionshipPhaseEventFromDirectUserMessage,
   buildCompanionshipPhaseEventFromDecision,
   type CompanionshipPhaseDecision,
 } from './directCompanionshipPhase';
 import {
-  buildUserProfileMemoryEventFromDirectUserMessage,
   createUserProfileMemoryEvent,
 } from './directUserProfileMemory';
 import { reportRecoverableWarning } from './diagnostics';
@@ -277,6 +274,7 @@ type PromiseDecision = {
   action: CompanionshipPromiseEventPayload['action'];
   promiseText: string;
   promiseKind: PendingPromise['kind'];
+  relationshipEffects?: CompanionshipPromiseEventPayload['relationshipEffects'];
   dueAt?: number;
   reason: string;
   evidence: string;
@@ -559,6 +557,30 @@ function normalizeAddressing(raw: unknown, userContent: string): AddressingDecis
   };
 }
 
+function normalizePromiseEffects(raw: unknown): CompanionshipPromiseEventPayload['relationshipEffects'] {
+  if (raw == null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid promise relationshipEffects: expected an object');
+  const value = raw as Record<string, unknown>;
+  const effects: NonNullable<CompanionshipPromiseEventPayload['relationshipEffects']> = {};
+  for (const outcome of ['fulfilled', 'missed'] as const) {
+    const input = value[outcome];
+    if (input == null) continue;
+    if (typeof input !== 'object' || Array.isArray(input)) throw new Error(`Invalid promise relationshipEffects.${outcome}: expected an object`);
+    const effect: NonNullable<typeof effects.fulfilled> = {};
+    for (const [axis, delta] of Object.entries(input)) {
+      if (axis !== 'attraction' && axis !== 'intimacy' && axis !== 'attachment' && axis !== 'longing' && axis !== 'exclusivity' && axis !== 'security') {
+        throw new Error(`Invalid promise relationshipEffects.${outcome} axis: ${axis}`);
+      }
+      if (typeof delta !== 'number' || !Number.isFinite(delta) || Math.abs(delta) > 100) {
+        throw new Error(`Invalid promise relationshipEffects.${outcome}.${axis}: expected a finite delta between -100 and 100`);
+      }
+      effect[axis] = delta;
+    }
+    effects[outcome] = effect;
+  }
+  return effects;
+}
+
 function normalizePromiseDecisions(raw: unknown, userContent: string, createdAt: number): PromiseDecision[] {
   const source = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? [raw] : [];
   return source
@@ -579,6 +601,7 @@ function normalizePromiseDecisions(raw: unknown, userContent: string, createdAt:
         action,
         promiseText,
         promiseKind: isPromiseKind(value.promiseKind) ? value.promiseKind : 'other',
+        relationshipEffects: normalizePromiseEffects(value.relationshipEffects),
         dueAt: action === 'opened' && dueInHours ? createdAt + dueInHours * 60 * 60_000 : undefined,
         reason: compactText(typeof value.reason === 'string' ? value.reason : '模型判断用户消息形成了未完成约定事件。', 160),
         evidence: compactText(typeof value.evidence === 'string' ? value.evidence : userContent, 160),
@@ -696,11 +719,6 @@ function createSharedPhraseRuntimeEvent(params: {
   };
 }
 
-function buildLocalSharedPhraseDecisions(message: Message): SharedPhraseDecision[] {
-  void message;
-  return [];
-}
-
 function buildSharedPhraseEventsFromDecisions(params: {
   chat: GroupChat;
   character: AICharacter;
@@ -747,11 +765,6 @@ function createIntimateConflictRuntimeEvent(params: {
     visibleToIds: [USER_ACTOR_ID, params.character.id],
     payload: payload as unknown as Record<string, unknown>,
   };
-}
-
-function buildLocalIntimateConflictDecision(message: Message): IntimateConflictDecision | null {
-  void message;
-  return null;
 }
 
 function createAttachmentProfileRuntimeEvent(params: {
@@ -849,6 +862,7 @@ function createPromiseRuntimeEvent(params: {
     action: params.decision.action,
     participantIds: [params.character.id, USER_ACTOR_ID],
     promiseKind: params.decision.promiseKind,
+    relationshipEffects: params.decision.relationshipEffects,
     lifecycleEvidence: [params.decision.evidence, params.decision.reason].filter(Boolean),
     reason: params.decision.reason,
     evidence: params.decision.evidence,
@@ -895,6 +909,7 @@ async function runModelAssessment(params: {
     'userProfile 只记录适合未来自然照顾用户的事实、偏好、边界、日期、计划或稳定压力来源。',
     'addressing 只在用户明确要求当前角色如何称呼用户、私下怎么叫、公开怎么叫、不要再叫某个称呼、解除禁用或撤回称呼偏好时创建；不要从普通自我介绍或第三人称描述里猜。',
     'promises 只在用户和当前角色之间形成、完成、取消、落空或关闭一个明确约定时创建，例如一起做某事、等用户回来说结果、情感承诺、关系边界、修复约定、关系仪式。不要把普通计划或单方面待办都当成两人约定。',
+    'promises 可选 relationshipEffects={fulfilled:{亲密轴:变化量},missed:{亲密轴:变化量}}，仅在有具体关系影响证据时提供；亲密轴为 attraction/intimacy/attachment/longing/exclusivity/security，变化量 -100 到 100，通常应很小。无依据时省略，不按 promiseKind 自动加减分。',
     'sharedAnchors 只在用户明确把某件事标记为当前角色和用户之间的重要共同经历时创建，例如第一次、确认心意、冲突/修复节点、共同梗、小秘密、约定、里程碑。不要把普通聊天摘要、普通计划或角色扮演剧情当共同锚点。',
     'sharedSecrets 只在用户明确说这是只属于用户和当前角色的小秘密、要求保密、只告诉当前角色，或明确更新/坦白/泄露这个小秘密时创建。必须同时给出私密原文 privateText 和可公开遮罩 publicMask；不要把普通隐私倾诉自动变成“小秘密”。',
     'sharedPhrases 只在用户明确创造、复用或拒绝一条“我们之间的话”时创建，例如专属称呼、暗号、约定原话、安慰语、心意话语、秘密暗号；不要把普通聊天句子当口头禅。',
@@ -940,16 +955,6 @@ async function runModelAssessment(params: {
     attachmentProfile: normalizeAttachmentProfile(parsed.attachmentProfile, params.message.content),
     activeTopics,
   };
-}
-
-function buildLocalFallbackEvents(params: {
-  chat: GroupChat;
-  character: AICharacter;
-  message: Message;
-  now?: number;
-}) {
-  void params;
-  return [] as RuntimeEventV2[];
 }
 
 export async function resolveDirectCompanionshipAssessmentEvents(params: {

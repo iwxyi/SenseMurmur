@@ -788,7 +788,15 @@ export interface DriverMessageCommitTransition {
   runtimeEvents: DriverEventPayload[];
 }
 
-export interface DriverMessageCommitResult extends DriverMessageCommitTransition {}
+export type DriverMessageCommitResult = DriverMessageCommitTransition;
+
+export type OpenChatCommittedMessage = Pick<Message, 'content' | 'type' | 'senderId' | 'metadata'> & Partial<Pick<Message, 'id' | 'timestamp'>> & {
+  interactionHint?: import('./runtimeEvent').InteractionEventPayload | null;
+  interactionHints?: import('./runtimeEvent').InteractionEventPayload[] | null;
+  incomingInteractionHint?: import('./runtimeEvent').InteractionEventPayload | null;
+  socialEventHints?: import('./runtimeEvent').SocialEventHintEnvelope[] | null;
+  conflictFocus?: import('./runtimeEvent').ConflictFocusPayload | null;
+};
 
 export interface OpenChatModeDriver {
   key: ConversationMode;
@@ -800,7 +808,7 @@ export interface OpenChatModeDriver {
   onMessageCommitted: (params: {
     conversation: GroupChat;
     characters: AICharacter[];
-    message: Pick<Message, 'content' | 'type' | 'senderId' | 'metadata'> & { interactionHint?: import('./runtimeEvent').InteractionEventPayload | null };
+    message: OpenChatCommittedMessage;
     previousAiMessage?: Pick<Message, 'senderId'> | null;
     recentMessages?: Message[];
     apiConfig?: APIConfig;

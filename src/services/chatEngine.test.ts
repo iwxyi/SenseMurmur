@@ -446,6 +446,36 @@ describe('chatEngine streaming preview', () => {
     expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
   });
 
+  it('logs each rejected response with parser details and redacts credentials without truncating the tail', async () => {
+    useSettingsStore.setState({ developerMode: true });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+    const raw = JSON.stringify({ messages: [{ content: '看看这件。' }],
+      activityUpdate: { title: '逛街', kind: 'activity', status: 'in_progress', evidenceText: '逛街', durationMinutes: '60' },
+      token: 'private-test-secret', padding: 'x'.repeat(2500), tail: 'response-end' });
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(raw);
+    const callbacks = { onSpeakerSelected: vi.fn(), onMessageChunk: vi.fn(), onMessageComplete: vi.fn(), onError: vi.fn() };
+    try {
+      await runOneRound(buildChat(), [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')],
+        [buildUserMessage('你们继续聊。')], buildProfiles(), callbacks);
+      const logs = warn.mock.calls.filter(([label]) => label === '[ai-generation-failure:json]')
+        .map(([, json]) => JSON.parse(String(json)));
+      expect(logs).toHaveLength(3);
+      expect(logs.map((entry) => entry.attempt)).toEqual([1, 2, 3]);
+      expect(logs[2].details).toMatchObject({ responseLength: raw.length,
+        parseFailure: { stage: 'activity_update', field: 'activityUpdate.durationMinutes' } });
+      expect(logs[2].details.rawResponse).toContain('response-end');
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('private-test-secret');
+      expect(JSON.stringify(debug.mock.calls)).not.toContain('private-test-secret');
+      expect(logs[2].details.rawResponse).toContain('[REDACTED]');
+      expect(callbacks.onMessageComplete).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      debug.mockRestore();
+    }
+  });
+
   it('does not commit a plain streamed draft when the final group response is blank', async () => {
     generateResponseMock.mockReset();
     generateResponseMock.mockImplementationOnce(async (_api, _prompt, _messages, onRawChunk?: (chunk: string) => void) => {
@@ -675,7 +705,7 @@ describe('chatEngine streaming preview', () => {
     expect(contract).toContain('Known speaker activity records: []');
     expect(__chatEngineTestUtils.buildWorldEventInfluenceRulesPrompt(input)).not.toContain('within 6 hours');
     const completed = applyPresenceUpdateToTransition({ chat: updatedChat, characters: members, now: now + 1000,
-      message: { ...message, id: 'patrol-result', content: '巡城走完了。', timestamp: now + 1000,
+      message: { ...message, id: 'patrol-result', content: '巡城走完了。',
         metadata: { activityUpdate: { calendarItemId: 'patrol', title: '巡城', kind: 'activity', status: 'completed',
           evidenceText: '巡城走完了' } } },
       transition: { chatPatch: {}, characterPatches: [], runtimeEvents: [] } });
@@ -825,7 +855,7 @@ describe('chatEngine streaming preview', () => {
     }];
     const resolved = __chatEngineTestUtils.resolveMediaProfiles(profiles, undefined);
     expect(resolved).toBe(profiles);
-    expect(__chatEngineTestUtils.buildMediaCapabilities({ id: 'char-1', modelProfileIds: {} } as AICharacter, resolved)).toMatchObject({ image: true, audio: false });
+    expect(__chatEngineTestUtils.buildMediaCapabilities({ id: 'char-1', modelProfileIds: {} } as AICharacter, profiles)).toMatchObject({ image: true, audio: false });
   });
 
   it('requires a media decision in the prompt contract when image generation is available', () => {
@@ -1045,6 +1075,8 @@ describe('chatEngine streaming preview', () => {
     const chat = buildChat({
       memberIds: ['niu-tou', 'yan-jun'],
       relationshipStructure: {
+        version: 1,
+        edges: [],
         updatedAt: 1,
         sharedFacts: [{ id: 'authority', memberIds: ['niu-tou', 'yan-jun'], kind: 'authority', statement: '阎君统辖幽都，牛头受其差遣并负责夜巡。', confidence: 0.98, evidence: '角色设定', updatedAt: 1 }],
       },
@@ -1367,7 +1399,7 @@ describe('chatEngine streaming preview', () => {
     expect(message.content).not.toContain('前情');
   });
 
-  it('blocks semantic near-duplicates even when wording shifts', () => {
+  it('does not infer semantic duplication from wording overlap', () => {
     const result = evaluateDuplicateGuard({
       content: '先单开一个分支，提交前只暂存你自己的文件。',
       messages: [
@@ -1375,8 +1407,8 @@ describe('chatEngine streaming preview', () => {
       ],
       speakerId: 'mei',
     });
-    expect(result.blocked).toBe(true);
-    expect(result.reason).toContain("exactly repeats the speaker's recent line");
+    expect(result.blocked).toBe(false);
+    expect(result.reason).toBeNull();
   });
 
   it('folds recent-airtime pressure into the ordinary group turn directive', async () => {
@@ -1533,8 +1565,8 @@ describe('chatEngine streaming preview', () => {
     expect(message.metadata?.runtimeDecision?.directorIntent?.userGuidance).toMatchObject({
       suppressedActorIds: ['zhou'],
     });
-    expect(message.metadata?.runtimeDecision?.generationRuntime?.turnPlan?.targetIds).toEqual([]);
-    expect(message.metadata?.runtimeDecision?.generationRuntime?.trace?.policyHits).toContain('conversation_move_reason:explicit_user_guidance');
+    expect(message.metadata?.runtimeDecision?.generationRuntime?.turnPlan).toMatchObject({ targetIds: [] });
+    expect(message.metadata?.runtimeDecision?.generationRuntime?.trace).toMatchObject({ policyHits: expect.arrayContaining(['conversation_move_reason:explicit_user_guidance']) });
   });
 
   it('models targeted guidance as floor control without forcing every continuation to add a new thesis', async () => {
@@ -2036,7 +2068,7 @@ describe('chatEngine streaming preview', () => {
       conflictFocus: null,
     }));
     const speaker = buildCharacter('speaker', '潇潇', {
-      voiceConfig: { voiceName: 'zh_female_cancan' },
+      voiceConfig: { enabled: true, voiceName: 'zh_female_cancan' },
     });
     const message = await generateSpeakerMessage({
       chat: buildChat({ memberIds: ['speaker'] }),
@@ -3105,6 +3137,32 @@ describe('chatEngine streaming preview', () => {
     expect(message.extraMessages).toEqual(['二', '三']);
   });
 
+  it.each(['deepseek', 'official-1'] as const)('requests native JSON and streams safe bubbles with %s group history', async (provider) => {
+    generateResponseMock.mockReset();
+    const raw = JSON.stringify({ messages: [{ content: '把袖口翻过来看看。' }, { content: '阿强，这里还能改吗？' }] });
+    generateResponseMock.mockImplementation(async (_api, _prompt, _messages, onChunk?: (chunk: string) => void) => {
+      onChunk?.(raw);
+      return raw;
+    });
+    const a = buildCharacter('a', 'Lily');
+    const b = buildCharacter('b', '阿强');
+    const onChunk = vi.fn();
+    const message = await generateSpeakerMessage({ chat: buildChat({ memberIds: ['a', 'b'] }),
+      speaker: a, characters: [a, b],
+      messages: [buildAiMessage('a', 'Lily', '这件先别扔。', 1), buildAiMessage('b', '阿强', '袖口还能改。', 2)],
+      apiConfig: [{ id: 'text', name: 'DeepSeek', type: 'text', provider, apiKey: 'test',
+        baseUrl: provider === 'official-1' ? '/api/ai' : 'https://api.deepseek.test', model: 'deepseek-v4-flash', isDefault: true }],
+      onChunk,
+    });
+    expect(generateResponseMock.mock.calls[0]?.[4]).toMatchObject({ responseFormat: 'json' });
+    const history = generateResponseMock.mock.calls[0]?.[2] as Array<{ role: string; content: string }>;
+    expect(JSON.parse(history.find((item) => item.role === 'assistant')!.content)).toEqual({ messages: [{ content: '这件先别扔。' }] });
+    expect(history.at(-1)).toMatchObject({ role: 'user', content: '阿强: 袖口还能改。' });
+    expect(onChunk).toHaveBeenCalled();
+    expect(onChunk.mock.calls.every(([chunk]) => !String(chunk).includes('"messages"'))).toBe(true);
+    expect(message.messageParts?.map((part) => part.content)).toEqual(['把袖口翻过来看看。', '阿强，这里还能改吗？']);
+  });
+
   it.each(['group', 'direct', 'ai_direct'] as const)('keeps DeepSeek protocol outside the %s transcript and preserves separate sends', async (type) => {
     generateResponseMock.mockReset();
     generateResponseMock.mockResolvedValue(JSON.stringify({
@@ -3131,10 +3189,22 @@ describe('chatEngine streaming preview', () => {
     expect(generateResponseMock).toHaveBeenCalledTimes(1);
     expect(generateResponseMock.mock.calls[0]?.[1]).toContain('格式校验');
     expect(generateResponseMock.mock.calls[0]?.[2]?.at(-1)?.content).toContain('我改主意了，一起去吧。');
-    expect(generateResponseMock.mock.calls[0]?.[2]?.some((item) => item.content.includes('格式校验'))).toBe(false);
+    expect(generateResponseMock.mock.calls[0]?.[2]?.some((item: { content: string }) => item.content.includes('格式校验'))).toBe(false);
     expect(message.content).toBe('嗯？');
     expect(message.messageParts?.map((part) => part.content)).toEqual(['嗯？', '刚才不是还说不去吗。']);
     expect(message.metadata?.runtimeDecision?.turnPlan?.actualBubbleCount).toBe(2);
+  });
+
+  it('does not reject a reply for sharing an opening or quoting part of a recent line', () => {
+    const recent = '这件外套肩线可以收，袖长也可以改，但是领口歪了就别折腾。';
+    const messages = [buildAiMessage('hui', '灰太狼', recent)];
+    for (const draft of [
+      '这件外套肩线可以收，袖长也可以改。',
+      `${recent}你把衣服带来，我先看看里衬。`,
+      '这件外套肩线可以收，袖长也可以改，但是下摆歪了就别折腾。',
+    ]) {
+      expect(__chatEngineTestUtils.evaluateHiddenEchoDraft(draft, messages, 'mei')).toBeNull();
+    }
   });
 
   it('retries a draft that exactly repeats a recent room line', async () => {
@@ -3478,7 +3548,7 @@ describe('chatEngine streaming preview', () => {
       role: 'user',
       content: expect.stringContaining('经济压力会不会让愿意费心的人也没电？'),
     });
-    expect(generateResponseMock.mock.calls[0]?.[2]?.some((item) => item.content.includes('格式校验'))).toBe(false);
+    expect(generateResponseMock.mock.calls[0]?.[2]?.some((item: { content: string }) => item.content.includes('格式校验'))).toBe(false);
     expect(onChunk).toHaveBeenCalled();
     expect(message.metadata?.deliberationArtifacts?.claims?.[0]?.text).toBe('资源压力会削弱合租中的主动照顾');
     expect(onLocalInterception).toHaveBeenCalledWith(expect.objectContaining({
@@ -3928,7 +3998,7 @@ describe('chatEngine streaming preview', () => {
   });
 
   it('warns only when recent group chat overuses visible name-address openers', () => {
-    const surface = { kind: 'chat', allowMarkdown: false, preserveParagraphs: false, roleFit: 'ordinary', basis: [] } as const;
+    const surface = { kind: 'chat' as const, allowMarkdown: false, preserveParagraphs: false, roleFit: 'ordinary' as const, basis: [] };
     const repeated = __chatEngineTestUtils.buildNaturalChatSurfaceContract([
       buildAiMessage('tea', '数据茶娘', '小铁，你今晚这单子接得也太顺了。', 1),
       buildAiMessage('bot', '机械跑堂小铁', '茶娘，别把账都算我头上。', 2),
@@ -4858,6 +4928,9 @@ describe('chatEngine streaming preview', () => {
     expect(prompt).toContain('## Turn Directive');
     expect(prompt).not.toContain('## Natural Chat Rhythm');
     expect(prompt).toContain('Acknowledgement is implicit by default');
+    expect(prompt).toContain('Write what this person actually wants to say in this exchange, then report only effects');
+    expect(prompt).not.toContain('Appraise the exchange as this person, then write');
+    expect(prompt).not.toContain('add one condition, cost, or limit that changes the next response');
     expect(prompt).not.toContain('Forbidden semantic overlap:');
     expect(prompt).not.toContain('## Conversation Move Guidance');
     expect(result.content).toBe('二哥，刀先借俺使使。');
@@ -4938,7 +5011,7 @@ describe('chatEngine streaming preview', () => {
       [tutor],
       [buildUserMessage('我们开始学习。', 1)],
       buildProfiles(),
-      { onSpeakerSelected: () => undefined, onMessageChunk: () => undefined, onMessageComplete: (message) => completed.push(message), onIdle: (reason) => idleReasons.push(reason), onError: (error) => { throw error; } },
+      { onSpeakerSelected: () => undefined, onMessageChunk: () => undefined, onMessageComplete: (message) => { completed.push(message); }, onIdle: (reason) => idleReasons.push(reason), onError: (error) => { throw error; } },
       undefined,
       undefined,
       {},

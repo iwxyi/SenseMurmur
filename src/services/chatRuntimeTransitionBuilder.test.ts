@@ -429,7 +429,7 @@ describe('buildRelationshipTransition', () => {
           tone: 'warm',
           evidenceText: '乙，这次你处理得不错。',
           confidence: 0.94,
-          relationship: { delta: { warmth: 2, trust: 2 }, labels: ['支持'], stance: '这次确实值得肯定' },
+          relationship: { delta: { warmth: 2, trust: 2, competence: 0, threat: 0 }, labels: ['支持'], stance: '这次确实值得肯定' },
         },
       },
       previousAiMessage: null,
@@ -439,8 +439,8 @@ describe('buildRelationshipTransition', () => {
     expect(speakerPatch?.relationships?.[0]).toMatchObject({ characterId: 'char-b', warmth: 32, trust: 27 });
     const ledger = result.relationshipLedger.find((entry) => entry.pairKey === 'char-a->char-b');
     expect(ledger?.baseline).toMatchObject({ warmth: 30, trust: 25 });
-    expect(ledger?.adjustment.warmth).toBeGreaterThan(0);
-    expect(ledger?.adjustment.trust).toBeGreaterThan(0);
+    expect(ledger?.adjustment?.warmth).toBeGreaterThan(0);
+    expect(ledger?.adjustment?.trust).toBeGreaterThan(0);
   });
 
   it('treats speak-as user messages as character-authored runtime speech', () => {

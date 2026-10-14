@@ -1,15 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeConversation } from '../types/chat';
+import { createTestChat, createTestCharacter } from '../test/fixtures';
 import type { Message } from '../types/message';
 import type { ConversationUpdate } from '../types/conversationContinuity';
 import { createInitialRoomState } from './roomStateSynthesizer';
 import { applyConversationUpdate, buildConversationContinuityContext, normalizeConversationUpdate } from './conversationContinuity';
 import { projectNarrativeLines } from './narrativeProjection';
 import { buildInlineInteractionContract } from './inlineInteractionHint';
-import { normalizeCharacter } from '../types/character';
 import { resolveDirectorIntent } from './directorIntent';
 
-const chat = () => normalizeConversation({ id: 'room', type: 'group', mode: 'open_chat', memberIds: ['a', 'b'] });
+const chat = () => createTestChat({ id: 'room', memberIds: ['a', 'b'] });
 const item = { key: 'role', kind: 'decision' as const, status: 'established' as const,
   summary: '只定了前锋分工，尚未下令开战', participantIds: ['a', 'b'], evidenceText: '先定分工' };
 const message = (update: ConversationUpdate, patch: Partial<Message> = {}): Message => ({
@@ -56,8 +55,8 @@ describe('conversation continuity commit boundary', () => {
     expect(next.continuity?.items).toHaveLength(65);
     expect(next.continuity?.items.find((entry) => entry.key === 'old-promise'))
       .toMatchObject({ status: 'established', updatedAt: 1, sourceMessageIds: ['old-source'] });
-    const speaker = normalizeCharacter({ id: 'a', name: '甲' });
-    const characters = [speaker, normalizeCharacter({ id: 'b', name: '乙' })];
+    const speaker = createTestCharacter({ id: 'a', name: '甲' });
+    const characters = [speaker, createTestCharacter({ id: 'b', name: '乙' })];
     const contract = buildInlineInteractionContract({ chat: current, speaker, characters, recentMessages: [] });
     expect(contract).toContain('[old-promise] commitment/established');
     expect(contract).not.toContain('[decision-0]');
@@ -109,8 +108,8 @@ describe('conversation continuity commit boundary', () => {
     expect(context).toContain('participants: 甲, 乙');
     expect(context.match(/issue\/open/g)).toHaveLength(20);
     const contract = buildInlineInteractionContract({ chat: initial,
-      speaker: normalizeCharacter({ id: 'a', name: '甲' }),
-      characters: [normalizeCharacter({ id: 'a', name: '甲' }), normalizeCharacter({ id: 'b', name: '乙' })],
+      speaker: createTestCharacter({ id: 'a', name: '甲' }),
+      characters: [createTestCharacter({ id: 'a', name: '甲' }), createTestCharacter({ id: 'b', name: '乙' })],
       recentMessages: [],
     });
     expect(contract).toContain('[proposal-0] issue/open');

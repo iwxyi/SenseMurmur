@@ -27,6 +27,8 @@ export interface WorldCalendarItem {
   startAt?: number | null;
   endAt?: number | null;
   durationMinutes?: number | null;
+  /** True when duration was inferred from a generic activity label. */
+  durationEstimated?: boolean;
   timeHint?: string | null;
   locationHint?: string | null;
   availabilityByActor?: Record<string, 'online' | 'away'>;
@@ -425,6 +427,19 @@ function resolvePatchCalendarId(event: RuntimeEventV2) {
 }
 
 function mergeCalendarItem(existing: WorldCalendarItem, incoming: WorldCalendarItem): WorldCalendarItem {
+  // Missing timing in a later mention must not replace an explicit interval
+  // with an activity-label estimate.
+  const timing = incoming.durationEstimated && !existing.durationEstimated
+    && (typeof existing.durationMinutes === 'number' || typeof existing.endAt === 'number')
+    ? existing : incoming;
+  const startAt = incoming.startAt ?? existing.startAt ?? null;
+  const durationMinutes = timing.durationMinutes
+    ?? (typeof timing.endAt === 'number' && typeof startAt === 'number'
+      ? (timing.endAt - startAt) / 60_000 : existing.durationMinutes ?? null);
+  const endAt = typeof durationMinutes === 'number' && typeof startAt === 'number'
+    && ((timing === existing && startAt !== existing.startAt) || timing.endAt == null)
+    ? startAt + durationMinutes * 60_000
+    : timing.endAt ?? existing.endAt ?? null;
   const participantIds = Array.from(new Set([
     ...existing.participantIds,
     ...incoming.participantIds,
@@ -457,9 +472,10 @@ function mergeCalendarItem(existing: WorldCalendarItem, incoming: WorldCalendarI
     participantIds,
     participantStates,
     participantNames: participantIds.map((id) => incomingNameById.get(id) || existingNameById.get(id) || '成员'),
-    startAt: incoming.startAt ?? existing.startAt ?? null,
-    endAt: incoming.endAt ?? existing.endAt ?? null,
-    durationMinutes: incoming.durationMinutes ?? existing.durationMinutes ?? null,
+    startAt,
+    endAt,
+    durationMinutes,
+    durationEstimated: timing.durationEstimated,
     timeHint: incoming.timeHint || existing.timeHint,
     locationHint: incoming.locationHint || existing.locationHint,
     summary: incoming.summary || existing.summary,
@@ -534,8 +550,18 @@ function applyCalendarPatch(
   });
   const status = payload.cancelled === true ? 'cancelled' : asCalendarStatus(payload.status) || base.status;
   const startAt = payload.clearStartAt === true ? null : (getNumber(payload.startAt) ?? base.startAt ?? null);
-  const rawEndAt = payload.clearEndAt === true ? null : (getNumber(payload.endAt) ?? base.endAt ?? null);
-  const rawDurationMinutes = payload.clearDurationMinutes === true ? null : (getNumber(payload.durationMinutes) ?? base.durationMinutes ?? null);
+  const explicitEndAt = getNumber(payload.endAt);
+  const explicitDurationMinutes = getNumber(payload.durationMinutes);
+  const hasExplicitEnd = explicitEndAt !== null && typeof startAt === 'number' && explicitEndAt >= startAt;
+  const hasExplicitDuration = explicitDurationMinutes !== null && explicitDurationMinutes > 0;
+  const durationEstimated = hasExplicitEnd || hasExplicitDuration ? false : base.durationEstimated;
+  const rawDurationMinutes = payload.clearDurationMinutes === true ? null
+    : hasExplicitEnd && explicitDurationMinutes === null && typeof startAt === 'number' ? (explicitEndAt - startAt) / 60_000
+      : explicitDurationMinutes ?? base.durationMinutes ?? null;
+  const rawEndAt = payload.clearEndAt === true ? null : explicitEndAt
+    ?? (typeof startAt === 'number' && typeof rawDurationMinutes === 'number'
+      && (hasExplicitDuration || getNumber(payload.startAt) !== null)
+      ? startAt + rawDurationMinutes * 60_000 : base.endAt ?? null);
   // Minimal temporal validation: reject impossible ranges, keep the rest of the patch.
   const endAt = (typeof startAt === 'number' && typeof rawEndAt === 'number' && rawEndAt < startAt) ? null : rawEndAt;
   const durationMinutes = (typeof rawDurationMinutes === 'number' && rawDurationMinutes <= 0) ? null : rawDurationMinutes;
@@ -560,6 +586,7 @@ function applyCalendarPatch(
     startAt,
     endAt,
     durationMinutes,
+    durationEstimated,
     timeHint,
     locationHint,
     availabilityByActor,
@@ -575,7 +602,10 @@ function detectConflicts(items: WorldCalendarItem[]) {
   const byId = new Map(next.map((item) => [item.id, item]));
   const activeIndexes = next
     .map((item, index) => ({ item, index }))
-    .filter((entry) => entry.item.status !== 'cancelled' && typeof entry.item.startAt === 'number' && (typeof entry.item.endAt === 'number' || typeof entry.item.durationMinutes === 'number'));
+    .filter((entry) => entry.item.status !== 'cancelled'
+      && !entry.item.durationEstimated
+      && typeof entry.item.startAt === 'number'
+      && (typeof entry.item.endAt === 'number' || typeof entry.item.durationMinutes === 'number'));
 
   function resolveEnd(item: WorldCalendarItem) {
     if (typeof item.endAt === 'number') return item.endAt;
@@ -756,7 +786,15 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
       const eventKind = getString(payload.eventKind);
       const kind: WorldCalendarItem['kind'] = eventKind === 'travel_plan' ? 'travel' : eventKind === 'calendar_reminder' ? 'reminder' : 'activity';
       const startAt = getNumber(payload.startAt);
-      const durationMinutes = getNumber(payload.durationMinutes) ?? estimateActivityDurationMinutes(title, activityType);
+      const explicitEndAt = getNumber(payload.endAt);
+      const explicitDurationMinutes = getNumber(payload.durationMinutes);
+      const durationMinutes = explicitDurationMinutes
+        ?? (typeof explicitEndAt === 'number'
+          ? (typeof startAt === 'number' ? (explicitEndAt - startAt) / 60_000 : null)
+          : estimateActivityDurationMinutes(title, activityType));
+      const durationEstimated = explicitDurationMinutes === null
+        && explicitEndAt === null
+        && durationMinutes !== null;
       const endAt = getNumber(payload.endAt) ?? (startAt && durationMinutes ? startAt + durationMinutes * 60_000 : null);
       const item: WorldCalendarItem = {
         id: buildCalendarKey(event) || event.id,
@@ -770,6 +808,7 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
         startAt,
         endAt,
         durationMinutes,
+        durationEstimated,
         timeHint: getString(payload.timeHint) || null,
         locationHint: getString(payload.locationHint) || null,
         summary: event.summary,
@@ -786,7 +825,7 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
       };
       const existing = items.get(item.id);
       items.set(item.id, existing ? mergeCalendarItem(existing, item) : item);
-      const canAutoOccupancy = kind === 'activity' && startAt && endAt && payload.autoPreparationRest === true;
+      const canAutoOccupancy = kind === 'activity' && startAt && endAt && !durationEstimated && payload.autoPreparationRest === true;
       if (canAutoOccupancy) {
         const inferredPreparationDuration = Math.max(20, Math.min(60, Math.round((durationMinutes || 120) * 0.25)));
         const inferredRestDuration = Math.max(20, Math.min(60, Math.round((durationMinutes || 120) * 0.2)));
@@ -895,7 +934,7 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
           };
           const existingTravel = items.get(travelId);
           items.set(travelId, existingTravel ? mergeCalendarItem(existingTravel, travelItem) : travelItem);
-          const canChainPrepRestWithTravel = payload.autoPreparationRest === true && payload.autoPreparationRestAfterTravel === true;
+          const canChainPrepRestWithTravel = !durationEstimated && payload.autoPreparationRest === true && payload.autoPreparationRestAfterTravel === true;
           if (canChainPrepRestWithTravel) {
             const inferredPreparationDuration = Math.max(20, Math.min(60, Math.round((durationMinutes || 120) * 0.25)));
             const inferredRestDuration = Math.max(20, Math.min(60, Math.round((durationMinutes || 120) * 0.2)));

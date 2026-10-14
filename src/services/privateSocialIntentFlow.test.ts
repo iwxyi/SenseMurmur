@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { normalizeConversation, type GroupChat } from '../types/chat';
+import { createTestChat } from '../test/fixtures';
 import type { AICharacter } from '../types/character';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import { buildPendingSocialIntentContext, buildSocialIntentArtifact, buildSocialIntentOutcomes, getUnsettledSocialIntents } from './socialIntentArtifact';
@@ -13,7 +14,7 @@ function fixture(target = 'user') {
   if (!artifact) throw new Error('Missing intent');
   const intent: RuntimeEventV2 = { id: 'intent', conversationId: 'group', kind: 'artifact', createdAt: 1,
     actorIds: ['a'], targetIds: [target], ...artifact };
-  let chats = [normalizeConversation({ id: 'group', type: 'group', memberIds: ['a', 'b', 'user'], runtimeEventsV2: [intent] })];
+  let chats = [createTestChat({ id: 'group', memberIds: ['a', 'b', 'user'], runtimeEventsV2: [intent] })];
   let current = true;
   const ops: PrivateSocialIntentOps = {
     getChats: () => chats,

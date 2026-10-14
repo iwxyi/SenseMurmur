@@ -153,7 +153,7 @@ describe('shared generated bubble lifecycle', () => {
   it('does not commit an interaction whose evidence bubble is cancelled', async () => {
     const context = fixture('group');
     const controller = new AbortController();
-    const interactionHint = { actorId: 'speaker', targetId: 'other', kind: 'support' as const,
+    const interactionHint = { actorId: 'speaker', targetId: 'other', kind: 'support' as const, tone: 'warm' as const,
       intensity: 2, confidence: 0.9, evidenceText: context.message.messageParts![1].content };
     const committed: string[] = [];
     const result = commitGeneratedMessageTurn({

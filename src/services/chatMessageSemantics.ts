@@ -16,6 +16,14 @@ export function isVisibleDialogueTurn(message: Pick<Message, 'type' | 'isDeleted
   return !message.isDeleted && (message.type === 'ai' || message.type === 'user');
 }
 
+/** Explicit null means no answer is requested; older messages used addressees. */
+export function getExplicitReplyTargetIds(message: Message): string[] {
+  const targets = 'replyDebtTargetIds' in message
+    ? [message.primaryReplyDebtTargetId, ...(message.replyDebtTargetIds || [])]
+    : [message.primaryAddressedTargetId, ...(message.addressedTargetIds || [])];
+  return Array.from(new Set(targets.filter((id): id is string => Boolean(id))));
+}
+
 export function getUserFacingMessageSenderLabel(
   message: Pick<Message, 'type' | 'senderId' | 'senderName'>,
   characters?: Map<string, AICharacter> | AICharacter[],

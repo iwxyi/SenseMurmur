@@ -8,6 +8,7 @@ function message(overrides: Partial<Message>): Message {
     chatId: 'chat-1',
     type: overrides.type || 'ai',
     senderId: overrides.senderId || 'char-a',
+    senderName: 'Actor',
     content: overrides.content || '继续说。',
     emotion: 0,
     timestamp: overrides.timestamp || 1,

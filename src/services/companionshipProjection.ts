@@ -91,7 +91,7 @@ function silenceHours(lastUserReplyAt: number | undefined, now: number) {
   return Math.max(0, (now - lastUserReplyAt) / (60 * 60 * 1000));
 }
 
-function projectIntimacy(entry: RelationshipLedgerEntry | null, messages: Message[], characterId: string, now: number): IntimacyProjection {
+function projectIntimacy(entry: RelationshipLedgerEntry | null): IntimacyProjection {
   const current = entry?.current || { warmth: 0, competence: 0, trust: 0, threat: 0 };
   const semanticIntensity = entry?.derived?.semantic?.intensity || 0;
   const tension = Math.max(0, current.threat);
@@ -108,16 +108,13 @@ function projectIntimacy(entry: RelationshipLedgerEntry | null, messages: Messag
 function adjustIntimacyProjection(params: {
   base: IntimacyProjection;
   sharedAnchors: SharedMemoryAnchor[];
-  profile: UserProfileMemoryProjection;
-  entry: RelationshipLedgerEntry | null;
   promiseConsequences?: PromiseIntimacyConsequence[];
 }): IntimacyProjection {
   const anchorBoost = params.sharedAnchors.reduce((total, anchor) => {
+    if (anchor.kind === 'conflict') return total;
     const weight = anchor.kind === 'repair' || anchor.kind === 'confession' || anchor.kind === 'milestone' ? 1.2 : 1;
-    return total + anchor.salience * anchor.confidence * weight;
+    return total + (anchor.salience / 100) * (anchor.confidence / 100) * weight;
   }, 0);
-  const hasRepairAnchor = params.sharedAnchors.some((anchor) => anchor.kind === 'repair');
-  const hasConflictAnchor = params.sharedAnchors.some((anchor) => anchor.kind === 'conflict');
   const promiseEffect = (params.promiseConsequences || []).reduce((total, consequence) => ({
     attraction: total.attraction + (consequence.effect.attraction || 0),
     intimacy: total.intimacy + (consequence.effect.intimacy || 0),
@@ -247,84 +244,6 @@ function applyLongTermIntimacyTrend(base: IntimacyProjection, trend: Partial<Int
   };
 }
 
-function countCompanionshipTrendEvents(chat: GroupChat, characterId: string, now: number) {
-  const windowStart = now - 180 * DAY_MS;
-  const counts = {
-    stableBond: 0,
-    repair: 0,
-    conflict: 0,
-    cooled: 0,
-  };
-  (chat.runtimeEventsV2 || []).forEach((event) => {
-    const createdAt = event.createdAt || 0;
-    if (createdAt && createdAt < windowStart) return;
-    const payload = event.payload as Record<string, unknown> | undefined;
-    if (!payload || typeof payload.eventType !== 'string') return;
-    if (typeof payload.characterId === 'string' && payload.characterId !== characterId) return;
-    const userId = typeof payload.userId === 'string' ? payload.userId : undefined;
-    const participantIds = Array.isArray(payload.participantIds) ? payload.participantIds.filter((item): item is string => typeof item === 'string') : [];
-    if (userId && userId !== USER_ACTOR_ID) return;
-    if (!userId && participantIds.length && !participantIds.includes(USER_ACTOR_ID)) return;
-    if (payload.eventType === 'companionship_phase_event') {
-      if (payload.phase === 'deep' || payload.phase === 'passionate') counts.stableBond += 1;
-      if (payload.phase === 'reconciling') counts.repair += 1;
-      if (payload.phase === 'cooling') counts.cooled += 1;
-      if (payload.phase === 'crisis') counts.conflict += 1;
-    }
-    if (payload.eventType === 'companionship_intimate_conflict') {
-      if (payload.action === 'resolved' || payload.action === 'repair_attempted') counts.repair += 1;
-      if (payload.action === 'opened' || payload.action === 'reopened' || payload.action === 'updated') counts.conflict += 1;
-    }
-    if (payload.eventType === 'companionship_promise') {
-      if (payload.action === 'fulfilled') counts.stableBond += 1;
-      if (payload.action === 'blocked' || payload.action === 'stale') counts.cooled += 1;
-    }
-    if (payload.eventType === 'companionship_ritual' && (payload.action === 'performed' || payload.action === 'restored')) {
-      counts.stableBond += 1;
-    }
-  });
-  return counts;
-}
-
-function inferTrendPhase(params: {
-  intimacy: IntimacyProjection;
-  trend: Partial<IntimacyProjection>;
-  counts: ReturnType<typeof countCompanionshipTrendEvents>;
-  entry: RelationshipLedgerEntry | null;
-}): CompanionshipPhase | null {
-  const threat = params.entry?.current.threat || 0;
-  if (params.counts.conflict >= 2 && params.intimacy.security <= 30) return 'crisis';
-  if (params.counts.conflict >= 2 && params.counts.cooled >= 1 && threat >= 12 && (params.trend.security || 0) < 0) return 'cooling';
-  if ((params.counts.cooled >= 1 || params.counts.conflict >= 1) && params.intimacy.security <= 48 && threat >= 12) return 'cooling';
-  if (params.counts.repair >= 1 && (params.trend.security || 0) > 0 && params.intimacy.security >= 36) return 'reconciling';
-  if (params.counts.stableBond >= 3 && params.intimacy.intimacy >= 62 && params.intimacy.security >= 58) return 'deep';
-  return null;
-}
-
-function isTrendPhaseEligible(basePhase: CompanionshipPhase, trendPhase: CompanionshipPhase | null) {
-  if (!trendPhase) return false;
-  if (trendPhase === 'deep' || trendPhase === 'reconciling') {
-    return basePhase === 'stranger' || basePhase === 'curious' || basePhase === 'fond';
-  }
-  if (trendPhase === 'cooling' || trendPhase === 'crisis') {
-    return basePhase === 'stranger' || basePhase === 'curious' || basePhase === 'fond' || basePhase === 'ambiguous';
-  }
-  return false;
-}
-
-function buildTrendPhaseEvidence(phase: CompanionshipPhase | null, trend: Partial<IntimacyProjection>, counts: ReturnType<typeof countCompanionshipTrendEvents>) {
-  if (!phase) return [];
-  const trendText = Object.entries(trend)
-    .filter(([, value]) => value)
-    .map(([key, value]) => `${key}:${value}`)
-    .join(',');
-  const countText = Object.entries(counts)
-    .filter(([, value]) => value)
-    .map(([key, value]) => `${key}:${value}`)
-    .join(',');
-  return [`long-term phase candidate ${phase}${trendText ? ` trend=${trendText}` : ''}${countText ? ` events=${countText}` : ''}`];
-}
-
 function adjustIntimacyForCompanionshipRuntime(params: {
   base: IntimacyProjection;
   sharedSecrets: SharedSecret[];
@@ -414,10 +333,6 @@ function adjustIntimacyForCompanionshipRuntime(params: {
   };
 }
 
-function anchorText(anchor: SharedMemoryAnchor) {
-  return [anchor.title, anchor.text, anchor.evidence].filter(Boolean).join(' ');
-}
-
 function inferAnchorPhase(intimacy: IntimacyProjection, sharedAnchors: SharedMemoryAnchor[]): CompanionshipPhase | null {
   const anchors = sharedAnchors
     .filter((anchor) => anchor.confidence >= 56 && anchor.salience >= 42)
@@ -431,13 +346,11 @@ function inferAnchorPhase(intimacy: IntimacyProjection, sharedAnchors: SharedMem
   if (latestRepair && (!latestConflict || latestRepair.updatedAt >= latestConflict.updatedAt)) return 'reconciling';
   const confession = anchors.find((anchor) => anchor.kind === 'confession');
   if (confession) {
-    const text = anchorText(confession);
-    const negatesConfirmation = /(还没有|没有|未|尚未|并未|没).*?(确认关系|在一起|恋人|伴侣|对象|正式交往|确认了关系)/.test(text);
-    if (!negatesConfirmation && /(确认关系|在一起|恋人|伴侣|对象|正式交往|确认了关系)/.test(text)) return 'confirmed';
-    if (/(表白|告白|说喜欢|承认喜欢|心意)/.test(text)) {
-      if (intimacy.attraction >= 58 && intimacy.intimacy >= 48 && intimacy.security >= 38) return 'confessing';
-      return 'ambiguous';
-    }
+    // A distilled confession anchor proves that a confession occurred, not that
+    // both parties accepted a relationship. Confirmation comes only from the
+    // explicit companionship_phase_event projection.
+    if (intimacy.attraction >= 58 && intimacy.intimacy >= 48 && intimacy.security >= 38) return 'confessing';
+    return 'ambiguous';
   }
   return null;
 }
@@ -1326,12 +1239,14 @@ function isCareTopicAnswered(topicText: string, messages: Message[], topicUpdate
   return false;
 }
 
-function applyCareTopicLifecycle(topics: PendingCareTopic[], profile: UserProfileMemoryProjection, messages: Message[], now: number): PendingCareTopic[] {
+function applyCareTopicLifecycle(topics: PendingCareTopic[], profile: UserProfileMemoryProjection, messages: Message[], now: number, eventManagedTopicIds: Set<string>): PendingCareTopic[] {
   const blocksProactiveCare = hasBoundary(profile, [/不要.*(提醒|问|追问|关心)/, /不想.*(提醒|问|追问|关心)/, /别.*(提醒|问|追问|关心)/]);
   return topics
     .map((topic) => {
       const ageHours = Math.max(0, (now - topic.updatedAt) / (60 * 60 * 1000));
-      if (isCareTopicAnswered(topic.text, messages, topic.updatedAt)) {
+      // Runtime care events carry their own close/reopen lifecycle. Do not let
+      // broad prose heuristics override an explicit event state.
+      if (!eventManagedTopicIds.has(topic.id) && isCareTopicAnswered(topic.text, messages, topic.updatedAt)) {
         return { ...topic, status: 'answered' as const, restraintReason: 'user already followed up or closed the topic' };
       }
       if (blocksProactiveCare) {
@@ -1454,7 +1369,7 @@ function buildPendingCareTopics(chat: GroupChat, characterId: string, profile: U
     .filter((topic) => {
       const evidence = 'evidence' in topic ? topic.evidence : '';
       return !textMatchesSuppressedPromise(`${topic.text}\n${evidence || ''}`, suppressedPromiseKeys);
-    }), profile, messages, now);
+    }), profile, messages, now, new Set(runtimeTopics.map((topic) => topic.id)));
 }
 
 function buildPhaseEvidence(entry: RelationshipLedgerEntry | null, topics: PendingCareTopic[], phaseEvent: ResolvedPhaseEvent | null = null) {
@@ -2520,29 +2435,6 @@ function buildIntimateConflictHistory(chat: GroupChat, characterId: string): Int
   return history.sort((a, b) => b.occurredAt - a.occurredAt).slice(0, 8);
 }
 
-function hasRecentDismissedIntimateConflictEvent(chat: GroupChat, characterId: string, now: number) {
-  const events = (chat.runtimeEventsV2 || [])
-    .filter((event): event is RuntimeEventV2 => Boolean(event?.payload))
-    .slice()
-    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  for (const event of events) {
-    const payload = intimateConflictEventPayloadOf(event);
-    if (!payload || payload.characterId !== characterId) continue;
-    const userId = payload.userId || USER_ACTOR_ID;
-    if (userId !== USER_ACTOR_ID) continue;
-    const participantIds = payload.participantIds?.length ? payload.participantIds : [characterId, USER_ACTOR_ID];
-    if (!participantIds.includes(characterId) || !participantIds.includes(USER_ACTOR_ID)) continue;
-    const actorMatches = !event.actorIds?.length || event.actorIds.includes(characterId) || event.actorIds.includes(USER_ACTOR_ID);
-    const targetMatches = !event.targetIds?.length || event.targetIds.includes(characterId) || event.targetIds.includes(USER_ACTOR_ID);
-    if (!actorMatches || !targetMatches) continue;
-    if (payload.action === 'dismissed') return now - (event.createdAt || now) <= 30 * DAY_MS;
-    if (payload.action === 'opened' || payload.action === 'updated' || payload.action === 'repair_attempted' || payload.action === 'resolved' || payload.action === 'reopened') {
-      return false;
-    }
-  }
-  return false;
-}
-
 function conflictSummary(kind: IntimateConflictKind, severity: number, repairReadiness: number) {
   const intensity = severity >= 70 ? '很强' : severity >= 44 ? '明显' : '轻微';
   if (kind === 'repair_attempt') return `关系正在尝试修复，冲突余波${intensity}，需要先接住对方而不是急着恢复亲密。`;
@@ -2553,41 +2445,6 @@ function conflictSummary(kind: IntimateConflictKind, severity: number, repairRea
   if (kind === 'withdrawal') return `对方在退缩或把话收回去，冲突余波${intensity}，需要给空间和台阶。`;
   if (kind === 'vulnerability_burst') return `对方暴露了受伤或委屈，冲突余波${intensity}，需要优先安放情绪。`;
   return `关系里有试探性的紧张，修复成熟度约${repairReadiness}，不要贸然推进亲密。`;
-}
-
-function sharedSecretConsequenceDescription(secret: SharedSecret) {
-  if (secret.leakState === 'leaked') {
-    if (secret.consequenceKind === 'misunderstanding') return '更像误会或语境错位，需要先澄清真实意图';
-    if (secret.consequenceKind === 'accidental_leak') return '更像无意说漏，需要承认影响并给出边界修复';
-    if (secret.consequenceKind === 'intentional_breach') return '更像主动越界或信任背叛，需要严肃修复安全感';
-    return '需要处理被说漏、被发现或信任受损的余波';
-  }
-  if (secret.leakState === 'confessed') {
-    if (secret.consequenceKind === 'protective_confession') return '更像为了保护关系而主动说开，适合接住修复机会';
-    if (secret.consequenceKind === 'voluntary_confession') return '更像主动坦白，适合承认脆弱并补回安全感';
-    return '需要处理主动说开后的修复和安全感';
-  }
-  return '仍应保留边界，不把私密内容公开摊开';
-}
-
-function buildIntimateConflictState(params: {
-  chat: GroupChat;
-  characterId: string;
-  phase: CompanionshipPhase;
-  phaseEvent: ResolvedPhaseEvent | null;
-  entry: RelationshipLedgerEntry | null;
-  sharedAnchors: SharedMemoryAnchor[];
-  sharedSecrets: SharedSecret[];
-  intimacy: IntimacyProjection;
-  now: number;
-}): IntimateConflictState | undefined {
-  const explicitConflict = resolveIntimateConflictEvent(params.chat, params.characterId, params.now);
-  if (explicitConflict) return explicitConflict;
-  if (hasRecentDismissedIntimateConflictEvent(params.chat, params.characterId, params.now)) return undefined;
-  // Conflict kind, severity, and repair readiness are semantic judgments. Do
-  // not synthesize them from anchor text, secrets, phase thresholds, or
-  // keyword matches when no model conflict event exists.
-  return undefined;
 }
 
 function phaseLabel(phase: CompanionshipPhase) {
@@ -2989,10 +2846,8 @@ export function buildUserCompanionshipProjection(params: {
     .filter((anchor) => !textMatchesSuppressedPromise(`${anchor.text}\n${anchor.evidence || ''}`, suppressedPromiseKeys));
   const promiseConsequences = buildPromiseIntimacyConsequences(chat, character.id, now);
   const anchoredIntimacy = adjustIntimacyProjection({
-    base: projectIntimacy(ledger, messages, character.id, now),
+    base: projectIntimacy(ledger),
     sharedAnchors,
-    profile: userProfile,
-    entry: ledger,
     promiseConsequences,
   });
   const longTermTrend = buildLongTermIntimacyTrend(chat, character.id, now);
@@ -3015,17 +2870,7 @@ export function buildUserCompanionshipProjection(params: {
     .filter((phrase) => !textMatchesSuppressedPromise(`${phrase.text}\n${phrase.evidence || ''}`, suppressedPromiseKeys))
     .slice(0, 4);
   const sharedSecrets = buildSharedSecrets(character, now, chat);
-  const intimateConflict = buildIntimateConflictState({
-    chat,
-    characterId: character.id,
-    phase,
-    phaseEvent,
-    entry: ledger,
-    sharedAnchors,
-    sharedSecrets,
-    intimacy: baseIntimacy,
-    now,
-  });
+  const intimateConflict = resolveIntimateConflictEvent(chat, character.id, now) ?? undefined;
   const evidence = [
     ...buildPhaseEvidence(ledger, pendingCareTopics, phaseEvent),
     ...(!phaseEvent ? buildAnchorPhaseEvidence(sharedAnchors, phase) : []),
@@ -4439,10 +4284,8 @@ export function buildCompanionshipCarePolicyForCharacter(params: {
   const ledger = params.chat ? getCharacterToUserLedger(params.chat, character.id) : null;
   const intimacy = params.chat
     ? adjustIntimacyProjection({
-      base: projectIntimacy(ledger, messages, character.id, now),
+      base: projectIntimacy(ledger),
       sharedAnchors: buildUserSharedAnchors(character, now, params.chat),
-      profile: userProfile,
-      entry: ledger,
       promiseConsequences: buildPromiseIntimacyConsequences(params.chat, character.id, now),
     })
     : {

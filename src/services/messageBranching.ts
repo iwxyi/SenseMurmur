@@ -288,11 +288,11 @@ export function getActiveBranchTailNode(chat: BranchableChat | null | undefined,
   return resolveMessageBranchNodes(messages).find((node) => node.message.id === tail.id || node.nodeId === tail.id) || null;
 }
 
-export function attachMessageToActiveBranch<T extends { metadata?: MessageMetadata } & Record<string, unknown>>(
+export function attachMessageToActiveBranch<const T extends { metadata?: MessageMetadata } & Record<string, unknown>>(
   chat: Pick<GroupChat, 'messageBranchState' | 'sessionKind'> | null | undefined,
   activeMessages: Message[],
   message: T,
-) {
+): Omit<T, 'metadata'> & { metadata?: MessageMetadata } {
   if (!isMessageBranchingEnabled(chat)) return message;
   if (
     message.metadata?.branching?.parentNodeId !== undefined

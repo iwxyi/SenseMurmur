@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Message } from '../types/message';
+import { createTestChat } from '../test/fixtures';
 import { storageKey } from '../constants/brand';
 
 const getMessagesMock = vi.hoisted(() => vi.fn());
@@ -1238,22 +1239,22 @@ describe('useMessageStore', () => {
     });
 
     useChatStore.setState({
-      chats: [{
+      chats: [createTestChat({
         id: chatId,
         type: 'direct',
-        mode: 'normal',
+        mode: 'open_chat',
         name: '本地单聊',
         topic: '',
-        style: 'casual',
+        style: 'free',
         memberIds: ['user', 'character-1'],
-        speed: 'normal',
+        speed: 1,
         isActive: true,
         allowIntervention: true,
         showRoleActions: true,
         createdAt: 1,
         updatedAt: 2,
         lastMessageAt: 2,
-      }],
+      })],
       pendingOperations: [],
       currentChatId: chatId,
       lastSyncedAt: 1,
@@ -1324,22 +1325,22 @@ describe('useMessageStore', () => {
     });
 
     useChatStore.setState({
-      chats: [{
+      chats: [createTestChat({
         id: chatId,
         type: 'direct',
-        mode: 'normal',
+        mode: 'open_chat',
         name: '已删除角色单聊',
         topic: '',
-        style: 'casual',
+        style: 'free',
         memberIds: ['user', 'character-1'],
-        speed: 'normal',
+        speed: 1,
         isActive: true,
         allowIntervention: true,
         showRoleActions: true,
         createdAt: 1,
         updatedAt: 2,
         lastMessageAt: 2,
-      }],
+      })],
       pendingOperations: [],
       currentChatId: chatId,
       lastSyncedAt: 1,

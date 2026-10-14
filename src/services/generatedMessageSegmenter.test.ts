@@ -53,9 +53,11 @@ describe('generatedMessageSegmenter', () => {
 
   it.each(['modern', 'legacy'])('commits outgoing interactions with their exact evidence send (%s)', (format) => {
     const primary = { actorId: 'char-1', targetId: 'char-2', kind: 'support' as const,
+      tone: 'warm' as const,
       intensity: 2, confidence: 0.9, evidenceText: '你先歇会',
       immediateImpact: { roomDelta: { heat: -2 } } };
     const secondary = { actorId: 'char-1', targetId: 'char-3', kind: 'challenge' as const,
+      tone: 'cold' as const,
       intensity: 3, confidence: 0.9, evidenceText: '这次你来',
       immediateImpact: { targetEmotionDelta: { irritation: 3 } } };
     const invalid = { ...primary, evidenceText: '没有发送的话' };
@@ -73,6 +75,7 @@ describe('generatedMessageSegmenter', () => {
 
   it('routes a legacy single interaction without crossing bubble boundaries', () => {
     const interactionHint = { actorId: 'char-1', targetId: 'char-2', kind: 'support' as const,
+      tone: 'warm' as const,
       intensity: 2, confidence: 0.9, evidenceText: '你先歇会' };
     const message = { ...buildMessage('先等一下。'), extraMessages: ['你先歇会。'], interactionHint };
     expect(splitGeneratedRoundMessage(message).map((segment) => segment.interactionHint)).toEqual([null, interactionHint]);

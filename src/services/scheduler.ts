@@ -12,6 +12,7 @@ import { projectWorldAttentionStates } from './worldRuntimeProjection';
 import { canUseMute } from './conversationCapabilities';
 import { getEffectiveCharacterPresence, isCharacterAvailableForScheduling } from './characterPresence';
 import { deriveCharacterTurnDrive, getCharacterTurnDriveSpeakerBias } from './characterTurnDrive';
+import { getExplicitReplyTargetIds } from './chatMessageSemantics';
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -265,14 +266,10 @@ export function resolvePendingReplyContext(characters: AICharacter[], recentMess
   }> = [];
   for (let sourceIndex = recentWindow.length - 1; sourceIndex >= 0; sourceIndex -= 1) {
     const candidate = recentWindow[sourceIndex] as Message & { addressedTargetIds?: string[] | null; primaryAddressedTargetId?: string | null };
-    const legacyExplicit = (candidate.primaryAddressedTargetId ? [candidate.primaryAddressedTargetId] : [])
-      .concat(candidate.addressedTargetIds || []);
     // New messages distinguish the current addressee from an unanswered
     // request. Persisted pre-split messages keep the old field as debt.
     const hasReplyDebtDecision = 'replyDebtTargetIds' in candidate;
-    const explicit = hasReplyDebtDecision
-      ? (candidate.primaryReplyDebtTargetId ? [candidate.primaryReplyDebtTargetId] : []).concat(candidate.replyDebtTargetIds || [])
-      : legacyExplicit;
+    const explicit = getExplicitReplyTargetIds(candidate);
     const replyWorthyTargetIds = hasReplyDebtDecision ? [] : getReplyWorthyInteractionTargetIds(candidate, characters);
     const possibleTargets = explicit
       .concat(replyWorthyTargetIds)

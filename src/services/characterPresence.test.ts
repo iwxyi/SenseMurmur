@@ -119,6 +119,7 @@ describe('characterPresence', () => {
     const source = { ...chat, ...started.chatPatch, runtimeEventsV2: [...started.chatPatch.runtimeEventsV2!, {
       id: 'accepted', conversationId: chat.id, kind: 'calendar_item_patch' as const,
       createdAt: 2000, actorIds: ['b'], visibility: 'public' as const,
+      summary: 'Accepted the activity invitation',
       payload: { calendarItemId: id, addParticipantStates: { b: 'going' } },
     }] };
     const character = { id: 'a', ...started.characterPatches[0].patch } as AICharacter;

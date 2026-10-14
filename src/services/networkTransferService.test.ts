@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { strToU8, zipSync } from 'fflate';
+import type { ChatStorageTarget } from '../types/localWorkspace';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -8,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   save: vi.fn(),
   permission: vi.fn(),
   writeWorkspace: vi.fn(),
-  workspaceState: { getDefaultStorageTarget: () => ({ kind: 'session' as const }), directories: [] as Array<{ id: string; name: string }> },
+  workspaceState: { getDefaultStorageTarget: (): ChatStorageTarget => ({ kind: 'session' }), directories: [] as Array<{ id: string; name: string }> },
 }));
 
 vi.mock('./api', () => ({ api: { listNetworkDirectory: (...args: unknown[]) => mocks.list(...args) } }));

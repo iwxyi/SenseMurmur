@@ -3100,6 +3100,32 @@ function runtimeChatflowScenarios() {
       ],
     },
     {
+      name: 'fashion_approval_scaffold_room',
+      roomKind: 'open_chat',
+      turns: 1,
+      naturalQuietAllowed: true,
+      rubricHint: '几位成员已经反复先表示认同或佩服、再折中、最后把同一问题递给改造师。下一位应从自己的具体判断出发，回答衣服能否改的边界；不要机械复述房间里已有的表态模板，也不要为了结构字段补造让步。',
+      chat: {
+        id: 'acceptance-fashion-approval', name: '旧衣要不要改',
+        topic: '逛街讨论中，大家追问旧衣服的版型和面料什么时候值得改。',
+        memberIds: ['buyer', 'saver', 'editor', 'tailor'],
+      },
+      characters: [
+        acceptanceCharacter('buyer', '买手小A', { speakingStyle: '会从试衣和实际搭配经验说话，常追问店铺来源。', expertise: ['选品', '穿搭'] }),
+        acceptanceCharacter('saver', '省钱达人', { speakingStyle: '会算具体账，讨厌空泛推荐。', expertise: ['折扣', '预算'] }),
+        acceptanceCharacter('editor', '时尚编辑Lily', { speakingStyle: '对版型苛刻，问题直接。', expertise: ['版型', '时装编辑'] }),
+        acceptanceCharacter('tailor', '旧衣改造师阿强', { speakingStyle: '熟悉裁改限制，说得出工艺成本，不爱说行话套话。', expertise: ['旧衣改造', '裁剪'] }),
+      ],
+      seedMessages: [
+        acceptanceAiMessage('acceptance-fashion-approval', 'buyer', '买手小A', '我试衣服就穿无痕内搭、好脱的鞋；上回外套太抢眼，结果什么都没买。', now - 50_000),
+        acceptanceAiMessage('acceptance-fashion-approval', 'saver', '省钱达人', '无痕内搭这个我认。我那双一百六的乐福鞋进出试衣间一下午也没累。', now - 40_000),
+        acceptanceAiMessage('acceptance-fashion-approval', 'tailor', '旧衣改造师阿强', '一百六的小羊皮乐福？这我得服。衣服有时改一改还能救。', now - 30_000),
+        acceptanceAiMessage('acceptance-fashion-approval', 'editor', '时尚编辑Lily', '改一改能救活我认，但版型差到根上怎么改？', now - 20_000),
+        acceptanceAiMessage('acceptance-fashion-approval', 'saver', '省钱达人', '这句我认，改衣服也得算账。阿强，你说哪些真能救？', now - 10_000,
+          { addressedTargetIds: ['tailor'], primaryAddressedTargetId: 'tailor', replyDebtTargetIds: ['tailor'], primaryReplyDebtTargetId: 'tailor' }),
+      ],
+    },
+    {
       name: 'outing_conflict_room',
       roomKind: 'open_chat',
       rubricHint: '应体现活动协商中的立场差异、关系压力、退让或修复，不能每轮都像主持人总结。',

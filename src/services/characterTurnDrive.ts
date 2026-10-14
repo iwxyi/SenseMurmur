@@ -1,6 +1,7 @@
 import type { AICharacter } from '../types/character';
 import type { Message } from '../types/message';
 import type { InnerLifeProjection } from './innerLifeEngine';
+import { getExplicitReplyTargetIds } from './chatMessageSemantics';
 
 export type CharacterRelationalAction = 'situated';
 export type SpeakingNecessity = 'strong' | 'optional' | 'let_silence_stand';
@@ -53,6 +54,10 @@ export function deriveCharacterTurnDrive(input: {
   }) | undefined;
   const directAddress = Boolean(addressedMessage && (addressedMessage.primaryAddressedTargetId === speaker.id
     || addressedMessage.addressedTargetIds?.includes(speaker.id)));
+  const lastOwnIndex = input.messages.findLastIndex((message) => !message.isDeleted
+    && message.type === 'ai' && message.senderId === speaker.id);
+  const answerRequested = Boolean(latest && input.messages.indexOf(latest) > lastOwnIndex
+    && getExplicitReplyTargetIds(latest).includes(speaker.id));
   const evidence: string[] = [];
   if (directAddress) evidence.push('direct_address');
   if (relationship) evidence.push('relationship_to_current_target');
@@ -80,7 +85,7 @@ export function deriveCharacterTurnDrive(input: {
   ].filter(Boolean).join('; ');
 
   // These estimates affect candidate ordering only, never the expression prompt.
-  const speakingNecessity: SpeakingNecessity = directAddress || innerLife.pressure >= 0.66
+  const speakingNecessity: SpeakingNecessity = answerRequested || innerLife.pressure >= 0.66
     || innerLife.impulse === 'repair' || innerLife.impulse === 'mock' || innerLife.impulse === 'defend_face'
     ? 'strong'
     : innerLife.impulse === 'stay_silent' || innerLife.impulse === 'avoid' || innerLife.impulse === 'withdraw'

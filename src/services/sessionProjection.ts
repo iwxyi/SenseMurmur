@@ -11,7 +11,6 @@ import { sanitizeUserFacingText, type DisplayTextMember } from './displayTextSan
 import { reportUnresolvedDisplayEntity } from './diagnostics';
 import { formatRuntimeEventKindLabel } from './runtimeEventPresentation';
 import { formatActorRefKindLabel, formatSystemAgentSubtypeLabel, inferSystemAgentSubtypeFromId, toActorRef, type ActorRefKind } from './actorRefPresentation';
-import { evaluateGuidanceGeneratedContent } from './guidanceExecution';
 import { projectWorldAttentionStates } from './worldRuntimeProjection';
 import { canUsePrivateThreads } from './conversationCapabilities';
 import { getCurrentRetentionLimits } from './retentionLimits';
@@ -458,28 +457,14 @@ function projectAttentionFollowupMeta(
       issuedAt,
     };
   }
-  const baseFocusLabel = eventType === 'attention_followup_member'
-    ? `${actorName} 跟进 ${targetName || '成员'}`
-    : `${actorName} 跟进用户`;
-  const guidance = {
-    kind: 'direct_reply' as const,
-    rawText: focus || baseFocusLabel,
-    actorIds: [actorId],
-    mentionedActorIds: [actorId],
-    focusText: focus || baseFocusLabel,
-    beatType: 'answer' as const,
-    pressure: 0.92,
-    maxTurns: 2,
-    reason: '来自关注跟进动作',
-  };
+  // This projection records a subsequent response, not semantic fulfillment of the focus.
   const completionEvent = actorMessages.find((candidate) => {
     const candidatePayload = typeof candidate.payload === 'object' && candidate.payload !== null ? candidate.payload as Record<string, unknown> : null;
     const text = cleanProjectionText(
       typeof candidatePayload?.text === 'string' ? candidatePayload.text : (candidate.summary || ''),
       participantNameMap,
     );
-    if (!evaluateGuidanceGeneratedContent(text, guidance, actorId).matched) return false;
-    return true;
+    return Boolean(text.trim());
   });
   if (!completionEvent) {
     return {

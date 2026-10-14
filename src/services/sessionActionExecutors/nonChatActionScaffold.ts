@@ -422,7 +422,7 @@ function handleAssignStudyTask(chat: GroupChat, action: SessionActionDefinition)
   };
 }
 
-function handleMapLearningGoal(chat: GroupChat, action: SessionActionDefinition) {
+function handleMapLearningGoal(chat: GroupChat, action: SessionActionDefinition): SessionActionExecutionResult {
   const goal = getPayloadText(action, 'goal') || getPrompt(action) || chat.topic || '当前学习目标';
   const summary = `整理知识点：${truncate(goal, 48)}`;
   const result = buildActionResult(chat, action, '整理学习目标', summary, 'study_goal_mapped', { goal });

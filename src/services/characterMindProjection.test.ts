@@ -114,6 +114,7 @@ function chat(type: 'direct' | 'group' = 'direct') {
         pileOnTarget: 'char-b',
         alliances: [['char-a', 'char-b']],
         conflictPairs: [],
+        silencedActors: [],
       },
     },
     directorControls: { allowSpeakAs: true, allowDirectorMode: true, allowEventInjection: true, allowForcedReply: true },
@@ -211,7 +212,7 @@ describe('characterMindProjection', () => {
         }),
         memory({
           id: 'ordinary-user-profile',
-          kind: 'fact',
+          kind: 'trait_evidence',
           subjectIds: ['user'],
           text: '用户不喜欢太甜的饮料。',
           summary: '用户不喜欢太甜的饮料。',
@@ -414,7 +415,7 @@ describe('characterMindProjection', () => {
       layeredMemories: [
         memory({
           id: 'user-drink-preference',
-          kind: 'fact',
+          kind: 'trait_evidence',
           scope: 'relationship',
           subjectIds: ['user'],
           text: '用户不喜欢太甜的饮料。',
@@ -447,7 +448,7 @@ describe('characterMindProjection', () => {
     });
     const injectedMemory = memory({
       id: 'assembly-user-memory',
-      kind: 'fact',
+      kind: 'trait_evidence',
       subjectIds: ['user'],
       text: '用户最近在准备一个重要面试。',
       summary: '用户最近在准备一个重要面试。',

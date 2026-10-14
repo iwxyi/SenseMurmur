@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AICharacter } from '../types/character';
 import { normalizeConversation } from '../types/chat';
+import { createTestChat } from '../test/fixtures';
 import { projectGroupRelationshipGraphs } from './groupRelationshipGraph';
 
 function member(id: string, relationships: AICharacter['relationships'] = []): AICharacter {
@@ -8,8 +9,8 @@ function member(id: string, relationships: AICharacter['relationships'] = []): A
 }
 
 function chat() {
-  return normalizeConversation({
-    id: 'group', type: 'group', mode: 'open_chat', modeConfig: {}, modeState: { phase: 'free' }, name: '群', topic: '', style: 'free', runtimeEvolutionIntensity: 'balanced', memberIds: ['a', 'b', 'c', 'd'], speed: 1, isActive: false, allowIntervention: true, topicSeed: '', governance: {}, dramaRules: {}, worldState: {}, directorControls: {}, createdAt: 1, updatedAt: 1, lastMessageAt: 1,
+  return createTestChat({
+    id: 'group', name: '群', memberIds: ['a', 'b', 'c', 'd'],
   });
 }
 

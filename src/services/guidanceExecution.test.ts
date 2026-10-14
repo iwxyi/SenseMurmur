@@ -246,7 +246,7 @@ describe('guidanceExecution', () => {
         timestamp: 30,
         metadata: {
           runtimeDecision: {
-            directorIntent: { userGuidance: guidance },
+            directorIntent: { source: 'user_guidance', beatType: 'answer', userGuidance: guidance },
             guidanceExecution: {
               status: 'accepted',
               validated: true,

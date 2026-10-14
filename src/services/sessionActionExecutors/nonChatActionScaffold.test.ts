@@ -107,7 +107,7 @@ function buildStudyChat() {
     topic: '掌握 Python 基础',
     scenarioState: {
       phase: 'mapping',
-      learning: { goal: '掌握 Python 基础', teachingMode: 'professional', knowledgeItems: [] },
+      learning: { goal: '掌握 Python 基础', teachingMode: 'serious', knowledgeItems: [] },
     },
   });
 }

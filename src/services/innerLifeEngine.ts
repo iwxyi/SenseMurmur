@@ -3,6 +3,7 @@ import type { GroupChat } from '../types/chat';
 import type { Message } from '../types/message';
 import type { InteractionEventPayload } from '../types/runtimeEvent';
 import { getExpressionFeedbackSignal, summarizeExpressionFeedbackInfluence } from './expressionFeedbackInfluence';
+import { getExplicitReplyTargetIds } from './chatMessageSemantics';
 
 export type InnerLifeTone = 'casual' | 'defensive' | 'teasing' | 'serious' | 'tired' | 'vulnerable';
 export type InnerLifeLength = 'micro' | 'short' | 'normal' | 'long';
@@ -143,7 +144,7 @@ function latestUnansweredAddress(character: AICharacter, messages: Message[]) {
   const lastOwnIndex = visible.findLastIndex((message) => message.type === 'ai' && message.senderId === character.id);
   return visible
     .slice(lastOwnIndex + 1)
-    .filter((message) => message.senderId !== character.id && isAddressed(character, message))
+    .filter((message) => message.senderId !== character.id && getExplicitReplyTargetIds(message).includes(character.id))
     .at(-1) || null;
 }
 
@@ -174,13 +175,6 @@ function projectDirectedAffect(chat: GroupChat | null | undefined, characterId: 
     };
   }
   return null;
-}
-
-function isAddressed(character: AICharacter, message: Message | null) {
-  if (!message) return false;
-  const candidate = message as Message & { addressedTargetIds?: string[] | null; primaryAddressedTargetId?: string | null };
-  return candidate.primaryAddressedTargetId === character.id
-    || Boolean(candidate.addressedTargetIds?.includes(character.id));
 }
 
 function inferTopicAttention(character: AICharacter, message: Message | null) {
@@ -302,7 +296,7 @@ export function projectInnerLife(params: {
   const unansweredAddress = latestUnansweredAddress(params.character, params.messages);
   const socialTriggerMessage = unansweredAddress || lastMessage;
   const activeAffect = projectDirectedAffect(params.chat, params.character.id, params.messages);
-  const addressed = Boolean(params.explicitUserAddressed) || Boolean(unansweredAddress) || isAddressed(params.character, lastMessage);
+  const addressed = Boolean(params.explicitUserAddressed) || Boolean(unansweredAddress);
   const relationship = socialTriggerMessage
     ? params.character.relationships.find((item) => item.characterId === socialTriggerMessage.senderId)
     : undefined;

@@ -1,4 +1,4 @@
-import type { DriverMessageCommitResult, GroupChat } from '../../types/chat';
+import type { DriverMessageCommitResult, GroupChat, OpenChatCommittedMessage } from '../../types/chat';
 import { createDefaultConversationEngineDefinition } from '../../types/sessionEngine';
 import type { SessionEngineDefinition, SessionRuntimeContextBundle } from '../../types/sessionEngine';
 import type { AICharacter } from '../../types/character';
@@ -61,14 +61,6 @@ function buildRuntimeContextBundle(params: { conversation: GroupChat; speaker: {
     },
   };
 }
-
-type OpenChatCommittedMessage = Pick<Message, 'content' | 'type' | 'senderId' | 'metadata'> & Partial<Pick<Message, 'id' | 'timestamp'>> & {
-  interactionHint?: InteractionEventPayload | null;
-  interactionHints?: InteractionEventPayload[] | null;
-  incomingInteractionHint?: InteractionEventPayload | null;
-  socialEventHints?: SocialEventHintEnvelope[] | null;
-  conflictFocus?: import('../../types/runtimeEvent').ConflictFocusPayload | null;
-};
 
 function areRuntimeValuesEqual(left: unknown, right: unknown) {
   if (left === right) return true;

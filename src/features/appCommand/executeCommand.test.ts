@@ -21,10 +21,10 @@ vi.mock('../../services/aiClient', () => ({
   generateResponse: (...args: unknown[]) => generateResponseMock(...args),
 }));
 
-function context(): AppCommandContext {
+function context(input = '小明'): AppCommandContext {
   return {
     source: 'home',
-    input: '小明',
+    input,
     navigate: vi.fn(),
     apiConfig: { provider: 'openai', apiKey: '', baseUrl: '', model: 'test-model' },
     aiProfiles: [],
@@ -53,7 +53,7 @@ function character(id: string, name: string): AICharacter {
 }
 
 function chat(id: string, name: string, type: GroupChat['type'] = 'group'): GroupChat {
-  const sessionKind = createDefaultSessionKind(type === 'assistant' ? 'assistant' : 'open_chat', 'open_chat');
+  const sessionKind = createDefaultSessionKind(type, 'open_chat');
   return {
     id,
     type,

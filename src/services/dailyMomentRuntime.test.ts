@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { normalizeConversation, type GroupChat } from '../types/chat';
+import type { GroupChat } from '../types/chat';
+import { createTestChat } from '../test/fixtures';
 import type { AICharacter } from '../types/character';
 import { DEFAULT_AI_PROFILE, DEFAULT_IMAGE_AI_PROFILE, type AIModelProfile } from '../types/settings';
 import type { MemoryItem } from './memoryTypes';
@@ -44,13 +45,13 @@ describe('daily moments from character memories', () => {
     vi.clearAllMocks();
     setAIGenerationRuntimeConfig({ enableMoments: true, enableDiaries: true });
     actor = { id: 'a', name: '甲', layeredMemories: [memory()] } as AICharacter;
-    chats = [normalizeConversation({ id: 'room-a', type: 'group', mode: 'open_chat', name: '茶友',
+    chats = [createTestChat({ id: 'room-a', type: 'group', mode: 'open_chat', name: '茶友',
       memberIds: ['a'], isActive: true, runtimeEventsV2: [], createdAt: 1, updatedAt: 1, lastMessageAt: 1,
-    } as GroupChat)];
+    })];
     profiles = [{ ...DEFAULT_AI_PROFILE, model: 'test-model', apiKey: 'test-key' }];
     vi.mocked(generateTextWithAdapter).mockResolvedValue('今天这缕茉莉花香，先记下来。');
     vi.mocked(generateImageWithAdapter).mockResolvedValue([{ dataUrl: 'data:image/png;base64,AQID', mimeType: 'image/png' }]);
-    vi.mocked(persistGeneratedMomentMedia).mockResolvedValue({ url: 'local-image', storage: 'local_indexeddb' });
+    vi.mocked(persistGeneratedMomentMedia).mockResolvedValue({ assetId: 'local-image', thumbnailAssetId: 'local-image', url: 'local-image', thumbnailUrl: 'local-thumb', fullUrl: 'local-image', mimeType: 'image/png', sizeBytes: 3, alt: undefined, storage: 'local_indexeddb' });
   });
   afterEach(() => vi.useRealTimers());
 
@@ -94,7 +95,7 @@ describe('daily moments from character memories', () => {
     await runDailyMomentFlow('room-a', ops());
     expect(generateImageWithAdapter).toHaveBeenCalledOnce();
     expect(persistGeneratedMomentMedia).toHaveBeenCalledOnce();
-    expect(projectWorldMoments(chats, [actor])[0].media).toMatchObject([{ url: 'local-image' }]);
+    expect(projectWorldMoments(chats, [actor])[0].media).toMatchObject([{ url: 'local-thumb', fullUrl: 'local-image', assetId: 'local-image' }]);
   });
 
   it('publishes text and reports image failure', async () => {

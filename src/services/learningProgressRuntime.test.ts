@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeConversation } from '../types/chat';
+import { DEFAULT_OPEN_CHAT_MODE_CONFIG, DEFAULT_OPEN_CHAT_MODE_STATE, normalizeConversation } from '../types/chat';
 import { buildLearningProgressSnapshot, mergeLearningKnowledgeFromArtifacts, recordLearningAttempt, recordLearningEvidence } from './learningProgressRuntime';
 
 const chat = normalizeConversation({
-  id: 'learning-1', type: 'group', mode: 'classroom', modeConfig: {}, modeState: {},
+  id: 'learning-1', type: 'group', mode: 'classroom', modeConfig: DEFAULT_OPEN_CHAT_MODE_CONFIG, modeState: DEFAULT_OPEN_CHAT_MODE_STATE,
   name: '学习进步', topic: '掌握数据库索引', style: 'free', runtimeEvolutionIntensity: 'slow',
   memberIds: ['user', 'teacher'], speed: 1, isActive: true, allowIntervention: false,
   topicSeed: '', createdAt: 1, updatedAt: 1, lastMessageAt: 1,

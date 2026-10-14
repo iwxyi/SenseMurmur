@@ -76,21 +76,6 @@ function normalizeRoomStyle(styleProfile?: ChatStyleProfile | string | null): Tu
   return 'casual';
 }
 
-function describeSocialJob(plan: ConversationMovePlan, intent: SpeakIntent) {
-  if (intent.stance === 'challenge' || intent.stance === 'pile_on') return 'press one live assumption or consequence from the latest exchange';
-  if (intent.stance === 'comfort') return 'lower the pressure without erasing the unresolved point';
-  if (intent.stance === 'change_subject' || plan.moveType === 'shift_topic_softly') return 'move to a nearby live angle that a real room could follow';
-  if (plan.moveType === 'counterexample') return 'bring one concrete counterexample or exception';
-  if (plan.moveType === 'add_boundary_condition') return 'add one condition, cost, or limit that changes the next response';
-  if (plan.moveType === 'ask_followup' || plan.moveType === 'ask_evidence' || plan.moveType === 'test_assumption') return 'ask one situated question that tests the point';
-  if (plan.moveType === 'bring_back_prior_point') return 'pull back one dropped earlier point';
-  if (plan.moveType === 'name_tradeoff') return 'name one practical tradeoff the room has not faced';
-  if (plan.moveType === 'answer_unresolved_question') return 'answer the unresolved address with one concrete stance or opening';
-  if (intent.stance === 'support' || intent.stance === 'back_up') return 'show social support while keeping independent judgment';
-  if (intent.stance === 'side_comment' || intent.delivery === 'side_remark') return 'drop a side comment that changes the room temperature or angle';
-  return 'notice one locally specific detail if it genuinely matters; otherwise let the exchange rest';
-}
-
 function describeEmotion(innerLife: InnerLifeProjection) {
   const emotion = innerLife.dominantEmotion;
   const recorded = emotion
@@ -234,7 +219,10 @@ export function buildTurnDirective(input: BuildTurnDirectiveInput): TurnDirectiv
       sharedRelationshipFacts,
       includeRelationshipNote: true,
     }),
-    socialJob: describeSocialJob(input.conversationMovePlan, input.intent),
+    // Scheduler estimates select candidates; they do not prescribe dialogue acts.
+    socialJob: targetIsOptionalThread
+      ? 'choose whether and how to respond from this person and the visible exchange'
+      : 'respond to the actual addressed need in the visible exchange; choose the stance and form from this person',
     socialJobRequired: !targetIsOptionalThread,
     targetName,
     targetIsOptional: targetIsOptionalThread,
@@ -278,7 +266,7 @@ export function buildTurnDirectivePrompt(directive: TurnDirective | null | undef
       : `\n- ${cueLabel}: ${cueJob}; do not explain the whole topic.`;
   return `\n## Turn Directive — This Person in This Moment
 Speak as this person among people who share this exchange. Choose what catches their attention and what they actually want to say now. Their words may have warmth, bite, hesitation or delight; the exchange decides the shape.
-Acknowledgement is implicit by default. Name someone or explicitly agree when that itself matters to the relationship; responding does not require announcing agreement, receipt, or a recap. A brief acknowledgement can be the whole response when it fits this person and moment. Do not attach a new condition, responsibility, question, or action just to make a short reaction count as progress. Let relief, reluctance, affection or resistance show when grounded in the exchange. Let a completed exchange rest. Honor explicit requests for a deliverable and its format.
+Acknowledgement is implicit by default. A reply can begin with the thing that matters to this person; an actual change of mind can be stated when it matters. A brief reaction can be the whole response. Do not attach a new condition, responsibility, question, or action just to make it count as progress. Let completed exchanges rest and honor explicit user requests.
 ${targetLine}${directive.socialJobRequired === false ? '\n- This is not a quota. A brief attitude, a concrete reaction, or no new point is valid when the exchange has landed; do not manufacture a question, condition, task, or story update.' : ''}${roomAtmosphereLine}
 - Personal meaning: ${directive.characterDrive.stake}. Felt residue: ${directive.characterDrive.feltReaction}.
 - Attention habits: ${directive.characterDrive.attentionLens}.

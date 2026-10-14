@@ -10,7 +10,7 @@ function pair(pairKey: string): RelationshipLedgerEntry {
   return {
     pairKey, actorId: 'a', targetId: pairKey,
     current: { warmth: 0, competence: 0, trust: 0, threat: 0 }, derived: {}, axisReasons: {},
-    trend: 'stable', recentEvents: [], lastUpdatedAt: 1,
+    trend: 'flat', recentEvents: [], lastUpdatedAt: 1,
   };
 }
 

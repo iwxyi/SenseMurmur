@@ -62,8 +62,8 @@ describe('innerLifeEngine', () => {
   it('keeps suggested rhythm distinct from the messages actually emitted', () => {
     const projection = projectInnerLife({ character: character(), messages: [message({ content: '小甲，你怎么看？' })], now: 10 });
     const metadata = buildInnerLifeMetadata(projection, 3);
-    expect(metadata.expressionPlan?.suggestedMessageCount).toBe(projection.expressionPlan.messageCount);
-    expect(metadata.expressionPlan?.messageCount).toBe(3);
+    expect(metadata?.expressionPlan?.suggestedMessageCount).toBe(projection.expressionPlan.messageCount);
+    expect(metadata?.expressionPlan?.messageCount).toBe(3);
   });
   it('projects answer impulse when the character is addressed', () => {
     const projection = projectInnerLife({
@@ -75,6 +75,30 @@ describe('innerLifeEngine', () => {
     expect(projection.impulse).toBe('answer');
     expect(projection.pressure).toBeGreaterThan(0.8);
     expect(projection.evidence.join(' / ')).toContain('直接提到');
+  });
+
+  it.each([null, []])('does not turn an addressed answer into reply pressure when debt is %s', (replyDebtTargetIds) => {
+    const projection = projectInnerLife({ character: character(), now: 10,
+      messages: [addressedMessage({ senderId: 'b', type: 'ai',
+        content: '工时费可能比衣服还贵。', replyDebtTargetIds })],
+    });
+    expect(projection.impulse).not.toBe('answer');
+    expect(projection.evidence.join(' / ')).not.toContain('尚未回应');
+  });
+
+  it('honors explicit reply debt even without an addressed-target field', () => {
+    const projection = projectInnerLife({ character: character(), now: 10,
+      messages: [message({ senderId: 'b', type: 'ai', content: '你来决定。', replyDebtTargetIds: ['a'] })],
+    });
+    expect(projection.impulse).toBe('answer');
+  });
+
+  it('does not restore reply pressure from the last other message after an answer', () => {
+    const projection = projectInnerLife({ character: character(), now: 10,
+      messages: [addressedMessage({ senderId: 'b', content: '要不要改？', timestamp: 1 }),
+        message({ senderId: 'a', type: 'ai', content: '不改了。', timestamp: 2 })],
+    });
+    expect(projection.impulse).not.toBe('answer');
   });
 
   it('does not leave a pressured direct human address as casual inner tone', () => {

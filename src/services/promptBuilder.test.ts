@@ -51,7 +51,7 @@ function buildCharacter(overrides: Partial<AICharacter> = {}): AICharacter {
   };
 }
 
-function buildChat() {
+function buildChat(overrides: Partial<import('../types/chat').GroupChat> = {}) {
   return normalizeConversation({
     id: 'chat-1',
     type: 'group',
@@ -74,6 +74,7 @@ function buildChat() {
     createdAt: 1,
     updatedAt: 1,
     lastMessageAt: 1,
+    ...overrides,
   });
 }
 

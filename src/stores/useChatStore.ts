@@ -460,9 +460,9 @@ function compactGroupVisualForCloud(value: unknown): GroupChat['groupVisual'] {
   };
 }
 
-function compactChatPatchForCloud(patch: PendingChatOperation['patch']) {
+function compactChatPatchForCloud(patch: PendingChatOperation['patch'] | Partial<GroupChat>): Partial<GroupChat> & Record<string, unknown> {
   if (!patch || typeof patch !== 'object') return {};
-  const nextPatch = compactChatRuntimeFieldsForPersistence({ ...patch } as Partial<GroupChat>) as Record<string, unknown>;
+  const nextPatch: Partial<GroupChat> & Record<string, unknown> = compactChatRuntimeFieldsForPersistence({ ...patch });
   delete nextPatch.updatedAt;
   delete nextPatch.lastMessageAt;
   delete nextPatch.runtimeDetailHydratedAt;

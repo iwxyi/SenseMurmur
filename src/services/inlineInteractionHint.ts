@@ -524,7 +524,7 @@ export function buildInlineInteractionContract(params: {
       ? 'Search results are already supplied. Use them when relevant and keep toolRequest=null.'
       : '';
   // Shorten semantic guidance, not the shared wire format.
-  const compactInteractionRule = `Appraise the exchange as this person, then write the visible reply. Report only effects supported by a short exact evidenceText quote.
+  const compactInteractionRule = `Write what this person actually wants to say in this exchange, then report only effects supported by a short exact evidenceText quote from that visible reply. Do not add an agreement, concession, apology, or named preface to make a metadata kind easy to report. A clear shift in stance can be shown through the actual decision or objection without announcing receipt of the previous line.
 Interaction shape: {"targetId":"member-id","kind":"support|challenge|mock|dismiss|defend|evade|probe|pile_on|redirect|apologize|concede|take_responsibility|include|exclude|boundary","tone":"warm|annoyed|defensive|excited|sarcastic|cold","intensity":1,"confidence":0.8,"evidenceText":"exact quote","immediateImpact":{},"relationship":null}.
 interactionHints is {"primary":interaction,"secondary":[]} when this reply clearly affects a member; otherwise null. incomingImpact uses the same shape for a clear latest user/director effect on this speaker, quoting that incoming turn rather than this reply.
 immediateImpact accepts speakerEmotionDelta/targetEmotionDelta axes irritation, affection, insecurity, excitement, embarrassment (signed integers -40..40), and roomDelta axes heat, cohesion, topicDrift (-20..20). Positive raises, negative releases. incomingImpact uses targetEmotionDelta for this speaker. Put speaker release and room changes on primary only; secondary contains only its own target effect.
@@ -627,7 +627,7 @@ Before choosing null, compare known open items with the newer visible exchange a
 Known public continuity (keys are only for writeback):\n${continuityContext || '(none recorded)'}` : '';
   const interactionRule = isOrdinaryConversation
     ? `${compactInteractionRule}${aiDirectInteractionRules}`
-    : `Before writing, appraise the latest visible human turn's immediate effect on the current speaker. If that latest turn is from the user or director and it clearly warms, needles, embarrasses, pressures, reassures, alarms, or excites this speaker, emit incomingImpact as {"kind":"${interactionKinds}","tone":"warm|annoyed|defensive|excited|sarcastic|cold","intensity":3,"confidence":0.86,"evidenceText":"exact short quote from the human turn","reason":"why that quote has this effect","immediateImpact":{"targetEmotionDelta":{"irritation":8,"insecurity":4}}}; otherwise incomingImpact is null. The incoming targetEmotionDelta is the immediate effect on the current speaker, not a relationship change. Let that appraisal genuinely shape the visible reply before reporting it. interactionHints is the outgoing fast-affect channel: emit it whenever the speaker's own words clearly land on a particular member by warming them, needling them, embarrassing them, putting them on the spot, defending them, dismissing them, apologizing or conceding to them, taking responsibility toward them, including or excluding them, setting a boundary, making them wary, or making them excited. Do not omit a hint merely because the exchange is ordinary or because the slow relationship does not change. Use null only when no member-specific emotional effect is visible. When used, targetId must be a member id: {"primary":{"targetId":"member-id","kind":"${interactionKinds}","tone":"warm|annoyed|defensive|excited|sarcastic|cold","intensity":3,"confidence":0.86,"evidenceText":"exact short quote from this reply","reason":"why the quote has this effect","immediateImpact":{"speakerEmotionDelta":{"irritation":-8},"targetEmotionDelta":{"insecurity":12},"roomDelta":{"heat":5,"cohesion":-2,"topicDrift":0}},"relationship":null},"secondary":[]}. immediateImpact is your semantic judgement of this visible line, not a local keyword score: use signed integer deltas, emotion axes within -40..40 and room axes within -20..20. Positive raises an axis and negative releases it. Put the whole-turn speaker release and room effect on primary only; secondary hints contain only their own targetEmotionDelta so effects are not duplicated. Omit zero axes. evidenceText is required, must be a short exact substring of the visible source turn, and must support the chosen kind, tone, and impact by itself; never use the whole reply as evidence. Classify what the quoted words actually do, not their hoped-for outcome: admitting fault is apologize or take_responsibility, yielding a point is concede, and naming who was left out is exclude rather than support. intensity is the immediate spike (1-5), not a permanent score: one sharp line may be 4-5, a small sting or warmth 1-2. The interaction event may exist without any lasting relationship change. Include relationship only when this turn itself gives evidence for a slow relationship update: {"delta":{"warmth":0,"competence":0,"trust":0,"threat":0,"attachment":0,"deference":0},"labels":["meaning"],"stance":"stance"}. attachment and deference are especially slow axes: omit them or keep them within -2..2 unless this turn contains a real turning point. Omit uncertain hints.${aiDirectInteractionRules}`;
+    : `Before writing, appraise the latest visible human turn's immediate effect on the current speaker. If that latest turn is from the user or director and it clearly warms, needles, embarrasses, pressures, reassures, alarms, or excites this speaker, emit incomingImpact as {"kind":"${interactionKinds}","tone":"warm|annoyed|defensive|excited|sarcastic|cold","intensity":3,"confidence":0.86,"evidenceText":"exact short quote from the human turn","reason":"why that quote has this effect","immediateImpact":{"targetEmotionDelta":{"irritation":8,"insecurity":4}}}; otherwise incomingImpact is null. The incoming targetEmotionDelta is the immediate effect on the current speaker, not a relationship change. Write the visible reply from this person's reaction first, then classify only the effect actually visible in it. Never insert an agreement, concession, apology, or named preface just to make an interaction kind or evidenceText easy to report. interactionHints is the outgoing fast-affect channel: emit it whenever the speaker's own words clearly land on a particular member by warming them, needling them, embarrassing them, putting them on the spot, defending them, dismissing them, apologizing or conceding to them, taking responsibility toward them, including or excluding them, setting a boundary, making them wary, or making them excited. Do not omit a hint merely because the exchange is ordinary or because the slow relationship does not change. Use null only when no member-specific emotional effect is visible. When used, targetId must be a member id: {"primary":{"targetId":"member-id","kind":"${interactionKinds}","tone":"warm|annoyed|defensive|excited|sarcastic|cold","intensity":3,"confidence":0.86,"evidenceText":"exact short quote from this reply","reason":"why the quote has this effect","immediateImpact":{"speakerEmotionDelta":{"irritation":-8},"targetEmotionDelta":{"insecurity":12},"roomDelta":{"heat":5,"cohesion":-2,"topicDrift":0}},"relationship":null},"secondary":[]}. immediateImpact is your semantic judgement of this visible line, not a local keyword score: use signed integer deltas, emotion axes within -40..40 and room axes within -20..20. Positive raises an axis and negative releases it. Put the whole-turn speaker release and room effect on primary only; secondary hints contain only their own targetEmotionDelta so effects are not duplicated. Omit zero axes. evidenceText is required, must be a short exact substring of the visible source turn, and must support the chosen kind, tone, and impact by itself; never use the whole reply as evidence. Classify what the quoted words actually do, not their hoped-for outcome: admitting fault is apologize or take_responsibility, yielding a point is concede, and naming who was left out is exclude rather than support. intensity is the immediate spike (1-5), not a permanent score: one sharp line may be 4-5, a small sting or warmth 1-2. The interaction event may exist without any lasting relationship change. Include relationship only when this turn itself gives evidence for a slow relationship update: {"delta":{"warmth":0,"competence":0,"trust":0,"threat":0,"attachment":0,"deference":0},"labels":["meaning"],"stance":"stance"}. attachment and deference are especially slow axes: omit them or keep them within -2..2 unless this turn contains a real turning point. Omit uncertain hints.${aiDirectInteractionRules}`;
   const addressedTargetRule = `addressedTargets records the current visible addressee, even when this is simply a reply and does not require another turn. Emit {"targetIds":["member-id"],"primaryTargetId":"member-id","confidence":0.9,"reason":"why this turn is directed to this member"} when the speaker is replying to, speaking to, or emotionally directing a line at a member. A member merely mentioned or affected is not addressed. replyDebtTargets is a separate field: emit {"targetIds":["member-id"],"primaryTargetId":"member-id","confidence":0.9,"reason":"why this member is expected to answer next"} only when the visible reply directly asks, calls on, challenges, or hands the floor to that member. Use null for replyDebtTargets when no next answer is expected. Both fields must use valid member ids below.`;
   const ownActivityContext = projectWorldCalendar([params.chat], params.characters, { inferTemporalStatus: false, publicOnly: true }).items
     .filter((item) => !item.derivedFromItemId && item.participantIds.includes(params.speaker.id))
@@ -675,34 +675,73 @@ ${toolRule}
 Recent transcript scope: ${transcriptScope}${recentSocialEvents ? `\nRecent social events: ${recentSocialEvents}` : ''}`;
 }
 
-function isValidActivityUpdateInput(update: InlineInteractionEnvelope['activityUpdate']) {
-  if (update == null) return true;
-  if (!normalizeActivityUpdate(update)) return false;
-  if (update.availability != null && update.availability !== 'away' && update.availability !== 'online') return false;
-  if (update.startsNow != null && typeof update.startsNow !== 'boolean') return false;
-  if (update.startAt != null && (typeof update.startAt !== 'number' || !Number.isFinite(update.startAt) || update.startAt < 0)) return false;
-  if (update.durationMinutes != null && (typeof update.durationMinutes !== 'number' || !Number.isFinite(update.durationMinutes) || update.durationMinutes <= 0)) return false;
+function activityUpdateInputFailure(update: InlineInteractionEnvelope['activityUpdate']): InlineEnvelopeParseFailure | null {
+  const invalid = (field: string, expected: string): InlineEnvelopeParseFailure => ({
+    stage: 'activity_update', field: `activityUpdate${field ? `.${field}` : ''}`, message: `Expected ${expected}. Inspect this field in rawResponse.`,
+  });
+  if (update == null) return null;
+  if (typeof update !== 'object' || Array.isArray(update)) return invalid('', 'null or an activity object');
+  for (const field of ['title', 'evidenceText'] as const) {
+    if (typeof update[field] !== 'string' || !update[field].trim()) return invalid(field, 'a non-empty string');
+  }
+  if (!['activity', 'travel', 'rest', 'preparation', 'blocked_time', 'reminder'].includes(update.kind)) return invalid('kind', 'activity|travel|rest|preparation|blocked_time|reminder');
+  if (!['planned', 'in_progress', 'completed', 'cancelled'].includes(update.status)) return invalid('status', 'planned|in_progress|completed|cancelled');
+  if (!normalizeActivityUpdate(update)) return invalid('', 'an activity accepted by normalizeActivityUpdate (including a valid title)');
+  if (update.availability != null && update.availability !== 'away' && update.availability !== 'online') return invalid('availability', 'away|online');
+  if (update.startsNow != null && typeof update.startsNow !== 'boolean') return invalid('startsNow', 'a boolean');
+  if (update.startAt != null && (typeof update.startAt !== 'number' || !Number.isFinite(update.startAt) || update.startAt < 0)) return invalid('startAt', 'a finite non-negative number');
+  if (update.durationMinutes != null && (typeof update.durationMinutes !== 'number' || !Number.isFinite(update.durationMinutes) || update.durationMinutes <= 0)) return invalid('durationMinutes', 'a finite positive number');
   if (update.participantIds != null && (!Array.isArray(update.participantIds)
-    || update.participantIds.some((id) => typeof id !== 'string' || !id.trim()))) return false;
-  return [update.calendarItemId, update.timeHint, update.locationHint].every((value) => value == null || typeof value === 'string');
+    || update.participantIds.some((id) => typeof id !== 'string' || !id.trim()))) return invalid('participantIds', 'an array of non-empty strings');
+  for (const field of ['calendarItemId', 'timeHint', 'locationHint'] as const) {
+    if (update[field] != null && typeof update[field] !== 'string') return invalid(field, 'a string');
+  }
+  return null;
+}
+
+export interface InlineEnvelopeParseFailure {
+  stage: 'json_extraction' | 'json_parse' | 'visible_content' | 'activity_update' | 'conversation_update' | 'normalization';
+  message: string;
+  field?: string;
+  receivedKeys?: string[];
 }
 
 export function parseInlineInteractionEnvelope(raw: string, options: {
   allowContentSalvage?: boolean;
   requireConversationUpdate?: boolean;
   validateActivityUpdate?: boolean;
+  onFailure?: (failure: InlineEnvelopeParseFailure) => void;
 } = {}): InlineInteractionEnvelope | null {
+  let stage: InlineEnvelopeParseFailure['stage'] = 'json_extraction';
+  let receivedKeys: string[] | undefined;
+  const reject = (failure: InlineEnvelopeParseFailure) => {
+    options.onFailure?.({ ...failure, receivedKeys });
+    return null;
+  };
   try {
     const jsonMatch = cleanJsonLikeText(raw).match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
+    if (!jsonMatch) return reject({ stage, message: raw.trim()
+      ? 'No complete {...} JSON object found. The response may be prose or truncated.'
+      : 'The model returned empty or whitespace-only text.' });
+    stage = 'json_parse';
     const parsed = JSON.parse(jsonMatch[0]) as InlineInteractionEnvelope;
-    if (!parsed || !hasVisibleEnvelopeContent(parsed)) return null;
-    if (options.validateActivityUpdate && !isValidActivityUpdateInput(parsed.activityUpdate)) return null;
+    receivedKeys = Object.keys(parsed);
+    stage = 'visible_content';
+    if (!parsed || !hasVisibleEnvelopeContent(parsed)) return reject({ stage,
+      message: 'No non-empty visible content found in messages[].content or supported legacy/story fields.', field: 'messages' });
+    const activityFailure = options.validateActivityUpdate ? activityUpdateInputFailure(parsed.activityUpdate) : null;
+    if (activityFailure) return reject(activityFailure);
     if (options.requireConversationUpdate && (!Object.hasOwn(parsed, 'conversationUpdate')
       || (parsed.conversationUpdate !== null && (!parsed.conversationUpdate
-        || !Array.isArray(parsed.conversationUpdate.items))))) return null;
+        || !Array.isArray(parsed.conversationUpdate.items))))) return reject({
+      stage: 'conversation_update', field: 'conversationUpdate', message: Object.hasOwn(parsed, 'conversationUpdate')
+        ? 'Expected conversationUpdate=null or an object with an items array.'
+        : 'Required top-level conversationUpdate is missing. Use null when no known public item changes.',
+    });
+    stage = 'normalization';
     return sanitizeEnvelope(parsed);
-  } catch {
+  } catch (error) {
+    options.onFailure?.({ stage, receivedKeys, message: error instanceof Error ? error.message : String(error) });
     if (options.allowContentSalvage === false || options.requireConversationUpdate || options.validateActivityUpdate) return null;
     const salvaged = salvageContentFromMalformedEnvelope(raw);
     return salvaged ? sanitizeEnvelope(salvaged) : null;

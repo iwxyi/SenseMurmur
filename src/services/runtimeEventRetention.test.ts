@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import { retainRuntimeEvents } from './runtimeEventRetention';
 import { hasPendingAutoSocialEventCandidate } from '../hooks/useChatAutoSocialFlow';
-import { normalizeConversation } from '../types/chat';
+import { createTestChat } from '../test/fixtures';
 
 describe('calendar event retention', () => {
   it('preserves unresolved social intents and prevents retained calendar intents resurrecting after completion', () => {
@@ -24,7 +24,7 @@ describe('calendar event retention', () => {
     const history: RuntimeEventV2[] = Array.from({ length: 200 }, (_, index) => ({ ...candidate, id: `history-${index}`, kind: 'room_shift', createdAt: index + 3, payload: {} }));
     const retained = retainRuntimeEvents([candidate, marker, ...history], 120);
     expect(retained).toHaveLength(122);
-    expect(hasPendingAutoSocialEventCandidate(normalizeConversation({ id: 'chat', runtimeEventsV2: retained }))).toBe(false);
+    expect(hasPendingAutoSocialEventCandidate(createTestChat({ id: 'chat', runtimeEventsV2: retained }))).toBe(false);
     expect(retainRuntimeEvents(retained, 0)).toEqual([candidate, marker]);
   });
 

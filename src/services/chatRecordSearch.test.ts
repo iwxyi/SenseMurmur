@@ -8,7 +8,7 @@ function storyChat(): GroupChat {
     id: 'story-chat-1',
     type: 'group',
     mode: 'scripted_play',
-    sessionKind: createDefaultSessionKind('story_reader', 'story_reader'),
+    sessionKind: createDefaultSessionKind('group', 'scripted_play'),
     modeConfig: DEFAULT_OPEN_CHAT_MODE_CONFIG,
     modeState: DEFAULT_OPEN_CHAT_MODE_STATE,
     name: '三国红楼故事房',

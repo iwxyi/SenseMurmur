@@ -89,7 +89,8 @@ describe('messageBranching v2', () => {
 
   it('honors explicit v2 state for chats without a scenario id', () => {
     const plainChat = chat({
-      sessionKind: { topology: 'group', family: 'conversation', surfaceProfile: 'text' },
+      // Simulate legacy persisted data written before scenarioId became required.
+      sessionKind: { topology: 'group', family: 'conversation', surfaceProfile: 'text' } as GroupChat['sessionKind'],
       messageBranchState: { enabled: true },
     });
     const messages = [message('u1', 'user', null, 1), message('a1', 'ai', 'u1', 2), message('a2', 'ai', 'u1', 3)];
@@ -100,7 +101,7 @@ describe('messageBranching v2', () => {
 
   it('keeps a legacy timeline when the branch flag has no message metadata', () => {
     const plainChat = chat({
-      sessionKind: { topology: 'group', family: 'conversation', surfaceProfile: 'text' },
+      sessionKind: { topology: 'group', family: 'conversation', surfaceProfile: 'text' } as GroupChat['sessionKind'],
       messageBranchState: { enabled: true, activeLeafNodeId: 'latest' },
     });
     const messages = [
@@ -152,14 +153,20 @@ describe('messageBranching v2', () => {
     const original = message('a1', 'ai', 'u1', 2, '原始回答');
     original.metadata = {
       branching: { nodeId: 'a1', parentNodeId: 'u1', rootNodeId: 'u1', sequence: 2 },
-      parts: [{ type: 'text', text: '原始回答' }, { type: 'text', text: '第二段' }],
-      attachments: [{ assetId: 'asset-original', mimeType: 'image/png' }],
+      narrativeTurn: { turnId: 'original', turnKind: 'character_reaction', blocks: [
+        { id: 'original-1', actorId: 'ai', actorKind: 'character', kind: 'dialogue', displayMode: 'bubble', text: '原始回答' },
+        { id: 'original-2', actorId: 'ai', actorKind: 'character', kind: 'dialogue', displayMode: 'bubble', text: '第二段' },
+      ] },
+      attachments: [{ id: 'original', kind: 'image', status: 'ready', altText: '原始图片', createdAt: 1, updatedAt: 1, assetId: 'asset-original', mimeType: 'image/png' }],
     };
     const revision = message('a2', 'ai', 'u1', 3, '替代回答', 'a1');
     revision.metadata = {
       branching: { nodeId: 'a2', parentNodeId: 'u1', rootNodeId: 'u1', sequence: 3, revisionOfNodeId: 'a1' },
-      parts: [{ type: 'text', text: '替代回答' }, { type: 'code', language: 'ts', text: 'const ok = true;' }],
-      attachments: [{ assetId: 'asset-revision', mimeType: 'audio/mpeg' }],
+      narrativeTurn: { turnId: 'revision', turnKind: 'character_reaction', blocks: [
+        { id: 'revision-1', actorId: 'ai', actorKind: 'character', kind: 'dialogue', displayMode: 'bubble', text: '替代回答' },
+        { id: 'revision-2', actorId: 'ai', actorKind: 'character', kind: 'prose', displayMode: 'paragraph', text: 'const ok = true;' },
+      ] },
+      attachments: [{ id: 'revision', kind: 'audio', status: 'ready', altText: '替代音频', createdAt: 1, updatedAt: 1, assetId: 'asset-revision', mimeType: 'audio/mpeg' }],
     };
     const state = buildBranchStateWithHead({ enabled: true }, 'a2');
     const projected = projectActiveBranchMessages(chat({ messageBranchState: state }), [
@@ -167,7 +174,7 @@ describe('messageBranching v2', () => {
     ]);
     expect(projected.map((item) => item.id)).toEqual(['u1', 'a2']);
     expect(projected[1]?.metadata).toMatchObject({
-      parts: [{ type: 'text', text: '替代回答' }, { type: 'code', language: 'ts', text: 'const ok = true;' }],
+      narrativeTurn: { turnId: 'revision', blocks: [{ text: '替代回答' }, { text: 'const ok = true;' }] },
       attachments: [{ assetId: 'asset-revision', mimeType: 'audio/mpeg' }],
     });
     expect(projected[1]?.metadata).not.toMatchObject({ attachments: [{ assetId: 'asset-original' }] });
