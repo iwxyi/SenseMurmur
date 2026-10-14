@@ -126,7 +126,7 @@ describe('api sync changes', () => {
     await expect(api.getMe()).rejects.toBeInstanceOf(ApiError);
 
     expect(events).toEqual([
-      expect.objectContaining({ status: 401, path: '/auth/me', reason: 'refresh_token_missing' }),
+      expect.objectContaining({ status: 401, path: '/api/auth/me', reason: 'refresh_token_missing' }),
     ]);
   });
 
@@ -236,9 +236,7 @@ describe('api sync changes', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(localStorage.getItem('pneumata-token')).toBe('token-2');
     expect(localStorage.getItem('pneumata-refresh-token')).toBe('refresh-token-2');
-    expect(fetchMock.mock.calls[2]?.[1]).toEqual(expect.objectContaining({
-      headers: expect.objectContaining({ Authorization: 'Bearer token-2' }),
-    }));
+    expect(new Headers(fetchMock.mock.calls[2]?.[1]?.headers).get('Authorization')).toBe('Bearer token-2');
   });
 
   it('accepts a refresh token rotated by another tab', async () => {

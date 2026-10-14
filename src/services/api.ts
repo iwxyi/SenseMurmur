@@ -594,18 +594,7 @@ class ApiClient {
   private authRefreshFailure: { reason: 'refresh_token_missing' | 'refresh_rejected' | 'refresh_network_error' | 'refresh_response_invalid'; status?: number; diagnostic?: string } | null = null;
 
   private getToken(): string | null {
-    return localStorage.getItem(storageKey('token'));
-  }
-
-  private getHeaders(): Record<string, string> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    const token = this.getToken();
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    return headers;
+    return typeof localStorage === 'undefined' ? null : localStorage.getItem(storageKey('token'));
   }
 
   getAccessTokenExpiresAt(token = this.getToken()): number | null {
@@ -637,7 +626,7 @@ class ApiClient {
 
   private async refreshAuthSession(): Promise<boolean> {
     if (this.authRefreshInFlight) return this.authRefreshInFlight;
-    const refreshToken = localStorage.getItem(storageKey('refresh-token'));
+    const refreshToken = typeof localStorage === 'undefined' ? null : localStorage.getItem(storageKey('refresh-token'));
     this.authRefreshFailure = null;
     if (!refreshToken) {
       this.authRefreshFailure = { reason: 'refresh_token_missing', diagnostic: 'refresh token is not present in local storage' };
@@ -665,7 +654,7 @@ class ApiClient {
           return rotated;
         }
         const result = await this.parseJsonResponse<{ token: string; refreshToken: string; user?: AuthUserResponse }>(response);
-        if (!result.token || !result.refreshToken) {
+        if (typeof result.token !== 'string' || !result.token || typeof result.refreshToken !== 'string' || !result.refreshToken) {
           this.authRefreshFailure = { reason: 'refresh_response_invalid', status: response.status, diagnostic: 'refresh response did not contain token fields' };
           return false;
         }
@@ -683,10 +672,10 @@ class ApiClient {
           };
         }
         return rotated;
-      } finally {
-        this.authRefreshInFlight = null;
       }
-    })();
+    })().finally(() => {
+      this.authRefreshInFlight = null;
+    });
     return this.authRefreshInFlight;
   }
 
@@ -708,44 +697,61 @@ class ApiClient {
     return Math.max(0, expiresAt - Date.now() - 5 * 60_000);
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    return this.requestWithRetry<T>(method, path, body, false);
+  private async isAuthRejection(response: Response): Promise<boolean> {
+    if (response.status === 401) return true;
+    if (response.ok) return false;
+    const error = await response.clone().json().catch(() => null) as { code?: unknown } | null;
+    return typeof error?.code === 'string' && shouldExpireAuthSession(response.status, error.code);
   }
 
-  private async requestWithRetry<T>(method: string, path: string, body: unknown, retried: boolean): Promise<T> {
-    const url = backendUrl(`${API_BASE}${path}`);
-    const options: RequestInit = {
-      method,
-      headers: this.getHeaders(),
+  /** Backend session requests, including streaming and multipart responses. */
+  async fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
+    const send = () => {
+      const token = this.getToken();
+      const headers = new Headers(options.headers);
+      if (token) headers.set('Authorization', `Bearer ${token}`);
+      else headers.delete('Authorization');
+      return { token, response: fetch(url, { ...options, headers }) };
     };
+    const initial = send();
+    let response = await initial.response;
+    if (!await this.isAuthRejection(response)) return response;
 
-    if (body !== undefined) {
-      options.body = JSON.stringify(body);
+    // A late 401 can belong to an access token that another request has
+    // already renewed. Retry with the current token without renewing again.
+    const currentToken = this.getToken();
+    const alreadyRefreshed = Boolean(currentToken && currentToken !== initial.token);
+    const refreshed = alreadyRefreshed || await this.refreshAuthSession();
+    if (refreshed) {
+      response = await send().response;
+      if (!await this.isAuthRejection(response)) return response;
     }
 
-    const response = await fetch(url, options);
+    const failure = refreshed ? null : this.authRefreshFailure;
+    if (failure && (failure.reason === 'refresh_network_error' || failure.reason === 'refresh_response_invalid'
+      || (failure.reason === 'refresh_rejected' && failure.status !== 401 && failure.status !== 403))) {
+      console.warn('[auth] session refresh unavailable; retaining login', failure);
+      throw new ApiError('登录续期暂时失败，请稍后重试', { code: 'AUTH_REFRESH_UNAVAILABLE', status: 503 });
+    }
+    dispatchAuthSessionExpired({
+      status: response.status,
+      path: url,
+      refreshStatus: failure?.status,
+      reason: failure?.reason || 'access_token_rejected',
+      diagnostic: failure?.diagnostic,
+    });
+    return response;
+  }
 
+  async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const response = await this.fetchWithAuth(backendUrl(`${API_BASE}${path}`), {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
     if (!response.ok) {
       const error: { error?: string; detail?: string; code?: string } = await this.parseJsonResponse<{ error?: string; detail?: string; code?: string }>(response).catch(() => ({ error: '请求失败', code: 'REQUEST_FAILED' }));
       const detail = typeof error.detail === 'string' && error.detail ? ` (${error.detail})` : '';
-      if (shouldExpireAuthSession(response.status, error.code)) {
-        if (!retried && path !== '/auth/refresh' && await this.refreshAuthSession()) {
-          return this.requestWithRetry<T>(method, path, body, true);
-        }
-        const failure = retried ? null : this.authRefreshFailure;
-        if (failure && (failure.reason === 'refresh_network_error' || failure.reason === 'refresh_response_invalid'
-          || (failure.reason === 'refresh_rejected' && failure.status !== 401 && failure.status !== 403))) {
-          console.warn('[auth] session refresh unavailable; retaining login', failure);
-          throw new ApiError('登录续期暂时失败，请稍后重试', { code: 'AUTH_REFRESH_UNAVAILABLE', status: 503 });
-        }
-        dispatchAuthSessionExpired({
-          status: response.status,
-          path,
-          refreshStatus: failure?.status,
-          reason: failure?.reason || 'access_token_rejected',
-          diagnostic: failure?.diagnostic || (error.code && AUTH_EXPIRED_CODES.has(error.code.toUpperCase()) ? error.code.toUpperCase() : undefined),
-        });
-      }
       throw new ApiError(`${error.error || `HTTP ${response.status}`}${detail}`, { code: error.code, status: response.status });
     }
 

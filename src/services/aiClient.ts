@@ -1,7 +1,6 @@
 import type { APIConfig, AIModelProfile } from '../types/settings';
 import { normalizeAIModelAdvancedOptions, normalizeMaxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS } from '../types/settings';
-import { storageKey } from '../constants/brand';
-import { dispatchAuthSessionExpired } from './authSession';
+import { api } from './api';
 import { backendUrl } from './backendUrl';
 
 type ChatRole = 'user' | 'assistant' | 'system';
@@ -434,11 +433,6 @@ function buildOpenAICompatibleMessages(messages: ChatMessage[], systemPrompt: st
     ...payload,
     { role: 'user' as const, content: 'Return exactly one valid json object.' },
   ];
-}
-
-function getAuthHeaders(): Record<string, string> {
-  const token = typeof localStorage === 'undefined' ? null : localStorage.getItem(storageKey('token'));
-  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 function buildOfficialMessages(messages: ChatMessage[], systemPrompt: string, includeJsonInputInstruction = false) {
@@ -972,19 +966,14 @@ async function generateOfficialResponse(
     ...buildOpenAICompatibleAdvancedRequestFields(config),
     metadata: options.aiUsage ? { aiUsage: options.aiUsage } : undefined,
   };
-  const response = await fetch(backendUrl('/api/ai/v1/chat/completions'), {
+  const response = await api.fetchWithAuth(backendUrl('/api/ai/v1/chat/completions'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...getAuthHeaders(),
     },
     body: JSON.stringify(requestBody),
     signal: options.signal,
   });
-
-  if (response.status === 401) {
-    dispatchAuthSessionExpired({ status: response.status, path: '/api/ai/v1/chat/completions' });
-  }
 
   if (onChunk) {
     let fullResponse = '';
@@ -1042,12 +1031,7 @@ async function listOpenAICompatibleModels(config: APIConfig) {
 
 async function listOfficialModels(config: APIConfig): Promise<AvailableModelInfo[]> {
   const provider = resolveOfficialBackendProvider(config.provider);
-  const response = await fetch(backendUrl(`/api/ai/models?provider=${encodeURIComponent(provider)}`), {
-    headers: getAuthHeaders(),
-  });
-  if (response.status === 401) {
-    dispatchAuthSessionExpired({ status: response.status, path: '/api/ai/models' });
-  }
+  const response = await api.fetchWithAuth(backendUrl(`/api/ai/models?provider=${encodeURIComponent(provider)}`));
   const result = await parseJsonResponse<{ items?: Array<{ id?: string; label?: string; family?: string; tier?: string | null; metadata?: JSONValue }> }>(response, 'Official model list request failed');
   return (result.items || [])
     .filter((item): item is { id: string; label?: string; family?: string; tier?: string | null; metadata?: JSONValue } => Boolean(item.id))
@@ -1145,16 +1129,12 @@ async function generateOpenAICompatibleImage(config: APIConfig, options: ImageGe
     }
 
     try {
-      const response = await fetch(buildOpenAICompatibleImageEditUrl(config.baseUrl), {
+      const response = await (officialProxy ? api.fetchWithAuth.bind(api) : fetch)(buildOpenAICompatibleImageEditUrl(config.baseUrl), {
         method: 'POST',
-        headers: officialProxy ? getAuthHeaders() : { Authorization: `Bearer ${config.apiKey}` },
+        headers: officialProxy ? {} : { Authorization: `Bearer ${config.apiKey}` },
         signal: timed.signal,
         body: formData,
       });
-      if (officialProxy && response.status === 401) {
-        dispatchAuthSessionExpired({ status: response.status, path: buildOpenAICompatibleImageEditUrl(config.baseUrl) });
-      }
-
       const result = await parseJsonResponse<{
         data?: Array<{ b64_json?: string; revised_prompt?: string; url?: string }>;
       }>(response, 'Image edit request failed');
@@ -1187,11 +1167,11 @@ async function generateOpenAICompatibleImage(config: APIConfig, options: ImageGe
   }
 
   try {
-    const response = await fetch(buildOpenAICompatibleImageUrl(config.baseUrl), {
+    const response = await (officialProxy ? api.fetchWithAuth.bind(api) : fetch)(buildOpenAICompatibleImageUrl(config.baseUrl), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(officialProxy ? getAuthHeaders() : { Authorization: `Bearer ${config.apiKey}` }),
+        ...(officialProxy ? {} : { Authorization: `Bearer ${config.apiKey}` }),
       },
       signal: timed.signal,
       body: JSON.stringify({
@@ -1206,10 +1186,6 @@ async function generateOpenAICompatibleImage(config: APIConfig, options: ImageGe
         metadata: officialProxy && options.aiUsage ? { aiUsage: options.aiUsage } : undefined,
       }),
     });
-    if (officialProxy && response.status === 401) {
-      dispatchAuthSessionExpired({ status: response.status, path: buildOpenAICompatibleImageUrl(config.baseUrl) });
-    }
-
     const result = await parseJsonResponse<{
       data?: Array<{ b64_json?: string; revised_prompt?: string; url?: string }>;
     }>(response, 'Image generation request failed');
@@ -1256,13 +1232,12 @@ async function generateGeminiImage(config: APIConfig, options: ImageGenerationOp
   const officialProxy = usesOfficialProxy(config);
   const timed = withTimeoutSignal(options.signal, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS, '图片生成超时，请稍后重试。');
   try {
-    const response = await fetch(officialProxy
+    const response = await (officialProxy ? api.fetchWithAuth.bind(api) : fetch)(officialProxy
       ? backendUrl(buildOfficialGeminiGenerateContentUrl(config.baseUrl || '/api/ai', config.model))
       : `${buildGeminiUrl(config.baseUrl, config.model, false)}?key=${encodeURIComponent(config.apiKey)}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(officialProxy ? getAuthHeaders() : {}),
       },
       signal: timed.signal,
       body: JSON.stringify({
@@ -1275,10 +1250,6 @@ async function generateGeminiImage(config: APIConfig, options: ImageGenerationOp
         },
       }),
     });
-    if (officialProxy && response.status === 401) {
-      dispatchAuthSessionExpired({ status: response.status, path: buildOfficialGeminiGenerateContentUrl(config.baseUrl || '/api/ai', config.model) });
-    }
-
     const result = await parseJsonResponse<{
       candidates?: Array<{ content?: { parts?: Array<{ inlineData?: { mimeType?: string; data?: string }; inline_data?: { mime_type?: string; data?: string } }> } }>;
     }>(response, 'Gemini image generation request failed');
