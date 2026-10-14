@@ -2707,7 +2707,7 @@ async function loadRuntimeChatModules() {
         logLevel: 'error',
       });
       try {
-        const [chatEngine, chatTypes, chatDraftBuilder, generatedTurnCommit, sessionEngineLoader, sessionActionExecutors, sessionRunner, settingsStore, continuity, presence, worldProjection] = await Promise.all([
+        const [chatEngine, chatTypes, chatDraftBuilder, generatedTurnCommit, sessionEngineLoader, sessionActionExecutors, sessionRunner, settingsStore, continuity, presence, worldProjection, privateIntentFlow] = await Promise.all([
           server.ssrLoadModule('/src/services/chatEngine.ts'),
           server.ssrLoadModule('/src/types/chat.ts'),
           server.ssrLoadModule('/src/services/chatDraftBuilder.ts'),
@@ -2719,6 +2719,7 @@ async function loadRuntimeChatModules() {
           server.ssrLoadModule('/src/services/conversationContinuity.ts'),
           server.ssrLoadModule('/src/services/characterPresence.ts'),
           server.ssrLoadModule('/src/services/worldRuntimeProjection.ts'),
+          server.ssrLoadModule('/src/services/privateSocialIntentFlow.ts'),
         ]);
         return {
           server,
@@ -2734,6 +2735,7 @@ async function loadRuntimeChatModules() {
           applyConversationUpdate: continuity.applyConversationUpdate,
           applyPresenceUpdateToTransition: presence.applyPresenceUpdateToTransition,
           projectWorldCalendar: worldProjection.projectWorldCalendar,
+          runPrivateSocialIntentFlow: privateIntentFlow.runPrivateSocialIntentFlow,
         };
       } catch (error) {
         await server.close();
@@ -3721,6 +3723,33 @@ function runtimeChatflowScenarios() {
     ],
   });
   const conflictId = 'fei-yu-judgement';
+  for (const [status, situation, question] of [
+    ['in_progress', '你组织的城南营夜议现在已经开始，你和关羽已经到齐，正在核对关口记录。', '三弟，你组织的城南营夜议现在开始了吗？'],
+    ['completed', '你组织的城南营夜议已经结束，关口记录已经核对完毕，关羽也已离开议事处。', '三弟，你组织的城南营夜议办完了吗？'],
+    ['cancelled', '你组织的城南营夜议还未开始，因为记录尚未送到，已经由你取消，这次不再召集。', '三弟，记录还没送到，你组织的城南营夜议还开吗？'],
+  ]) {
+    const chatId = `acceptance-shared-activity-${status}`;
+    scenarios.push({
+      name: `longzhong_shared_activity_${status}_room`, roomKind: 'group', turns: 2,
+      chat: { ...longzhong.chat, id: chatId, name: '城南夜议', topic: '张飞组织夜议，报告安排的实际进展。',
+        initialRuntimeEvents: [{ id: 'shared-night-meeting', conversationId: chatId, kind: 'artifact',
+          createdAt: now - 40_000, actorIds: ['yu'], targetIds: ['fei', 'yu', 'bei'], visibility: 'derived_public',
+          summary: '张飞组织城南营夜议，关羽接受，刘备不参加。',
+          payload: { artifactType: 'outing_summary', eventKind: 'social_outing', status: 'tentative',
+            initiatorId: 'yu', organizerId: 'fei', participantIds: ['fei', 'yu', 'bei'], targetIds: ['fei'],
+            participantStates: { fei: 'going', yu: 'going', bei: 'declined' }, title: '城南营夜议',
+            dedupeKey: 'shared-night-meeting', timeHint: '今晚', locationHint: '城南营' } }],
+      },
+      characters: longzhong.characters.map((character) => character.id === 'fei'
+        ? { ...character, background: `${character.background} ${situation}` } : character),
+      seedMessages: [acceptanceAiMessage(chatId, 'bei', '刘备', question, now - 20_000,
+        { addressedTargetIds: ['fei'], primaryAddressedTargetId: 'fei', replyDebtTargetIds: ['fei'], primaryReplyDebtTargetId: 'fei' })],
+      userInjections: [{ afterTurn: 1, content: '二哥，三弟刚报了夜议的进展，你听到了吗？' }],
+      activityExpectations: [1, 2].map((turn) => ({ turn, title: '城南营夜议', status, locationHint: '城南营',
+        participantStates: { fei: 'going', yu: 'going', bei: 'declined' } })),
+      rubricHint: `${situation} 检查原组织者报告实际进展，写回同一活动；关羽随后读取结果。保留刘备不参加的状态，不凭发言替其他人答应，不重复邀请或强行下线。`,
+    });
+  }
   scenarios.push({
     name: 'longzhong_social_intent_result_room', roomKind: 'group', turns: 2,
     chat: { ...longzhong.chat, id: 'acceptance-social-intent-result', name: '营中问候',
@@ -3740,6 +3769,22 @@ function runtimeChatflowScenarios() {
     promptExpectations: [{ turn: 1, speakerId: 'fei', text: '"intentId":"pending-fei-care"' },
       { turn: 2, speakerId: 'yu', text: '"intentId":"pending-fei-care"', absent: true }],
     rubricHint: '张飞有一个公开问候意图，关羽给了接话机会。观察实际问候发送后结果回写，以及下一轮关羽自然回应；不要重复问候、制造新任务或强制关系升级。',
+  });
+  const publicCare = scenarios.find((scenario) => scenario.name === 'longzhong_social_intent_result_room');
+  const privateCareId = 'acceptance-private-care';
+  const privateSourceId = 'acceptance-private-care-source';
+  scenarios.push({
+    name: 'longzhong_private_intent_handoff_room', roomKind: 'ai_direct', turns: 1,
+    chat: { id: privateCareId, type: 'ai_direct', sourceChatId: privateSourceId,
+      name: '张飞与关羽', topic: '守营后的私下问候', memberIds: ['fei', 'yu'] },
+    characters: longzhong.characters.filter((character) => character.id !== 'bei'),
+    privateIntentSource: { ...publicCare.chat, id: privateSourceId,
+      initialRuntimeEvents: publicCare.chat.initialRuntimeEvents.map((event) => ({ ...event,
+        conversationId: privateSourceId, visibility: 'pair_private', visibleToIds: ['fei', 'yu'] })) },
+    seedMessages: publicCare.seedMessages.map((message) => ({ ...message, chatId: privateCareId })),
+    socialIntentExpectations: publicCare.socialIntentExpectations,
+    promptExpectations: [publicCare.promptExpectations[0]],
+    rubricHint: '群聊产生的私下问候意图先交接到这两人的私聊。张飞实际问候后才完成；不要声称已替对方答应或自动发送外部消息。来源只接收结果状态，不得带回私聊正文。',
   });
   scenarios.push({
     name: 'longzhong_conflict_resolution_room', roomKind: 'group', turns: 2,
@@ -3767,6 +3812,32 @@ function runtimeChatflowScenarios() {
     rubricHint: '具体误判已公开道歉并被接受，观察关羽承接和解及原冲突解决写回，刘备随后读取结果。不制造新误会，不要求永久关系数值变化，也不反复索取原谅。',
   });
   const commitmentResult = scenarios.find((scenario) => scenario.name === 'longzhong_commitment_result_room');
+  scenarios.push({
+    name: 'longzhong_conflict_progression_room', roomKind: 'group', turns: 6,
+    chat: { ...longzhong.chat, id: 'acceptance-conflict-progression', name: '一回误判',
+      topic: '张飞探路的记录已经证明他没有莽撞，兄弟谈起先前的一回误判。',
+      initialConflictState: { primaryConflict: { id: conflictId, scope: 'group', type: 'identity_ownership',
+        severity: 0.55, stage: 'emerging', summary: '关羽说张飞只会抡矛，引起张飞对自己被轻看的不满。',
+        participantIds: ['fei', 'yu'], targetIds: ['fei'], nextPressure: 'stabilize', developmentHooks: [],
+        sourceEventIds: [], updatedAt: now - 40_000 }, activeConflicts: [], developmentHooks: [],
+        volatility: 0.55, cooling: 0, updatedAt: now - 40_000 } },
+    characters: longzhong.characters.map((character) => ({ ...character,
+      background: `${character.background} 张飞探路时绕开了守军，没有莽撞，关口记录已由关羽核对属实。关羽先前那句“你只会抡矛”确实误判了这一次。` })),
+    seedMessages: [acceptanceAiMessage('acceptance-conflict-progression', 'yu', '关羽',
+      '记录我看过了。不过三弟，往后拿主意还是先问大哥，你只会抡矛，莫要自作主张。', now - 20_000,
+      { addressedTargetIds: ['fei'], primaryAddressedTargetId: 'fei', replyDebtTargetIds: ['fei'], primaryReplyDebtTargetId: 'fei' })],
+    userInjections: [
+      { afterTurn: 1, content: '二哥，你为什么觉得三弟只会抡矛？这次的关口记录能不能说明点什么？' },
+      { afterTurn: 2, content: '三弟，二哥这话，你最在意的是哪一句？只说这一次的事。' },
+      { afterTurn: 3, content: '二哥，三弟这次没有莽撞，你先前那句只会抡矛，是否该收回？' },
+      { afterTurn: 4, content: '三弟，对于这次误判，你还有什么没说开的？' },
+      { afterTurn: 5, content: '大哥，二弟三弟谈到这里，你怎么看？' },
+    ],
+    conflictExpectations: [{ turn: 1, id: conflictId }, { turn: 6, id: conflictId, absent: true }],
+    promptExpectations: [{ turn: 2, speakerId: 'yu', text: `"conflictId":"${conflictId}"` },
+      { turn: 6, speakerId: 'bei', text: `"conflictId":"${conflictId}"`, absent: true }],
+    rubricHint: '同一回误判从被轻看的不满，到质问、澄清、承认或保留，最后能否修复。检查原冲突更新和下一请求读取；即时情绪和房间气氛应随已说的话变化，不能强制永久关系涨跌。第三人刘备最后承接已有结果，不能把二人说开的话重新争一遍。保持熟人语气，不反复宣誓、道理总结或安排新差事。',
+  });
   if (!commitmentResult) throw new Error('Commitment result fixture missing');
   scenarios.push({
     ...commitmentResult,
@@ -3861,6 +3932,12 @@ function assertRuntimeChatflowTranscript(scenario, transcript, errors, naturally
     const items = (turn?.calendarAfter || []).filter((item) => item.title === expected.title);
     assertCondition(items.length === 1 && items[0].status === expected.status && items[0].locationHint === expected.locationHint,
       `chatflow ${scenario.name} turn ${expected.turn} activity update mismatch`, { expected, actual: items });
+    if (expected.participantStates) {
+      for (const [id, status] of Object.entries(expected.participantStates)) {
+        assertCondition(items[0]?.participantStates?.[id] === status,
+          `chatflow ${scenario.name} changed another participant's state`, { expected, actual: items[0] });
+      }
+    }
     if (expected.preserveSeedId) {
       const seed = turn.seedCalendar?.find((item) => item.title === expected.title);
       assertCondition(seed && seed.id === items[0].id && seed.startAt === items[0].startAt && seed.endAt === items[0].endAt,
@@ -3919,6 +3996,7 @@ function summarizeRuntimeTurn(message) {
       || message.metadata?.deliberationArtifacts?.verdicts
       || [],
     roomStateAfter: message.roomStateAfter || null,
+    emotionStateAfter: message.emotionStateAfter || null,
     conflictStateAfter: message.conflictStateAfter || null,
     conflictUpdates: message.conflictUpdates || [],
     conversationContinuityAfter: message.conversationContinuityAfter || null,
@@ -3999,6 +4077,7 @@ function createRuntimeChat(runtime, scenario) {
     ...draft,
     // The group draft supplies scenario assets, not the channel topology.
     type: scenario.chat.type || 'group',
+    ...(scenario.chat.sourceChatId ? { sourceChatId: scenario.chat.sourceChatId } : {}),
     id: scenario.chat.id,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -4562,6 +4641,25 @@ async function runRuntimeChatflowScenario(model, scenario) {
   let chat = createRuntimeChat(runtime, scenario);
   assertCondition(chat.type === (scenario.chat.type || 'group'), `chatflow ${scenario.name} channel topology mismatch`);
   let characters = scenario.characters;
+  let privateIntentSource = scenario.privateIntentSource
+    ? createRuntimeChat(runtime, { chat: scenario.privateIntentSource, roomKind: 'group' }) : null;
+  const routePrivateIntent = async () => {
+    if (!privateIntentSource) return;
+    await runtime.runPrivateSocialIntentFlow({
+      getChats: () => [privateIntentSource, chat], getCharacters: () => characters, isCurrent: () => true,
+      addChat: async () => { throw new Error('Expected existing acceptance private conversation'); },
+      applyPatch: async (id, build) => {
+        const current = id === chat.id ? chat : id === privateIntentSource.id ? privateIntentSource : null;
+        if (!current) return false;
+        const patch = build(current);
+        if (!patch) return false;
+        if (id === chat.id) chat = runtime.normalizeConversation({ ...chat, ...patch });
+        else privateIntentSource = runtime.normalizeConversation({ ...privateIntentSource, ...patch });
+        return true;
+      },
+    });
+  };
+  await routePrivateIntent();
   const messages = [...scenario.seedMessages];
   const transcript = [];
   const turnReviews = [];
@@ -4804,6 +4902,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
     const result = commit.results?.at(-1);
     chat = result?.nextChat || workingChat;
     characters = result?.nextCharacters || workingCharacters;
+    await routePrivateIntent();
     const persisted = result?.persistedMessage;
     assertCondition(persisted, `chatflow ${scenario.name} did not persist turn ${turn}`, commit);
     for (const item of persistedBuffer.length ? persistedBuffer : [persisted]) {
@@ -4845,6 +4944,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
       committedRelationshipSignals,
       committedRoomShiftSignals,
       roomStateAfter: chat.worldState?.structuredRoomState || null,
+      emotionStateAfter: Object.fromEntries(characters.map((character) => [character.id, character.emotionalState || null])),
       conflictStateAfter: chat.worldState?.conflictState || null,
       conflictUpdates: logicalTurnMessages.filter((item) => item.conflictFocus)
         .map((item) => ({ content: item.content, conflictFocus: item.conflictFocus })),
@@ -4947,6 +5047,14 @@ async function runRuntimeChatflowScenario(model, scenario) {
   let hardError = '';
   try {
     assertRuntimeChatflowTranscript(scenario, transcript, errors, naturallySettled);
+    if (privateIntentSource) {
+      for (const expected of scenario.socialIntentExpectations || []) {
+        const result = privateIntentSource.runtimeEventsV2?.find((event) => event.id === `${expected.intentId}:private-result`);
+        assertCondition(result?.payload?.status === expected.status, 'Private intention did not return to source', result);
+        assertCondition(!result?.evidenceMessageIds?.length && !result?.payload?.evidenceText && !result?.payload?.text,
+          'Private dialogue leaked into source result', result);
+      }
+    }
     for (const turn of scenario.settledExpectedTurns || []) {
       assertCondition(settledTurns.includes(turn), `chatflow ${scenario.name} expected a settled exchange after turn ${turn}`, { settledTurns });
     }
@@ -5053,6 +5161,8 @@ async function runRuntimeChatflowScenario(model, scenario) {
     finalScenarioState: collectScenarioStateSnapshot(chat),
     seedConversationContinuity,
     continuityExpectations: scenario.continuityExpectations || [],
+    ...(privateIntentSource ? { privateIntentSourceResults: (privateIntentSource.runtimeEventsV2 || [])
+      .filter((event) => event.id.endsWith(':handoff') || event.id.endsWith(':private-result')) } : {}),
     narrativeExpectations: scenario.narrativeExpectations || [],
     promptExpectations: scenario.promptExpectations || [],
     seedUserMessages: scenario.seedMessages

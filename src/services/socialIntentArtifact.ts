@@ -25,6 +25,21 @@ interface SocialIntentPayload {
   candidateId?: string;
 }
 
+export function getUnsettledSocialIntents(chat: GroupChat) {
+  const events = chat.runtimeEventsV2 || [];
+  const settled = new Set(events.filter((event) => event.kind === 'artifact')
+    .map((event) => event.payload as SocialIntentPayload)
+    .filter((payload) => payload.status === 'completed' || payload.status === 'cancelled')
+    .map((payload) => payload.intentId).filter(Boolean));
+  return events.filter((event) => {
+    const payload = event.payload as SocialIntentPayload;
+    return event.kind === 'artifact' && payload.status === 'tentative'
+      && payload.eventKind != null && payload.eventKind in ARTIFACT_TYPES
+      && payload.initiatorId != null && event.actorIds?.[0] === payload.initiatorId
+      && !settled.has(event.id);
+  });
+}
+
 export function getSocialIntentStateEventIds(events: RuntimeEventV2[], retainedIds: Set<string>) {
   const stateIds = new Set<string>();
   const outcomes = events.filter((event) => event.kind === 'artifact'
@@ -46,21 +61,20 @@ export function getSocialIntentStateEventIds(events: RuntimeEventV2[], retainedI
   for (const event of outcomes) {
     if (stateIds.has((event.payload as SocialIntentPayload).intentId || '')) stateIds.add(event.id);
   }
+  for (const event of events) {
+    const payload = event.payload as { artifactType?: string; intentId?: string };
+    if (event.kind === 'artifact' && payload.artifactType === 'social_intent_handoff'
+      && stateIds.has(payload.intentId || '')) stateIds.add(event.id);
+  }
   return stateIds;
 }
 
 export function getPendingSocialIntents(chat: GroupChat, actorId: string) {
-  const events = chat.runtimeEventsV2 || [];
-  const settled = new Set(events.filter((event) => event.kind === 'artifact')
-    .map((event) => event.payload as SocialIntentPayload)
-    .filter((payload) => payload.status === 'completed' || payload.status === 'cancelled')
-    .map((payload) => payload.intentId).filter(Boolean));
-  return events.filter((event) => {
+  return getUnsettledSocialIntents(chat).filter((event) => {
     const payload = event.payload as SocialIntentPayload;
     return event.kind === 'artifact' && payload.status === 'tentative'
       && payload.eventKind != null && payload.eventKind in ARTIFACT_TYPES
       && payload.initiatorId === actorId && event.actorIds?.[0] === actorId
-      && !settled.has(event.id)
       && !event.visibleToRoles?.length
       && (!event.visibleToIds?.length || chat.memberIds.every((id) => event.visibleToIds?.includes(id)))
       && (event.visibility === 'derived_public' || event.visibility === 'public'

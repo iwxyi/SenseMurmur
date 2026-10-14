@@ -24,6 +24,7 @@ import AppSnackbar from '../common/AppSnackbar';
 import { APP_DIAGNOSTIC_TOAST_EVENT, type DiagnosticToastDetail } from '../../services/diagnostics';
 import { CONTENT_SCROLL_TO_TOP_EVENT, type ContentScrollToTopDetail } from '../../services/contentScrollRegion';
 import { useApplicationSocialFlow } from '../../hooks/useApplicationSocialFlow';
+import { usePrivateSocialIntentFlow } from '../../hooks/usePrivateSocialIntentFlow';
 
 const routeMeta = [
   { match: (pathname: string) => pathname === '/', titleKey: 'nav.home' },
@@ -60,6 +61,7 @@ const SIDEBAR_COLLAPSED_WIDTH = 72;
 
 export default function AppLayout() {
   useApplicationSocialFlow();
+  usePrivateSocialIntentFlow();
   const { t } = useTranslation();
   const location = useLocation();
   const { isMobile, isTablet, isDesktop } = useResponsive();
