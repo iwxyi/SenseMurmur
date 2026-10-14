@@ -557,6 +557,7 @@ export interface ChatDraftDefaults {
 import type { BubbleStyleDefinition } from './bubbleStyle';
 
 export interface DeveloperUIPrefs {
+  autoApplyCodeUpdates: boolean;
   showMemoryDebug: boolean;
   showRelationshipEvents: boolean;
   showAffectEvents: boolean;
@@ -592,6 +593,7 @@ export function getDeveloperUiDefaults() {
 
 export function normalizeDeveloperUiPrefs(input?: Partial<DeveloperUIPrefs> | null): DeveloperUIPrefs {
   return {
+    autoApplyCodeUpdates: Boolean(input?.autoApplyCodeUpdates),
     showMemoryDebug: Boolean(input?.showMemoryDebug),
     showRelationshipEvents: Boolean(input?.showRelationshipEvents),
     showAffectEvents: Boolean(input?.showAffectEvents),
@@ -950,6 +952,7 @@ export interface AppSettings {
 }
 
 export const DEFAULT_DEVELOPER_UI_PREFS: DeveloperUIPrefs = {
+  autoApplyCodeUpdates: false,
   showMemoryDebug: false,
   showRelationshipEvents: false,
   showAffectEvents: false,

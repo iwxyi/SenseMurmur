@@ -1995,6 +1995,7 @@ export default function SettingsPage() {
               {i18n.language.startsWith('zh') ? '交互与实验' : 'Interaction and experiments'}
             </Typography>
             <Box sx={buildDeveloperSwitchListSx()}>
+              <FormControlLabel control={<Switch size="small" checked={settings.developerUI.autoApplyCodeUpdates} onChange={(e) => settings.setDeveloperUI({ autoApplyCodeUpdates: e.target.checked })} />} label={i18n.language.startsWith('zh') ? '自动应用代码更新' : 'Apply code updates automatically'} />
               <FormControlLabel control={<Switch size="small" checked={settings.developerUI.showWithdrawnMessageContent} onChange={(e) => settings.setDeveloperUI({ showWithdrawnMessageContent: e.target.checked })} />} label={i18n.language.startsWith('zh') ? '悬浮查看撤回原文' : 'Reveal withdrawn content on hover'} />
               <FormControlLabel control={<Switch size="small" checked={settings.developerUI.showMomentDebug} onChange={(e) => settings.setDeveloperUI({ showMomentDebug: e.target.checked })} />} label={i18n.language.startsWith('zh') ? '朋友圈调试' : 'Moments debug'} />
               <FormControlLabel control={<Switch size="small" checked={settings.developerUI.enableHumanAppraisal} onChange={(e) => settings.setDeveloperUI({ enableHumanAppraisal: e.target.checked })} />} label={i18n.language.startsWith('zh') ? '启用人性化行为评估' : 'Enable human appraisal'} />

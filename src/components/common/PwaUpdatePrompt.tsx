@@ -2,12 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import Button from '@mui/material/Button';
 import { registerSW } from 'virtual:pwa-register';
 import AppSnackbar from './AppSnackbar';
-
-const UPDATE_MODE = import.meta.env.VITE_APP_UPDATE_MODE === 'prompt' ? 'prompt' : 'auto';
+import { useSettingsStore } from '../../stores/useSettingsStore';
 
 export default function PwaUpdatePrompt() {
   const [needRefresh, setNeedRefresh] = useState(false);
   const updateSWRef = useRef<ReturnType<typeof registerSW> | null>(null);
+  const autoApplyUpdates = useSettingsStore((state) => state.developerMode && state.developerUI.autoApplyCodeUpdates);
 
   useEffect(() => {
     if (import.meta.env.DEV) {
@@ -27,24 +27,24 @@ export default function PwaUpdatePrompt() {
     updateSWRef.current = registerSW({
       immediate: true,
       onNeedRefresh() {
-        if (UPDATE_MODE === 'auto') {
-          void updateSWRef.current?.(true);
-          return;
-        }
         setNeedRefresh(true);
       },
     });
   }, []);
 
+  useEffect(() => {
+    if (needRefresh && autoApplyUpdates) void updateSWRef.current?.(true);
+  }, [needRefresh, autoApplyUpdates]);
+
   const handleRefresh = () => {
     void updateSWRef.current?.(true);
   };
 
-  if (import.meta.env.DEV || UPDATE_MODE === 'auto') return null;
+  if (import.meta.env.DEV) return null;
 
   return (
     <AppSnackbar
-      open={needRefresh}
+      open={needRefresh && !autoApplyUpdates}
       message="页面已更新，刷新后生效"
       severity="info"
       autoHideDuration={null}

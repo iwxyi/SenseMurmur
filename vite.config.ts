@@ -13,10 +13,6 @@ function resolveAllowedHosts(env: Record<string, string>) {
     : true
 }
 
-function resolveAppUpdateMode(env: Record<string, string>) {
-  return env.VITE_APP_UPDATE_MODE === 'prompt' ? 'prompt' : 'auto'
-}
-
 function resolveDisablePwa(env: Record<string, string>) {
   return env.VITE_DISABLE_PWA === '1' || env.VITE_DISABLE_PWA === 'true'
 }
@@ -76,8 +72,6 @@ function devServiceWorkerCleanupPlugin(): Plugin {
     '    const keys = await caches.keys();',
     '    await Promise.all(keys.map(key => caches.delete(key)));',
     '    await self.registration.unregister();',
-    '    const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });',
-    '    clients.forEach(client => client.navigate(client.url));',
     '  })());',
     '});',
     '',
@@ -173,7 +167,6 @@ function setForwardedHeaders(proxyRequest: { setHeader(name: string, value: stri
 
 export default defineConfig(({ mode }) => {
   const env = loadClientEnv(mode)
-  const appUpdateMode = resolveAppUpdateMode(env)
   const allowedHosts = resolveAllowedHosts(env)
   const appBase = env.VITE_APP_BASE || '/'
   const disablePwa = resolveDisablePwa(env)
@@ -244,7 +237,8 @@ export default defineConfig(({ mode }) => {
       host: '0.0.0.0',
       port: 5173,
       cors: false,
-      hmr: appUpdateMode === 'auto',
+      // Runtime settings control updates through DevUpdatePrompt.
+      hmr: false,
       allowedHosts,
       proxy,
     },
@@ -255,7 +249,7 @@ export default defineConfig(({ mode }) => {
       devServiceWorkerCleanupPlugin(),
       ...(disablePwa ? [disabledPwaRegisterPlugin()] : []),
       ...(disablePwa ? [] : [VitePWA({
-        registerType: appUpdateMode === 'prompt' ? 'prompt' : 'autoUpdate',
+        registerType: 'prompt',
         includeAssets: ['favicon.svg', 'logo-192.png', 'logo-512.png'],
         manifest: {
           name: 'Sense Murmur',
@@ -281,8 +275,8 @@ export default defineConfig(({ mode }) => {
           ],
         },
         workbox: {
-          clientsClaim: appUpdateMode === 'auto',
-          skipWaiting: appUpdateMode === 'auto',
+          clientsClaim: false,
+          skipWaiting: false,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
           runtimeCaching: [
             {

@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import Button from '@mui/material/Button';
 import AppSnackbar from './AppSnackbar';
+import { useSettingsStore } from '../../stores/useSettingsStore';
 
 const DEV_UPDATE_POLL_INTERVAL_MS = 2500;
-const UPDATE_MODE = import.meta.env.VITE_APP_UPDATE_MODE === 'prompt' ? 'prompt' : 'auto';
 
 async function fetchDevUpdateVersion(signal: AbortSignal) {
   const response = await fetch('/__pneumata_dev_updates', {
@@ -17,9 +17,10 @@ async function fetchDevUpdateVersion(signal: AbortSignal) {
 
 export default function DevUpdatePrompt() {
   const [needRefresh, setNeedRefresh] = useState(false);
+  const autoApplyUpdates = useSettingsStore((state) => state.developerMode && state.developerUI.autoApplyCodeUpdates);
 
   useEffect(() => {
-    if (!import.meta.env.DEV || UPDATE_MODE === 'auto') return;
+    if (!import.meta.env.DEV) return;
 
     let disposed = false;
     let baselineVersion: number | null = null;
@@ -45,7 +46,7 @@ export default function DevUpdatePrompt() {
         }
       } catch (error) {
         if (!activeController.signal.aborted && import.meta.env.DEV) {
-          // Dev server restarts are expected while coding; retry quietly.
+          console.warn('Failed to check for development updates:', error);
         }
       } finally {
         if (controller === activeController) controller = null;
@@ -62,11 +63,15 @@ export default function DevUpdatePrompt() {
     };
   }, []);
 
-  if (!import.meta.env.DEV || UPDATE_MODE === 'auto') return null;
+  useEffect(() => {
+    if (needRefresh && autoApplyUpdates) window.location.reload();
+  }, [needRefresh, autoApplyUpdates]);
+
+  if (!import.meta.env.DEV) return null;
 
   return (
     <AppSnackbar
-      open={needRefresh}
+      open={needRefresh && !autoApplyUpdates}
       message="开发代码已更新，刷新后生效"
       severity="info"
       autoHideDuration={null}

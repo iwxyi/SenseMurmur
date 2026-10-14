@@ -108,7 +108,16 @@ describe('storeMigrations', () => {
     expect(migrated?.developerUI).toMatchObject({
       showMemoryDebug: true,
       enableHumanAppraisal: true,
+      autoApplyCodeUpdates: false,
     });
+  });
+
+  it('keeps the explicit code update preference during migration', () => {
+    const migrated = migrateSettingsStoreState({
+      developerUI: { autoApplyCodeUpdates: true },
+    });
+
+    expect(migrated?.developerUI).toMatchObject({ autoApplyCodeUpdates: true });
   });
 
   it('normalizes chat memory settings during migration', () => {

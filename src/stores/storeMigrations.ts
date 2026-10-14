@@ -260,6 +260,7 @@ export function migrateSettingsStoreState<T extends Record<string, unknown>>(per
     ...persisted,
     themePreset: typeof persisted.themePreset === 'string' ? persisted.themePreset : DEFAULT_SETTINGS.themePreset,
     developerUI: {
+      autoApplyCodeUpdates: Boolean((developerUI as { autoApplyCodeUpdates?: boolean }).autoApplyCodeUpdates),
       showMemoryDebug: Boolean(developerUI.showMemoryDebug),
       showRelationshipEvents: Boolean(developerUI.showRelationshipEvents),
       showAffectEvents: Boolean(developerUI.showAffectEvents),
