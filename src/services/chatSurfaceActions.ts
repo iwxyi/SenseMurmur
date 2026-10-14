@@ -10,6 +10,7 @@ import { getUsablePreferredAIProfile } from '../types/settings';
 import { useChatStore } from '../stores/useChatStore';
 import { logDeveloperDiagnostic } from './developerDiagnostics';
 import { retainRuntimeEvents } from './runtimeEventRetention';
+import { getLocalDataUserId } from './authStorageScope';
 
 export interface ChatSurfaceActionContext {
   chat: GroupChat | undefined;
@@ -42,7 +43,7 @@ export interface AutoSocialEventFlowContext {
   characters: AICharacter[];
   aiProfiles?: AIModelProfile[];
   updateChat: (id: string, updates: Partial<GroupChat>) => Promise<void>;
-  addMessage: (input: Record<string, unknown>) => Promise<unknown>;
+  addMessage: (input: Omit<Message, 'id' | 'timestamp' | 'isDeleted'> & { timestamp?: number }) => Promise<unknown>;
   appendEventMessage: (
     chatId: string,
     payload: {
@@ -448,20 +449,39 @@ export async function runSurfaceIntentImpl(
 }
 
 export async function runAutoSocialEventFlowImpl(sourceChat: GroupChat, context: AutoSocialEventFlowContext) {
+  const dataUserId = getLocalDataUserId();
+  const isCurrentSource = () => {
+    const source = useChatStore.getState().getChat(sourceChat.id);
+    return getLocalDataUserId() === dataUserId && source != null && source.deletedAt == null;
+  };
+  const assertCurrentSource = () => {
+    if (!isCurrentSource()) throw new Error('自动社交任务的账户或来源会话已失效');
+  };
   const { runSocialEventAutoFlow } = await import('./directSessionRuntime');
   const imageModelEnabled = Boolean(getUsablePreferredAIProfile(context.aiProfiles || [], 'image'));
   const textApiConfig = resolveTextApiConfig(context.aiProfiles || []);
   const currentChat = useChatStore.getState().getChat(sourceChat.id);
-  if (!currentChat || currentChat.deletedAt != null) return { handledEventId: null };
+  if (!currentChat || !isCurrentSource()) return { handledEventId: null };
   return runSocialEventAutoFlow(currentChat, {
     chats: useChatStore.getState().chats,
     characters: context.characters,
     imageModelEnabled,
     textApiConfig,
     allowWorldFallback: currentChat.isActive,
-    applyChatRuntimePatch: useChatStore.getState().applyChatRuntimePatch,
-    addChat: async (input) => useChatStore.getState().addChat(input as never),
-    addMessage: context.addMessage,
-    appendEventMessage: context.appendEventMessage,
+    applyChatRuntimePatch: (chatId, buildPatch) => isCurrentSource()
+      ? useChatStore.getState().applyChatRuntimePatch(chatId, (chat) => isCurrentSource() ? buildPatch(chat) : null)
+      : Promise.resolve(false),
+    addChat: async (input) => {
+      assertCurrentSource();
+      return useChatStore.getState().addChat(input as never);
+    },
+    addMessage: async (message) => {
+      assertCurrentSource();
+      return context.addMessage(message);
+    },
+    appendEventMessage: async (chatId, payload) => {
+      assertCurrentSource();
+      return context.appendEventMessage(chatId, payload);
+    },
   });
 }

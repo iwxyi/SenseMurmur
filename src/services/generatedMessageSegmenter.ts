@@ -1,5 +1,6 @@
 import type { GeneratedRoundMessage } from './chatEngine';
 import type { ConversationUpdate } from '../types/conversationContinuity';
+import type { SocialEventHintEnvelope } from '../types/runtimeEvent';
 
 function stateUpdateForSegment<T extends { evidenceText?: string }>(update: T | undefined, parts: string[], index: number) {
   if (!update) return undefined;
@@ -23,6 +24,15 @@ function interactionsForSegment(message: GeneratedRoundMessage, parts: string[],
   const owned = interactions.filter((interaction) => Boolean(interaction.evidenceText)
     && parts.findIndex((part) => part.includes(interaction.evidenceText)) === index);
   return { interactionHint: owned[0] || null, interactionHints: owned.length ? owned : null };
+}
+
+function socialEventsForSegment(hints: SocialEventHintEnvelope[] | null | undefined, parts: string[], index: number) {
+  const owned = (hints || []).filter((hint) => {
+    const quote = hint.evidenceText;
+    return quote ? parts.findIndex((part) => part.includes(quote)) === index
+      : parts.length === 1 && index === 0;
+  });
+  return owned.length ? owned : null;
 }
 
 // Compatibility-only protection for legacy extraMessages. The model-facing
@@ -88,7 +98,7 @@ export function splitGeneratedRoundMessage(message: GeneratedRoundMessage) {
       primaryAddressedTargetId: index === 0 ? message.primaryAddressedTargetId : null,
       replyDebtTargetIds: index === 0 ? message.replyDebtTargetIds : null,
       primaryReplyDebtTargetId: index === 0 ? message.primaryReplyDebtTargetId : null,
-      socialEventHints: index === 0 ? message.socialEventHints : null,
+      socialEventHints: socialEventsForSegment(message.socialEventHints, parts.map((item) => item.content), index),
       conflictFocus: stateUpdateForSegment(message.conflictFocus || undefined, parts.map((item) => item.content), index) || null,
     }));
   }
@@ -136,7 +146,7 @@ export function splitGeneratedRoundMessage(message: GeneratedRoundMessage) {
     primaryAddressedTargetId: index === 0 ? message.primaryAddressedTargetId : null,
     replyDebtTargetIds: index === 0 ? message.replyDebtTargetIds : null,
     primaryReplyDebtTargetId: index === 0 ? message.primaryReplyDebtTargetId : null,
-    socialEventHints: index === 0 ? message.socialEventHints : null,
+    socialEventHints: socialEventsForSegment(message.socialEventHints, parts, index),
     conflictFocus: stateUpdateForSegment(message.conflictFocus || undefined, parts, index) || null,
   }));
 }

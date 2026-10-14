@@ -80,6 +80,9 @@ describe('worldRuntimeProjection', () => {
       ]),
     ]);
     const members = [character('a', 'A')];
+    chat.runtimeEventsV2?.push({ id: 'restricted-patch', conversationId: chat.id,
+      kind: 'calendar_item_patch', createdAt: now - 1, visibility: 'public', visibleToIds: ['a'],
+      summary: '受限变更', payload: { calendarItemId: 'patrol', locationHint: '秘密地点', status: 'cancelled' } });
     const publicItems = projectWorldCalendar([chat], members, { now, inferTemporalStatus: false, publicOnly: true }).items;
     expect(publicItems).toHaveLength(1);
     expect(publicItems[0]).toMatchObject({ id: 'patrol', status: 'in_progress', locationHint: '南门' });
@@ -1437,7 +1440,7 @@ describe('worldRuntimeProjection', () => {
     ['status_update', 'status_note'],
     ['check_in', 'check_in_note'],
     ['react_to_moment', 'moment_reaction_note'],
-  ])('keeps tentative %s out of published moments', (eventKind, artifactType) => {
+  ])('keeps tentative and cancelled %s out of published moments', (eventKind, artifactType) => {
     const chats = [buildChat('chat-1', '群聊一', [{
       id: 'intent-1', conversationId: 'chat-1', kind: 'artifact', createdAt: 200,
       actorIds: ['a'], targetIds: ['user'], visibility: 'derived_public', summary: '待定意图',
@@ -1446,6 +1449,24 @@ describe('worldRuntimeProjection', () => {
     expect(projectWorldMoments(chats, [character('a', 'A')])).toEqual([]);
     expect(projectWorldMoments(chats, [character('a', 'A')], { includeCandidates: true }))
       .toMatchObject([{ debugState: 'candidate' }]);
+    chats[0].runtimeEventsV2![0].payload = { eventKind, artifactType, status: 'cancelled', text: '不问了' };
+    expect(projectWorldMoments(chats, [character('a', 'A')], { includeCandidates: true })).toEqual([]);
+  });
+
+  it.each(['completed', 'cancelled'])('hides the original intention and candidate after a %s outcome', (status) => {
+    const shared = { conversationId: 'chat-1', actorIds: ['a'], targetIds: ['user'],
+      visibility: 'derived_public' as const, summary: '问问近况' };
+    const payload = { eventKind: 'check_in', artifactType: 'check_in_note', text: '问问近况' };
+    const chats = [buildChat('chat-1', '群聊一', [
+      { ...shared, id: 'candidate-1', kind: 'event_candidate', createdAt: 100, payload },
+      { ...shared, id: 'intent-1', kind: 'artifact', createdAt: 200,
+        payload: { ...payload, status: 'tentative', candidateId: 'candidate-1' } },
+      { ...shared, id: 'result-1', kind: 'artifact', createdAt: 300,
+        payload: { ...payload, status, intentId: 'intent-1' } },
+    ])];
+    const moments = projectWorldMoments(chats, [character('a', 'A')], { includeCandidates: true });
+    expect(moments).toHaveLength(status === 'completed' ? 1 : 0);
+    expect(moments.every((moment) => moment.debugState !== 'candidate')).toBe(true);
   });
 
   it('projects check_in and react_to_moment as world moments', () => {

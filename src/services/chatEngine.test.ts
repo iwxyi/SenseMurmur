@@ -603,6 +603,31 @@ describe('chatEngine streaming preview', () => {
     expect(__chatEngineTestUtils.buildWorldEventInfluenceRulesPrompt(input)).not.toContain('within 6 hours');
   });
 
+  it('reads only the speaker accepted public activities from other rooms without granting writeback', () => {
+    const now = Date.now();
+    const event: RuntimeEventV2 = { id: 'other-activity', conversationId: 'other', kind: 'calendar_item_patch',
+      createdAt: now - 1000, actorIds: ['mei'], visibility: 'public', summary: '修器械',
+      payload: { calendarItemId: 'other-item', title: '修器械', kind: 'activity', status: 'in_progress',
+        participantIds: ['mei'], participantStates: { mei: 'going' }, locationHint: '南营' } };
+    const other = buildChat({ id: 'other', runtimeEventsV2: [event] });
+    const input = { chat: buildChat(), speaker: buildCharacter('mei', '美羊羊'),
+      members: [buildCharacter('mei', '美羊羊')], knownConversations: [other], now };
+    const prompt = __chatEngineTestUtils.buildWorldEventContextPrompt(input);
+    expect(prompt).toContain('Your public activity recorded elsewhere');
+    expect(prompt).toContain('修器械');
+    expect(prompt).toContain('update in its source conversation');
+    expect(prompt).not.toContain('other-item');
+    for (const patch of [
+      { visibility: 'pair_private' as const }, { visibleToIds: ['mei'] }, { visibleToRoles: ['moderator'] },
+      { payload: { ...event.payload, participantStates: { mei: 'invited' } } },
+      { payload: { ...event.payload, participantIds: ['hui'], participantStates: { hui: 'going' } } },
+      { payload: { ...event.payload, status: 'completed' } },
+    ]) expect(__chatEngineTestUtils.buildWorldEventContextPrompt({ ...input,
+      knownConversations: [{ ...other, runtimeEventsV2: [{ ...event, ...patch }] }] })).not.toContain('修器械');
+    expect(__chatEngineTestUtils.buildWorldEventContextPrompt({ ...input,
+      knownConversations: [{ ...other, deletedAt: now }] })).not.toContain('修器械');
+  });
+
   it('keeps an elapsed activity in generation context until completion is recorded', () => {
     const now = Date.now();
     const chat = buildChat({ runtimeEventsV2: [
@@ -823,7 +848,7 @@ describe('chatEngine streaming preview', () => {
     expect(contract).toContain('including a single send');
     expect(contract).toContain('repeating wording, cadence, or a marker is the deliberate social move');
     expect(contract).toContain('do not use it to excuse template drift');
-    expect(contract).toContain('socialEventHints: null unless the visible turn itself proposes');
+    expect(contract).toContain('socialEventHints reports either changes to a concrete shared social event OR the result of a known pending social intention');
     expect(contract).toContain('Recent transcript scope');
     expect(contract).toContain('does not repeat raw dialogue');
     expect(contract).not.toContain('美羊羊发个灰太狼证件照的图片');

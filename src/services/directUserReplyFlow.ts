@@ -4,7 +4,6 @@ import type { DriverMessageCommitResult, GroupChat } from '../types/chat';
 import type { Message } from '../types/message';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import { decayEmotionalState, getEmotionalBaseline } from './personalityDrift';
-import { resolveRuntimeEvolutionConfig } from './runtimeEvolutionConfig';
 import { retainRuntimeEvents } from './runtimeEventRetention';
 import { updateCharacterLayeredMemories } from './characterLayeredMemory';
 import { accumulateCharacterRuntime } from './characterRuntime';
@@ -124,7 +123,6 @@ export async function runDirectUserReplyFlow(params: {
     })();
   };
 
-  const evolution = resolveRuntimeEvolutionConfig(params.chat.runtimeEvolutionIntensity);
   const drift = directCharacter.personalityDrift || {};
   // The user's words are already visible to the generation model. Do not run a
   // second, local keyword interpretation before the reply; model-authored
@@ -193,6 +191,7 @@ export async function runDirectUserReplyFlow(params: {
     signal: params.signal,
     shouldContinue: params.shouldContinue,
     generationContext: {
+      knownConversations: useChatStore.getState().chats,
       buildPromptContext: (speaker) => sessionEngine.buildGenerationPromptContext?.({
         conversation: chatForGeneration,
         characters: generationCharactersForTurn,

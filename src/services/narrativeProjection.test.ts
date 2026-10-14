@@ -511,6 +511,19 @@ describe('projectNarrativeLines', () => {
     expect(topicLine?.summary).not.toContain('eventType');
   });
 
+  it('does not turn private runtime records into mystery pressure in an ordinary conversation', () => {
+    const lines = projectNarrativeLines({
+      chat: buildChat({ runtimeEventsV2: [{
+        id: 'diagnostic', conversationId: 'chat-1', kind: 'artifact', createdAt: 10,
+        actorIds: ['a'], visibility: 'moderator_only', summary: '内部状态记录',
+        payload: { artifactType: 'private_thread_summary' },
+      }] }),
+      characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')],
+      messages: [buildMessage({ content: '那就先歇一会儿。' })], now: 20,
+    });
+    expect(lines.some((line) => line.type === 'mystery')).toBe(false);
+  });
+
   it('projects private or moderator-only events as non-leaking mystery lines', () => {
     const event: RuntimeEventV2 = {
       id: 'evt-secret',

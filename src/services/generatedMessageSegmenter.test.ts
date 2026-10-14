@@ -27,6 +27,30 @@ function buildMessage(content: string, messageCount = 1): GeneratedRoundMessage 
 }
 
 describe('generatedMessageSegmenter', () => {
+  it.each(['modern', 'legacy'])('commits social events only with their evidence send (%s)', (format) => {
+    const contents = ['先查卷宗。', '明天一起去城南探路。', '明天一起去城南探路。'];
+    const hint = { eventKind: 'social_outing' as const, title: '城南探路',
+      targetIds: ['char-2'], evidenceText: '一起去城南探路' };
+    const message = { ...buildMessage(contents[0]),
+      ...(format === 'modern' ? { messageParts: contents.map((content) => ({ content })) }
+        : { extraMessages: contents.slice(1) }),
+      socialEventHints: [hint],
+    };
+
+    expect(splitGeneratedRoundMessage(message).map((segment) => segment.socialEventHints))
+      .toEqual([null, [hint], null]);
+    expect(splitGeneratedRoundMessage({ ...message, socialEventHints: [{ ...hint, evidenceText: '没有发出的邀约' }] })
+      .every((segment) => segment.socialEventHints === null)).toBe(true);
+    expect(splitGeneratedRoundMessage({ ...message, socialEventHints: [{ ...hint, evidenceText: undefined }] })
+      .every((segment) => segment.socialEventHints === null)).toBe(true);
+  });
+
+  it('retains legacy single-bubble social event hints without evidenceText', () => {
+    const hint = { eventKind: 'social_outing' as const, title: '城南探路', targetIds: ['char-2'] };
+    expect(splitGeneratedRoundMessage({ ...buildMessage('明天一起去城南探路。'), socialEventHints: [hint] })[0]?.socialEventHints)
+      .toEqual([hint]);
+  });
+
   it.each(['modern', 'legacy'])('commits outgoing interactions with their exact evidence send (%s)', (format) => {
     const primary = { actorId: 'char-1', targetId: 'char-2', kind: 'support' as const,
       intensity: 2, confidence: 0.9, evidenceText: '你先歇会',

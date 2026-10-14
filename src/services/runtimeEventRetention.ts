@@ -1,4 +1,5 @@
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
+import { getSocialIntentStateEventIds } from './socialIntentArtifact';
 
 export function isCalendarStateEvent(event: RuntimeEventV2) {
   if (event.kind === 'calendar_item_patch') return true;
@@ -21,9 +22,10 @@ export function getCalendarStateEventIds(events: RuntimeEventV2[]) {
 
 // Calendar patches are incremental state, so retaining only the latest loses fields.
 export function retainRuntimeEvents(events: RuntimeEventV2[], historyLimit: number) {
-  const calendarIds = getCalendarStateEventIds(events);
-  const history = events.filter((event) => !calendarIds.has(event.id));
+  const stateIds = getCalendarStateEventIds(events);
+  getSocialIntentStateEventIds(events, stateIds).forEach((id) => stateIds.add(id));
+  const history = events.filter((event) => !stateIds.has(event.id));
   const historyIds = new Set((historyLimit > 0 ? history.slice(-historyLimit) : [])
     .map((event) => event.id));
-  return events.filter((event) => calendarIds.has(event.id) || historyIds.has(event.id));
+  return events.filter((event) => stateIds.has(event.id) || historyIds.has(event.id));
 }

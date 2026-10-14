@@ -71,6 +71,30 @@ describe('auto social scheduling lifecycle', () => {
     ] as GroupChat['runtimeEventsV2']), isActive: true, updatedAt: 10_000 };
   }
 
+  it('checks the world repeatedly without chat mutations and keeps its deadline during messages', async () => {
+    const run = vi.fn(async () => undefined);
+    const onError = vi.fn();
+    const chat = { ...chatWithRuntimeEvents([]), isActive: true, updatedAt: Date.now() };
+    scheduler.update({ chat, runAutoSocialEventFlow: run, onError });
+    await vi.advanceTimersByTimeAsync(6_000);
+    scheduler.update({ chat: { ...chat, updatedAt: Date.now() }, runAutoSocialEventFlow: run, onError });
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
+    expect(run).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
+    expect(run).toHaveBeenCalledTimes(3);
+  });
+
+  it('continues world checks after an ineligible candidate produces no patch', async () => {
+    const run = vi.fn(async () => ({ handledEventId: null }));
+    scheduler.update({ chat: pendingChat(), runAutoSocialEventFlow: run, onError: vi.fn() });
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the deadline through continuous messages and uses the newest chat and callback', async () => {
     const oldRun = vi.fn(async () => undefined);
     const newRun = vi.fn(async () => undefined);
@@ -142,7 +166,7 @@ describe('auto social scheduling lifecycle', () => {
     finish();
   });
 
-  it('reports failure once and preserves the candidate without an infinite retry loop', async () => {
+  it('retries failures with bounded backoff and preserves an exhausted candidate', async () => {
     const error = new Error('storage unavailable');
     const run = vi.fn(async () => { throw error; });
     const onError = vi.fn();
@@ -150,10 +174,30 @@ describe('auto social scheduling lifecycle', () => {
     scheduler.update({ chat, runAutoSocialEventFlow: run, onError });
     await vi.advanceTimersByTimeAsync(8_000);
     scheduler.update({ chat: { ...chat, updatedAt: 19_000 }, runAutoSocialEventFlow: run, onError });
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(29_999);
     expect(run).toHaveBeenCalledTimes(1);
-    expect(onError).toHaveBeenCalledExactlyOnceWith(error);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(run).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(run).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(onError).toHaveBeenCalledTimes(3);
+    expect(onError).toHaveBeenLastCalledWith(error);
     expect(hasPendingAutoSocialEventCandidate(chat)).toBe(true);
+  });
+
+  it('recovers on retry using the latest callback without replaying a successful attempt', async () => {
+    const onError = vi.fn();
+    const run = vi.fn(async () => { throw new Error('offline'); });
+    scheduler.update({ chat: pendingChat(), runAutoSocialEventFlow: run, onError });
+    await vi.advanceTimersByTimeAsync(8_000);
+    const recoveredRun = vi.fn(async () => undefined);
+    scheduler.update({ chat: pendingChat(), runAutoSocialEventFlow: recoveredRun, onError });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(recoveredRun).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(recoveredRun).toHaveBeenCalledTimes(1);
   });
 
   it('cancels pending work on disposal and permits a fresh mount to schedule it', async () => {

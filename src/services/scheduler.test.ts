@@ -88,6 +88,28 @@ function buildMessage(patch: Partial<Message>): Message {
 }
 
 describe('scheduler speaker scoring', () => {
+  it('stops prioritizing participants after the primary conflict is resolved', () => {
+    const base = buildChat();
+    const conflict = {
+      id: 'dispute-1', scope: 'group' as const, type: 'goal_conflict' as const,
+      severity: 0.8, stage: 'open' as const, summary: '如何处理卷宗',
+      participantIds: ['b'], targetIds: ['b'], nextPressure: 'escalate' as const,
+      developmentHooks: ['invite_target_response' as const], sourceEventIds: [], updatedAt: Date.now(),
+    };
+    const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙')];
+    const messages = [buildMessage({ senderId: 'a', content: '卷宗放这儿。' })];
+    const withConflict = (stage: 'open' | 'resolved') => calculateWeights(
+      characters, messages, {}, 1, 0, null,
+      { ...base, worldState: { ...base.worldState, conflictState: {
+        primaryConflict: { ...conflict, stage }, activeConflicts: [], developmentHooks: [],
+        volatility: 0, cooling: 0, updatedAt: Date.now(),
+      } } },
+    );
+
+    expect(withConflict('open').find((item) => item.characterId === 'b')?.scoreBreakdown?.reasons).toContain('conflict');
+    expect(withConflict('resolved').find((item) => item.characterId === 'b')?.scoreBreakdown?.reasons).not.toContain('conflict');
+  });
+
   it('boosts the actor targeted by DirectorIntent and exposes score reasons', () => {
     const intent: DirectorIntent = {
       source: 'user_message',
@@ -301,6 +323,20 @@ describe('scheduler speaker scoring', () => {
     addressed.primaryReplyDebtTargetId = null;
 
     expect(resolvePendingReplyContext([buildCharacter('a', '甲'), buildCharacter('b', '乙')], [addressed])).toBeNull();
+  });
+
+  it('does not recreate explicitly empty reply debt from an interaction tag', () => {
+    const message: Message = { ...buildMessage({ senderId: 'a' }), replyDebtTargetIds: null,
+      primaryReplyDebtTargetId: null, interactionHint: { kind: 'apologize', targetId: 'b',
+        confidence: 0.9, intensity: 0.5, evidenceText: '方才误会你了。' } };
+    const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙'), buildCharacter('c', '丙')];
+    expect(resolvePendingReplyContext(characters, [message])).toBeNull();
+    expect(resolvePendingReplyContext(characters, [{ ...message, replyDebtTargetIds: ['c'] }]))
+      .toMatchObject({ targetIds: ['c'], primaryTargetId: 'c' });
+    const legacy = { ...message };
+    delete legacy.replyDebtTargetIds;
+    expect(resolvePendingReplyContext(characters, [legacy]))
+      .toMatchObject({ targetIds: ['b'], primaryTargetId: 'b' });
   });
 
   it('keeps an explicit reply debt open when another member interrupts', () => {

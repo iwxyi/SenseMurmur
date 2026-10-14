@@ -734,7 +734,8 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
   const items = new Map<string, WorldCalendarItem>();
   chats.forEach((chat) => {
     const events = (chat.runtimeEventsV2 || [])
-      .filter((event) => !options.publicOnly || !event.visibility || event.visibility === 'public' || event.visibility === 'derived_public')
+      .filter((event) => !options.publicOnly || ((!event.visibility || event.visibility === 'public' || event.visibility === 'derived_public')
+        && !event.visibleToIds?.length && !event.visibleToRoles?.length))
       .slice().sort((left, right) => left.createdAt - right.createdAt);
     events.forEach((event) => {
       if (isSocialOutingEvent(event)) {
@@ -1020,7 +1021,13 @@ export function projectWorldMoments(chats: GroupChat[], characters: AICharacter[
     matchedSource.lastEvidenceAt = Math.max(matchedSource.lastEvidenceAt, event.createdAt);
   };
   chats.forEach((chat) => {
-    (chat.runtimeEventsV2 || []).forEach((event) => {
+    const events = chat.runtimeEventsV2 || [];
+    const settledIntents = new Set(events.filter((event) => event.kind === 'artifact'
+      && ['completed', 'cancelled'].includes(getString(getPayload(event).status)))
+      .map((event) => getString(getPayload(event).intentId)).filter(Boolean));
+    const settledCandidates = new Set(events.filter((event) => settledIntents.has(event.id))
+      .map((event) => getString(getPayload(event).candidateId)).filter(Boolean));
+    events.forEach((event) => {
       const payload = getPayload(event);
       const eventKind = getString(payload.eventKind);
       const artifactType = getString(payload.artifactType);
@@ -1038,6 +1045,9 @@ export function projectWorldMoments(chats: GroupChat[], characters: AICharacter[
       const isReactMoment = isReactMomentArtifact || isReactMomentCandidate;
       if (!isMoment && !isStatus && !isCheckIn && !isReactMoment) return;
       const isTentativeArtifact = event.kind === 'artifact' && payload.status === 'tentative';
+      if ((isTentativeArtifact && settledIntents.has(event.id))
+        || (event.kind === 'event_candidate' && settledCandidates.has(event.id))) return;
+      if (event.kind === 'artifact' && !isTentativeArtifact && !isCompletedSocialArtifact(event)) return;
       if (isTentativeArtifact && !options.includeCandidates) return;
       if (isMomentArtifact && isLegacyMomentRecordText(getString(payload.text)) && !options.includeCandidates) return;
       const actorId = event.actorIds?.[0];

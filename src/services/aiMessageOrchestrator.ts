@@ -32,6 +32,7 @@ export async function generateAndCommitAiMessage(params: {
   shouldContinue?: () => boolean;
   onLocalInterception?: (event: LocalInterceptionEvent) => void | Promise<void>;
   generationContext?: {
+    knownConversations?: GroupChat[];
     promptContext?: SessionGenerationPromptContext | null;
     buildPromptContext?: (speaker: AICharacter) => SessionGenerationPromptContext | null | undefined;
   };

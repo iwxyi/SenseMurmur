@@ -311,6 +311,7 @@ export function buildSocialOutingEffectEvents(sourceChat: GroupChat, payload: So
       payload: {
         artifactType: 'outing_summary',
         eventKind: 'social_outing',
+        organizerId: payload.organizerId || payload.initiatorId,
         status: 'tentative',
         text: summary,
         expectedArtifacts: payload.expectedArtifacts || [],

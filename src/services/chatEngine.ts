@@ -2010,6 +2010,7 @@ function buildWorldEventContextPrompt(input: {
   chat: GroupChat;
   speaker: AICharacter;
   members: AICharacter[];
+  knownConversations?: GroupChat[];
   now?: number;
 }) {
   const now = input.now ?? Date.now();
@@ -2017,6 +2018,16 @@ function buildWorldEventContextPrompt(input: {
     .find((item) => item.actorId === input.speaker.id)
     || null;
   const calendar = projectWorldCalendar([input.chat], input.members, { now, inferTemporalStatus: false, publicOnly: true }).items;
+  const ownOtherActivities = projectWorldCalendar((input.knownConversations || [])
+    .filter((chat) => chat.id !== input.chat.id && chat.deletedAt == null && chat.memberIds.includes(input.speaker.id))
+    .map((chat) => ({ ...chat, runtimeEventsV2: (chat.runtimeEventsV2 || [])
+      .filter((event) => !event.visibleToIds?.length && !event.visibleToRoles?.length) })),
+  input.members, { now, inferTemporalStatus: false, publicOnly: true }).items
+    .filter((item) => !item.derivedFromItemId && item.participantIds.includes(input.speaker.id)
+      && item.participantStates[input.speaker.id] === 'going')
+    .filter((item) => item.status === 'in_progress' || ((item.status === 'planned' || item.status === 'confirmed')
+      && item.startAt != null && item.startAt >= now && item.startAt - now <= 48 * 60 * 60_000))
+    .sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 2);
   const upcomingCalendar = calendar
     .filter((item) => item.status !== 'cancelled' && item.status !== 'completed' && item.participantIds.includes(input.speaker.id))
     .filter((item) => {
@@ -2040,7 +2051,7 @@ function buildWorldEventContextPrompt(input: {
     .filter((item) => item.actorId !== input.speaker.id)
     .filter((item) => now - item.createdAt <= 24 * 60 * 60_000)
     .slice(0, 2);
-  if (!attention && !upcomingCalendar.length && !publicActivities.length && !recentMoments.length) return '';
+  if (!attention && !upcomingCalendar.length && !publicActivities.length && !recentMoments.length && !ownOtherActivities.length) return '';
   const lines: string[] = [];
   if (attention) {
     const targetName = attention.targetId === 'user'
@@ -2056,6 +2067,9 @@ function buildWorldEventContextPrompt(input: {
   upcomingCalendar.forEach((item) => {
     const timing = item.status === 'in_progress' ? 'Last recorded ongoing activity' : item.startAt == null ? 'Schedule with unconfirmed time' : 'Upcoming schedule';
     lines.push(`- ${timing}: ${item.title}${item.timeHint ? ` @ ${item.timeHint}` : ''}${item.locationHint ? ` at ${item.locationHint}` : ''}.`);
+  });
+  ownOtherActivities.forEach((item) => {
+    lines.push(`- Your public activity recorded elsewhere (context only; update in its source conversation): ${item.title}; recorded status: ${item.status}${item.timeHint ? ` @ ${item.timeHint}` : ''}${item.locationHint ? ` at ${item.locationHint}` : ''}. Do not attribute this knowledge to the people here.`);
   });
   publicActivities.forEach((item) => {
     const participants = item.participantIds.map((id) => {
@@ -4003,6 +4017,7 @@ export async function generateSpeakerMessage(params: {
   speakerSelection?: { speakerId?: string | null; reason?: string | null; bypassNotice?: string | null; policy?: Record<string, unknown> } | null;
   speakerScore?: SpeakerScoreBreakdown | null;
   generationContext?: {
+    knownConversations?: GroupChat[];
     promptContext?: SessionGenerationPromptContext | null;
     buildPromptContext?: (speaker: AICharacter) => SessionGenerationPromptContext | null | undefined;
     sessionEngine?: SessionEngineDefinition | null;
@@ -4334,7 +4349,7 @@ export async function generateSpeakerMessage(params: {
     { id: 'pending_reply', layer: 'task', priority: 10, content: pendingReplyPrompt },
     { id: 'user_guidance', layer: 'task', priority: 20, content: buildUserGuidancePrompt(userGuidance, params.speaker, effectiveMembers, mediaCapabilities, priorGuidanceReplies) },
     { id: 'room_floor_state', layer: 'task', priority: 25, content: buildGuidanceFloorPrompt(guidanceFloorState) },
-    { id: 'world_event_context', layer: 'scene', priority: 20, content: buildWorldEventContextPrompt({ chat: params.chat, speaker: params.speaker, members: effectiveMembers }) },
+    { id: 'world_event_context', layer: 'scene', priority: 20, content: buildWorldEventContextPrompt({ chat: params.chat, speaker: params.speaker, members: effectiveMembers, knownConversations: params.generationContext?.knownConversations }) },
     { id: 'world_influence', layer: 'scene', priority: 30, content: worldInfluenceSnapshot.prompt },
     { id: 'current_intent', layer: 'task', priority: 30, content: usesUnifiedGroupTurn ? '' : buildCurrentIntentPrompt({ directorIntent: effectiveDirectorIntent, intent }) },
     { id: 'private_turn_priority', layer: 'task', priority: 35, content: buildPrivateTurnPriorityPrompt(params.chat) },
@@ -4696,6 +4711,7 @@ export const runOneRound = async (
   callbacks: ChatEngineCallbacks,
   profiles?: AIModelProfile[],
   generationContext?: {
+    knownConversations?: GroupChat[];
     promptContext?: SessionGenerationPromptContext | null;
     buildPromptContext?: (speaker: AICharacter) => SessionGenerationPromptContext | null | undefined;
     sessionEngine?: SessionEngineDefinition | null;

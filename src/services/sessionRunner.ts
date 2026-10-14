@@ -237,6 +237,7 @@ export async function runSessionLoop(params: {
   getStreamingMessage?: () => Message | null;
   getDisplayedStreamingMessage?: () => Message | null;
   getCurrentChat?: () => GroupChat | undefined;
+  getKnownConversations?: () => GroupChat[];
   getCurrentCharacters?: () => AICharacter[];
   ensureCharacterDetail?: (characterId: string) => Promise<AICharacter | null>;
   isRunning: () => boolean;
@@ -578,12 +579,13 @@ export async function runSessionLoop(params: {
         engine.buildGenerationPromptContext
           ? {
               sessionEngine: engine,
+              knownConversations: params.getKnownConversations?.(),
               buildPromptContext: (speaker) => engine.buildGenerationPromptContext?.({
                 ...generationContext,
                 speaker,
               }) || null,
             }
-          : { sessionEngine: engine },
+          : { sessionEngine: engine, knownConversations: params.getKnownConversations?.() },
         params.getCooldownMap?.()
       );
 

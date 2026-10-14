@@ -93,7 +93,7 @@ export function useChatSurfaceActions(params: UseChatSurfaceActionsParams) {
       characters: params.characters,
       aiProfiles: params.aiProfiles,
       updateChat: params.updateChat,
-      addMessage: params.addMessage as unknown as (input: Record<string, unknown>) => Promise<unknown>,
+      addMessage: params.addMessage,
       appendEventMessage: params.appendEventMessage,
     });
   }, [params.addMessage, params.aiProfiles, params.appendEventMessage, params.characters, params.chats, params.updateChat]);

@@ -496,12 +496,12 @@ function buildGoalLines(chat: GroupChat, characters: AICharacter[], now: number)
 }
 
 function buildMysteryLines(chat: GroupChat, now: number): NarrativeLineProjection[] {
+  const scenario = resolveSessionDefinition(chat).kind;
+  if (scenario.family !== 'mystery' && scenario.family !== 'deduction') return [];
   const privateEvents = (chat.runtimeEventsV2 || [])
     .filter((event) => event.visibility === 'role_private' || event.visibility === 'moderator_only' || event.visibility === 'pair_private')
     .slice(-8);
   const hiddenRoles = (chat.scenarioState?.roleAssignments || []).filter((assignment) => assignment.summary || assignment.factionId || assignment.roleId);
-  const scenario = resolveSessionDefinition(chat).kind;
-  if (!privateEvents.length && scenario.family !== 'mystery' && scenario.family !== 'deduction') return [];
   const newest = privateEvents.at(-1);
   const ageMinutes = newest ? Math.max(0, now - newest.createdAt) / 60_000 : 0;
   const recency = newest ? clamp01(1 - ageMinutes / 90) : 0.36;

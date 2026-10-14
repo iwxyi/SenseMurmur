@@ -151,7 +151,7 @@ export interface ConflictSpeakerContext {
 
 function resolveConflictSpeakerContext(chat?: GroupChat | null): ConflictSpeakerContext | null {
   const primary = chat?.worldState.conflictState?.primaryConflict || null;
-  if (!primary) return null;
+  if (!primary || primary.stage === 'resolved') return null;
   return {
     participantIds: primary.participantIds || [],
     targetIds: primary.targetIds || [],
@@ -269,11 +269,13 @@ export function resolvePendingReplyContext(characters: AICharacter[], recentMess
       .concat(candidate.addressedTargetIds || []);
     // New messages distinguish the current addressee from an unanswered
     // request. Persisted pre-split messages keep the old field as debt.
-    const explicit = ('replyDebtTargetIds' in candidate)
+    const hasReplyDebtDecision = 'replyDebtTargetIds' in candidate;
+    const explicit = hasReplyDebtDecision
       ? (candidate.primaryReplyDebtTargetId ? [candidate.primaryReplyDebtTargetId] : []).concat(candidate.replyDebtTargetIds || [])
       : legacyExplicit;
+    const replyWorthyTargetIds = hasReplyDebtDecision ? [] : getReplyWorthyInteractionTargetIds(candidate, characters);
     const possibleTargets = explicit
-      .concat(getReplyWorthyInteractionTargetIds(candidate, characters))
+      .concat(replyWorthyTargetIds)
       .filter((targetId, index, array): targetId is string => Boolean(targetId) && array.indexOf(targetId) === index)
       .filter((targetId) => targetId !== candidate.senderId && characters.some((character) => (
         character.id === targetId && !character.deletedAt && (!chat || !isChatMemberMuted(chat, targetId))
@@ -297,7 +299,7 @@ export function resolvePendingReplyContext(characters: AICharacter[], recentMess
       sourceMessage,
       targetIds: unresolvedTargets,
       explicitTargetIds: explicit.filter((targetId) => unresolvedTargets.includes(targetId)),
-      replyWorthyTargetIds: getReplyWorthyInteractionTargetIds(candidate, characters).filter((targetId) => unresolvedTargets.includes(targetId)),
+      replyWorthyTargetIds: replyWorthyTargetIds.filter((targetId) => unresolvedTargets.includes(targetId)),
       unmetTurns: countUnmetTurns(recentAiMessages, unresolvedTargets[0], sourceMessage.id),
     });
   }

@@ -5,6 +5,15 @@ import { hasPendingAutoSocialEventCandidate } from '../hooks/useChatAutoSocialFl
 import { normalizeConversation } from '../types/chat';
 
 describe('calendar event retention', () => {
+  it('preserves unresolved social intents and prevents retained calendar intents resurrecting after completion', () => {
+    const intent: RuntimeEventV2 = { id: 'intent', conversationId: 'chat', kind: 'artifact', createdAt: 1, visibility: 'derived_public', summary: 'pending',
+      payload: { status: 'tentative', eventKind: 'check_in', initiatorId: 'a' } };
+    expect(retainRuntimeEvents([intent], 0)).toEqual([intent]);
+    const completed: RuntimeEventV2 = { ...intent, id: 'result', createdAt: 2, payload: { status: 'completed', intentId: 'intent' } };
+    expect(retainRuntimeEvents([intent, completed], 0)).toEqual([]);
+    const reminder = { ...intent, payload: { status: 'tentative', eventKind: 'status_update', initiatorId: 'a', reasonType: 'world_calendar_upcoming_reminder' } };
+    expect(retainRuntimeEvents([reminder, completed], 0)).toEqual([reminder, completed]);
+  });
   it.each([
     { eventKind: 'social_outing' },
     { eventKind: 'status_update', reasonType: 'world_calendar_upcoming_reminder' },

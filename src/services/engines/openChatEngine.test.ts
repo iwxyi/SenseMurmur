@@ -7,6 +7,7 @@ import type { DriverMessageCommitResult } from '../../types/chat';
 import type { RuntimeEventV2, SocialEventCandidatePayload, SocialEventHintEnvelope } from '../../types/runtimeEvent';
 import { setAIGenerationRuntimeConfig } from '../aiGenerationRuntimeConfig';
 import { setCompanionshipRuntimeConfig } from '../companionshipRuntimeConfig';
+import { buildPendingSocialIntentContext, buildSocialIntentArtifact } from '../socialIntentArtifact';
 
 const generateResponseMock = vi.fn();
 const generateJsonResponseMock = vi.fn();
@@ -145,6 +146,24 @@ describe('openChatEngine runtime context', () => {
 });
 
 describe('openChatEngine.onMessageCommitted', () => {
+  it('commits an intention outcome, consumes it in next context and does not recreate a candidate', async () => {
+    const payload: SocialEventCandidatePayload = { eventKind: 'check_in', initiatorId: 'a', targetIds: ['b'], participantIds: ['a', 'b'],
+      seedIntent: '问问乙睡得怎样', reasonType: 'care', confidence: 0.9, urgency: 'soon', visibilityPlan: 'public' };
+    const artifact = buildSocialIntentArtifact(payload, '甲', 'candidate');
+    if (!artifact) throw new Error('missing social artifact');
+    const chat = buildChat({ runtimeEventsV2: [{ ...artifact, id: 'pending-check-in', kind: 'artifact',
+      conversationId: 'chat-1', actorIds: ['a'], targetIds: ['b'], createdAt: 1 }] });
+    const message: OpenChatCommittedMessageForTest = { id: 'delivered', type: 'ai', senderId: 'a', content: '昨晚睡得怎样？',
+      socialEventHints: [{ eventKind: 'check_in', intentId: 'pending-check-in', outcome: 'completed', evidenceText: '昨晚睡得怎样？', confidence: 0.9 }] };
+    const result = await openChatEngine.onMessageCommitted({ conversation: chat, message, characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')],
+      previousAiMessage: null, recentMessages: [] });
+    const next = applyResultToChat(chat, result);
+    expect(next.runtimeEventsV2).toContainEqual(expect.objectContaining({ evidenceMessageIds: ['delivered'], payload: expect.objectContaining({
+      status: 'completed', intentId: 'pending-check-in', text: '昨晚睡得怎样？',
+    }) }));
+    expect(buildPendingSocialIntentContext(next, 'a')).toBe('');
+    expect(next.runtimeEventsV2?.filter((event) => event.kind === 'event_candidate')).toEqual([]);
+  });
   it('preserves old calendar state through a long-history message commit and subsequent update', async () => {
     const calendar: RuntimeEventV2 = {
       id: 'old-activity', conversationId: 'chat-1', kind: 'calendar_item_patch',
@@ -3466,6 +3485,7 @@ describe('openChatEngine.onMessageCommitted', () => {
     const outing = readRuntimeEvents(result).find((event) => event.kind === 'event_candidate' && (event.payload as { eventKind?: string; dedupeKey?: string }).eventKind === 'social_outing' && (event.payload as { dedupeKey?: string }).dedupeKey === 'outing-tea-house');
     expect(outing).toBeTruthy();
     expect((outing?.payload as SocialEventCandidatePayload).participantStates).toMatchObject({ b: 'declined' });
+    expect((outing?.payload as SocialEventCandidatePayload).organizerId).toBe('a');
     expect((outing?.payload as SocialEventCandidatePayload).participantIds).toEqual(['b']);
   });
 

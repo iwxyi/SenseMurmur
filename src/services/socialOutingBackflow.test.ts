@@ -3,6 +3,7 @@ import { normalizeConversation } from '../types/chat';
 import type { RuntimeEventV2, SocialEventCandidatePayload } from '../types/runtimeEvent';
 import { updateSourceChatAfterSocialOuting } from './directSessionRuntime';
 import { projectWorldCalendarItems } from './worldRuntimeProjection';
+import { applyPresenceUpdateToTransition, canUpdateSpeakerActivity } from './characterPresence';
 
 function buildPayload(overrides: Partial<SocialEventCandidatePayload> = {}): SocialEventCandidatePayload {
   return {
@@ -48,6 +49,29 @@ function buildChat() {
 }
 
 describe('social outing backflow', () => {
+  it.each(['in_progress', 'cancelled', 'completed'] as const)('lets the original organizer report %s through the production activity channel', (status) => {
+    const chat = buildChat();
+    const patch = updateSourceChatAfterSocialOuting(chat, buildPayload({
+      initiatorId: 'b', organizerId: 'a', title: '营中夜议', dedupeKey: 'meeting',
+      participantStates: { a: 'going', b: 'going', c: 'declined' },
+    }), ['甲', '乙', '丙']);
+    const source = { ...chat, ...patch };
+    expect(canUpdateSpeakerActivity(source, { id: 'a' }, 'meeting')).toBe(true);
+    expect(canUpdateSpeakerActivity(source, { id: 'b' }, 'meeting')).toBe(false);
+    const result = applyPresenceUpdateToTransition({ chat: source,
+      transition: { chatPatch: {}, characterPatches: [], runtimeEvents: [] }, now: Date.now() + 10,
+      message: { id: `report-${status}`, senderId: 'a', type: 'ai', content: '夜议的安排变了。', metadata: {
+        activityUpdate: { calendarItemId: 'meeting', title: '营中夜议', kind: 'activity', status,
+          evidenceText: '夜议的安排变了', availability: 'online' },
+      } },
+    });
+    const items = projectWorldCalendarItems([{ ...source, ...result.chatPatch }], []);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: 'meeting', status,
+      participantStates: { a: 'going', b: 'going', c: 'declined' } });
+    expect(result.characterPatches.every((item) => item.characterId === 'a')).toBe(true);
+  });
+
   it('dedupe helper treats same-cluster outing as already backflowed', () => {
     const chat = buildChat();
     const payload = buildPayload({ dedupeKey: 'outing-1' });

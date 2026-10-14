@@ -105,12 +105,21 @@ describe('state evidence source boundary', () => {
     { activityUpdate: { title: '探路', kind: 'travel', status: 'in_progress', evidenceText: '旧台词' } },
     { presenceUpdate: { status: 'away', evidenceText: '旧台词' } },
     { conflictFocus: { key: 'gate', type: 'goal', participantIds: ['speaker', 'other'], severity: 4, evidenceText: '旧台词' } },
+    { socialEventHints: [{ eventKind: 'social_outing', evidenceText: '旧台词' }] },
   ])('checks each durable state update: %j', (update) => {
     expect(hasInvalidStateEvidence({ content: '本轮台词', ...update } as Parameters<typeof hasInvalidStateEvidence>[0])).toBe(true);
   });
 
   it('allows a turn without state updates', () => {
     expect(hasInvalidStateEvidence({ content: '看过了。', conversationUpdate: null })).toBe(false);
+  });
+
+  it('requires a quote to assign a social event to one send while accepting legacy single sends', () => {
+    const socialEventHints = [{ eventKind: 'social_outing' as const }];
+    expect(hasInvalidStateEvidence({ content: '去逛逛？', socialEventHints })).toBe(false);
+    expect(hasInvalidStateEvidence({ messages: [{ content: '吃过了。' }, { content: '去逛逛？' }], socialEventHints })).toBe(true);
+    expect(hasInvalidStateEvidence({ messages: [{ content: '吃过了。' }, { content: '去逛逛？' }],
+      socialEventHints: [{ ...socialEventHints[0], evidenceText: '去逛逛' }] })).toBe(false);
   });
 });
 
@@ -689,7 +698,7 @@ describe('buildInlineInteractionContract analysis room detection', () => {
       recentMessages: [],
     });
 
-    expect(contract).toContain('socialEventHints: null unless the visible turn itself proposes');
+    expect(contract).toContain('socialEventHints reports either changes to a concrete shared social event OR the result of a known pending social intention');
     expect(contract).toContain('"eventKind":"social_outing"');
     expect(contract).toContain('eventKind is REQUIRED');
     expect(contract).toContain('"participantIds"');

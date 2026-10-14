@@ -49,6 +49,17 @@ export function buildPresencePatchFromMessage(params: {
 }
 
 export function canUpdateSpeakerActivity(chat: GroupChat, speaker: Pick<AICharacter, 'id' | 'presence'>, calendarItemId: string): boolean {
+  const arrangement = [...(chat.runtimeEventsV2 || [])].sort((a, b) => a.createdAt - b.createdAt).find((event) => {
+    const payload = event.payload as Record<string, unknown>;
+    return (event.kind === 'event_candidate' || event.kind === 'artifact')
+      && (event.visibility === 'public' || event.visibility === 'derived_public')
+      && !event.visibleToIds?.length && !event.visibleToRoles?.length
+      && payload.eventKind === 'social_outing' && payload.dedupeKey === calendarItemId;
+  });
+  if (arrangement) {
+    const payload = arrangement.payload as Record<string, unknown>;
+    return (payload.organizerId || payload.initiatorId || arrangement.actorIds?.[0]) === speaker.id;
+  }
   return speaker.presence?.calendarItemId === calendarItemId || Boolean(chat.runtimeEventsV2?.some((event) => (
     event.kind === 'calendar_item_patch'
     && (!event.visibility || event.visibility === 'public')
@@ -82,7 +93,7 @@ export function applyPresenceUpdateToTransition(params: {
   };
   if (validActivity && params.chat) {
     patch = null;
-    // Only the speaker's own activity records can be updated through this channel.
+    // Own activities and shared activities organized by this speaker use the same writeback channel.
     const currentEvents = new Map((params.transition.chatPatch.runtimeEventsV2 || params.chat.runtimeEventsV2 || []).map((event) => [event.id, event]));
     params.transition.chatRuntimeDelta?.runtimeEventsV2?.upserts.forEach((event) => currentEvents.set(event.id, event));
     const currentChat = { ...params.chat, runtimeEventsV2: [...currentEvents.values()] };
@@ -118,7 +129,7 @@ export function applyPresenceUpdateToTransition(params: {
       ...(existing ? {
         addParticipantIds: participantIds,
         addParticipantStates: Object.fromEntries(participantIds.map((id) => [id,
-          id === params.message.senderId ? 'going' : existing.participantStates[id] || 'invited'])),
+          existing.participantStates[id] || (id === params.message.senderId ? 'going' : 'invited')])),
       } : {
         participantIds, participantStates: Object.fromEntries(participantIds.map((id) => [id, id === params.message.senderId ? 'going' : 'invited'])),
       }),

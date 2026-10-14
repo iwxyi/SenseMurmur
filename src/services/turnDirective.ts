@@ -19,6 +19,8 @@ export interface TurnDirective {
   roomStyle: 'casual' | 'analytical' | 'discovery' | 'dramatic';
   characterDrive: CharacterTurnDrive;
   socialJob: string;
+  /** Hard replies keep a real obligation; ordinary group cues remain optional. */
+  socialJobRequired?: boolean;
   targetName?: string;
   targetIsOptional?: boolean;
   emotionalUndercurrent: string;
@@ -86,7 +88,7 @@ function describeSocialJob(plan: ConversationMovePlan, intent: SpeakIntent) {
   if (plan.moveType === 'answer_unresolved_question') return 'answer the unresolved address with one concrete stance or opening';
   if (intent.stance === 'support' || intent.stance === 'back_up') return 'show social support while keeping independent judgment';
   if (intent.stance === 'side_comment' || intent.delivery === 'side_remark') return 'drop a side comment that changes the room temperature or angle';
-  return 'make one locally specific conversational move';
+  return 'notice one locally specific detail if it genuinely matters; otherwise let the exchange rest';
 }
 
 function describeEmotion(innerLife: InnerLifeProjection) {
@@ -233,6 +235,7 @@ export function buildTurnDirective(input: BuildTurnDirectiveInput): TurnDirectiv
       includeRelationshipNote: true,
     }),
     socialJob: describeSocialJob(input.conversationMovePlan, input.intent),
+    socialJobRequired: !targetIsOptionalThread,
     targetName,
     targetIsOptional: targetIsOptionalThread,
     emotionalUndercurrent: input.innerLife.activeAffect && input.innerLife.activeAffect.counterpartId === targetActorId
@@ -266,15 +269,17 @@ export function buildTurnDirectivePrompt(directive: TurnDirective | null | undef
     ? `\n- Room atmosphere: ${directive.roomAtmosphere.join(' ')} This is environmental context, not a speaking order or a demand to create conflict.`
     : '';
   // Project evidence, not a locally assigned recipient or expression checklist.
+  const cueLabel = directive.socialJobRequired === false ? 'Optional attention cue' : 'Live';
+  const cueJob = directive.socialJobRequired === false ? `if useful, ${directive.socialJob}` : directive.socialJob;
   const targetLine = directive.targetName && !directive.targetIsOptional
-    ? `\n- Live: ${directive.socialJob} to ${directive.targetName}; do not explain the whole topic.`
+    ? `\n- ${cueLabel}: ${cueJob} to ${directive.targetName}; do not explain the whole topic.`
     : directive.targetIsOptional
-      ? `\n- Live: ${directive.socialJob}; latest speaker is context, not recipient; do not explain the whole topic.`
-      : `\n- Live: ${directive.socialJob}; do not explain the whole topic.`;
+      ? `\n- ${cueLabel}: ${cueJob}; latest speaker is context, not recipient; do not explain the whole topic.`
+      : `\n- ${cueLabel}: ${cueJob}; do not explain the whole topic.`;
   return `\n## Turn Directive — This Person in This Moment
 Speak as this person among people who share this exchange. Choose what catches their attention and what they actually want to say now. Their words may have warmth, bite, hesitation or delight; the exchange decides the shape.
-Acknowledgement is implicit by default. Name someone or explicitly agree when that itself matters to the relationship; responding does not require announcing agreement, receipt, or a recap. A bare receipt such as “I acknowledge that”, “noted”, or “I will listen” is not a completed social move: if you acknowledge, let the line reveal a concrete stance, choice, condition, responsibility, question, or immediate action. A reaction may still reveal relief, reluctance, affection or resistance without adding another task when the exchange is genuinely complete. Let a completed exchange rest. Honor explicit requests for a deliverable and its format.
-${targetLine}${roomAtmosphereLine}
+Acknowledgement is implicit by default. Name someone or explicitly agree when that itself matters to the relationship; responding does not require announcing agreement, receipt, or a recap. A brief acknowledgement can be the whole response when it fits this person and moment. Do not attach a new condition, responsibility, question, or action just to make a short reaction count as progress. Let relief, reluctance, affection or resistance show when grounded in the exchange. Let a completed exchange rest. Honor explicit requests for a deliverable and its format.
+${targetLine}${directive.socialJobRequired === false ? '\n- This is not a quota. A brief attitude, a concrete reaction, or no new point is valid when the exchange has landed; do not manufacture a question, condition, task, or story update.' : ''}${roomAtmosphereLine}
 - Personal meaning: ${directive.characterDrive.stake}. Felt residue: ${directive.characterDrive.feltReaction}.
 - Attention habits: ${directive.characterDrive.attentionLens}.
 - Emotional and dramatic context: ${directive.emotionalUndercurrent}. ${directive.narrativePressure ? `${directive.narrativePressure}.` : 'No dramatic escalation is required.'} ${directive.requiredChange}.

@@ -43,7 +43,6 @@ import { getConversationLoopStartBlockReason, useChatRunLoop } from '../hooks/us
 import { useChatSidebarProjection } from '../hooks/useChatSidebarProjection';
 import { useMessageAnalysis } from '../hooks/useMessageAnalysis';
 import { useChatSurfaceActions } from '../hooks/useChatSurfaceActions';
-import { useChatAutoSocialFlow } from '../hooks/useChatAutoSocialFlow';
 import { useImageResourceAvailability } from '../hooks/useImageResourceAvailability';
 import { getSyncableCharacterMemberIds } from '../services/pageSyncScopeContract';
 import SessionInfoCards from '../components/chat/SessionInfoCards';
@@ -3169,7 +3168,7 @@ export default function ChatDetailPage() {
     });
   }, [addMessageStable, chat, chatInteractionDisabled, chatReadOnlyReason, commitPersistedManualRuntime, currentChatMessages, effectiveSpeakAsChar, enqueueManualInput, getNextMessageTimestamp, id, setSnackbar, startConversationLoopIfNeeded, updateChat]);
 
-  const { runSessionAction, normalizeAndRunSurfaceIntent, runAutoSocialEventFlow } = useChatSurfaceActions({
+  const { runSessionAction, normalizeAndRunSurfaceIntent } = useChatSurfaceActions({
     chat,
     chats,
     characters,
@@ -3760,7 +3759,6 @@ export default function ChatDetailPage() {
     setSnackbar({ open: true, message: '已重新加入生成队列', severity: 'info' });
   }, [aiProfiles, characters, chatInteractionDisabled, chatReadOnlyReason, currentChatMessages, upsertMessageStable]);
 
-  useChatAutoSocialFlow({ chat, runAutoSocialEventFlow, onError: (error) => showErrorToast(error instanceof Error ? error.message : String(error)) });
 
   const handleLoadOlderMessages = useCallback(async () => {
     if (!id || loadingMoreRef.current || !hasMore || currentChatMessages.length === 0) return;

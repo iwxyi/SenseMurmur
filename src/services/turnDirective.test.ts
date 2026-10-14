@@ -135,7 +135,7 @@ const turnPlan: TurnPlan = {
 };
 
 describe('turnDirective', () => {
-  it('keeps receipt language from standing in for a social result', () => {
+  it('allows a brief reaction without requiring another task or question', () => {
     const directive = buildTurnDirective({
       chat: chat(),
       speaker: character('rui', '瑞瑞'),
@@ -147,10 +147,10 @@ describe('turnDirective', () => {
       turnPlan,
     });
     const prompt = buildTurnDirectivePrompt(directive);
-    expect(prompt).toContain('A bare receipt');
-    expect(prompt).toContain('concrete stance, choice, condition, responsibility, question, or immediate action');
-    expect(prompt).toContain('A reaction may still reveal');
-    expect(prompt).toContain('Live: add one condition, cost, or limit that changes the next response');
+    expect(prompt).toContain('A brief acknowledgement can be the whole response');
+    expect(prompt).toContain('Do not attach a new condition');
+    expect(prompt).toContain('Let a completed exchange rest');
+    expect(prompt).toContain('Optional attention cue: if useful, add one condition, cost, or limit that changes the next response');
     expect(prompt).not.toContain('changes the next response to 陈越');
     expect(prompt).toContain('latest speaker is context, not recipient');
     expect(prompt).toContain('do not explain the whole topic');
@@ -330,6 +330,42 @@ describe('turnDirective', () => {
     expect(prompt).toContain('not an assigned recipient');
     expect(prompt).not.toContain('live attention is on');
     expect(prompt).not.toContain('Active target: 陈越');
+  });
+
+  it('marks an ordinary group cue as optional so a landed exchange does not become a task', () => {
+    const directive = buildTurnDirective({
+      chat: chat(),
+      speaker: character('rui', '瑞瑞'),
+      members: [character('rui', '瑞瑞'), character('chen', '陈越')],
+      messages: [message({ senderId: 'chen', content: '这事先这样，回头再看。' })],
+      intent: { ...intent, target: undefined, stance: 'side_comment' },
+      innerLife,
+      conversationMovePlan: { ...movePlan, targetActorId: 'chen', moveType: 'react_lightly', reason: 'default_room_move' },
+      turnPlan,
+    });
+
+    expect(directive?.socialJobRequired).toBe(false);
+    const prompt = buildTurnDirectivePrompt(directive);
+    expect(prompt).toContain('Optional attention cue');
+    expect(prompt).toContain('if useful');
+    expect(prompt).toContain('no new point is valid');
+    expect(prompt).not.toContain('- Live:');
+  });
+
+  it('keeps a hard pending reply as a real live obligation', () => {
+    const directive = buildTurnDirective({
+      chat: chat(),
+      speaker: character('rui', '瑞瑞'),
+      members: [character('rui', '瑞瑞'), character('chen', '陈越')],
+      messages: [message({ senderId: 'chen', content: '瑞瑞，你现在给个准话。' })],
+      intent,
+      innerLife,
+      conversationMovePlan: { ...movePlan, reason: 'pending_direct_address' },
+      turnPlan,
+    });
+
+    expect(directive?.socialJobRequired).toBe(true);
+    expect(buildTurnDirectivePrompt(directive)).toContain('- Live:');
   });
 
   it('projects structured room atmosphere into ordinary group turns without assigning a speaker', () => {

@@ -174,6 +174,7 @@ export function useChatRunLoop(params: {
         getStreamingMessage: () => current.streamingMessageRef.current,
         getDisplayedStreamingMessage: current.getDisplayedStreamingMessage,
         getCurrentChat: () => useChatStore.getState().chats.find((item) => item.id === current.chatId),
+        getKnownConversations: () => useChatStore.getState().chats,
         getCurrentCharacters: () => useCharacterStore.getState().characters,
         ensureCharacterDetail: (characterId) => useCharacterStore.getState().loadCharacter(characterId),
         isRunning: () => current.isRunningRef.current,

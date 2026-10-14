@@ -28,7 +28,7 @@ import { isCharacterFeatureEnabled } from '../characterGenerationPolicy';
 import { isPostMomentDelaySourceEventKind, resolvePostMomentPublishGuard } from '../postMomentPublishPolicy';
 import { applyConversationUpdate } from '../conversationContinuity';
 import { retainRuntimeEvents } from '../runtimeEventRetention';
-import { buildSocialIntentArtifact } from '../socialIntentArtifact';
+import { buildSocialIntentArtifact, buildSocialIntentOutcomes } from '../socialIntentArtifact';
 
 const MAX_OPEN_CHAT_RUNTIME_EVENTS = 120;
 
@@ -701,7 +701,8 @@ async function resolveSocialEventHints(params: {
   void params.characters;
   void params.recentMessages;
   void params.apiConfig;
-  const hints = normalizeSocialEventHints(params.message.socialEventHints);
+  const hints = normalizeSocialEventHints(params.message.socialEventHints)
+    .filter((hint) => !hint.evidenceText || params.message.content.includes(hint.evidenceText));
   return hints.length ? hints : null;
 }
 
@@ -782,6 +783,7 @@ function buildSocialOutingCandidateFromHint(params: {
   const payload: SocialEventCandidatePayload = {
     eventKind: 'social_outing',
     initiatorId: params.message.senderId,
+    organizerId: existingOuting?.organizerId || existingOuting?.initiatorId || params.message.senderId,
     participantIds,
     targetIds: validTargetIds.length ? validTargetIds : fallbackTargetIds,
     reasonType: hint.reasonType || 'celebration',
@@ -932,6 +934,7 @@ function mergeCandidatePayloads(existing: SocialEventCandidatePayload, incoming:
   return {
     ...existing,
     ...incoming,
+    ...(existing.eventKind === 'social_outing' ? { organizerId: existing.organizerId || existing.initiatorId } : {}),
     dedupeKey: existing.dedupeKey || incoming.dedupeKey || fallbackKey,
     title: choosePreferredText(existing.title, incoming.title),
     activityType: choosePreferredText(existing.activityType, incoming.activityType),
@@ -1405,7 +1408,10 @@ async function buildSocialEventCandidateEvents(params: {
   message: Pick<Message, 'content' | 'senderId'> & { socialEventHints?: SocialEventHintEnvelope[] | null };
   apiConfig?: APIConfig;
 }) {
-  const selection = buildSocialEventCandidates(params);
+  const selection = buildSocialEventCandidates({
+    ...params,
+    message: { ...params.message, socialEventHints: params.message.socialEventHints?.filter((hint) => !hint.intentId && !hint.outcome) },
+  });
   if (!selection.candidates.length) return selection;
   const decision = await orchestrateWorldDecision({
     domain: 'open_chat',
@@ -1627,6 +1633,7 @@ async function buildStructuredRuntime(params: {
     socialEventHints: resolvedSocialEventHints,
     conflictFocus: params.message.conflictFocus || null,
   };
+  const socialIntentOutcomes = buildSocialIntentOutcomes(params.conversation, enrichedMessage);
 
   const messageGeneratedEvent = createRuntimeEventV2({
     conversationId: params.conversation.id,
@@ -1666,7 +1673,7 @@ async function buildStructuredRuntime(params: {
           messageGeneratedEvent,
           momentArtifactEvents: socialArtifacts,
           artifactEvent,
-        }).concat(socialEventCandidateSelection.suppressedEvents),
+        }).concat(socialEventCandidateSelection.suppressedEvents, socialIntentOutcomes),
       ),
       relationshipLedger: params.conversation.relationshipLedger || [],
       structuredRoomState: params.conversation.worldState.structuredRoomState || null,
@@ -1861,6 +1868,7 @@ async function buildStructuredRuntime(params: {
         secondaryRelationshipEvents,
         secondaryAttentionEvents,
         socialEventCandidateSelection.suppressedEvents,
+        socialIntentOutcomes,
       ),
     ),
     relationshipLedger,

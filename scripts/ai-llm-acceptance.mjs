@@ -3722,6 +3722,26 @@ function runtimeChatflowScenarios() {
   });
   const conflictId = 'fei-yu-judgement';
   scenarios.push({
+    name: 'longzhong_social_intent_result_room', roomKind: 'group', turns: 2,
+    chat: { ...longzhong.chat, id: 'acceptance-social-intent-result', name: '营中问候',
+      topic: '关羽昨夜守营，张飞想问问他歇得如何。',
+      initialRuntimeEvents: [{ id: 'pending-fei-care', conversationId: 'acceptance-social-intent-result',
+        kind: 'artifact', createdAt: now - 40_000, actorIds: ['fei'], targetIds: ['yu'], visibility: 'derived_public',
+        summary: '张飞想问问关羽昨夜守营后休息得如何。',
+        payload: { artifactType: 'check_in_note', eventKind: 'check_in', status: 'tentative', initiatorId: 'fei',
+          participantIds: ['fei', 'yu'], targetIds: ['yu'], seedIntent: '问问二哥昨夜守营后休息得如何' } }],
+    },
+    characters: longzhong.characters,
+    seedMessages: [acceptanceAiMessage('acceptance-social-intent-result', 'yu', '关羽',
+      '昨夜守营，刚歇了一会儿。三弟，找我有事？', now - 20_000,
+      { addressedTargetIds: ['fei'], primaryAddressedTargetId: 'fei', replyDebtTargetIds: ['fei'], primaryReplyDebtTargetId: 'fei' })],
+    userInjections: [{ afterTurn: 1, content: '二哥，三弟在问你歇得怎么样。' }],
+    socialIntentExpectations: [{ turn: 1, intentId: 'pending-fei-care', status: 'completed' }],
+    promptExpectations: [{ turn: 1, speakerId: 'fei', text: '"intentId":"pending-fei-care"' },
+      { turn: 2, speakerId: 'yu', text: '"intentId":"pending-fei-care"', absent: true }],
+    rubricHint: '张飞有一个公开问候意图，关羽给了接话机会。观察实际问候发送后结果回写，以及下一轮关羽自然回应；不要重复问候、制造新任务或强制关系升级。',
+  });
+  scenarios.push({
     name: 'longzhong_conflict_resolution_room', roomKind: 'group', turns: 2,
     chat: { ...longzhong.chat, id: 'acceptance-longzhong-conflict-resolution', name: '兄弟释嫌',
       topic: '关羽误判张飞只会蛮干，双方已经公开说清这一次误会。',
@@ -3748,6 +3768,21 @@ function runtimeChatflowScenarios() {
   });
   const commitmentResult = scenarios.find((scenario) => scenario.name === 'longzhong_commitment_result_room');
   if (!commitmentResult) throw new Error('Commitment result fixture missing');
+  scenarios.push({
+    ...commitmentResult,
+    name: 'longzhong_explicit_pause_resume_room',
+    turns: 2,
+    settledExpectedTurns: [1],
+    seedMessages: [commitmentResult.seedMessages[0],
+      acceptanceAiMessage('acceptance-longzhong-result', 'fei', '张飞',
+        '二哥，关口记录都交齐了，俺没有别的要说。你收妥就各忙各的，等有消息再聊。', now - 20_000,
+        { addressedTargetIds: ['yu'], primaryAddressedTargetId: 'yu' }),
+    ],
+    promptExpectations: [commitmentResult.promptExpectations[0],
+      { turn: 2, speakerId: 'fei', text: '[fei-scout-report] commitment/resolved' }],
+    userInjections: [{ afterTurn: 1, content: '三弟，你这趟带回来的记录，交给谁了？' }],
+    rubricHint: '明确结束本次交付讨论，收件人确认收妥后可以安静；没有未答问题时不额外发明问题来维持发言。安静期间用户再点名张飞询问已经交付的事实，应恢复张飞回应。',
+  });
   scenarios.push({
     ...commitmentResult,
     name: 'longzhong_quiet_resume_room',
@@ -3792,6 +3827,12 @@ function runtimeChatflowScenarios() {
 
 function assertRuntimeChatflowTranscript(scenario, transcript, errors, naturallySettled = false) {
   assertCondition(errors.length === 0, `chatflow ${scenario.name} produced runtime errors`, errors.map((error) => String(error?.message || error)));
+  for (const expected of scenario.socialIntentExpectations || []) {
+    const turn = transcript.find((item) => item.turn === expected.turn);
+    const result = turn?.socialIntentOutcomes?.find((item) => item.intentId === expected.intentId);
+    assertCondition(result?.status === expected.status && turn.content.includes(result.evidenceText),
+      `chatflow ${scenario.name} social intention outcome mismatch`, { expected, result });
+  }
   for (const expected of scenario.conflictExpectations || []) {
     const turn = transcript.find((item) => item.turn === expected.turn);
     const state = turn?.conflictStateAfter;
@@ -3870,6 +3911,7 @@ function summarizeRuntimeTurn(message) {
     primaryReplyDebtTargetId: message.primaryReplyDebtTargetId ?? null,
     interactionHints: message.interactionHints || message.interactionHint ? (message.interactionHints || [message.interactionHint]).filter(Boolean) : [],
     socialEventHints: message.socialEventHints || [],
+    socialIntentOutcomes: message.socialIntentOutcomes || [],
     relationshipSignals: message.committedRelationshipSignals
       ?.length ? message.committedRelationshipSignals
       : runtimeDecision.runtimeBundle?.relationshipDeltas
@@ -3962,6 +4004,7 @@ function createRuntimeChat(runtime, scenario) {
     updatedAt: Date.now(),
     lastMessageAt: Date.now(),
     topicSeed: scenario.chat.topic,
+    ...(scenario.chat.initialRuntimeEvents ? { runtimeEventsV2: scenario.chat.initialRuntimeEvents } : {}),
     ...(scenario.chat.initialRoomState || scenario.chat.initialConflictState ? {
       worldState: {
         ...draft.worldState,
@@ -4527,6 +4570,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
   const judgeErrors = [];
   const localInterceptions = [];
   const quietTurns = [];
+  const settledTurns = [];
   let naturallySettled = false;
   const profiles = runtimeProfile(model);
   const api = profiles[0];
@@ -4809,6 +4853,9 @@ async function runRuntimeChatflowScenario(model, scenario) {
       calendarAfter: runtime.projectWorldCalendar([chat], characters, { inferTemporalStatus: false }).items,
       seedCalendar,
       activityUpdates: logicalTurnMessages.map((item) => item.metadata?.activityUpdate).filter(Boolean),
+      socialIntentOutcomes: (chat.runtimeEventsV2 || []).filter((event) => event.kind === 'artifact'
+        && event.payload?.intentId && ['completed', 'cancelled'].includes(event.payload.status))
+        .map((event) => ({ intentId: event.payload.intentId, status: event.payload.status, evidenceText: event.payload.evidenceText })),
     });
     summarized.addressedTargetNames = summarized.addressedTargetIds
       .map((targetId) => targetId === 'user' ? '用户' : characters.find((character) => character.id === targetId)?.name)
@@ -4886,6 +4933,8 @@ async function runRuntimeChatflowScenario(model, scenario) {
       turnReviews.push({ turn, senderName: summarized.senderName, score: 0, review: null, judgeError: message });
       logProgress('chatflow turn judge failed', { model, scenario: scenario.name, turn, error: clip(message, 400) });
     }
+    const canPause = runtime.shouldPauseSettledConversation(conversationRunStart, chat, characters, messages);
+    if (canPause) settledTurns.push(turn);
     const injections = await commitUserInjections(turn);
     if (runtime.shouldPauseSettledConversation(conversationRunStart, chat, characters, messages)
       && !injections.length) {
@@ -4898,6 +4947,9 @@ async function runRuntimeChatflowScenario(model, scenario) {
   let hardError = '';
   try {
     assertRuntimeChatflowTranscript(scenario, transcript, errors, naturallySettled);
+    for (const turn of scenario.settledExpectedTurns || []) {
+      assertCondition(settledTurns.includes(turn), `chatflow ${scenario.name} expected a settled exchange after turn ${turn}`, { settledTurns });
+    }
     for (const turn of scenario.quietExpectedTurns || []) {
       assertCondition(quietTurns.includes(turn), `chatflow ${scenario.name} expected quiet turn ${turn}`, { quietTurns });
     }
@@ -4994,6 +5046,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
     turnCount: transcript.length,
     naturallySettled,
     quietTurns,
+    settledTurns,
     selectedSpeakers,
     transcript,
     turnReviews,

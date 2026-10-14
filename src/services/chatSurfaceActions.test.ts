@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { normalizeConversation } from '../types/chat';
+import { normalizeConversation, type GroupChat } from '../types/chat';
+import type { SocialEventRuntimeOps } from './directSessionRuntime';
 import { DEFAULT_CHARACTER_BEHAVIOR, DEFAULT_CHARACTER_INTERVENTION, DEFAULT_CHARACTER_MEMORY, DEFAULT_PERSONALITY, type AICharacter } from '../types/character';
 import type { SessionNormalizedIntentResult } from '../types/sessionEngine';
-import { runSessionActionImpl, runSurfaceIntentImpl, type ChatSurfaceActionContext } from './chatSurfaceActions';
+import { runAutoSocialEventFlowImpl, runSessionActionImpl, runSurfaceIntentImpl, type ChatSurfaceActionContext } from './chatSurfaceActions';
+import { useChatStore } from '../stores/useChatStore';
+import * as authStorageScope from './authStorageScope';
 
 function buildCharacter(id: string, name: string): AICharacter {
   return {
@@ -75,6 +78,38 @@ function buildContext(): ChatSurfaceActionContext {
 }
 
 describe('chatSurfaceActions', () => {
+  it.each(['deleted', 'account_changed'] as const)('rejects social writes after the source becomes %s during execution', async (reason) => {
+    const context = buildContext();
+    const source = context.chat!;
+    const getChat = vi.spyOn(useChatStore.getState(), 'getChat').mockReturnValue(source);
+    const account = vi.spyOn(authStorageScope, 'getLocalDataUserId').mockReturnValue('initial');
+    const applyPatch = vi.spyOn(useChatStore.getState(), 'applyChatRuntimePatch');
+    const addChat = vi.spyOn(useChatStore.getState(), 'addChat');
+    const runSocialEventAutoFlow = vi.fn(async (_chat: GroupChat, ops: SocialEventRuntimeOps) => {
+      if (reason === 'deleted') getChat.mockReturnValue({ ...source, deletedAt: 1 });
+      else account.mockReturnValue('different');
+      expect(await ops.applyChatRuntimePatch(source.id, () => ({}))).toBe(false);
+      await expect(ops.addChat(source)).rejects.toThrow('账户或来源会话已失效');
+      await expect(ops.addMessage({ chatId: source.id, senderId: 'a', senderName: '甲',
+        type: 'ai', content: '你好', emotion: 0 })).rejects.toThrow('账户或来源会话已失效');
+      await expect(ops.appendEventMessage(source.id, { eventType: 'test', title: '事件', summary: '已完成' }))
+        .rejects.toThrow('账户或来源会话已失效');
+      return { handledEventId: null };
+    });
+    vi.doMock('./directSessionRuntime', () => ({ runSocialEventAutoFlow }));
+    try {
+      await runAutoSocialEventFlowImpl(source, context);
+      expect(runSocialEventAutoFlow).toHaveBeenCalledOnce();
+      expect(applyPatch).not.toHaveBeenCalled();
+      expect(addChat).not.toHaveBeenCalled();
+      expect(context.addMessage).not.toHaveBeenCalled();
+      expect(context.appendEventMessage).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock('./directSessionRuntime');
+      vi.restoreAllMocks();
+    }
+  });
+
   it('applies calendar patch drafts via unified patch queue action', async () => {
     const context = buildContext();
     const trigger = vi.fn(async () => null);

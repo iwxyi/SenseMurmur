@@ -278,6 +278,7 @@ export type SocialEventKind = 'pair_private_thread' | 'social_outing' | 'post_mo
 export interface SocialEventCandidatePayload {
   eventKind: SocialEventKind;
   initiatorId: string;
+  organizerId?: string;
   participantIds: string[];
   targetIds?: string[];
   reasonType: string;
@@ -309,6 +310,9 @@ export interface SocialEventCandidatePayload {
 
 export interface SocialEventHintEnvelope {
   eventKind: SocialEventKind;
+  evidenceText?: string;
+  intentId?: string;
+  outcome?: 'completed' | 'cancelled';
   targetIds?: string[];
   participantIds?: string[];
   reasonType?: string;
@@ -370,6 +374,9 @@ function normalizeSocialEventHint(value: unknown): SocialEventHintEnvelope | nul
     : Math.max(0, Math.min(1, rawConfidence > 1 ? rawConfidence / 100 : rawConfidence));
   return {
     eventKind: raw.eventKind,
+    evidenceText: typeof raw.evidenceText === 'string' ? raw.evidenceText.trim().slice(0, 240) || undefined : undefined,
+    intentId: typeof raw.intentId === 'string' ? raw.intentId.trim() || undefined : undefined,
+    outcome: raw.outcome === 'completed' || raw.outcome === 'cancelled' ? raw.outcome : undefined,
     targetIds: normalizeStringArray(raw.targetIds),
     participantIds: normalizeStringArray(raw.participantIds),
     reasonType: typeof raw.reasonType === 'string' ? raw.reasonType : undefined,

@@ -23,6 +23,7 @@ import { motion } from '../../styles/motion';
 import AppSnackbar from '../common/AppSnackbar';
 import { APP_DIAGNOSTIC_TOAST_EVENT, type DiagnosticToastDetail } from '../../services/diagnostics';
 import { CONTENT_SCROLL_TO_TOP_EVENT, type ContentScrollToTopDetail } from '../../services/contentScrollRegion';
+import { useApplicationSocialFlow } from '../../hooks/useApplicationSocialFlow';
 
 const routeMeta = [
   { match: (pathname: string) => pathname === '/', titleKey: 'nav.home' },
@@ -58,6 +59,7 @@ const SIDEBAR_WIDTH = 280;
 const SIDEBAR_COLLAPSED_WIDTH = 72;
 
 export default function AppLayout() {
+  useApplicationSocialFlow();
   const { t } = useTranslation();
   const location = useLocation();
   const { isMobile, isTablet, isDesktop } = useResponsive();
