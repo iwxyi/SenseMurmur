@@ -125,8 +125,7 @@ function buildStatGridSx() {
     display: 'grid',
     gridTemplateColumns: {
       xs: 'repeat(2, minmax(0, 1fr))',
-      sm: 'repeat(3, minmax(0, 1fr))',
-      lg: 'repeat(4, minmax(0, 1fr))',
+      sm: 'repeat(auto-fit, minmax(min(100%, 160px), 1fr))',
     },
     '@media (min-width: 360px) and (max-width: 599.95px)': {
       gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
