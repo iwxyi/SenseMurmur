@@ -9,6 +9,8 @@ import { buildPrivateSessionEvent } from '../services/directSessionHelpers';
 import { buildRuntimeEventMessageContent, normalizeRuntimeEvent } from '../services/runtimeEventFactory';
 import { persistLocalFirstMessage } from '../services/chatCommitMessage';
 import { reportRecoverableError } from '../services/diagnostics';
+import { runDailyMomentFlow } from '../services/dailyMomentRuntime';
+import { getLocalDataUserId } from '../services/authStorageScope';
 import type { GroupChat } from '../types/chat';
 
 export function createApplicationSocialScheduler() {
@@ -63,9 +65,30 @@ export function useApplicationSocialFlow() {
   }, []);
   useEffect(() => {
     schedulerRef.current?.update(chats, async (chat) => {
+      const dataUserId = getLocalDataUserId();
+      const isCurrentSource = () => {
+        const source = useChatStore.getState().getChat(chat.id);
+        return getLocalDataUserId() === dataUserId && source != null && source.deletedAt == null;
+      };
       const loaded = await useChatStore.getState().loadChat(chat.id);
-      if (!loaded || loaded.deletedAt != null) return;
-      return runAutoSocialEventFlowImpl(loaded, {
+      if (!loaded || loaded.deletedAt != null || !isCurrentSource()) return;
+      let dailyFailure: { error: unknown } | undefined;
+      try {
+        await runDailyMomentFlow(chat.id, {
+          isCurrentSource,
+          getChats: () => useChatStore.getState().chats,
+          getCharacters: () => useCharacterStore.getState().characters,
+          getProfiles: () => useSettingsStore.getState().aiProfiles,
+          loadCharacter: (id) => useCharacterStore.getState().loadCharacter(id),
+          applyChatRuntimePatch: useChatStore.getState().applyChatRuntimePatch,
+          onImageError: (error) => reportRecoverableError({ location: 'daily-moment-image', error,
+            userMessage: '朋友圈配图生成失败，本次发布文字动态。' }),
+        });
+      } catch (error) {
+        dailyFailure = { error };
+      }
+      if (!isCurrentSource()) return;
+      const result = await runAutoSocialEventFlowImpl(loaded, {
         chats: useChatStore.getState().chats,
         characters: useCharacterStore.getState().characters,
         aiProfiles: useSettingsStore.getState().aiProfiles,
@@ -73,6 +96,8 @@ export function useApplicationSocialFlow() {
         addMessage: useMessageStore.getState().addMessage,
         appendEventMessage,
       });
+      if (dailyFailure) throw dailyFailure.error;
+      return result;
     }, (error) => reportRecoverableError({ location: 'application-social-flow', error,
       userMessage: '自动社交活动未完成，将按重试策略处理。' }));
   }, [chats, characters, aiProfiles]);
