@@ -33,9 +33,10 @@ function normalizeField(value: unknown): AssistantHtmlSubmissionField | null {
 export function resolveAssistantHtmlPresentation(html: string, fieldCount: number, preferredMode?: 'inline_interaction' | 'artifact_page'): AssistantHtmlRuntimeManifest['presentation'] {
   const source = html.trim().replace(/^```(?:html)?\s*/i, '');
   const fullDocument = /^(?:<!doctype\s+html\b|<html\b)/i.test(source);
+  if (fieldCount > 12 || source.length > 12_000) return 'fullscreen';
   if (preferredMode === 'inline_interaction') return 'inline';
   if (preferredMode === 'artifact_page') return 'fullscreen';
-  return fullDocument || fieldCount > 12 || source.length > 12_000 ? 'fullscreen' : 'inline';
+  return fullDocument ? 'fullscreen' : 'inline';
 }
 
 export function normalizeAssistantHtmlRuntime(value: unknown, html = '', preferredMode?: 'inline_interaction' | 'artifact_page'): AssistantHtmlRuntimeManifest | undefined {

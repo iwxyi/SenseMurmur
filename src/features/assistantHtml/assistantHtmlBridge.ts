@@ -8,6 +8,7 @@ export interface AssistantHtmlBridgeEvent {
   interactionId: string;
   height?: number;
   payload?: Record<string, unknown>;
+  closeOnSubmit?: boolean;
   error?: string;
   errorInfo?: {
     kind?: 'runtime' | 'unhandledrejection' | 'console' | 'resource' | 'page_state';
@@ -33,5 +34,6 @@ export function parseAssistantHtmlBridgeEvent(params: {
   const record = data as Record<string, unknown>;
   if (!['ready', 'resize', 'autosave', 'submit', 'open_fullscreen', 'close', 'error'].includes(String(record.type))) return null;
   if (record.channelToken !== params.channelToken || record.artifactId !== params.artifactId || record.versionId !== params.versionId || record.interactionId !== params.interactionId) return null;
+  if (record.closeOnSubmit !== undefined && typeof record.closeOnSubmit !== 'boolean') return null;
   return record as unknown as AssistantHtmlBridgeEvent;
 }

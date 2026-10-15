@@ -32,8 +32,7 @@ export default function AssistantHtmlMessageBlock({ artifactRef, onAutosave, onS
   if (!version || !manifest) return null;
   const isCurrentVersion = version.id === artifact.currentVersionId;
   const hasNewerVersion = !isCurrentVersion;
-  const interactive = Boolean(manifest.submission)
-    && artifactRef.presentation !== 'fullscreen_html'
+  const interactive = artifactRef.presentation !== 'fullscreen_html'
     && (manifest.presentation === 'inline' || manifest.presentation === 'both');
   const readOnly = !isCurrentVersion;
   if (interactive) {
@@ -48,6 +47,7 @@ export default function AssistantHtmlMessageBlock({ artifactRef, onAutosave, onS
           readOnly={readOnly}
           onAutosave={onAutosave}
           onSubmit={onSubmit}
+          onOpenFullscreen={() => onOpenFullscreen?.(artifact.id)}
           onRequestRepair={isCurrentVersion ? onRequestRepair : undefined}
         />
       </Box>

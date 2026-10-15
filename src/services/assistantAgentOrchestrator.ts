@@ -287,7 +287,7 @@ function buildPlannerPrompt(options: { includeImages: boolean; includeLocalFiles
     '结合用户输入、最近对话、产物注册表和交互焦点判断，不要要求用户使用“HTML/产物”等技术词。',
     '普通问答=chat；创建结果=create；修改现有产物=update；目标不明确=clarify。不要猜多个候选目标。',
     '需要创建图片或图片变体=create。',
-    'structured_input 用于少量字段、单题投票、单题选择、简短反馈和小表单；interactive_workspace 只用于多题试卷/问卷、计算器、配置器、连续练习和审批等较大流程；visual_explanation 用于复杂图表、对比表和公式。HTML 只是实现方式。',
+    'structured_input 用于少量字段的小表单、单题投票/选择、简短反馈，以及汇率换算、单位换算等可在原地完成的轻量计算工具；是否提交给助手是独立选择，本地计算无需提交。interactive_workspace 用于多题试卷/问卷、多步骤配置、连续练习、审批及代码量较大的复杂工具；不能仅因为是计算器就选择完整页面。visual_explanation 用于复杂图表、对比表和公式。HTML 只是实现方式。',
     'source_code 只在用户明确要源码时使用，并输出 intent=chat；每轮必须选择 responseExperience。',
     'selectedArtifactId 存在且用户说“这个/当前产物/改一下”等相对指代时优先作为 update 目标；没有唯一目标则 clarify。',
   ];
@@ -459,10 +459,12 @@ function buildWriterPrompt(options: { includeImages: boolean; includeLocalFiles:
   sections.push(
     '11. 如果 assistantMessage、patch content 或 files 中需要写应用内链接，必须使用跨平台 AppLink：ssmm://character/{id}?action=edit、ssmm://chat/{id}?action=open、ssmm://settings?action=open&tab=models&card=models。禁止输出 /characters/...、/chats/...、#/...、http://localhost/... 或任何平台私有路由。',
     '11.1 只有当 ID 来自用户输入、recentConversation、artifactRegistry、targetArtifacts、localFiles 或其他明确上下文时，才能写入 AppLink；禁止编造角色、会话、产物或文件 ID。外部网页来源继续使用 https:// 链接。',
-    '12. 遵循 changePlan.responseExperience。structured_input 生成简洁 HTML 表单片段；interactive_workspace 生成 <!doctype html>/<html> 完整交互文档；visual_explanation 根据内容规模生成 HTML 片段或完整文档，并优先可读、可比较的视觉表达。这三类使用 kind=html；需要提交时输出 htmlRuntime。不要在用户可见文案中谈论 HTML、网页、全屏、气泡、presentation 或 viewport。source_code 不应进入 Writer；若意外收到，必须返回 patches=[]。',
+    '12. 遵循 changePlan.responseExperience。structured_input 生成简洁 HTML 表单或轻量计算工具片段（style、form/section 和必要脚本，不加 doctype/html/head/body 外壳），适配窄屏，不使用固定大宽度或 min-height:100vh；interactive_workspace 生成 <!doctype html>/<html> 完整交互文档；visual_explanation 根据内容规模生成 HTML 片段或完整文档，并优先可读、可比较的视觉表达。这三类使用 kind=html；需要提交时输出 htmlRuntime。不要在用户可见文案中谈论 HTML、网页、全屏、气泡、presentation 或 viewport。source_code 不应进入 Writer；若意外收到，必须返回 patches=[]。',
     '12.1 HTML 可以包含脚本、事件属性与外部 HTTP(S) src/href、请求或表单 action；禁止 iframe/object/embed、javascript: URL，以及访问 parent/top、Cookie 和应用存储。交互表单仍应使用标准 input/select/textarea/form 和 data-pneumata-action。任何被 catch 的初始化、网络、生成、游戏逻辑、提交或事件回调错误，必须先保留原始 error（必要时用 new Error(String(reason)) 包装），再执行 console.error(error) 或 window.pneumataReportError?.(error, “具体阶段”），最后才更新用户提示；不得只显示“失败，请重试”，不得把真实原因只藏在未上报的“查看详情”面板中。',
     '12.1a 当用户报告 HTML 工具“没有异常但行为不符合预期”时，必须直接检查目标产物的完整源码、状态流转、事件绑定、边界条件和数据处理逻辑，基于用户描述修复实际行为；不能要求先出现运行时异常，也不能只修改错误提示文案或凭空声称已修复。',
     '12.2 联网或脚本驱动页面的 htmlRuntime.executionMode 设为 sandboxed_web；普通静态/表单页面使用 declarative。submission.fields 必须完整列出允许提交的字段名、类型、必填、长度和选项，并与 HTML 中 name 属性一致。',
+    '12.2a 本地计算按钮用 type="button"，自行更新结果，不需要 submission；汇率必须注明来源/时间或允许用户填写汇率，不能伪造实时数据。需要把填写结果交给助手时，提供明确的“提交”按钮（data-pneumata-action="submit"）及 htmlRuntime.submission={interactionId,label,resultType:"form",fields:[{name,type,label,required}]}。每个字段的 label 必须是面向用户的名称；程序按这些标签把校验后的输入整理为聊天消息并发给助手。使用标准 input/select/textarea 的 name 收集值；计算结果需要随提交发送时放入声明过的具名控件，不自行访问 parent 或调用应用接口。',
+    '12.2b 片段和完整页面使用相同提交协议。默认提交写入聊天后关闭已打开页面；只有需要留在页面继续操作时，在提交按钮或 form 上设置 data-pneumata-after-submit="keep_open"。按用途选一种提交方式，不必同时放两个按钮；不要假设提交会同步返回 AI 结果。',
     '12.3 如果 userMessage.htmlSubmission 存在，本轮必须 update 其目标 HTML 产物，baseVersionId 使用提交版本，生成包含审批、批改、分析、结果或下一步交互的完整新版本；不得创建无关的新产物。',
     '12.4 HTML 正文只能放在 patches[].content，严禁放进 assistantMessage 的 Markdown 代码块或直接正文。assistantMessage 只保留一句简短说明；程序会提供产物打开入口。',
     '',
@@ -764,7 +766,6 @@ function normalizePatchSet(raw: unknown, imageReferenceRegistry = new Map<string
         ? 'artifact_page'
         : undefined;
     const htmlRuntime = kind === 'html' ? normalizeAssistantHtmlRuntime(isRecord(item.htmlRuntime) ? item.htmlRuntime : {}, content, preferredMode) : undefined;
-    if (kind === 'html' && plan?.responseExperience === 'structured_input' && !htmlRuntime?.submission) return [];
     return [{
       action,
       artifactId: text(item.artifactId, 160) || null,

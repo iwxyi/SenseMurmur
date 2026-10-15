@@ -16,6 +16,14 @@ const manifest = normalizeAssistantHtmlRuntime({
 }, '<form><input name="answer"></form>')!;
 
 describe('assistant HTML safety', () => {
+  it('promotes large structured inputs to full pages', () => {
+    const largeMarkup = normalizeAssistantHtmlRuntime({}, `<section>${'x'.repeat(12_001)}</section>`, 'inline_interaction');
+    const manyFields = normalizeAssistantHtmlRuntime({ submission: {
+      interactionId: 'large-form', fields: Array.from({ length: 13 }, (_, index) => ({ name: `field${index}`, type: 'text' })),
+    } }, '<form></form>', 'inline_interaction');
+    expect(largeMarkup?.presentation).toBe('fullscreen');
+    expect(manyFields?.presentation).toBe('fullscreen');
+  });
   it('keeps structured input inline even when the writer returns a full document', () => {
     const manifest = normalizeAssistantHtmlRuntime({
       submission: {
@@ -55,7 +63,7 @@ describe('assistant HTML safety', () => {
 
     expect(document).toContain('"readOnly":true');
     expect(document).not.toContain("node.disabled=true");
-    expect(document).toContain('if(config.readOnly)return');
+    expect(document).toContain('if(config.readOnly||!config.fields.length)return');
   });
 
   it('validates and normalizes declared submission fields', () => {
@@ -93,6 +101,9 @@ describe('assistant HTML safety', () => {
     });
 
     expect(parse(validData)?.type).toBe('submit');
+    expect(parse({ ...validData, closeOnSubmit: false })?.closeOnSubmit).toBe(false);
+    expect(parse({ ...validData, closeOnSubmit: true })?.closeOnSubmit).toBe(true);
+    expect(parse({ ...validData, closeOnSubmit: 'false' })).toBeNull();
     expect(parse({ ...validData, channelToken: 'wrong' })).toBeNull();
     expect(parse({ ...validData, versionId: 'other-version' })).toBeNull();
     expect(parse(validData, {} as Window)).toBeNull();

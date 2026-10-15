@@ -17,6 +17,7 @@ export interface AssistantHtmlInteractionPayload {
   interactionId: string;
   resultType: 'form' | 'quiz' | 'selection' | 'custom';
   payload: Record<string, unknown>;
+  closeOnSubmit?: boolean;
 }
 
 export interface AssistantHtmlRuntimeError {
@@ -159,6 +160,7 @@ export default function AssistantHtmlFrame({
         };
         if (message.type === 'autosave') void onAutosave?.(input);
         if (message.type === 'submit') {
+          input.closeOnSubmit = message.closeOnSubmit !== false;
           setSubmitting(true);
           void Promise.resolve(onSubmit?.(input)).catch((reason) => {
             if (!getAssistantHtmlRuntimeError(artifactId, version.id)) setError(reason instanceof Error ? reason.message : '提交失败');

@@ -613,6 +613,24 @@ export default function HomePage() {
       ))
       .slice(0, 12);
   }, [characters, recentChats]);
+  const recentCharactersRailRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const rail = recentCharactersRailRef.current;
+    if (!rail) return undefined;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || Math.abs(event.deltaX) >= Math.abs(event.deltaY) || event.deltaY === 0) return;
+      const maxScrollLeft = Math.max(0, rail.scrollWidth - rail.clientWidth);
+      const atLeadingEdge = rail.scrollLeft <= 1;
+      const atTrailingEdge = rail.scrollLeft >= maxScrollLeft - 1;
+      if (!maxScrollLeft || (event.deltaY < 0 && atLeadingEdge) || (event.deltaY > 0 && atTrailingEdge)) return;
+      event.preventDefault();
+      rail.scrollLeft = Math.min(maxScrollLeft, Math.max(0, rail.scrollLeft + event.deltaY));
+    };
+
+    rail.addEventListener('wheel', handleWheel, { passive: false });
+    return () => rail.removeEventListener('wheel', handleWheel);
+  }, [recentCharacters.length]);
   const [noCharactersDialogOpen, setNoCharactersDialogOpen] = useState(false);
   const [noCharactersReturnTo, setNoCharactersReturnTo] = useState('/chats/create');
   const [noCharactersRequiredCount, setNoCharactersRequiredCount] = useState(MIN_MEMBERS);
@@ -1203,16 +1221,7 @@ export default function HomePage() {
           <SurfaceCard>
             <SectionHeader title="最近角色" action={<Button size="small" variant="outlined" onClick={() => navigate('/characters')}>查看全部</Button>} />
             <Box
-              onWheel={(event) => {
-                if (Math.abs(event.deltaX) >= Math.abs(event.deltaY) || event.deltaY === 0) return;
-                const rail = event.currentTarget;
-                const maxScrollLeft = Math.max(0, rail.scrollWidth - rail.clientWidth);
-                const atLeadingEdge = rail.scrollLeft <= 1;
-                const atTrailingEdge = rail.scrollLeft >= maxScrollLeft - 1;
-                if (!maxScrollLeft || (event.deltaY < 0 && atLeadingEdge) || (event.deltaY > 0 && atTrailingEdge)) return;
-                event.preventDefault();
-                rail.scrollLeft = Math.min(maxScrollLeft, Math.max(0, rail.scrollLeft + event.deltaY));
-              }}
+              ref={recentCharactersRailRef}
               sx={{
                 display: 'flex',
                 gap: 1,

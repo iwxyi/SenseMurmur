@@ -70,6 +70,7 @@ import { isAssistantArtifactCloudSyncEnabled, setAssistantArtifactCloudSyncEnabl
 import { hasRoomCapability } from '../services/capabilityRuntime';
 import { useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
 import type { AssistantHtmlInteractionPayload, AssistantHtmlRuntimeError } from '../features/assistantHtml/AssistantHtmlFrame';
+import { formatAssistantHtmlSubmission } from '../features/assistantHtml/assistantHtmlSubmission';
 import { readAssistantAgentDefaultEnabled, writeAssistantAgentDefaultEnabled } from '../services/assistantAgentPreference';
 import { isChatBlockedByMissingRequiredCharacters } from '../services/chatAvailability';
 import { createConversationInitializationState, getConversationInitializationRequirement, getInitializationMembers } from '../services/conversationInitialization';
@@ -2766,8 +2767,7 @@ export default function ChatDetailPage() {
         });
         if (!artifact) return;
         const submittedVersion = artifact.versions.find((version) => version.id === artifact.currentVersionId);
-        if (!submittedVersion || submittedVersion.stage !== 'submitted' || submittedVersion.submissionId !== submissionId) return;
-        setFullscreenAssistantArtifactId((current) => current === artifact.id ? null : current);
+        if (!submittedVersion || submittedVersion.stage !== 'submitted' || submittedVersion.submissionId !== submissionId || !submittedVersion.htmlRuntime) return;
         if (isLearningProgressRoom) {
           const { recordLearningAttempt } = await import('../services/learningProgressRuntime');
           const attemptPatch = recordLearningAttempt(chat, {
@@ -2787,7 +2787,7 @@ export default function ChatDetailPage() {
           type: 'user',
           senderId: 'user',
           senderName: currentUser?.nickname?.trim() || '我',
-          content: `已提交「${artifact.title}」的交互结果。`,
+          content: formatAssistantHtmlSubmission(artifact.title, submittedVersion.htmlRuntime, input.payload),
           emotion: 0,
           timestamp: getNextMessageTimestamp(),
           metadata: {
@@ -2802,6 +2802,9 @@ export default function ChatDetailPage() {
             },
           },
         });
+        if (input.closeOnSubmit !== false) {
+          setFullscreenAssistantArtifactId((current) => current === artifact.id ? null : current);
+        }
         void updateChat(id, { lastMessageAt: userMessage.timestamp, latestMessage: userMessage });
         const recentMessagesWithUser = [...recentMessages.filter((message) => message.id !== userMessage.id), userMessage];
 

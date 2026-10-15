@@ -232,21 +232,21 @@ describe('assistantAgentOrchestrator validation', () => {
     expect(patchSet.patches).toEqual([]);
   });
 
-  it('requires a declared submission schema for structured input forms', async () => {
+  it('allows a local calculator without a chat submission schema', async () => {
     generateResponseMock.mockResolvedValue(JSON.stringify({
-      assistantMessage: '请填写旅行信息。',
-      patches: [{ action: 'create', kind: 'html', title: '旅行信息', content: '<form><input name="destination"></form>' }],
+      assistantMessage: '可以直接换算。',
+      patches: [{ action: 'create', kind: 'html', title: '汇率换算', content: '<form><input name="amount" type="number"><button type="button">换算</button></form>' }],
     }));
     const plan: AssistantAgentChangePlan = {
       intent: 'create',
       responseExperience: 'structured_input',
       scope: { targetMode: 'unknown', artifactIds: [] },
-      operations: [{ kind: 'create', instruction: '收集旅行计划所需信息' }],
+      operations: [{ kind: 'create', instruction: '创建轻量汇率换算工具' }],
       requiresConfirmation: false,
       confidence: 1,
     };
     const userMessage: Message = {
-      id: 'message-user', chatId: 'chat-a', type: 'user', senderId: 'user', senderName: '用户', content: '我想去旅游，帮我制定计划', emotion: 0, timestamp: 1, isDeleted: false,
+      id: 'message-user', chatId: 'chat-a', type: 'user', senderId: 'user', senderName: '用户', content: '给我一个简单的汇率换算工具', emotion: 0, timestamp: 1, isDeleted: false,
     };
 
     const patchSet = await writeAssistantAgentPatchSet({
@@ -254,7 +254,8 @@ describe('assistantAgentOrchestrator validation', () => {
       chatId: 'chat-a', messages: [], userMessage, plan, existingArtifacts: [],
     });
 
-    expect(patchSet.patches).toEqual([]);
+    expect(patchSet.patches[0]?.htmlRuntime?.presentation).toBe('inline');
+    expect(patchSet.patches[0]?.htmlRuntime?.submission).toBeUndefined();
   });
 
   it('allows a read-only HTML visualization without a submission schema', async () => {
