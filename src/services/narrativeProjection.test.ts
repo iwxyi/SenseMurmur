@@ -39,6 +39,44 @@ function buildChat(patch: Partial<GroupChat> = {}): GroupChat {
   };
 }
 
+describe('conversation commitment projection', () => {
+  it('retains a freshly updated pending condition without manufacturing an immediate invitation', () => {
+    const chat = buildChat({ worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE,
+      conversationContinuity: { items: [{ key: 'shift', kind: 'condition', status: 'open',
+        summary: '瑟瑟今晚才能确认换班结果', evidenceText: '今晚给你准话', participantIds: ['a'],
+        updatedAt: 100, sourceMessageIds: ['m1'] }] },
+    } });
+    const line = projectNarrativeLines({ chat, messages: [buildMessage({ timestamp: 100 })], now: 100 })
+      .find((item) => item.id === 'continuity:shift');
+    expect(line).toMatchObject({ summary: '瑟瑟今晚才能确认换班结果', contextKind: 'background',
+      openQuestions: [], possibleNextBeats: [] });
+    const issueChat = { ...chat, worldState: { ...chat.worldState,
+      conversationContinuity: { items: chat.worldState.conversationContinuity!.items.map((item) => ({ ...item, kind: 'issue' as const })) },
+    } };
+    expect(projectNarrativeLines({ chat: issueChat, messages: [], now: 100 })
+      .find((item) => item.id === 'continuity:shift')?.possibleNextBeats).toHaveLength(1);
+  });
+
+  it('retains accepted future commitments without inventing a fresh question or response beat', () => {
+    const chat = buildChat({ worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE,
+      conversationContinuity: { items: [{ key: 'return_book', kind: 'commitment', status: 'established',
+        summary: '甲明天还书', evidenceText: '明天把书还你', participantIds: ['a', 'b'],
+        updatedAt: 100, sourceMessageIds: ['m1'] }] },
+    } });
+    const project = (room: GroupChat) => projectNarrativeLines({ chat: room,
+      messages: [buildMessage({ content: '明天把书还你', timestamp: 100 })], now: 100 })
+      .find((line) => line.id === 'continuity:return_book');
+    expect(project(chat)).toMatchObject({ contextKind: 'background', summary: '甲明天还书',
+      openQuestions: [], possibleNextBeats: [] });
+    const open = project({ ...chat, worldState: { ...chat.worldState,
+      conversationContinuity: { items: chat.worldState.conversationContinuity!.items.map((item) => ({ ...item, status: 'open' })) },
+    } });
+    expect(open?.contextKind).toBe('unresolved');
+    expect(open?.openQuestions).toEqual(['甲明天还书']);
+    expect(open?.possibleNextBeats).toHaveLength(1);
+  });
+});
+
 function buildMessage(patch: Partial<Message>): Message {
   return {
     id: patch.id || 'm1',
@@ -50,6 +88,7 @@ function buildMessage(patch: Partial<Message>): Message {
     emotion: 0,
     timestamp: patch.timestamp ?? 1,
     isDeleted: false,
+    metadata: patch.metadata,
   };
 }
 
@@ -96,6 +135,23 @@ function memory(overrides: Partial<MemoryItem>): MemoryItem {
 }
 
 describe('projectNarrativeLines', () => {
+  it.each(['conversation', 'analysis'] as const)('keeps drift visible while respecting %s room semantics', (family) => {
+    const chat = buildChat({
+      sessionKind: { topology: 'group', family, scenarioId: family === 'conversation' ? 'open-chat' : 'opinion-review', surfaceProfile: 'text' },
+      worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE,
+        structuredRoomState: { heat: 0, cohesion: 0, topicDrift: 80, dominantThread: null,
+          alliances: [], conflictPairs: [], pileOnTarget: null, silencedActors: [] } },
+    });
+    const line = projectNarrativeLines({ chat, messages: [buildMessage({ content: '今天的晚霞好看。' })], now: 2 })
+      .find((item) => item.id === 'room:topic-drift');
+    expect(line?.summary).toBe('当前讨论已经偏离原本焦点。');
+    if (family === 'conversation') {
+      expect(line).toMatchObject({ contextKind: 'background', openQuestions: [], possibleNextBeats: [] });
+    } else {
+      expect(line?.possibleNextBeats[0].beatType).toBe('summarize');
+    }
+  });
+
   it('keeps explicit now=0 without falling back to Date.now', () => {
     const lines = projectNarrativeLines({
       chat: buildChat(),
@@ -104,6 +160,18 @@ describe('projectNarrativeLines', () => {
     });
     const topic = lines.find((line) => line.id === 'topic:latest');
     expect(topic?.lastTouchedAt).toBe(0);
+  });
+
+  it('keeps an ordinary user topic as context without assigning another reply beat', () => {
+    const lines = projectNarrativeLines({
+      chat: buildChat(),
+      messages: [buildMessage({ type: 'user', senderId: 'user', content: '今天逛街穿什么？' })],
+      now: 2,
+    });
+    expect(lines.find((line) => line.id === 'topic:latest')).toMatchObject({
+      contextKind: 'background', openQuestions: [], possibleNextBeats: [],
+      summary: '用户刚刚提到：今天逛街穿什么？',
+    });
   });
 
   it.each([0.9, 0])('keeps an unresolved conflict at severity %s without escalating a cold one', (severity) => {
@@ -448,6 +516,59 @@ describe('projectNarrativeLines', () => {
     expect(goalLine?.possibleNextBeats[0]?.beatType).toBe('invite');
   });
 
+  it.each(['completed', 'expired', 'superseded'] as const)('does not restore %s guidance as a prompt goal', (state) => {
+    const event: RuntimeEventV2 = {
+      id: 'old-request', conversationId: 'chat-1', kind: 'director_intervention',
+      createdAt: 10, summary: '让甲先确认能不能去', visibility: 'moderator_only',
+      payload: { intent: 'force_reply', text: '让甲先确认能不能去', targetActorIds: ['a'], maxTurns: 1, expiresAt: state === 'expired' ? 15 : 100 },
+    };
+    const messages = state === 'completed'
+      ? [buildMessage({ type: 'ai', senderId: 'a', timestamp: 12, content: '周五才能确定。' })]
+      : state === 'superseded'
+        ? [buildMessage({ type: 'user', timestamp: 12, metadata: { runtimeDecision: { directorIntent: {
+          source: 'user_message', beatType: 'answer', targetActorIds: ['b'],
+          userGuidance: { kind: 'direct_reply', rawText: '乙先说', actorIds: ['b'], mentionedActorIds: [],
+            beatType: 'answer', pressure: 0.8, maxTurns: 1 },
+        } } } })]
+        : [];
+    const lines = projectNarrativeLines({ chat: buildChat({ runtimeEventsV2: [event] }),
+      characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')], messages, now: 20 });
+    expect(lines.filter((line) => line.type === 'goal')).toEqual([]);
+  });
+
+  it('projects only remaining targeted participants rather than restoring everyone', () => {
+    const event: RuntimeEventV2 = {
+      id: 'targeted-request', conversationId: 'chat-1', kind: 'director_intervention',
+      createdAt: 10, summary: '甲乙各自确认', visibility: 'moderator_only',
+      payload: { intent: 'force_reply', targetActorIds: ['a', 'b'], maxTurns: 1,
+        userGuidance: { kind: 'direct_reply', rawText: '甲乙各自确认', actorIds: ['a', 'b'],
+          mentionedActorIds: [], beatType: 'answer', pressure: 0.8, maxTurns: 1 } },
+    };
+    const chat = buildChat({ runtimeEventsV2: [event] });
+    const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙')];
+    const messages = [buildMessage({ type: 'ai', senderId: 'a', timestamp: 12, content: '周五确认。' })];
+    const partial = projectNarrativeLines({ chat, characters, messages, now: 20 });
+    expect(partial.find((line) => line.type === 'goal')?.participantIds).toEqual(['b']);
+    const completed = projectNarrativeLines({ chat, characters,
+      messages: [...messages, buildMessage({ type: 'ai', senderId: 'b', timestamp: 14, content: '我周六能去。' })], now: 20 });
+    expect(completed.filter((line) => line.type === 'goal')).toEqual([]);
+  });
+
+  it('does not turn a remaining restraint window into a repeated answer goal', () => {
+    const event: RuntimeEventV2 = {
+      id: 'restraint', conversationId: 'chat-1', kind: 'director_intervention', createdAt: 10,
+      summary: '甲先说，乙等一下', visibility: 'moderator_only', payload: {
+        intent: 'force_reply', targetActorIds: ['a'], maxTurns: 3,
+        userGuidance: { kind: 'direct_reply', rawText: '甲先说，乙等一下', actorIds: ['a'],
+          mentionedActorIds: [], suppressedActorIds: ['b'], beatType: 'answer', pressure: 0.8, maxTurns: 3 },
+      },
+    };
+    const lines = projectNarrativeLines({ chat: buildChat({ runtimeEventsV2: [event] }),
+      characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')],
+      messages: [buildMessage({ senderId: 'a', content: '我周六有空。', timestamp: 12 })], now: 20 });
+    expect(lines.filter((line) => line.type === 'goal')).toEqual([]);
+  });
+
   it('projects scenario structure lines when the chat has scenario state', () => {
     const lines = projectNarrativeLines({
       chat: buildChat({
@@ -509,6 +630,18 @@ describe('projectNarrativeLines', () => {
     const topicLine = lines.find((line) => line.type === 'topic');
     expect(topicLine?.summary).toBe('最近有什么好玩的事？');
     expect(topicLine?.summary).not.toContain('eventType');
+    expect(topicLine).toMatchObject({ contextKind: 'background', possibleNextBeats: [] });
+  });
+
+  it('keeps an AI topic actionable in an analysis room', () => {
+    const lines = projectNarrativeLines({
+      chat: buildChat({ sessionKind: { topology: 'group', family: 'analysis', scenarioId: 'opinion-review', surfaceProfile: 'text' } }),
+      messages: [buildMessage({ type: 'ai', senderId: 'a', content: '这个依据还需要核对。' })],
+      now: 20,
+    });
+    expect(lines.find((line) => line.id === 'topic:latest')?.possibleNextBeats[0]).toMatchObject({
+      beatType: 'invite', targetActorIds: ['a'],
+    });
   });
 
   it('does not turn private runtime records into mystery pressure in an ordinary conversation', () => {

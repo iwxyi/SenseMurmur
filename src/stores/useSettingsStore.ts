@@ -21,6 +21,7 @@ import { setHumanAppraisalRuntimeConfig } from '../services/humanAppraisalRuntim
 import { isCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { createSyncScopeMetadata, type SyncScopeSnapshot } from './syncScopeMetadata';
 import { createSyncScheduler } from './storeSyncScheduler';
+import { normalizeChatReplyPreferences, type ChatReplyPreferences } from '../types/chatReplyPreferences';
 
 interface SettingsStore extends AppSettings {
   _loaded: boolean;
@@ -35,6 +36,7 @@ interface SettingsStore extends AppSettings {
   setAIGeneration: (prefs: Partial<AIGenerationSettings>) => void;
   setCompanionship: (prefs: Partial<CompanionshipSettings>) => void;
   setChatMemory: (prefs: Partial<ChatMemorySettings>) => void;
+  setChatReplyPreferences: (prefs: Partial<ChatReplyPreferences>) => void;
   setChatAppearance: (prefs: Partial<ChatAppearanceSettings>) => void;
   setAutoGenerateCharacterAvatar: (enabled: boolean) => void;
   setDeveloperUI: (prefs: Partial<DeveloperUIPrefs>) => void;
@@ -276,6 +278,7 @@ export function buildSettingsPayload(state: AppSettings) {
     aiGeneration: state.aiGeneration,
     companionship: state.companionship,
     chatMemory: state.chatMemory,
+    chatReplyPreferences: state.chatReplyPreferences,
     developerUI: state.developerUI,
     memoryUI: state.memoryUI,
     artifactAppearance: state.artifactAppearance,
@@ -335,6 +338,7 @@ function syncState(state: Partial<AppSettings> & { api?: APIConfig; aiProfiles?:
       },
     },
     chatMemory: normalizeChatMemorySettings(state.chatMemory || DEFAULT_CHAT_MEMORY_SETTINGS),
+    chatReplyPreferences: normalizeChatReplyPreferences(state.chatReplyPreferences),
     developerUI,
     memoryUI: {
       showDeveloperMemory: developerModeAllowed && (state.developerUI?.showMemoryDebug ?? legacyShowMemoryDebug),
@@ -493,6 +497,7 @@ export const useSettingsStore = create<SettingsStore>()(
                 },
               },
               chatMemory: normalizeChatMemorySettings((settings as { chatMemory?: ChatMemorySettings }).chatMemory),
+              chatReplyPreferences: normalizeChatReplyPreferences(settings.chatReplyPreferences),
               developerUI: settings.developerUI as DeveloperUIPrefs | undefined,
               memoryUI: settings.memoryUI as { showDeveloperMemory?: boolean } | undefined,
               chatDraftDefaults: {
@@ -579,7 +584,7 @@ export const useSettingsStore = create<SettingsStore>()(
           const shouldBecomeDefault = config.isDefault === true
             || (!!config.type && !state.aiProfiles.some((profile) => profile.id !== id && (profile.type || 'text') === nextType));
 
-          const nextProfiles = state.aiProfiles.map((profile, index) => {
+          const nextProfiles = state.aiProfiles.map((profile) => {
             if (profile.id === id) {
               return {
                 ...profile,
@@ -719,6 +724,18 @@ export const useSettingsStore = create<SettingsStore>()(
             lastSyncedAt: Date.now(),
           };
           setChatMemoryRuntimeConfig(chatMemory);
+          syncToServer(buildSettingsPayload(next), set);
+          return next;
+        });
+      },
+
+      setChatReplyPreferences: (prefs) => {
+        set((state) => {
+          const next = {
+            ...state,
+            chatReplyPreferences: normalizeChatReplyPreferences({ ...state.chatReplyPreferences, ...prefs }),
+            lastSyncedAt: Date.now(),
+          };
           syncToServer(buildSettingsPayload(next), set);
           return next;
         });
@@ -1004,6 +1021,7 @@ export const useSettingsStore = create<SettingsStore>()(
         aiGeneration: state.aiGeneration,
         companionship: state.companionship,
         chatMemory: state.chatMemory,
+        chatReplyPreferences: state.chatReplyPreferences,
         developerUI: state.developerUI,
         memoryUI: state.memoryUI,
         chatDraftDefaults: state.chatDraftDefaults,
@@ -1016,14 +1034,10 @@ export const useSettingsStore = create<SettingsStore>()(
         usageStats: state.usageStats,
       }),
       merge: (persistedState, currentState) => {
-        const {
-          developerModeEntitled: _currentDeveloperModeEntitled,
-          ...currentSettings
-        } = currentState as SettingsStore;
-        const {
-          developerModeEntitled: _persistedDeveloperModeEntitled,
-          ...persistedSettings
-        } = (persistedState || {}) as Partial<SettingsStore>;
+        const currentSettings: Partial<SettingsStore> = { ...currentState };
+        const persistedSettings = { ...((persistedState || {}) as Partial<SettingsStore>) };
+        delete currentSettings.developerModeEntitled;
+        delete persistedSettings.developerModeEntitled;
         return {
           ...currentState,
           ...syncState({ ...(currentSettings as AppSettings), ...(persistedSettings as Partial<AppSettings>) }),

@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GroupChat } from '../types/chat';
 import type { Message } from '../types/message';
-import { runSessionLoop, shouldPauseSettledConversation } from './sessionRunner';
+import { buildNoSendContextKey, runSessionLoop, shouldPauseSettledConversation } from './sessionRunner';
 import { GenerationCancelledError } from './generationCancellation';
 
 const runOneRoundMock = vi.fn();
@@ -209,7 +209,7 @@ function buildLoopParams(chat: GroupChat) {
     getCurrentMessages: () => [] as Message[],
     isRunning: () => running,
     isPaused: () => false,
-    isActiveLoop: (loopId: string) => loopId === 'loop-1',
+    isActiveLoop: (loopId: string): boolean => loopId === 'loop-1',
     onSpeakerSelected: vi.fn(),
     getStreamingMessage: undefined as (() => unknown) | undefined,
     onCommitStarted: undefined as (() => void) | undefined,
@@ -221,6 +221,7 @@ function buildLoopParams(chat: GroupChat) {
     onMessageChunk: vi.fn(),
     onIdle: vi.fn(() => { running = false; }),
     onClearStreamingState: vi.fn(),
+    onDiscardStreamingMessage: vi.fn(),
     onEngineError: vi.fn(),
     onLoopError: vi.fn(() => { running = false; }),
     onCommit: vi.fn(async () => ({ chatPatch: {}, characterPatches: [], runtimeEvents: [] })),
@@ -234,6 +235,195 @@ function buildLoopParams(chat: GroupChat) {
 }
 
 describe('runSessionLoop', () => {
+  it('waits without starting busy work when all members decline and wakes for a new message', async () => {
+    const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    const start = vi.fn();
+    const finish = vi.fn();
+    let messages: Message[] = [];
+    let waited = false;
+    params.getCurrentMessages = () => messages;
+    const previousTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((fn: () => void, ms: number) => {
+      if (ms === 250 && runOneRoundMock.mock.calls.length === 2) {
+        waited = true;
+        expect(start).toHaveBeenCalledTimes(2);
+        expect(finish).toHaveBeenCalledTimes(2);
+        messages = [{ id: 'wake', type: 'user', content: '等一下。' } as Message];
+      }
+      fn();
+      return 0;
+    }) as unknown as typeof setTimeout;
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks, _profiles, context) => {
+      const round = runOneRoundMock.mock.calls.length;
+      if (round <= 2) hooks.onNoSend({ delivery: 'no_send', speakerId: round === 1 ? 'a' : 'b' });
+      else {
+        expect(context.consumedSpeakerIds.size).toBe(0);
+        params.pauseLoop();
+      }
+    });
+    try {
+      await runSessionLoop({ ...params, onTurnWorkStarted: start, onTurnWorkFinished: finish } as never);
+      expect(waited).toBe(true);
+      expect(runOneRoundMock).toHaveBeenCalledTimes(3);
+    } finally {
+      globalThis.setTimeout = previousTimeout;
+    }
+  });
+
+  it('clears silent placeholders and work state without committing or counting speech', async () => {
+    const chat = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
+    const params = buildLoopParams(chat);
+    const start = vi.fn();
+    const finish = vi.fn();
+    const discard = vi.fn();
+    const commitStart = vi.fn();
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks, _profiles, context) => {
+      const round = runOneRoundMock.mock.calls.length;
+      expect(context.allowNoSend).toBe(true);
+      if (round === 1) {
+        hooks.onSpeakerSelected('a');
+        hooks.onNoSend({ delivery: 'no_send', speakerId: 'a' });
+      } else {
+        expect([...context.consumedSpeakerIds]).toEqual(['a']);
+        params.pauseLoop();
+      }
+    });
+    await runSessionLoop({ ...params, onTurnWorkStarted: start, onTurnWorkFinished: finish,
+      onDiscardStreamingMessage: discard, onCommitStarted: commitStart } as never);
+    expect(discard).toHaveBeenCalledTimes(1);
+    expect(params.onClearStreamingState).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(finish).toHaveBeenCalledTimes(2);
+    expect(commitStart).not.toHaveBeenCalled();
+    expect(params.recordSpeak).not.toHaveBeenCalled();
+    expect(params.upsertMessage).not.toHaveBeenCalled();
+    expect(params.updateChat).not.toHaveBeenCalled();
+    expect(params.onEngineError).not.toHaveBeenCalled();
+  });
+
+  it('invalidates silence for new dialogue and does not carry an in-flight old-context result forward', async () => {
+    const chat = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
+    const params = buildLoopParams(chat);
+    let messages: Message[] = [];
+    params.getCurrentMessages = () => messages;
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks, _profiles, context) => {
+      const round = runOneRoundMock.mock.calls.length;
+      if (round === 1) {
+        hooks.onNoSend({ delivery: 'no_send', speakerId: 'a' });
+        messages = [{ id: 'new', content: '新消息', type: 'user' } as Message];
+      } else if (round === 2) {
+        expect(context.consumedSpeakerIds.size).toBe(0);
+        messages = [{ id: 'newer', content: '又一条消息', type: 'user' } as Message];
+        hooks.onNoSend({ delivery: 'no_send', speakerId: 'b' });
+      } else {
+        expect(context.consumedSpeakerIds.size).toBe(0);
+        params.pauseLoop();
+      }
+    });
+    await runSessionLoop(params as never);
+    expect(params.onLoopError).not.toHaveBeenCalled();
+  });
+
+  it('does not clear a replacement loop when an old silent request finishes', async () => {
+    const params = buildLoopParams(buildChat());
+    let active = true;
+    params.isActiveLoop = () => active;
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks) => {
+      active = false;
+      hooks.onNoSend({ delivery: 'no_send', speakerId: 'a' });
+      params.pauseLoop();
+    });
+    await runSessionLoop(params as never);
+    expect(params.onClearStreamingState).not.toHaveBeenCalled();
+    expect(params.onDiscardStreamingMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps an autonomous window stable across AI and runtime updates, but resets for new external input', () => {
+    const chat = buildChat();
+    const key = buildNoSendContextKey(chat, []);
+    expect(buildNoSendContextKey({ ...chat, updatedAt: 500, runtimeDetailHydratedAt: 600,
+      worldState: { ...chat.worldState, recentEvent: '运行态发生变化' },
+      runtimeEventsV2: [{ id: 'trace', kind: 'decision_trace' }, { id: 'score', kind: 'score_update', eventClass: 'score' }] as never[] }, [])).toBe(key);
+    expect(buildNoSendContextKey(chat, [{ id: 'typing', type: 'ai', content: '未提交草稿', isStreaming: true } as Message])).toBe(key);
+    expect(buildNoSendContextKey(chat, [{ id: 'ai', type: 'ai', content: '新回复' } as Message])).toBe(key);
+    expect(buildNoSendContextKey({ ...chat, messageBranchState: { activeBranchName: 'other' } }, [])).not.toBe(key);
+    expect(buildNoSendContextKey(chat, [{ id: 'new', type: 'user', content: '你好' } as Message])).not.toBe(key);
+    expect(buildNoSendContextKey(chat, [{ id: 'director', type: 'god', content: '阿甲来说说。' } as Message])).not.toBe(key);
+  });
+
+  it('consumes successful speakers once, then grants another window for new user input', async () => {
+    const chat = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
+    const params = buildLoopParams(chat);
+    const messages: Message[] = [];
+    params.getCurrentMessages = () => messages;
+    runSessionCommitPipelineMock.mockImplementation(async (args: Parameters<typeof buildCommitPipelineResult>[0] & { upsertMessage: (message: Message) => void }) => {
+      const result = buildCommitPipelineResult(args);
+      args.upsertMessage(result.persistedMessage);
+      messages.push(result.persistedMessage);
+      return result;
+    });
+
+    let wokeForInput = false;
+    const previousTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((fn: () => void, ms: number) => {
+      if (ms === 250 && runOneRoundMock.mock.calls.length === 2 && !wokeForInput) {
+        wokeForInput = true;
+        messages.push({ id: 'wake', type: 'user', content: '换个问题。' } as Message);
+      }
+      fn();
+      return 0;
+    }) as unknown as typeof setTimeout;
+
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _snapshot, _api, hooks, _profiles, context) => {
+      const round = runOneRoundMock.mock.calls.length;
+      if (round <= 2) {
+        const speakerId = round === 1 ? 'a' : 'b';
+        await hooks.onMessageComplete({ id: `generated-${round}`, chatId: chat.id, type: 'ai', senderId: speakerId,
+          senderName: speakerId === 'a' ? '甲' : '乙', content: '这轮说完了。', emotion: 0 } as never);
+      } else {
+        expect(context.consumedSpeakerIds.size).toBe(0);
+        params.pauseLoop();
+      }
+    });
+
+    try {
+      await runSessionLoop(params as never);
+    } finally {
+      globalThis.setTimeout = previousTimeout;
+    }
+    expect(wokeForInput).toBe(true);
+    expect(runOneRoundMock).toHaveBeenCalledTimes(3);
+    expect(runSessionCommitPipelineMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an explicit reply debt runnable after every member used their ordinary opportunity', async () => {
+    const chat = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
+    const params = buildLoopParams(chat);
+    const messages: Message[] = [];
+    params.getCurrentMessages = () => messages;
+    runSessionCommitPipelineMock.mockImplementation(async (args: Parameters<typeof buildCommitPipelineResult>[0] & { upsertMessage: (message: Message) => void }) => {
+      const result = buildCommitPipelineResult(args);
+      args.upsertMessage(result.persistedMessage);
+      messages.push(result.persistedMessage);
+      return result;
+    });
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _snapshot, _api, hooks, _profiles, context) => {
+      const round = runOneRoundMock.mock.calls.length;
+      if (round === 1 || round === 2) {
+        const speakerId = round === 1 ? 'b' : 'a';
+        await hooks.onMessageComplete({ id: `generated-${round}`, chatId: chat.id, type: 'ai', senderId: speakerId,
+          senderName: speakerId === 'a' ? '甲' : '乙', content: '说完了。', emotion: 0,
+          replyDebtTargetIds: round === 2 ? ['b'] : [], primaryReplyDebtTargetId: round === 2 ? 'b' : null } as never);
+      } else {
+        expect([...context.consumedSpeakerIds].sort()).toEqual(['a', 'b']);
+        params.pauseLoop();
+      }
+    });
+
+    await runSessionLoop(params as never);
+    expect(runOneRoundMock).toHaveBeenCalledTimes(3);
+  });
+
   it('waits for the final pending reply then pauses without another settled update', async () => {
     const start = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
     let current = start;

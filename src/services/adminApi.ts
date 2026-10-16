@@ -341,21 +341,7 @@ class AdminApiClient {
     return this.request<Record<string, unknown>>('GET', '/ai/ops-summary');
   }
 
-  getAiModelRoutes() {
-    return this.request<{ items: Array<Record<string, unknown>> }>('GET', '/ai/model-routes');
-  }
 
-  createAiModelRoute(payload: Record<string, unknown>) {
-    return this.request<Record<string, unknown>>('POST', '/ai/model-routes', payload);
-  }
-
-  updateAiModelRoute(routeId: string, payload: Record<string, unknown>) {
-    return this.request<Record<string, unknown>>('PUT', `/ai/model-routes/${encodeURIComponent(routeId)}`, payload);
-  }
-
-  deleteAiModelRoute(routeId: string) {
-    return this.request<{ ok: boolean }>('DELETE', `/ai/model-routes/${encodeURIComponent(routeId)}`);
-  }
 
   getPlatformGlobalConfig() {
     return this.request<{ ai: Record<string, unknown>; site: SitePublicConfig }>('GET', '/platform/global-config');

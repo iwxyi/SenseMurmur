@@ -284,6 +284,12 @@ export function useChatRunLoop(params: {
           setChatError(null);
         },
         onStreamingComplete: current.freezeStreamingDisplay,
+        onDiscardStreamingMessage: () => {
+          if (current.loopTokenRef.current !== loopId) return;
+          current.discardStreamingMessage();
+          setThinkingId(null);
+          current.setCurrentSpeaker(null);
+        },
         onLocalInterception: current.onLocalInterception,
         onIdle: (reason) => {
           current.discardStreamingMessage();

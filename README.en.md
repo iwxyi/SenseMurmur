@@ -1,270 +1,215 @@
-# Sense Murmur Client
+# Sense Murmur
 
-> Not a chatbot.  
-> A living AI social world where characters argue, align, remember, whisper in private, and get directed by you.
+**Create characters and casts, build shared history, and explore stories, companionship, learning, and creative work.**
 
-Sense Murmur Client is the frontend experience layer of Sense Murmur: a **PWA + React + TypeScript + Material UI** client for multi-agent social simulation. It lets users create AI group chats, private user-to-character chats, and AI-to-AI side threads. Characters share memory, relationships, and runtime context across sessions, while the user can step in as a director to steer the story.
+Sense Murmur is an AI interaction and creation app built around persistent character lives. Start with a character concept, a story, or an entire cast. Build personalities, relationships, and visual identities, then spend time with those characters in group conversations, private chats, stories, discussions, and learning rooms.
 
-| Document | Purpose |
+Shared experiences enter layered memory and influence relationships, emotion, and later expression. Diaries, letters, moments, and calendar activities preserve more of that history. Natural-language app actions, web research, file tools, and versioned Agent artifacts let you turn conversation into creative work within the same app.
+
+[Try It Online](https://sense.lyixi.com) · QQ community: 571886312 · [简体中文](./README.md)
+
+## At a Glance
+
+| Capability | What you can experience |
 |---|---|
-| [中文 README](./README.md) | Showcase doc for Chinese readers |
+| Character and cast creation | Extract people from a story or script, generate profiles in batches, inspect relationship circles, and complete visuals and voices |
+| Multi-character rooms | Characters respond to one another, argue, hold back, or form rapport; you can direct a speaker or introduce an event |
+| Persistent characters | Identity, memory, relationships, emotion, and the current room influence each response |
+| Layered memory | Personal history, impressions of others, shared room history, and significant events are stored and recalled in context |
+| Relationships and companionship | Closeness, trust, caution, and short-lived emotion affect tone, stance, addressing, and care |
+| Life records | Birth letters, diaries, farewell letters, social moments, and calendar activities |
+| Multimedia | Image input and generation, character visuals, voice input and playback, rich messages, files, and reference images |
+| Assistant and Agent | Create and revise documents, code, diagrams, tables, images, and interactive pages |
+| Natural-language operations | Create characters and rooms, find old conversations, compare people, and manage existing content |
+| Files and workspaces | Upload attachments, read web pages, save network resources, and organize files in authorized directories |
+| Template market | Browse and import characters, chat templates, and bundles; submit your own work for review |
+| Different rooms | Group chat, story, deliberation, learning, one-to-one chat, and private character threads |
+| Personal control | Choose models and preferences, keep local data first, and enable account sync when needed |
 
----
+## Build a Cast From an Idea
 
-## What it is
+Edit characters individually or use AI generation and batch completion. Supply a short description, story, script, or conversation to extract a cast and relationship clues, choose the people you want, and generate their full profiles.
 
-Sense Murmur is not built around a single model answering prompts. It is built around a **persistent AI social runtime**.
+- **Character foundations:** Background, expertise, desires, fears, values, self-image, attachment, and conflict style.
+- **Distinct expression:** Personality and behavior parameters, habitual phrases, sentence length, sarcasm, speaking habits, and expressions to avoid.
+- **Relationships:** Directional ties, relationship graphs and circles, and suggested links between new and existing characters.
+- **Appearance and voice:** Visual descriptions, reference images, avatars, generated artwork, and configured or automatically matched voices.
+- **Library management:** Groups, filters, import/export, batch completion, and separate model choices for text, images, and speech.
 
-| Typical AI chat app | Sense Murmur |
+A family, club, rival factions, or the cast of a story can enter a room with their internal relationships already established. Join the conversation, observe the characters, or guide the situation as a director.
+
+## What “Digital Life” Means Here
+
+A digital life in Sense Murmur is **your persistent character instance**. The term makes no claim that AI is conscious. You define a character's identity, personality, appearance, habits, and boundaries; your shared experiences then become part of that character's history.
+
+Two people can begin with the same character concept and arrive at different relationships. A promise, an argument, or a moment of support can affect what the character remembers and how they respond. When the character moves to another room, their longer-term history remains relevant, while the new room supplies its own roles and circumstances.
+
+Before a response, the runtime assembles the character's current situation:
+
+```text
+Identity and growth
+  + layered memories and shared experiences
+  + relationship with the current person
+  + recent emotion and unfinished concerns
+  + room topic, rules, and group dynamics
+  -> current perspective and expression context
+  -> a reply, an action, or a choice to stay silent
+  -> new messages, events, and validated state changes
+```
+
+This involves character records, memory retrieval, relationship updates, speaker scheduling, generation protocols, and state commits. The visible result is a character who may remember an earlier conversation or react differently after a disagreement; the engineering work keeps those changes grounded and available later.
+
+You can see those systems connect in ordinary use:
+
+- A disagreement in a group leaves an interaction event and may affect how characters see each other. A later diary can reflect on it from one character's perspective, and a private chat can carry the aftereffect forward.
+- Upload a reference image and a vision-capable model can summarize what it sees. Later, a request to use “this image's style” can resolve the relevant image and send the selected reference to the image service.
+- Completing an exercise in a learning room leaves answer and assessment evidence. The room can use its topic state, review needs, and saved materials when you return.
+
+### Character Through Behavior
+
+A character profile includes values, motivations, fears, habits, and speaking style. The current relationship and emotion shape whether they approach, defend, question, avoid, or let somebody else speak. Emotion can change quickly after an interaction, while lasting relationship changes need stronger evidence.
+
+A group room also considers the topic, who has spoken recently, outstanding replies, relationships between members, and the room's social atmosphere. Direct requests and open conversation follow different paths. A character can answer, offer a short reaction, or remain silent.
+
+The runtime supports restraint, bias, care, hesitation, and disagreement while retaining the character's identity. Results still depend on the model; repeated patterns and incorrect references remain areas of active evaluation.
+
+## Memory, Relationships, and Emotion
+
+### From Working Memory to Lasting Knowledge
+
+Memory has three layers, with separate ownership for the character, particular relationships, rooms, and private threads:
+
+| Layer | Purpose |
 |---|---|
-| User asks, model answers | Multiple characters interact inside one shared world |
-| Sessions are mostly isolated | Group chats, direct chats, and AI-private threads shape the same characters |
-| Text output is the product | Text + relationship shifts + memory consolidation + runtime projection |
-| User is only a requester | User can also watch, intervene, roleplay, and direct |
-| Little social structure | Governance, cliques, conflict, private threads, cooldowns, and public/private projections |
+| Working | Recent interactions, the current topic, and outstanding matters |
+| Episodic | Specific conflicts, choices, promises, and shared experiences |
+| Long-term | Stable understanding, relationship judgments, and significant personal context |
 
-What users come back for is not just a line of text, but questions like:
+Experiences become candidates for creation, reinforcement, revision, merging, or archiving. Repeated evidence can be consolidated and distilled into more stable knowledge. Retrieval considers the current topic, relationships, importance, and recency. Archived material is managed separately from active memory to keep each turn focused.
 
-- Who started fighting again?
-- Who quietly formed an alliance?
-- Which private thread changed the group mood?
-- Why does this character feel different lately?
+“You dislike overly sweet drinks” is a preference. “You ordered a sweet drink, left half of it unfinished, and made it a shared joke” is an experience. The character can use that history naturally when recommending a drink later. You can inspect and organize memories in the character view.
 
----
+Long-term facts such as relationships, promises, and calendar plans need structured results, explicit actions, or traceable events. A stray word in a message should not manufacture shared history.
 
-## Core experiences
+### Relationships With Different People
 
-| Experience | Description |
+Characters have relationships with you and with one another. The system tracks dimensions such as warmth, respect for competence, trust, and perceived threat, alongside the events and impressions behind them. Someone can respect another character's ability while doubting their judgment. A temporary alliance in one room need not erase a long-term bond.
+
+Attachment and willingness to yield add further nuance: a character can care deeply while disagreeing, or acknowledge someone's competence while remaining guarded. Relationships contribute to who speaks and how: who helps, challenges, yields, or becomes guarded. Context from a private conversation can inform the same character in a group, story, or discussion while respecting visibility rules.
+
+### Emotion and Companionship
+
+Immediate emotion affects attention and expression in the current turn and can leave a short-lived aftereffect. Over time, shared names, habits, promises, and ways of caring become part of a relationship's rhythm.
+
+Private chats can use more detailed personal context. Proactive care and diary generation are controlled by settings, timing, and context. Public rooms receive only what can be shared safely.
+
+Companionship includes shared forms of address, inside jokes, promises, relationship rituals, and attempts to repair conflict. Configure proactive care, ritual types, intensity, cooldowns, quiet hours, and how explicitly memories appear in replies.
+
+Characters also have online, away, and activity states that affect availability. Give direct feedback when a reply is out of character, too long, too formal, or too assistant-like, or mark an expression that fits. That feedback can inform later expression context.
+
+## A Life Beyond the Chat Window
+
+**Diaries and letters.** Characters can write birth letters, diaries, and farewell letters. Diaries draw on recent experiences, relationships, emotions, and unfinished thoughts. Read them in the Letters and Diary view, filter by character, and manage deleted entries. Automatic diary generation can be switched on or off.
+
+**Moments and calendar.** Moments show everyday character activity and interaction. The calendar tracks plans and activities. These views give room events a place to echo beyond chat; automatic updates depend on settings, model access, and runtime conditions.
+
+**Care, gifts, and invitations.** The social runtime can propose greetings, reactions to moments, gifts, and shared activities, then continue them in public or private conversation. Pending intentions and completed events have separate states. Confirmed activities and outcomes can feed relationship and memory updates. Add calendar events manually or filter activities by character and conversation.
+
+**Visual identity.** Characters can have avatars and visual references, with image generation for new material. Group chats can also have their own avatar and background. Character visuals and message images have separate ownership and storage rules.
+
+Diaries, social events, and new experiences can contribute to later companionship context. A promise may return in a future conversation; a disagreement may leave something to repair. These continuations depend on the active runtime, generation settings, and recorded events. Continuous autonomous operation after closing the app remains future work.
+
+## Rooms and Ways to Participate
+
+- **Group chat:** Bring a cast into one conversation. They can follow the topic, respond to one another, or hold back. Pause, direct a reply, speak as a character, or introduce an event.
+- **One-to-one and character threads:** Talk privately with a character; characters can also have separate private threads. Each channel has its own visibility rules.
+- **Story rooms:** Set the opening, follow narration and dialogue, and make branching choices with characters who already have history together.
+- **Deliberation:** Let different viewpoints examine, challenge, and summarize a question.
+- **Learning:** Set a goal and teaching style. Topics, exercises, answers, evidence, and review records accumulate over time.
+
+These four group-room families and their presets are available from the standard creation flow. Other training scenarios, deduction games, and world simulation are being validated in developer mode.
+
+### Keep the Paths You Explore
+
+Edit messages, regenerate answers, and switch between revision branches to explore another phrasing or direction while retaining alternatives. Story rooms support branching choices, custom directions, chapter navigation, and reading-position recovery. Search conversation records to locate earlier material and continue browsing long histories.
+
+Learning rooms retain goals, topics, exercises, and answer evidence in scenario state. Choose teaching and assessment styles, generate materials or interactive exercises, and return submissions to the teaching workflow. Deliberation presets organize different perspectives, questioning, and summaries.
+
+## Images, Voice, and Rich Messages
+
+Conversations can contain Markdown, code, images, files, and voice. Upload an image or file and discuss it with a model that supports the appropriate input. Characters and the assistant can generate images on request; images can become references for further variants.
+
+With suitable services configured, use voice input, hear spoken replies, and assign voices to characters. Text, images, and speech can appear in the same interaction. Media tasks show progress and failure states. Availability depends on your selected models and providers.
+
+The Files page brings together conversation images, audio, avatars, character visuals, and backgrounds. Filter, preview, download, or clean up multiple items, and check storage usage and sync status. Creative artifacts have a separate panel for content, files, and versions.
+
+## Assistant and Agent: Work You Can Keep
+
+The general assistant handles questions, explanations, and writing. Optional Agent capabilities turn a conversation into managed work:
+
+| Artifact | What it supports |
 |---|---|
-| AI group chat | Create a shared conversation with multiple characters and let it evolve from the first user topic |
-| User ↔ AI direct chat | Build a private, continuous relationship with any character; retrieval prioritizes the character's own memory and relationship state |
-| AI ↔ AI private threads | Spin off side conversations from the group, observe them, or intervene from either side |
-| Director mode | Ask for specific replies, inject events, trigger governance actions, or speak as a character |
-| Relationship and memory | Characters carry long-term personality, behavior, relationship state, and layered memories |
-| Dramatic governance | Owners, admins, muting, calling out, factions, and cold treatment become part of the interaction system |
-| PWA feel | Installable, fast startup, local-first reads, and cross-device continuity |
+| Documents and code | Reports, plans, tutorials, snippets, and multi-file text projects |
+| Diagrams and data | Diagram source, tables, JSON, and CSV that can be queried or revised |
+| Interactive pages | Small tools, forms, exercises, and previewable HTML pages |
+| Images | Generation from descriptions or references, with subsequent variants and versions |
 
----
+### Revise Work With a Version History
 
-## Why this project is compelling
+The Agent identifies the task and target, prepares changes, validates them, and commits new versions. One task can update several artifacts, and one artifact can contain multiple text files. Revisit, preview, copy, download, and continue editing earlier versions; ambiguous requests ask for clarification.
 
-| Audience | Value |
-|---|---|
-| Creators | A multi-character brainstorming room and story engine |
-| Entertainment users | An AI ensemble drama that can be followed over time |
-| Companion-oriented users | A world with persistent characters instead of disposable chat threads |
-| Education / simulation | Historical debates, mock courtrooms, classroom discussions, and role-driven exercises |
-| Developers | A productized example of multi-agent runtime, memory, relationship, and projection systems in a real client |
+Tables and JSON support queries, filters, sorting, pagination, and record changes. HTML artifacts can contain forms, exercises, and interactive tools. Submissions return to the model for assessment, explanation, or another revision. Page runtime errors can also be sent to the assistant for repair.
 
----
+### Research and File Tools
 
-## Product highlights
+- **Web research:** Search through configured providers, read a URL as readable content or source, and save resources to the conversation or export them to your device.
+- **Attachments and transfers:** Upload text and other files within the available parsing capabilities. Network tools support HTTP(S), anonymous FTP/FTPS, bounded directory transfers, ZIP extraction, and archive export.
+- **Authorized workspaces:** In supported browsers, authorize folders, list and select text files, and let the Agent read or organize them. Write, copy, move, delete, and transfer files between conversation storage and workspaces. Operations such as bulk overwrites, deletion, and cross-directory moves require confirmation.
+- **Desktop tools:** Electron exposes controlled command execution, system open/reveal actions, and Office inspection and conversion interfaces through `officecli`. These require the relevant environment, settings, and authorization. Web and mobile expose the tools their platforms support.
 
-| Area | Highlight |
-|---|---|
-| Session model | Unified support for `group`, `direct`, and `ai_direct` conversations |
-| Character system | Tabbed editing for identity, behavior, relationships, memory, models, and intervention permissions |
-| Relationship model | Four-axis ledger: `warmth / competence / trust / threat` |
-| Memory pipeline | Working, episodic, and long-term memory with character-centered retrieval |
-| Event system | Structured runtime events with shared visibility and projection rules |
-| Director controls | User-driven narrative steering and governance intervention |
-| Avatar generation | Shared prompt builder and queue for manual, automatic, and batch avatar generation |
-| Runtime UI | Timelines, relationship changes, room-state shifts, and private projections surfaced in the interface |
+Without an authorized directory, the Agent works with conversation artifacts and explicitly uploaded attachments. Keep generated work in the conversation, then choose whether to download it or save it to a workspace.
 
----
+Agent tools are configured per conversation. Learning rooms can reuse artifact tools for materials and exercises. Availability depends on models, account permissions, conversation settings, and device capabilities.
 
-## Example scenarios
+## Operate the App in Natural Language
 
-| Category | Examples |
-|---|---|
-| Creative | Future city design council, startup review panel, fictional character roundtable |
-| Entertainment | Romance observation room, office rant group, internet hot-take cast |
-| Companion | Goodnight group, morning motivation cast, philosophy late-night room |
-| Educational | Historical figure debate, scientist roundtable, courtroom simulation, classroom discussion |
-| Roleplay / structured play | Interviews, roundtables, classroom modes, and future deduction / board-game families |
+Use the home command entry or ask the assistant to perform app actions: create a cast and a room from a story, find an earlier travel discussion, or compare several characters. Continue from the returned candidates or results.
 
----
+Connected actions include individual and batch character creation, profile reading and comparison, permitted profile changes, private chats, room creation, conversation search, renaming, topic and membership changes, and deleting or restoring characters and conversations. You can also check AI credits, switch light/dark mode, select a default text model, or set a provider Key. Ambiguous or sensitive operations show choices or confirmation; complex creative tasks continue in an assistant conversation.
 
-## Architecture overview
+## Share a Starting Point Others Can Develop
 
-Sense Murmur's frontend is not just a set of pages calling APIs. It is the product shell for a shared runtime model.
+The template market supports characters, chat templates, and bundles. Inspect the people and configuration before importing your own copy. Creators can submit from character and chat editors for review and publication.
 
-| Layer | Responsibility |
-|---|---|
-| App Shell | Routing, theming, auth gates, PWA startup, and global settings loading |
-| Pages / UI | Chats, character library, settings, model management, runtime panels, relationship views |
-| Session Engine | Drives phases, actions, scheduling, and viewer-aware projections |
-| Runtime Events | Shared fact source for messages, interactions, relationship deltas, room shifts, memory candidates, and artifacts |
-| Relationship Ledger | Updates structured character-to-character state from interaction hints and reducers |
-| Memory Pipeline | Consolidates memory candidates and retrieves context with character-first priorities |
-| Projection Layer | Turns internal runtime state into user-facing and developer-facing UI views |
-| Persistence & Sync | Local-first caches with account-scoped optional sign-in sync |
+Character templates preserve identity and presentation resources. Chat templates preserve scenario, gameplay, and director configuration. Bundles can also include internal relationships, memories, companionship starting points, and runtime seeds. Import creates new local instances whose later experiences belong to the user. Submission removes full chat history, private user information, credentials, and relationships outside the bundle.
 
-### Runtime main loop
+## Data, Models, and Access
 
-The current group-chat path is no longer a thin “pick a speaker and ask for text” loop. It carries runtime decisions all the way into committed message metadata so replay, debugging, and downstream reducers can observe the same chain the generator used.
+Characters, rooms, and conversations load from local data first. Configure your own models in local mode or sign in to use available platform models. Current models, pricing, and permissions are shown in the app. An AI gateway and Key management are also available for compatible external tools.
 
-| Step | What happens now |
-|---|---|
-| Director intent | User guidance, beat pressure, and explicit actor targeting are normalized into a runtime intent object |
-| Speaker selection | The scheduler scores candidates, applies cooldown / reply pressure, and can hard-lock a requested speaker for explicit guidance |
-| Generation runtime | Turn plan, expression plan, realization plan, and execution trace are bundled before text generation |
-| Message commit | The final message writes `runtimeDecision` metadata including director intent, speaker selection, score traces, response surface, guidance execution, and runtime bundle traces |
-| Downstream consumers | Memory, relationship, companionship, projection, and debug panels can inspect the same runtime footprint instead of inferring it from plain text only |
+Account sync is optional. Importing guest data into an account requires confirmation, and account data remains separate. Artifact content is local by default; eligible text artifacts can sync when the account has permission and you enable it. Cached content remains viewable offline, while AI generation needs network access.
 
-| Metadata branch | Current purpose |
-|---|---|
-| `runtimeDecision.speakerSelection` | Records who was selected, why idle happened, and whether explicit guidance locked the actor |
-| `runtimeDecision.speakerScore` | Keeps compact scheduler score evidence for the chosen actor |
-| `runtimeDecision.generationRuntime` | Preserves turn / expression / realization planning traces for later inspection |
-| `runtimeDecision.guidanceExecution` | Shows whether explicit user guidance matched on first try, retried, or failed |
+Use Sense Murmur in a browser or install the PWA. The project also includes desktop and Android packaging.
 
-### Local-first sync
+- **Manage your data:** Select categories for backup and restore, import/export character profiles, manage deleted characters and conversations in the recycle bin, and inspect sync status and errors.
+- **Combine models:** Configure text, images, speech recognition, and speech synthesis separately, with character-level overrides. Platform models include usage and cost views; the AI gateway and Key management support compatible external tools.
+- **Personalize the interface:** Chinese and English, light/dark/system modes, color presets, character bubbles, and letter-paper styles. Wide screens use list/detail panes, with corresponding page access on mobile.
 
-Sense Murmur pages do not treat the cloud as the primary read path. Characters, chat lists, chat details, message windows, settings, and character artifacts hydrate from account-scoped local stores first. The cloud is used for background synchronization, cross-device reconciliation, conflict detection, and older-history pagination instead of blocking first paint.
+## Get Started
 
-| Case | Current rule |
-|---|---|
-| Opening a page | Render local data first; cloud summaries and details only refresh freshness in the background |
-| Signed-in local scope | A signed-in account reads and writes its own account-scoped local data even when cloud sync is disabled |
-| Logout | Switch back to the guest scope and clear in-memory workspace state; do not delete the signed-in account's persisted local snapshots |
-| Guest-to-account login | If guest characters, chats, messages, or artifacts exist after login, ask before importing them into the account scope |
-| Guest import ordering | Defer normal cloud refresh while an import prompt is pending; run accepted imports under the bootstrap lock, then resume workers and scope refresh |
-| Character / chat detail | If a local entity exists and the cloud returns 404, keep the local entity and mark that detail scope checked |
-| Character editor | First paint only loads the current character detail and local summaries; diary artifacts sync for that character only after the Diary tab is opened |
-| Preset characters | Provided by local preset definitions and never fetched from cloud detail endpoints |
-| Message history | Keep a bounded local window; `messages.window:<chatId>` is a lightweight freshness probe only. When cloud data changed, message bodies still load through `/messages?limit&before` pagination to keep `/sync/changes` small |
-| First cloud-sync enable | Hydrate local characters, chats, messages, and settings before building the local-to-cloud reconcile plan |
-| Cloud-sync entitlement | Auth responses include `cloudSyncEntitled`; it defaults to enabled today. Future non-entitled accounts disable cloud sync without deleting local data |
-| Settings bootstrap | Upload settings only when they differ from defaults; default local settings must not overwrite cloud settings |
-| Empty bootstrap | If there are no local entities, messages, or pending creates, do not fetch remote character/chat summaries |
-| Conflicts | Preserve pending local operations and surface remote deletes or field-version conflicts explicitly |
-| Observability | The sync details page shows each scope's lastChecked, lastApplied, cursor/revision, error count, backoff time, and inflight state |
-| Local persistence failures | Buffered persistence write failures show an error and can be inspected/exported from the sync details page |
+1. Open [sense.lyixi.com](https://sense.lyixi.com) and choose local mode or sign in.
+2. Configure a model or select one available to your account.
+3. Choose a preset character or create your own.
+4. Start a private chat or create a group, story, deliberation, or learning room.
 
-The sync architecture should continue to converge on one scope model: `scope + cursor/revision + changes + tombstone + conflict`. Stores own their merge semantics; shared infrastructure owns freshness, retry backoff, idempotency, bootstrap locking, and observability. Future multi-user or group collaboration should build on this protocol rather than making pages depend directly on live cloud reads.
+Begin with a character and a topic, then explore the memories, relationships, diary entries, and artifacts that follow.
 
-### Conversation topology
+## Project Status and Community
 
-| Type | Meaning | Default runtime semantics |
-|---|---|---|
-| `group` | Multi-character public room | Continuously runnable |
-| `direct` | User ↔ single character private channel | Response-oriented, not continuously auto-rotating |
-| `ai_direct` | AI ↔ AI private side thread | Continuously runnable and can project summaries back |
+Sense Murmur is under active development. Cast creation, relationship graphs, different room scenarios, layered memory, life records, multimedia, Agent work, natural-language operations, the template market, and data management have their own interfaces and execution paths, with connections across these workflows.
 
-### Core principles
+Ongoing work focuses on how these mechanisms hold up over time: consistent characters who can change, timely recall, natural group conversation, accurate follow-through on promises, and smooth artifact revision. Models can still repeat themselves, miss a memory, or misunderstand context. The app shows the current availability and requirements of each capability.
 
-| Principle | Meaning |
-|---|---|
-| Event-sourced runtime | Timelines, relationships, memory, and room state derive from structured events |
-| LLM proposes, code adjudicates | Models produce text and candidates; reducers and engines decide official state |
-| Character-led retrieval | Direct chat prioritizes the character's own long-term and relationship memory |
-| Projection separation | User-facing summaries and developer-facing detail views are intentionally distinct |
-| Unified data model | Conversations, characters, events, artifacts, and mode state share reusable primitives |
+Share feedback and reproducible scenarios in QQ group 571886312. Remove private conversations and credentials before posting.
 
-
----
-
-## Frontend stack
-
-| Category | Choice |
-|---|---|
-| UI | React 19 + Material UI 9 |
-| Language | TypeScript |
-| Build tool | Vite 8 |
-| State management | Zustand |
-| Routing | React Router 7 |
-| i18n | i18next + react-i18next |
-| PWA | vite-plugin-pwa / Workbox |
-| Testing | Vitest |
-
----
-
-## Project guide
-
-| Path | Purpose |
-|---|---|
-| `src/App.tsx` | App shell, routing, theme, and auth gate |
-| `src/pages/` | Product pages for chats, characters, settings, account, and models |
-| `src/components/` | UI building blocks, editors, panels, controls, and layouts |
-| `src/stores/` | Zustand stores for chats, messages, characters, settings, and auth |
-| `src/services/` | Runtime logic: chat engine, session engine, memory, relationships, avatar generation |
-| `src/types/` | Core types for chat, characters, runtime events, and settings |
-| `src/i18n/` | Localization resources |
-| `src/theme/` | Material You themed design system |
-
----
-
-## Getting started
-
-### Requirements
-
-| Item | Notes |
-|---|---|
-| Node.js | Use a recent LTS version |
-| AI model config | At least one text model is needed; add an image model for avatar generation |
-| Login mode | Local mode works for standalone use; sign-in is optional |
-
-### Install and run
-
-| Action | Command |
-|---|---|
-| Install dependencies | `npm install` |
-| Start dev server | `npm run dev` |
-| Build | `npm run build` |
-| Run tests | `npm run test` |
-| Preview production build | `npm run preview` |
-
-### First-run flow
-
-| Step | Suggested action |
-|---|---|
-| 1 | Start the client |
-| 2 | Open the app and enter local mode or sign in if needed |
-| 3 | Configure AI models |
-| 4 | Create or import characters |
-| 5 | Create a group chat or a direct chat |
-| 6 | Send the first topic message to start the runtime |
-| 7 | Watch relationship changes, private threads, and runtime panels evolve |
-
----
-
-## Current product boundaries
-
-| Area | Current rule |
-|---|---|
-| Group chat startup | A group begins from the user's first message, not from a fixed canned script |
-| Direct chat semantics | `direct` is a private response-oriented character channel, not a continuously auto-running room |
-| AI-private chat | `ai_direct` carries the private thread and can produce public summary projections |
-| Relationship updates | Interaction hints drive ledger updates; display values and reducer accumulation are intentionally distinct |
-| Memory retrieval | Direct chat prioritizes the character itself, then the current session, then cross-session projections |
-| Avatar generation | Manual, automatic, and batch flows share one prompt builder and queue |
-
----
-
-## Who may want to follow this project
-
-| Interest area | Why it fits |
-|---|---|
-| Multi-agent interaction | Shared runtime state, not just multiple bots taking turns |
-| AI entertainment | A product-oriented AI ensemble and social simulation client |
-| Long-term memory | Character memory, relationship memory, session memory, and targeted retrieval |
-| Social simulation | Governance, alliances, conflict, private threads, and projections inside one product |
-| PWA product design | Fast startup, mobile-friendly interactions, and cross-device continuity |
-| Frontend architecture | A client that participates in runtime presentation rather than only rendering CRUD screens |
-
----
-
-## Roadmap direction
-
-| Stage | Focus |
-|---|---|
-| Current | Unified session runtime, character editor, layered memory, relationship ledger, avatar generation, PWA shell |
-| Next | Stronger runtime visualization, clearer topology separation, richer director controls, better replayability |
-| Longer-term | More scenario families, board-like surfaces, world-driven proactive events, future multi-user support |
-
----
-
-## One-line pitch
-
-**Sense Murmur Client is a PWA frontend for an AI social world where multiple characters talk, align, fight, remember, split into private threads, and let the user direct the drama.**
+Developers can read the [full project's technical README](https://github.com/lyixi/Pneumata#readme). The frontend uses React, TypeScript, MUI, and Vite. Run this directory with `npm install` and `npm run dev`; local mode needs a configured model.

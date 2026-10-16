@@ -4,6 +4,8 @@ import type { GroupChat } from '../types/chat';
 import type { Message } from '../types/message';
 import { DEFAULT_CONVERSATION_DIRECTOR_CONTROLS, DEFAULT_CONVERSATION_DRAMA_RULES, DEFAULT_CONVERSATION_GOVERNANCE, DEFAULT_CONVERSATION_WORLD_STATE } from '../types/chat';
 import { resolveDirectorIntent } from './directorIntent';
+import { projectNarrativeLines } from './narrativeProjection';
+import { getDirectorIntentSpeakerBias } from './speakerScoring';
 
 function buildCharacter(id: string, name: string): AICharacter {
   return {
@@ -72,6 +74,77 @@ function buildMessage(patch: Partial<Message>): Message {
 }
 
 describe('resolveDirectorIntent', () => {
+  it('uses the actual user turn for ordinary guidance without topic projection duplicating it', () => {
+    const chat = buildChat();
+    const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙')];
+    const messages = [buildMessage({ content: '今天逛街穿什么？' })];
+    const lines = projectNarrativeLines({ chat, characters, messages, now: 2 });
+    const intent = resolveDirectorIntent({ chat, characters, messages, narrativeLines: lines });
+    expect(intent.source).toBe('user_message');
+    expect(intent.beatType).toBe('invite');
+    expect(lines.find((line) => line.id === 'topic:latest')?.possibleNextBeats).toEqual([]);
+  });
+
+  it.each([true, false])('does not assign the latest AI speaker a casual reply task with projection=%s', (withProjection) => {
+    const chat = buildChat();
+    const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙')];
+    const messages = [buildMessage({ type: 'ai', senderId: 'a', senderName: '甲', content: '今晚先到这儿。' })];
+    const intent = resolveDirectorIntent({ chat, characters, messages,
+      narrativeLines: withProjection ? projectNarrativeLines({ chat, characters, messages, now: 2 }) : undefined });
+    expect(intent.targetActorIds).toEqual([]);
+    expect(intent.pressure).toBe(0);
+    expect(getDirectorIntentSpeakerBias({ character: characters[1], directorIntent: intent, chat }).bias).toBe(0);
+  });
+
+  it.each([true, false])('does not turn casual drift into a summarizer assignment with projection=%s', (withProjection) => {
+    const chat = buildChat({ worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE,
+      structuredRoomState: { heat: 0, cohesion: 0, topicDrift: 80, dominantThread: null,
+        alliances: [], conflictPairs: [], pileOnTarget: null, silencedActors: [] } } });
+    const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙')];
+    characters[1].behavior.summarizing = 90;
+    const messages = [buildMessage({ type: 'ai', senderId: 'a', content: '今天的晚霞好看。' })];
+    const intent = resolveDirectorIntent({ chat, characters, messages,
+      narrativeLines: withProjection ? projectNarrativeLines({ chat, characters, messages, now: 2 }) : undefined });
+    expect(intent.beatType).not.toBe('summarize');
+    expect(getDirectorIntentSpeakerBias({ character: characters[1], directorIntent: intent, chat }).reasons)
+      .not.toContain('director:summarizer');
+  });
+
+  it('retains drift-based synthesis in analysis rooms', () => {
+    const intent = resolveDirectorIntent({
+      chat: buildChat({
+        sessionKind: { topology: 'group', family: 'analysis', scenarioId: 'opinion-review', surfaceProfile: 'text' },
+        worldState: { ...DEFAULT_CONVERSATION_WORLD_STATE,
+          structuredRoomState: { heat: 0, cohesion: 0, topicDrift: 80, dominantThread: null,
+            alliances: [], conflictPairs: [], pileOnTarget: null, silencedActors: [] } },
+      }),
+      characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')], messages: [],
+    });
+    expect(intent.beatType).toBe('summarize');
+  });
+
+  it('preserves an explicit user request to summarize in casual chat', () => {
+    const intent = resolveDirectorIntent({
+      chat: buildChat(),
+      characters: [buildCharacter('a', '甲'), buildCharacter('b', '乙')],
+      messages: [buildMessage({
+        content: '甲，帮我总结一下刚才的讨论。',
+        metadata: { runtimeDecision: { directorIntent: {
+          source: 'user_message', beatType: 'summarize', targetActorIds: ['a'],
+          userGuidance: {
+            kind: 'direct_reply', rawText: '甲，帮我总结一下刚才的讨论。',
+            actorIds: ['a'], mentionedActorIds: ['a'], focusText: '总结刚才的讨论',
+            beatType: 'summarize', pressure: 0.8, maxTurns: 1,
+            reason: '用户明确请求总结。',
+          },
+        } } },
+      })],
+    });
+    expect(intent.source).toBe('user_message');
+    expect(intent.beatType).toBe('summarize');
+    expect(intent.targetActorIds).toEqual(['a']);
+  });
+
   it('prioritizes an unresolved pending reply', () => {
     const intent = resolveDirectorIntent({
       chat: buildChat(),

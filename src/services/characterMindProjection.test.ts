@@ -327,6 +327,17 @@ describe('characterMindProjection', () => {
     expect(projection.expression.temperature).toContain('长期关系不是固定口吻');
   });
 
+  it('preserves an explicitly targetless turn despite a recent speaker', () => {
+    const speaker = character();
+    const other = character({ id: 'char-b', name: '阿远' });
+    const projection = buildCharacterMindProjection({
+      chat: chat('group'), character: speaker, characters: [speaker, other],
+      messages: [message('我刚到。', other.id)], target: null, now: 2000,
+    });
+    expect(projection.relationship.targetId).toBeUndefined();
+    expect(projection.relationship.targetName).toBeUndefined();
+  });
+
   it('uses an upstream resolved target instead of re-picking the latest speaker', () => {
     const latestSpeaker = character({ id: 'char-b', name: '阿远' });
     const guidedTarget = character({ id: 'char-c', name: '林北' });

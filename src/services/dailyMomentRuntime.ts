@@ -1,8 +1,8 @@
 import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
 import type { RuntimeEventV2, SocialEventCandidatePayload } from '../types/runtimeEvent';
-import { getUsablePreferredAIProfile, normalizeMaxOutputTokens, type AIModelProfile } from '../types/settings';
-import { generateImageWithAdapter, generateTextWithAdapter } from './aiGenerationAdapter';
+import { getUsablePreferredAIProfile, type AIModelProfile } from '../types/settings';
+import { generateImageWithAdapter, generateJsonWithAdapter } from './aiGenerationAdapter';
 import { isCharacterFeatureEnabled } from './characterGenerationPolicy';
 import { updateSourceChatAfterPostMoment } from './directSessionRuntime';
 import { sanitizeUserFacingText } from './displayTextSanitizer';
@@ -10,8 +10,10 @@ import { resolveMemoryDisclosureMetadata } from './memoryDisclosure';
 import { persistGeneratedMomentMedia, type StoredMomentMedia } from './momentMediaStorage';
 import { resolvePostMomentPublishGuard } from './postMomentPublishPolicy';
 import { retainRuntimeEvents } from './runtimeEventRetention';
+import { characterPublicationOffset, MOMENT_SPREAD_WINDOW_MS } from './characterPublicationSchedule';
 
 const runningActors = new Set<string>();
+const CHAT_QUIET_PERIOD_MS = 18 * 60_000;
 
 function startOfDay(now: number) {
   const date = new Date(now);
@@ -27,7 +29,48 @@ function hasTodayMoment(chats: GroupChat[], actorId: string, now: number) {
   }));
 }
 
-export function getDailyMomentMemories(actor: AICharacter, chat: GroupChat, now = Date.now()) {
+function memorySignature(items: ReturnType<typeof getDailyMomentMemoryItems>) {
+  const source = items.map((item) => `${item.id}:${item.updatedAt || item.createdAt}:${item.text}`).join('|');
+  return [...source].reduce((value, char) => (value * 31 + char.charCodeAt(0)) >>> 0, 0).toString(36);
+}
+
+function hasSkippedMemories(chats: GroupChat[], actorId: string, signature: string, now: number) {
+  return chats.some((chat) => chat.deletedAt == null && (chat.runtimeEventsV2 || []).some((event) => {
+    const payload = event.payload as { artifactType?: string; memorySignature?: string };
+    return event.kind === 'artifact' && event.actorIds?.[0] === actorId && event.createdAt >= startOfDay(now)
+      && payload.artifactType === 'daily_moment_skip' && payload.memorySignature === signature;
+  }));
+}
+
+function parseMomentDecision(raw: string): { publish: boolean; text: string } {
+  const parsed: unknown = JSON.parse(raw.trim());
+  if (!parsed || typeof parsed !== 'object' || !('publish' in parsed) || typeof parsed.publish !== 'boolean') {
+    throw new Error('朋友圈模型未返回有效发布判断');
+  }
+  const decision = parsed as { publish: boolean; text?: unknown };
+  if (decision.publish && (typeof decision.text !== 'string' || !decision.text.trim())) {
+    throw new Error('朋友圈模型未返回有效正文');
+  }
+  return { publish: decision.publish, text: decision.publish ? (decision.text as string).trim() : '' };
+}
+
+function dailyTimingMinutes(actorId: string, now: number, salt: string, base: number, spread: number) {
+  const date = new Date(now);
+  const key = `${actorId}:${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}:${salt}`;
+  const hash = [...key].reduce((value, char) => (value * 31 + char.charCodeAt(0)) >>> 0, 0);
+  return base + hash % spread;
+}
+
+function nextDailyMomentTime(chats: GroupChat[], actorId: string, memoryAt: number, now: number) {
+  const latestConversationAt = Math.max(0, ...chats.filter((item) => item.deletedAt == null
+    && item.type === 'group' && item.isActive && item.memberIds.includes(actorId))
+    .map((item) => item.lastMessageAt || 0).filter((at) => at <= now));
+  const memoryDelayMinutes = dailyTimingMinutes(actorId, now, 'memory', 25, 121);
+  return Math.max(memoryAt + memoryDelayMinutes * 60_000,
+    latestConversationAt + CHAT_QUIET_PERIOD_MS);
+}
+
+function getDailyMomentMemoryItems(actor: AICharacter, chat: GroupChat, now: number) {
   const today = startOfDay(now);
   return [...(actor.layeredMemories || []), ...(chat.layeredMemories || [])]
     .filter((memory) => {
@@ -41,10 +84,14 @@ export function getDailyMomentMemories(actor: AICharacter, chat: GroupChat, now 
         && !memory.subjectIds?.includes('user');
     })
     .sort((a, b) => b.updatedAt - a.updatedAt)
-    .map((memory) => memory.text.trim())
-    .filter(Boolean)
-    .filter((text, index, texts) => texts.indexOf(text) === index)
+    .filter((item) => item.text.trim())
+    .filter((item, index, items) => items.findIndex((candidate) => candidate.text.trim() === item.text.trim()) === index)
     .slice(0, 6);
+}
+
+export function getDailyMomentMemories(actor: AICharacter, chat: GroupChat, now = Date.now()) {
+  return getDailyMomentMemoryItems(actor, chat, now)
+    .map((memory) => memory.text.trim());
 }
 
 interface DailyMomentOps {
@@ -64,6 +111,7 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
   if (!chat || chat.deletedAt != null || chat.type !== 'group' || !chat.isActive) return;
   if (!getUsablePreferredAIProfile(ops.getProfiles(), 'text')) return;
   const errors: unknown[] = [];
+  let nextCheckAt: number | undefined;
   for (const actorId of chat.memberIds) {
     if (actorId === 'user' || runningActors.has(actorId)) continue;
     const ownerRoom = ops.getChats().filter((item) => item.type === 'group' && item.isActive
@@ -77,8 +125,39 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
       const currentChat = ops.getChats().find((item) => item.id === chatId);
       if (!currentChat || !currentChat.isActive || currentChat.deletedAt != null) continue;
       const now = Date.now();
+      const memoryItems = getDailyMomentMemoryItems(actor, currentChat, now);
       const memories = getDailyMomentMemories(actor, currentChat, now);
       if (!memories.length) continue;
+      const signature = memorySignature(memoryItems);
+      if (hasSkippedMemories(ops.getChats(), actorId, signature, now)) continue;
+      const memoryAt = Math.max(...memoryItems.map((item) => item.updatedAt || item.createdAt));
+      let appointmentAt = now;
+      if (ops.getCharacters().filter((item) => item.deletedAt == null && isCharacterFeatureEnabled(item, 'moments')).length > 1) {
+        const schedule = ops.getChats().flatMap((item) => item.deletedAt == null ? item.runtimeEventsV2 || [] : [])
+          .find((event) => {
+            const payload = event.payload as Record<string, unknown>;
+            return event.kind === 'artifact' && event.actorIds?.[0] === actorId
+              && event.createdAt >= startOfDay(now) && payload.artifactType === 'daily_moment_schedule'
+              && payload.memorySignature === signature;
+          });
+        const readyAt = (schedule?.payload as Record<string, unknown> | undefined)?.readyAt;
+        appointmentAt = typeof readyAt === 'number' ? readyAt
+          : now + characterPublicationOffset(`${actorId}:${startOfDay(now)}:moment`, MOMENT_SPREAD_WINDOW_MS);
+        if (!schedule) {
+          await ops.applyChatRuntimePatch(chatId, (latest) => {
+            if (!ops.isCurrentSource() || latest.deletedAt != null) return null;
+            const event: RuntimeEventV2 = { id: crypto.randomUUID(), conversationId: chatId,
+              kind: 'artifact', createdAt: now, actorIds: [actorId], visibility: 'role_private',
+              summary: '今日分享检查已预约', payload: { artifactType: 'daily_moment_schedule', memorySignature: signature, readyAt: appointmentAt } };
+            return { runtimeEventsV2: retainRuntimeEvents([...(latest.runtimeEventsV2 || []), event], 160) };
+          });
+        }
+      }
+      const nextPublishAt = Math.max(appointmentAt, nextDailyMomentTime(ops.getChats(), actorId, memoryAt, now));
+      if (nextPublishAt > now) {
+        nextCheckAt = Math.min(nextCheckAt ?? nextPublishAt, nextPublishAt);
+        continue;
+      }
       const members = ops.getCharacters().map((item) => ({ id: item.id, name: item.name }));
       const sourceText = memories.map((text) => sanitizeUserFacingText(text, members)).join('\n');
       const date = new Date(now);
@@ -94,23 +173,32 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
       if (!resolvePostMomentPublishGuard({ chat: guardChat, actor, payload, now }).allow) continue;
       const textProfile = getUsablePreferredAIProfile(ops.getProfiles(), 'text');
       if (!textProfile) continue;
-      const rawText = await generateTextWithAdapter({
+      const rawDecision = await generateJsonWithAdapter({
         profile: textProfile,
-        systemPrompt: '用角色自己的语气写一条公开朋友圈。只输出正文，不要标题、JSON或系统说明。只能使用提供的公开记忆，不编造活动、经历或人物，不点名用户，不泄露私聊、秘密、内部字段或身份标识。',
+        systemPrompt: '判断角色今天是否真有值得主动分享到朋友圈的具体新鲜片段。普通聊天、喝茶吃饭等平常记录、重复经历、空泛心情都可以不发；不要为了每日任务凑动态。只根据提供的公开记忆判断，不编造事件或人物。返回 JSON 对象：{"publish":boolean,"text":string}。不发时 text 为空；要发时用角色自己的口吻写 100 字以内正文，不泄露私聊、秘密、用户资料或内部字段。',
         messages: [{ role: 'user', content: [
           `角色：${sanitizeUserFacingText(actor.name, members)}`,
           `背景：${sanitizeUserFacingText(actor.background, members)}`,
           `说话风格：${sanitizeUserFacingText(actor.speakingStyle, members)}`,
           `今天：${date.toLocaleDateString()}`,
           `今天的公开记忆：\n${sourceText}`,
-          '选一个具体片段，写成100字以内自然、简短的随手记录或心情。不复述全部记忆。',
+          '只有角色真想分享且内容具体、有新意时才发布；拿不准就不发。',
         ].join('\n') }],
-        // Reasoning models share their output budget with thinking; use the profile limit.
-        maxTokens: normalizeMaxOutputTokens(textProfile.maxOutputTokens),
         aiUsage: { type: 'moment_generation', label: '生成每日朋友圈', scope: 'moment', resourceId: chatId },
       });
       if (!ops.isCurrentSource()) return;
-      payload.momentText = sanitizeUserFacingText(rawText.replace(/^```(?:text)?\s*|\s*```$/gi, '').trim(), members);
+      const decision = parseMomentDecision(rawDecision);
+      if (!decision.publish) {
+        await ops.applyChatRuntimePatch(chatId, (latest) => {
+          if (!ops.isCurrentSource() || latest.deletedAt != null || hasSkippedMemories(ops.getChats(), actorId, signature, Date.now())) return null;
+          const skip: RuntimeEventV2 = { id: crypto.randomUUID(), conversationId: chatId,
+            kind: 'artifact', createdAt: Date.now(), actorIds: [actorId], visibility: 'role_private',
+            summary: '今日暂无值得分享的新片段', payload: { artifactType: 'daily_moment_skip', memorySignature: signature } };
+          return { runtimeEventsV2: retainRuntimeEvents([...(latest.runtimeEventsV2 || []), skip], 160) };
+        });
+        continue;
+      }
+      payload.momentText = sanitizeUserFacingText(decision.text, members);
       if (!payload.momentText || /^[{[]/.test(payload.momentText)) throw new Error('朋友圈模型未返回有效正文');
       const candidate: RuntimeEventV2 = {
         id: payload.dedupeKey!, conversationId: chatId, kind: 'event_candidate', createdAt: now,
@@ -146,6 +234,11 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
         if (!ops.isCurrentSource() || !latest.isActive || latest.deletedAt != null || !latest.memberIds.includes(actorId)
           || !latestActor || latestActor.deletedAt != null || !isCharacterFeatureEnabled(latestActor, 'moments')
           || startOfDay(Date.now()) !== startOfDay(now) || hasTodayMoment(ops.getChats(), actorId, Date.now())) return null;
+        const nextPublishAt = nextDailyMomentTime(ops.getChats(), actorId, memoryAt, Date.now());
+        if (nextPublishAt > Date.now()) {
+          nextCheckAt = Math.min(nextCheckAt ?? nextPublishAt, nextPublishAt);
+          return null;
+        }
         const latestGuardChat = { ...latest, runtimeEventsV2: ops.getChats().flatMap((item) => item.deletedAt == null ? item.runtimeEventsV2 || [] : []) };
         if (!resolvePostMomentPublishGuard({ chat: latestGuardChat, actor: latestActor, payload }).allow) return null;
         const patch = updateSourceChatAfterPostMoment(latest, payload, actor.name, { createdAt: now });
@@ -168,4 +261,5 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
     }
   }
   if (errors.length) throw new AggregateError(errors, '每日朋友圈生成失败');
+  return { nextCheckAt };
 }

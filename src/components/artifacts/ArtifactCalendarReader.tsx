@@ -11,6 +11,7 @@ import type { PaperSurfaceVariant } from '../../types/artifactAppearance';
 import MarkdownText from '../common/MarkdownText';
 import PaperSurface from '../common/PaperSurface';
 import { motion, transition } from '../../styles/motion';
+import { compactPillChipSx } from '../../styles/interaction';
 import BaseCalendar from '../calendar/BaseCalendar';
 
 type ReaderSwipeState = {
@@ -28,11 +29,14 @@ interface ArtifactCalendarReaderProps {
   paperVariant: PaperSurfaceVariant;
   readerHeight: string;
   countUnit?: string;
+  showDayCharacters?: boolean;
   emptyTitle: string;
   emptyDescription: string;
+  getTitle?: (item: CharacterArtifactEntry) => string;
   getMeta?: (item: CharacterArtifactEntry) => string;
   onRegenerateDebug?: (item: CharacterArtifactEntry) => Promise<void> | void;
   onEnsureDetail?: (itemId: string) => Promise<void> | void;
+  onRead?: (itemId: string) => void;
 }
 
 function getEntryDateKey(item: CharacterArtifactEntry) {
@@ -54,19 +58,20 @@ function toDateKey(date: Date) {
 function buildFloatingNavButtonSx(side: 'left' | 'right') {
   return {
     position: 'absolute',
-    [side]: { xs: -10, sm: -12, lg: -20 },
+    [side]: 2,
     top: '50%',
     transform: 'translateY(-50%)',
     zIndex: 1200,
     width: { xs: 34, sm: 40 },
     height: { xs: 34, sm: 40 },
     color: 'text.primary',
-    bgcolor: 'transparent',
-    border: '1px solid transparent',
-    backdropFilter: 'none',
-    WebkitBackdropFilter: 'none',
-    boxShadow: 'none',
-    opacity: { xs: 0.32, sm: 0.52, lg: 0.44 },
+    bgcolor: (theme: Theme) => theme.palette.mode === 'light' ? 'rgba(255,255,255,0.82)' : 'rgba(30,33,40,0.82)',
+    border: '1px solid',
+    borderColor: 'divider',
+    backdropFilter: 'blur(8px)',
+    WebkitBackdropFilter: 'blur(8px)',
+    boxShadow: '0 2px 6px rgba(0,0,0,0.12)',
+    opacity: 0.88,
     transition: transition(['opacity', 'background-color', 'box-shadow', 'border-color', 'transform', 'backdrop-filter'], motion.durations.base, motion.gentleSpring),
     '&:hover, &:active, &:focus-visible': {
       opacity: 1,
@@ -101,32 +106,41 @@ export default function ArtifactCalendarReader({
   paperVariant,
   readerHeight,
   countUnit = '',
+  showDayCharacters = false,
   emptyTitle,
   emptyDescription,
+  getTitle,
   getMeta,
   onRegenerateDebug,
   onEnsureDetail,
+  onRead,
 }: ArtifactCalendarReaderProps) {
   const isZh = language.startsWith('zh');
   const today = useMemo(() => new Date(), []);
-  const [selectedId, setSelectedId] = useState<string | null>(items[0]?.id || null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const chronologicalItems = useMemo(() => [...items].sort((a, b) => (
+    getEntryDateKey(a).localeCompare(getEntryDateKey(b)) || a.createdAt - b.createdAt || a.id.localeCompare(b.id)
+  )), [items]);
   const selectedDeletedItem = deletedItems.find((item) => item.id === selectedId) || null;
-  const selectedItem = items.find((item) => item.id === selectedId) || selectedDeletedItem || items[0] || null;
+  const selectedItem = items.find((item) => item.id === selectedId) || selectedDeletedItem || chronologicalItems.at(-1) || null;
   const selectedItemDeleted = Boolean(selectedItem?.deletedAt);
-  const selectedIndex = selectedItem ? items.findIndex((item) => item.id === selectedItem.id) : -1;
+  const selectedIndex = selectedItem ? chronologicalItems.findIndex((item) => item.id === selectedItem.id) : -1;
   const selectedDate = selectedItem ? parseDateKey(getEntryDateKey(selectedItem)) : today;
   const [calendarExpanded, setCalendarExpanded] = useState(true);
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
   const [loadingDetailId, setLoadingDetailId] = useState<string | null>(null);
   const swipeRef = useRef<ReaderSwipeState | null>(null);
   const itemsByDate = useMemo(() => {
-    const map = new Map<string, CharacterArtifactEntry>();
-    items.forEach((item) => {
+    const map = new Map<string, CharacterArtifactEntry[]>();
+    chronologicalItems.forEach((item) => {
       const dateKey = getEntryDateKey(item);
-      if (!map.has(dateKey)) map.set(dateKey, item);
+      const entries = map.get(dateKey) || [];
+      entries.push(item);
+      map.set(dateKey, entries);
     });
     return map;
-  }, [items]);
+  }, [chronologicalItems]);
+  const selectedDayItems = selectedItem ? itemsByDate.get(getEntryDateKey(selectedItem)) || [] : [];
   const unreadDateKeys = useMemo(() => {
     const keys = new Set<string>();
     items.forEach((item) => {
@@ -135,21 +149,13 @@ export default function ArtifactCalendarReader({
     return keys;
   }, [items]);
 
-  useEffect(() => {
-    if (!items.length) {
-      setSelectedId(null);
-      return;
-    }
-    if (!selectedItem) setSelectedId(items[0].id);
-  }, [items, selectedItem]);
-
   const selectItem = (item: CharacterArtifactEntry) => {
     setSelectedId(item.id);
   };
 
   const goToItem = (offset: number) => {
     if (selectedIndex < 0) return;
-    const next = items[selectedIndex + offset];
+    const next = chronologicalItems[selectedIndex + offset];
     if (next) selectItem(next);
   };
 
@@ -185,7 +191,7 @@ export default function ArtifactCalendarReader({
     const absX = Math.abs(dx);
     const absY = Math.abs(dy);
     if (absX < 48 || absX < absY * 1.35) return;
-    goToItem(dx > 0 ? 1 : -1);
+    goToItem(dx > 0 ? -1 : 1);
   };
 
   const handleRegenerateDebug = async () => {
@@ -211,6 +217,12 @@ export default function ArtifactCalendarReader({
     };
   }, [onEnsureDetail, selectedItem]);
 
+  useEffect(() => {
+    if (selectedItem?.unread && selectedItem.deletedAt == null && selectedItem.text.trim()) {
+      onRead?.(selectedItem.id);
+    }
+  }, [onRead, selectedItem]);
+
   return (
     <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: 'minmax(300px, 360px) minmax(0, 1fr)' }, gap: { xs: 1.5, lg: 2.25 }, alignItems: 'start' }}>
       <Box sx={{ position: { lg: 'sticky' }, top: { lg: 'calc(var(--app-floating-tab-top, 10px) + 64px)' }, alignSelf: 'start', minWidth: 0 }}>
@@ -221,7 +233,7 @@ export default function ArtifactCalendarReader({
                 isZh={isZh}
                 selectedDate={selectedDate}
                 onSelectDate={(day) => {
-                  const item = itemsByDate.get(toDateKey(day));
+                  const item = itemsByDate.get(toDateKey(day))?.at(-1);
                   if (item) selectItem(item);
                 }}
                 mode={calendarExpanded ? 'month' : 'week'}
@@ -235,15 +247,15 @@ export default function ArtifactCalendarReader({
                 }}
                 getDayMeta={(day, inMonth) => {
                   const dateKey = toDateKey(day);
-                  const item = itemsByDate.get(dateKey);
+                  const entries = itemsByDate.get(dateKey) || [];
                   const selected = selectedItem ? getEntryDateKey(selectedItem) === dateKey : false;
                   const hasUnreadItem = unreadDateKeys.has(dateKey);
                   return {
-                    disabled: !item,
+                    disabled: !entries.length,
                     selected,
                     inMonth,
-                    hasDot: Boolean(item),
-                    eventCount: item ? 1 : 0,
+                    eventCount: entries.length ? 1 : 0,
+                    countLabel: showDayCharacters && entries.length ? String(entries.length) : undefined,
                     dotColors: hasUnreadItem ? ['error.main'] : ['primary.main'],
                   };
                 }}
@@ -253,26 +265,53 @@ export default function ArtifactCalendarReader({
         </Card>
       </Box>
 
+      <Box sx={{ minWidth: 0, display: 'grid', gap: 1 }}>
+        {showDayCharacters && selectedDayItems.length ? (
+          <Box role="group" aria-label={isZh ? '当天内容' : 'Entries on this day'} sx={{ display: 'flex', gap: 0.75, overflowX: 'auto', minWidth: 0, py: 0.5 }}>
+            {selectedDayItems.map((item) => {
+              const sameCharacterItems = selectedDayItems.filter((entry) => entry.characterId === item.characterId);
+              const label = sameCharacterItems.length > 1
+                ? `${item.characterName} · ${item.kind === 'birth_letter' ? (isZh ? '诞生信' : 'Birth letter') : item.kind === 'final_letter' ? (isZh ? '告别信' : 'Farewell letter') : (isZh ? '日记' : 'Diary')}`
+                : item.characterName;
+              return (
+                <Chip
+                  key={item.id}
+                  label={label}
+                  size="small"
+                  clickable
+                  onClick={() => selectItem(item)}
+                  aria-pressed={selectedItem?.id === item.id}
+                  color={selectedItem?.id === item.id ? 'primary' : 'default'}
+                  variant={selectedItem?.id === item.id ? 'filled' : 'outlined'}
+                  icon={item.unread ? <Box component="span" sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: 'error.main' }} /> : undefined}
+                  sx={{ ...compactPillChipSx, flexShrink: 0, maxWidth: '100%' }}
+                />
+              );
+            })}
+          </Box>
+        ) : null}
       <Box
         onTouchStart={handleReaderTouchStart}
         onTouchMove={handleReaderTouchMove}
         onTouchEnd={handleReaderTouchEnd}
         onTouchCancel={() => { swipeRef.current = null; }}
-        sx={{ position: 'relative', height: readerHeight, touchAction: 'pan-y pinch-zoom', minWidth: 0 }}
+        sx={{ position: 'relative', height: readerHeight, touchAction: 'pan-y pinch-zoom', minWidth: 0, px: selectedItem ? { xs: '20px', sm: '24px' } : 0 }}
       >
         <PaperSurface
           variant={paperVariant}
           minHeight={260}
           contentInset={false}
           sx={[
-            { height: readerHeight, minHeight: readerHeight, maxHeight: readerHeight, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
+            { height: readerHeight, minHeight: readerHeight, maxHeight: readerHeight, display: 'flex', flexDirection: 'column', overflow: 'hidden', px: { xs: 3, sm: 3.5 } },
             selectedItem?.unread ? { outline: '1px solid rgba(244, 67, 54, 0.18)' } : {},
           ]}
         >
           <Box className="paper-surface-content" sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, alignItems: 'flex-start', mb: 0.5, flexShrink: 0 }}>
             <Box sx={{ minWidth: 0 }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
-                {selectedItem ? selectedItem.title : emptyTitle}
+                {selectedItem
+                  ? getTitle?.(selectedItem) || (selectedItem.kind === 'diary' ? selectedItem.characterName : selectedItem.title)
+                  : emptyTitle}
               </Typography>
               {selectedItem ? (
                 <Typography className="paper-surface-muted" variant="caption">
@@ -284,7 +323,7 @@ export default function ArtifactCalendarReader({
               selectedItemDeleted ? (
                 <Chip size="small" color="error" variant="outlined" icon={<DeleteIcon />} label={isZh ? '已删除' : 'Deleted'} sx={{ bgcolor: 'rgba(255,255,255,0.55)' }} />
               ) : (
-                <Chip size="small" variant="outlined" label={`${selectedIndex >= 0 ? items.length - selectedIndex : 1}/${items.length}${countUnit}`} sx={{ bgcolor: 'rgba(255,255,255,0.55)' }} />
+                <Chip size="small" variant="outlined" label={`${selectedIndex >= 0 ? selectedIndex + 1 : 1}/${items.length}${countUnit}`} sx={{ bgcolor: 'rgba(255,255,255,0.55)' }} />
               )
             ) : null}
           </Box>
@@ -331,14 +370,15 @@ export default function ArtifactCalendarReader({
         </PaperSurface>
         {selectedItem ? (
           <>
-            <IconButton onClick={() => goToItem(1)} disabled={selectedIndex < 0 || selectedIndex >= items.length - 1} aria-label={isZh ? '上一项' : 'Previous'} sx={buildFloatingNavButtonSx('left')}>
+            <IconButton onClick={() => goToItem(-1)} disabled={selectedIndex <= 0} aria-label={isZh ? '更早一项' : 'Earlier entry'} sx={buildFloatingNavButtonSx('left')}>
               <ChevronLeftIcon />
             </IconButton>
-            <IconButton onClick={() => goToItem(-1)} disabled={selectedIndex <= 0} aria-label={isZh ? '下一项' : 'Next'} sx={buildFloatingNavButtonSx('right')}>
+            <IconButton onClick={() => goToItem(1)} disabled={selectedIndex < 0 || selectedIndex >= chronologicalItems.length - 1} aria-label={isZh ? '更新一项' : 'Later entry'} sx={buildFloatingNavButtonSx('right')}>
               <ChevronRightIcon />
             </IconButton>
           </>
         ) : null}
+      </Box>
       </Box>
     </Box>
   );

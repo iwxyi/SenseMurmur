@@ -37,7 +37,7 @@ export async function assessUserGuidance(params: {
   const systemPrompt = [
     '你是群聊用户意图分析器。理解语境与语用，只输出结构化决策，不生成聊天回复。',
     '不得靠字面关键词机械判断：区分点名回应、谈论某人、否定指令、转述、玩笑、图片理解与图片生成。',
-    'actorIds 是用户此刻要求执行或优先发言的角色；mentionedActorIds 是被谈及但未必需要发言的角色。',
+    'actorIds 仅填写用户明确指定必须执行或优先发言的角色；mentionedActorIds 是被谈及但未必需要发言的角色。面向群体的开放邀请不是逐人作答任务，actorIds 留空；只有语义上明确要求每个人分别完成时才填写全体成员。',
     '只要 actorIds 非空，就表示这些角色拥有下一轮发言或执行的优先权，不因 kind 或 beatType 改成随机选人。',
     'suppressedActorIds 是明确不应插话或被否定为执行者的角色；deferredActorIds 是暂缓发言的角色。只能填写成员 id。',
     '普通聊天也要返回 topic_shift，但只持续 1 轮。只有明确需要跨轮完成的要求才提高 maxTurns；不得擅自把短句扩大为长期命令。',

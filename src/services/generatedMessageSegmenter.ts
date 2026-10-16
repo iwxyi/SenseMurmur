@@ -79,6 +79,7 @@ export function splitGeneratedRoundMessage(message: GeneratedRoundMessage) {
   if (Array.isArray(message.messageParts) && message.messageParts.length) {
     const baseMessage = withoutTransientExtras(message);
     const parts = message.messageParts.filter((part) => Boolean(part.content?.trim()));
+    const hasPartRouting = parts.some((part) => Object.hasOwn(part, 'addressedTargetIds') || Object.hasOwn(part, 'replyDebtTargetIds'));
     return parts.map((part, index) => ({
       ...baseMessage,
       content: part.content,
@@ -94,10 +95,10 @@ export function splitGeneratedRoundMessage(message: GeneratedRoundMessage) {
       },
       ...interactionsForSegment(message, parts.map((item) => item.content), index),
       incomingInteractionHint: index === 0 ? message.incomingInteractionHint : null,
-      addressedTargetIds: index === 0 ? message.addressedTargetIds : null,
-      primaryAddressedTargetId: index === 0 ? message.primaryAddressedTargetId : null,
-      replyDebtTargetIds: index === 0 ? message.replyDebtTargetIds : null,
-      primaryReplyDebtTargetId: index === 0 ? message.primaryReplyDebtTargetId : null,
+      addressedTargetIds: hasPartRouting ? part.addressedTargetIds ?? null : index === 0 ? message.addressedTargetIds : null,
+      primaryAddressedTargetId: hasPartRouting ? part.primaryAddressedTargetId ?? null : index === 0 ? message.primaryAddressedTargetId : null,
+      replyDebtTargetIds: hasPartRouting ? part.replyDebtTargetIds ?? null : index === 0 ? message.replyDebtTargetIds : null,
+      primaryReplyDebtTargetId: hasPartRouting ? part.primaryReplyDebtTargetId ?? null : index === 0 ? message.primaryReplyDebtTargetId : null,
       socialEventHints: socialEventsForSegment(message.socialEventHints, parts.map((item) => item.content), index),
       conflictFocus: stateUpdateForSegment(message.conflictFocus || undefined, parts.map((item) => item.content), index) || null,
     }));

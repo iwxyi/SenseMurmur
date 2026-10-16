@@ -9,6 +9,7 @@ export type SettingsCardKey =
   | 'ai-generation'
   | 'companionship'
   | 'chat-memory'
+  | 'chat-reply-preferences'
   | 'chat-defaults'
   | 'data'
   | 'about'
@@ -27,6 +28,7 @@ const SETTINGS_CARD_TAB_MAP: Partial<Record<SettingsCardKey, SettingsTabKey>> = 
   'ai-generation': 'chat',
   companionship: 'chat',
   'chat-memory': 'chat',
+  'chat-reply-preferences': 'chat',
   'chat-defaults': 'chat',
   plugins: 'plugins',
 };

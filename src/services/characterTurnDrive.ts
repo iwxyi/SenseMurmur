@@ -31,14 +31,17 @@ export function deriveCharacterTurnDrive(input: {
   targetName?: string;
   sharedRelationshipFacts?: string[];
   includeRelationshipNote?: boolean;
+  useImplicitCounterpart?: boolean;
 }): CharacterTurnDrive {
   const { speaker, innerLife } = input;
   const core = speaker.coreProfile;
   const selectedMessage = input.targetMessageId
     ? input.messages.find((message) => message.id === input.targetMessageId)
     : undefined;
-  const latest = selectedMessage || input.messages.filter((message) => !message.isDeleted
-    && message.type !== 'system' && message.type !== 'event' && message.senderId !== speaker.id).at(-1);
+  const latest = selectedMessage || (input.useImplicitCounterpart === false
+    ? undefined
+    : input.messages.filter((message) => !message.isDeleted
+      && message.type !== 'system' && message.type !== 'event' && message.senderId !== speaker.id).at(-1));
   const resolvedTargetId = input.targetActorId || innerLife.activeAffect?.counterpartId || latest?.senderId;
   const relationship = speaker.relationships.find((item) => item.characterId === resolvedTargetId);
   const reciprocal = input.counterpart && input.counterpart.id === resolvedTargetId
@@ -66,7 +69,7 @@ export function deriveCharacterTurnDrive(input: {
   if (core?.coreDesire) evidence.push('core_desire');
   if (core?.coreFear) evidence.push('core_fear');
   if (core?.valuePriority?.length || core?.values?.length) evidence.push('core_values');
-  if (core?.interactionHabits?.length || core?.perceptionBiases?.length || core?.sensitivities?.length) evidence.push('character_attention_pattern');
+  if (core?.interactionHabits?.length || core?.biases?.length || core?.perceptionBiases?.length || core?.sensitivities?.length) evidence.push('character_attention_pattern');
 
   const stake = [
     relationship ? `Toward ${targetName}, ${relationshipEvidence(relationship)}` : '',
@@ -75,7 +78,7 @@ export function deriveCharacterTurnDrive(input: {
     sharedFacts.length ? `Shared facts: ${sharedFacts.join(' / ')}` : '',
     core?.coreDesire ? `Standing desire: ${core.coreDesire}` : '',
     core?.coreFear ? `Standing fear: ${core.coreFear}` : '',
-  ].filter(Boolean).join('; ') || 'no invented private stake; only respond to something concrete if there is one';
+  ].filter(Boolean).join('; ') || 'no invented private stake; ordinary speech does not require a personal stake';
   const emotion = innerLife.dominantEmotion;
   const affect = innerLife.activeAffect;
   const feltReaction = [
@@ -97,11 +100,15 @@ export function deriveCharacterTurnDrive(input: {
     feltReaction,
     observableMove: 'infer a response from this person and the exchange, not an axis threshold or scheduler impulse',
     attentionLens: [
+      `Personality tendencies (0-100): ${Object.entries(speaker.personality).map(([axis, value]) => `${axis} ${value}`).join(', ')}`,
+      speaker.personalityDrift && Object.keys(speaker.personalityDrift).length
+        ? `Recorded personality drift: ${Object.entries(speaker.personalityDrift).map(([axis, value]) => `${axis} ${value}`).join(', ')}` : '',
       core?.interactionHabits?.length ? `Interaction habits: ${core.interactionHabits.join(' / ')}` : '',
+      core?.biases?.length ? `Subjective biases: ${core.biases.join(' / ')}` : '',
       core?.perceptionBiases?.length ? `Perception biases: ${core.perceptionBiases.join(' / ')}` : '',
       core?.sensitivities?.length ? `Sensitivities: ${core.sensitivities.join(' / ')}` : '',
       (core?.valuePriority?.length || core?.values?.length) ? `Values: ${(core.valuePriority?.length ? core.valuePriority : core.values)?.join(' / ')}` : '',
-    ].filter(Boolean).join('; ') || 'no authored attention pattern',
+    ].filter(Boolean).join('; '),
     speakingNecessity,
     evidence,
   };

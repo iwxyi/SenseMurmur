@@ -27,7 +27,7 @@ export const CHAT_STYLE_DEFINITIONS: ChatStyleDefinition[] = [
       en: 'Natural back-and-forth for everyday company and low-pressure topics.',
     },
     promptDescription:
-      'Casual room: keep the conversation natural, warm, and easy to join. Let replies have uneven length, ordinary reactions, partial attention, side comments, small emotional signals, and occasional low-information social turns. Use everyday phrasing and respond to the current emotional texture. Do not turn ordinary chat into polished speeches, scene narration, or a chain of complete conclusions unless the user asks for that.',
+      'Casual room: use everyday phrasing and let the actual exchange, character and relationship determine the tone. Low pressure does not require warmth, agreement or reassurance. Replies can have uneven length and partial attention; a small reaction can stand on its own. Do not turn ordinary chat into polished speeches, scene narration, or a chain of complete conclusions unless the user asks for that.',
   },
   {
     value: 'debate',
@@ -69,7 +69,7 @@ export const CHAT_STYLE_DEFINITIONS: ChatStyleDefinition[] = [
       en: 'Stay in character and advance the scene through motives, relationships, and consequences.',
     },
     promptDescription:
-      'Immersive roleplay room: stay inside the character voice and situation. Drive the scene through motives, relationships, sensory details, and consequences while preserving continuity with prior events. Let characters speak as people inside the scene; do not automatically expand every reply into narrated prose or a polished dramatic monologue.',
+      'Immersive roleplay room: stay inside the character voice, motives, relationships and established situation. Let the current exchange determine whether anything changes; each turn need not advance the plot, settle a plan or resolve tension. Let characters speak as people inside the scene; do not automatically expand every reply into narrated prose or a polished dramatic monologue. Action visibility follows the room display contract.',
   },
 ];
 

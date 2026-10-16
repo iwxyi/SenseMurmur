@@ -29,6 +29,8 @@ export function retainRuntimeEvents(events: RuntimeEventV2[], historyLimit: numb
   // Today's posts remain evidence for the daily limit and publishing cooldown.
   for (const event of events) {
     const payload = event.payload as { artifactType?: string; eventKind?: string; candidateId?: string };
+    if (event.kind === 'artifact' && (payload.artifactType === 'daily_moment_skip' || payload.artifactType === 'daily_moment_schedule')
+      && event.createdAt >= today.getTime()) stateIds.add(event.id);
     if (event.kind === 'artifact' && payload.artifactType === 'moment_text'
       && payload.eventKind === 'post_moment' && event.createdAt >= today.getTime()) {
       stateIds.add(event.id);

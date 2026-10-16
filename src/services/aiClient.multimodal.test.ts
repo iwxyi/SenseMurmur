@@ -39,6 +39,25 @@ describe('aiClient multimodal requests', () => {
     ]);
   });
 
+  it('preserves uploaded images when sending an ACE GPT model through the official proxy', async () => {
+    const calls: RequestInit[] = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init || {});
+      return new Response(JSON.stringify({ choices: [{ message: { content: '收到图片' } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+
+    await generateResponse({ provider: 'official-acedata', apiKey: '', baseUrl: '/api/ai', model: 'gpt-6.1-sol' }, 'system', [{
+      role: 'user', content: '看这张图', attachments: [{ url: 'https://example.test/photo.png', mimeType: 'image/png' }],
+    }]);
+
+    const body = JSON.parse(String(calls[0]?.body || '{}'));
+    expect(body).toMatchObject({ provider: 'official-acedata', model: 'gpt-6.1-sol' });
+    expect(body.messages[1].content).toEqual([
+      { type: 'text', text: '看这张图' },
+      { type: 'image_url', image_url: { url: 'https://example.test/photo.png' } },
+    ]);
+  });
+
   it('shows the member generation limit instead of a generic permission error', async () => {
     globalThis.fetch = (async () => new Response(JSON.stringify({
       error: '今日 AI 生成次数已达当前会员上限',

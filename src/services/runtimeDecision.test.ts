@@ -965,14 +965,14 @@ describe('runtimeDecision', () => {
     expect(projection.directorIntent).toMatchObject({ source: 'user_message', targetActorIds: ['a'] });
   });
 
-  it('keeps the model-assessed restraint window after the requested floor is satisfied', () => {
+  it.each(['suppressedActorIds', 'deferredActorIds'] as const)('releases %s after the model-assessed restraint window is consumed', (restraintField) => {
     const guidance = {
       kind: 'direct_reply' as const,
       rawText: '我想听安安说，不是让周策替她决定。',
       actorIds: ['a'],
       mentionedActorIds: ['a', 'b'],
-      suppressedActorIds: ['b'],
-      deferredActorIds: [],
+      suppressedActorIds: restraintField === 'suppressedActorIds' ? ['b'] : [],
+      deferredActorIds: restraintField === 'deferredActorIds' ? ['b'] : [],
       focusText: '让安安自己说完',
       beatType: 'answer' as const,
       pressure: 0.92,
@@ -1009,8 +1009,19 @@ describe('runtimeDecision', () => {
     expect(projection.directorIntent).toMatchObject({
       source: 'user_message',
       targetActorIds: [],
-      userGuidance: { suppressedActorIds: ['b'] },
+      userGuidance: { [restraintField]: ['b'] },
     });
+
+    const released = projectRuntimePressure({
+      chat: buildChat({ runtimeEventsV2: [intervention] }),
+      characters: [buildCharacter('a', '安安'), buildCharacter('b', '周策')],
+      messages: [
+        buildMessage({ id: 'floor', type: 'ai', senderId: 'a', content: '我自己说。', timestamp: 40 }),
+        buildMessage({ id: 'after-floor', type: 'ai', senderId: 'a', content: '就这些。', timestamp: 45 }),
+      ],
+      now: 50,
+    });
+    expect(released.directorIntent?.source).not.toBe('user_message');
   });
 
   it('ignores expired director interventions', () => {

@@ -158,6 +158,30 @@ const leakySpeakerId = '3c78729f-e52d-4dde-b27f-01a949960bb8b';
 const leakyTargetId = '8b3d7266-c0c7-4ceb-8dc2-45126f3f2321';
 
 describe('buildSystemPromptWithContext', () => {
+  it('removes a consumed director goal from the next generation prompt while retaining unresolved conditions', () => {
+    const speaker = buildCharacter();
+    const now = Date.now();
+    const chat = buildChat({
+      memberIds: [speaker.id],
+      runtimeEventsV2: [{ id: 'request-availability', conversationId: 'chat-1', kind: 'director_intervention',
+        createdAt: now - 1000, summary: '先确认周末能不能去', visibility: 'moderator_only',
+        payload: { intent: 'force_reply', text: '先确认周末能不能去', targetActorIds: [speaker.id], maxTurns: 1 } }],
+      worldState: { ...buildChat().worldState, conversationContinuity: { items: [{
+        key: 'availability', kind: 'condition', status: 'open', summary: '周五晚上才知道加班安排',
+        participantIds: [speaker.id], evidenceText: '周五晚上才知道加班安排',
+        sourceMessageIds: ['availability-message'], updatedAt: now - 500,
+      }] } },
+    });
+    const characters = new Map([[speaker.id, speaker]]);
+    const before = buildSystemPromptWithContext(speaker, chat, 0, [], characters);
+    expect(before).toContain('回应目标: 先确认周末能不能去');
+    const after = buildSystemPromptWithContext(speaker, chat, 0, [buildMessage({
+      senderId: speaker.id, content: '周五晚上才知道，先别给我订死。', timestamp: now - 500,
+    })], characters);
+    expect(after).not.toContain('回应目标: 先确认周末能不能去');
+    expect(after).toContain('周五晚上才知道加班安排');
+  });
+
   it('uses ordinary group relationship data as evidence without a per-turn display quota', () => {
     const speaker = buildCharacter({
       relationships: [{
@@ -429,7 +453,7 @@ describe('buildSystemPromptWithContext', () => {
     expect(prompt).not.toContain('你这个问题问到了实务中的痛点');
   });
 
-  it('targets the latest AI speaker in group prompts as the default local relationship target', () => {
+  it('does not make the latest AI speaker the default relationship target in ordinary groups', () => {
     const speaker = buildCharacter({ id: 'char-a', name: '喜羊羊' });
     const latestAi = buildCharacter({ id: 'char-b', name: '灰太狼' });
     const trace = buildPromptMemoryTrace(speaker, { ...buildChat(), memberIds: ['char-a', 'char-b'] }, [
@@ -439,8 +463,13 @@ describe('buildSystemPromptWithContext', () => {
       [latestAi.id, latestAi],
     ]));
 
-    expect(trace.targetActorId).toBe('char-b');
-    expect(trace.targetReason).toBe('来自上一条消息的最近发言者');
+    expect(trace.targetActorId).toBeUndefined();
+    expect(trace.targetReason).toBeUndefined();
+    const assembly = buildPromptAssemblyWithContext(speaker, { ...buildChat(), memberIds: ['char-a', 'char-b'] }, 0, [
+      buildMessage({ senderId: latestAi.id, senderName: latestAi.name, content: '你这话听着就不靠谱。' }),
+    ], new Map([[speaker.id, speaker], [latestAi.id, latestAi]]));
+    expect(assembly.characterMindTrace.targetActorId).toBeUndefined();
+    expect(assembly.systemPrompt).not.toContain('Stance toward 灰太狼');
   });
 
   it.each(['user', 'god'] as const)('does not retrieve the old AI counterpart after a new %s turn without a character subject', (type) => {
@@ -457,7 +486,7 @@ describe('buildSystemPromptWithContext', () => {
     const assembly = buildPromptAssemblyWithContext(speaker, room, 0, messages, members);
 
     expect(assembly.memoryTrace.targetActorId).toBeUndefined();
-    expect(assembly.characterMindTrace.targetActorId).toBe('user');
+    expect(assembly.characterMindTrace.targetActorId).toBeUndefined();
 
     const withSubject = buildPromptAssemblyWithContext(speaker, room, 0, messages, members, { preferredTargetActorId: other.id });
     expect(withSubject.memoryTrace.targetActorId).toBe(other.id);
@@ -570,7 +599,7 @@ describe('buildSystemPromptWithContext', () => {
     };
 
     const prompt = buildSystemPromptWithContext(speaker, chat, 0, [
-      buildMessage({ senderId: target.id, senderName: target.name, content: '这次方案我可能做错了。' }),
+      buildMessage({ senderId: target.id, senderName: target.name, content: '这次方案我可能做错了。', addressedTargetIds: [speaker.id] }),
     ], new Map([
       [speaker.id, speaker],
       [target.id, target],
@@ -616,7 +645,8 @@ describe('buildSystemPromptWithContext', () => {
     expect(prompt).not.toContain('Topic bias:');
     expect(prompt).not.toContain('## Active Continuity Pull');
     expect(prompt).toContain('## Character Mind Projection');
-    expect(prompt).toContain('Stance toward 阿远');
+    expect(prompt).not.toContain('Stance toward 阿远');
+    expect(prompt).toContain('苏苏 toward 阿远: warmth 42');
   });
 
   it('adds a group-specific user boundary reminder when user continuity is present', () => {
@@ -1181,7 +1211,7 @@ describe('buildSystemPromptWithContext', () => {
     };
 
     const prompt = buildSystemPromptWithContext(speaker, chat, 0, [
-      buildMessage({ senderId: 'char-b', senderName: '阿远', content: '先别把话说太满。' }),
+      buildMessage({ senderId: 'char-b', senderName: '阿远', content: '先别把话说太满。', addressedTargetIds: [speaker.id] }),
     ], new Map([
       [speaker.id, speaker],
       [target.id, target],
@@ -1244,7 +1274,8 @@ describe('buildSystemPromptWithContext', () => {
     ]));
 
     expect(prompt).toContain('## Character Mind Projection');
-    expect(prompt).toContain('Stance toward 阿远');
+    expect(prompt).not.toContain('Stance toward 阿远');
+    expect(prompt).toContain('苏苏 toward 阿远: warmth 50');
     expect(prompt).not.toContain('## Targeted Response Lens');
     expect(prompt).not.toContain('## Targeted Reply Rule');
     expect(prompt).not.toContain('## Targeted Influence Summary');
@@ -1282,7 +1313,7 @@ describe('buildSystemPromptWithContext', () => {
         surfaceProfile: 'text',
       },
     }, 0, [
-      buildMessage({ senderId: 'char-b', senderName: '阿远', content: '这杯茶先放这儿。' }),
+      buildMessage({ senderId: 'char-b', senderName: '阿远', content: '这杯茶先放这儿。', addressedTargetIds: [speaker.id] }),
     ], new Map([
       [speaker.id, speaker],
       [target.id, target],
@@ -1769,7 +1800,7 @@ describe('buildSystemPromptWithContext', () => {
     const target = buildCharacter({ id: 'char-b', name: '林北' });
     const chat = { ...buildChat(), memberIds: ['char-a', 'char-b', 'user'] };
     const messages = [
-      buildMessage({ senderId: 'char-b', senderName: '林北', content: '刚才那句话你怎么看？' }),
+      buildMessage({ senderId: 'char-b', senderName: '林北', content: '刚才那句话你怎么看？', addressedTargetIds: [speaker.id] }),
     ];
     const characters = new Map([
       [speaker.id, speaker],
@@ -1866,7 +1897,7 @@ describe('buildSystemPromptWithContext', () => {
     const target = buildCharacter({ id: leakyTargetId, name: '灰太狼' });
     const chat = { ...buildChat(), memberIds: [leakySpeakerId, leakyTargetId] };
     const prompt = buildSystemPromptWithContext(speaker, chat, 0, [
-      buildMessage({ senderId: leakyTargetId, senderName: '灰太狼', content: '你刚才是不是又躲开了？' }),
+      buildMessage({ senderId: leakyTargetId, senderName: '灰太狼', content: '你刚才是不是又躲开了？', addressedTargetIds: [speaker.id] }),
     ], new Map([
       [speaker.id, speaker],
       [target.id, target],

@@ -2,7 +2,6 @@ import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
 import type { Message } from '../types/message';
 import type { SessionGenerationRuntimeBundle } from '../types/sessionEngine';
-import type { ChatStyleProfile } from './styleProfileRegistry';
 import type { SpeakIntent } from './intentEngine';
 import type { InnerLifeProjection } from './innerLifeEngine';
 import type { ConversationMovePlan } from './conversationMovePlanner';
@@ -16,23 +15,17 @@ import { sanitizeUserFacingText } from './displayTextSanitizer';
 import { isPendingConversationItem } from './conversationContinuity';
 
 export interface TurnDirective {
-  roomStyle: 'casual' | 'analytical' | 'discovery' | 'dramatic';
   characterDrive: CharacterTurnDrive;
-  socialJob: string;
-  /** Hard replies keep a real obligation; ordinary group cues remain optional. */
-  socialJobRequired?: boolean;
   targetName?: string;
-  targetIsOptional?: boolean;
+  addressedNeed?: boolean;
   emotionalUndercurrent: string;
   relationshipEffect: string;
   narrativePressure?: string;
   continuityEvidence?: string[];
   roomAtmosphere?: string[];
   requiredChange: string;
-  expressionShape: string;
   userConstraint?: string;
   situationalConstraints: string[];
-  forbiddenDrift: string[];
 }
 
 export interface BuildTurnDirectiveInput {
@@ -40,7 +33,6 @@ export interface BuildTurnDirectiveInput {
   speaker: AICharacter;
   members: AICharacter[];
   messages: Message[];
-  styleProfile?: ChatStyleProfile | string | null;
   intent: SpeakIntent;
   innerLife: InnerLifeProjection;
   conversationMovePlan: ConversationMovePlan;
@@ -69,13 +61,6 @@ export function shouldUseUnifiedTurnDirective(chat: Pick<GroupChat, 'type' | 'mo
     && resolveSessionFamilyKey(chat) === 'conversation';
 }
 
-function normalizeRoomStyle(styleProfile?: ChatStyleProfile | string | null): TurnDirective['roomStyle'] {
-  if (styleProfile === 'analytical_room') return 'analytical';
-  if (styleProfile === 'discovery_room') return 'discovery';
-  if (styleProfile === 'dramatic_room') return 'dramatic';
-  return 'casual';
-}
-
 function describeEmotion(innerLife: InnerLifeProjection) {
   const emotion = innerLife.dominantEmotion;
   const recorded = emotion
@@ -94,6 +79,8 @@ function describeNarrativePressure(input: BuildTurnDirectiveInput, targetActorId
     // Relationship lines are numeric projections, not established live plot.
     // The relationship context already supplies their underlying evidence.
     .filter((line) => line.type !== 'relationship')
+    // The latest topic is already visible in the transcript and user guidance.
+    .filter((line) => line.type !== 'topic' || resolveSessionFamilyKey(input.chat) !== 'conversation')
     .filter((line) => line.visibility === 'public' || line.visibility === 'derived_public')
     .filter((line) => line.status !== 'resolved' && line.status !== 'abandoned')
     .filter((line) => line.id === input.directorIntent?.targetLineId || !line.participantIds.length || line.participantIds.includes(input.speaker.id))
@@ -138,18 +125,6 @@ function describeRequiredChange(input: BuildTurnDirectiveInput, hasNarrativePres
   return 'no mandatory plot or task change; a quiet reaction, shared pleasure or natural landing is valid';
 }
 
-function describeExpression(input: BuildTurnDirectiveInput) {
-  const style = normalizeRoomStyle(input.styleProfile);
-  const styleLine = style === 'analytical'
-    ? 'use distinctions or tradeoffs only when they advance the point'
-    : style === 'discovery'
-      ? 'prefer a fresh observation, example, or practical possibility'
-      : style === 'dramatic'
-        ? 'allow tension and implication, but keep it spoken chat'
-        : 'ordinary wording, uneven human rhythm, no meeting-style recap';
-  return `use the depth this person's live situation and the user's need warrant; ${styleLine}`;
-}
-
 function describeUserConstraint(userGuidance?: UserGuidanceIntent | null) {
   if (!userGuidance) return undefined;
   if (userGuidance.kind === 'media_request') return 'the user asked for media; handle the media request before social drift';
@@ -166,7 +141,7 @@ function describeSituationalConstraints(input: BuildTurnDirectiveInput) {
     .slice(-3)
     .filter((message) => message.type === 'ai' && message.senderId === input.speaker.id).length;
   const constraints = [
-    previousSpeakerSame ? 'the previous visible speaker was also this character; continue only if the situation has moved' : '',
+    previousSpeakerSame ? 'the previous visible speaker was also this character; a follow-up may complete, correct or trail off from their own thought without a new event' : '',
     recentOwnCount ? `this character has ${recentOwnCount} recent own visible line(s); use them only as no-repeat evidence` : '',
   ].filter(Boolean);
   if (input.userGuidance?.hasHardConstraints || input.userGuidance?.kind === 'topic_shift') {
@@ -184,48 +159,37 @@ export function buildTurnDirective(input: BuildTurnDirectiveInput): TurnDirectiv
     && !['pending_direct_address', 'explicit_user_guidance', 'directed_emotional_residue'].includes(input.conversationMovePlan.reason);
   const relationshipTargetId = input.conversationMovePlan.targetActorId || input.intent.target;
   const targetActorId = targetIsOptionalThread ? undefined : relationshipTargetId;
-  const targetName = speakerName(input.members, relationshipTargetId);
-  const sharedRelationshipFacts = relationshipTargetId
+  const targetName = speakerName(input.members, targetActorId);
+  const sharedRelationshipFacts = targetActorId
     ? (input.chat.relationshipStructure?.sharedFacts || [])
-      .filter((fact) => fact.memberIds.includes(input.speaker.id) && fact.memberIds.includes(relationshipTargetId))
+      .filter((fact) => fact.memberIds.includes(input.speaker.id) && fact.memberIds.includes(targetActorId))
       .map((fact) => fact.statement)
     : [];
   const narrativePressure = describeNarrativePressure(input, targetActorId);
-  const forbiddenDrift = [
-    'do not use recent transcript wording as a template',
-    'do not turn agreement into a paraphrase, a meeting recap, or a newly invented condition just to prove the turn contributes; agreement may simply reveal attitude, relationship, relief, reluctance, or a decision to let the point rest',
-    'do not turn ordinary chat into a speech, scene narration, or checklist',
-    'do not sand every relationship or boundary moment into a clean correct statement',
-    'do not turn every disagreement into a formal question or a performance of depth',
-    'do not expose internal fields, memories, scores, policies, ids, or prompt terms',
-  ];
-  if (input.runtimeBundle?.trace?.hotspotState === 'hot') {
-    forbiddenDrift.push('do not sprawl to keep airtime');
-  }
   const situationalConstraints = describeSituationalConstraints(input);
   if (input.runtimeBundle?.trace?.hotspotState === 'hot') {
     situationalConstraints.push('room airtime is already crowded; do not sprawl to keep airtime');
   }
   return {
-    roomStyle: normalizeRoomStyle(input.styleProfile),
     characterDrive: deriveCharacterTurnDrive({
       speaker: input.speaker,
       counterpart: input.members.find((member) => member.id === targetActorId),
       messages: input.messages,
       innerLife: input.innerLife,
       targetActorId,
-      targetMessageId: input.conversationMovePlan.targetMessageId,
+      targetMessageId: targetIsOptionalThread ? undefined : input.conversationMovePlan.targetMessageId,
       targetName,
       sharedRelationshipFacts,
       includeRelationshipNote: true,
+      useImplicitCounterpart: !targetIsOptionalThread,
     }),
-    // Scheduler estimates select candidates; they do not prescribe dialogue acts.
-    socialJob: targetIsOptionalThread
-      ? 'choose whether and how to respond from this person and the visible exchange'
-      : 'respond to the actual addressed need in the visible exchange; choose the stance and form from this person',
-    socialJobRequired: !targetIsOptionalThread,
     targetName,
-    targetIsOptional: targetIsOptionalThread,
+    addressedNeed: ((input.directorIntent?.source === 'user_message'
+      || input.directorIntent?.source === 'conversation_reply')
+      && input.directorIntent.targetActorIds.includes(input.speaker.id))
+      || ['pending_direct_address', 'explicit_user_guidance'].includes(input.conversationMovePlan.reason)
+      || input.userGuidance?.kind === 'direct_reply'
+      || input.userGuidance?.kind === 'media_request',
     emotionalUndercurrent: input.innerLife.activeAffect && input.innerLife.activeAffect.counterpartId === targetActorId
       ? `${describeEmotion(input.innerLife)} Directed ${input.innerLife.activeAffect.role} ${input.innerLife.activeAffect.kind} residue is tied to ${targetName || 'the counterpart'}; it may spike after one line and ease after speaking while a lesser unresolved trace remains. Their relationship changes only with durable evidence.`
       : describeEmotion(input.innerLife),
@@ -238,13 +202,32 @@ export function buildTurnDirective(input: BuildTurnDirectiveInput): TurnDirectiv
       .sort((a, b) => Number(isPendingConversationItem(b)) - Number(isPendingConversationItem(a)) || b.updatedAt - a.updatedAt)
       .slice(0, 6).map((item) => sanitizeUserFacingText(`${item.kind}/${item.status}: ${item.summary}; spoken evidence: ${item.evidenceText}`, input.members)),
     requiredChange: describeRequiredChange(input, Boolean(narrativePressure)),
-    expressionShape: describeExpression(input),
     userConstraint: describeUserConstraint(input.userGuidance),
     situationalConstraints,
-    forbiddenDrift,
   };
 }
 
+export function buildTurnContextPrompt(directive: TurnDirective | null | undefined) {
+  if (!directive) return '';
+  const facts = [
+    `Personal background: ${directive.characterDrive.stake}.`,
+    `Attention habits: ${directive.characterDrive.attentionLens}.`,
+    `Recorded emotional state: ${directive.emotionalUndercurrent}.`,
+    directive.roomAtmosphere?.length ? `Room: ${directive.roomAtmosphere.join(' ')}` : '',
+    directive.narrativePressure || '',
+    directive.continuityEvidence?.length
+      ? `Recorded matters: ${directive.continuityEvidence.join(' / ')}. Newer visible speech takes precedence over these records.` : '',
+    directive.addressedNeed
+      ? `There is an addressed request${directive.targetName ? ` involving ${directive.targetName}` : ''}.` : '',
+    directive.userConstraint ? `User request: ${directive.userConstraint}.` : '',
+  ].filter(Boolean);
+  return `\n## Turn Context
+You are this person in this room. This is an ongoing chat; speak in character, with the scope the exchange calls for. Honor explicit requests for detailed work. The following is private background, not dialogue.
+${facts.map((fact) => `- ${fact}`).join('\n')}\n`;
+}
+
+// Retained for comparison and rollback; ordinary conversation currently uses
+// buildTurnContextPrompt instead of this detailed expression directive.
 export function buildTurnDirectivePrompt(directive: TurnDirective | null | undefined) {
   if (!directive) return '';
   const userLine = directive.userConstraint ? `\n- User constraint: ${directive.userConstraint}.` : '';
@@ -256,18 +239,11 @@ export function buildTurnDirectivePrompt(directive: TurnDirective | null | undef
   const roomAtmosphereLine = directive.roomAtmosphere?.length
     ? `\n- Room atmosphere: ${directive.roomAtmosphere.join(' ')} This is environmental context, not a speaking order or a demand to create conflict.`
     : '';
-  // Project evidence, not a locally assigned recipient or expression checklist.
-  const cueLabel = directive.socialJobRequired === false ? 'Optional attention cue' : 'Live';
-  const cueJob = directive.socialJobRequired === false ? `if useful, ${directive.socialJob}` : directive.socialJob;
-  const targetLine = directive.targetName && !directive.targetIsOptional
-    ? `\n- ${cueLabel}: ${cueJob} to ${directive.targetName}; do not explain the whole topic.`
-    : directive.targetIsOptional
-      ? `\n- ${cueLabel}: ${cueJob}; latest speaker is context, not recipient; do not explain the whole topic.`
-      : `\n- ${cueLabel}: ${cueJob}; do not explain the whole topic.`;
+  const addressedNeedLine = directive.addressedNeed
+    ? `\n- A current addressed need${directive.targetName ? ` involving ${directive.targetName}` : ''} is present; handle what was actually asked. The relationship context does not prescribe agreement.`
+    : '';
   return `\n## Turn Directive — This Person in This Moment
-Speak as this person among people who share this exchange. Choose what catches their attention and what they actually want to say now. Their words may have warmth, bite, hesitation or delight; the exchange decides the shape.
-Acknowledgement is implicit by default. A reply can begin with the thing that matters to this person; an actual change of mind can be stated when it matters. A brief reaction can be the whole response. Do not attach a new condition, responsibility, question, or action just to make it count as progress. Let completed exchanges rest and honor explicit user requests.
-${targetLine}${directive.socialJobRequired === false ? '\n- This is not a quota. A brief attitude, a concrete reaction, or no new point is valid when the exchange has landed; do not manufacture a question, condition, task, or story update.' : ''}${roomAtmosphereLine}
+You are this person in this room. Let the exchange, your earlier words and your present situation inform what comes out. Speech need not have a deliberate goal, add information or advance the discussion. Acknowledging, hesitating, habit or a change of subject can stand alone; no reaction category or motive explanation is required. Attention may fall on earlier lines, several people's views, or your own state. Speak without first reviewing someone else's contribution. A group invitation opens a shared conversation: its several angles are available to the room, not separate requirements for every member. Stop where this utterance stops; do not expand a small response into a position, example or conclusion to make it complete. Other members can carry what remains. Their words are history, not a structure to reproduce. A brief reaction can be the whole response; explain when needed. Ordinary conversation can wander or abruptly change subject, without a bridge back or an explanation; explicit user requests and boundaries still apply. Do not add a question or task merely to keep the exchange going, or manufacture unevenness through random lengths, broken grammar, or decorative filler. Recorded character and room facts are context, not a checklist to perform.${addressedNeedLine}${roomAtmosphereLine}
 - Personal meaning: ${directive.characterDrive.stake}. Felt residue: ${directive.characterDrive.feltReaction}.
 - Attention habits: ${directive.characterDrive.attentionLens}.
 - Emotional and dramatic context: ${directive.emotionalUndercurrent}. ${directive.narrativePressure ? `${directive.narrativePressure}.` : 'No dramatic escalation is required.'} ${directive.requiredChange}.

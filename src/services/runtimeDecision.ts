@@ -1,11 +1,11 @@
 import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
 import type { Message } from '../types/message';
-import type { DirectorBeatType } from './directorIntent';
 import { resolveDirectorIntent, type DirectorIntent, type PendingReplyLike } from './directorIntent';
-import { collectGuidanceProgressAfterTimestamp } from './guidanceExecution';
+import { resolveActiveDirectorIntervention, resolveLatestActiveUserGuidance } from './guidanceLifecycle';
 import { projectNarrativeLines, selectPrimaryNarrativeLine, type NarrativeLineProjection } from './narrativeProjection';
-import { getGuidanceTargetActorIds, readStoredUserGuidanceIntent, type UserGuidanceIntent } from './userGuidanceIntent';
+
+export { resolveLatestActiveUserGuidance, type HumanGuidanceResolution } from './guidanceLifecycle';
 
 export interface RuntimePressureProjection {
   narrativeLines: NarrativeLineProjection[];
@@ -13,196 +13,11 @@ export interface RuntimePressureProjection {
   directorIntent: DirectorIntent | null;
 }
 
-export interface HumanGuidanceResolution {
-  intent: DirectorIntent | null;
-  timestamp: number | null;
-}
-
 export function shouldUseFreeSpeechRuntimeDecision(chat: GroupChat) {
   if (chat.type !== 'group') return false;
   if (chat.scenarioState?.currentTurnActorId) return false;
   const freeSpeaking = chat.modeConfig?.freeSpeaking;
   return freeSpeaking !== false;
-}
-
-function clamp01(value: number) {
-  return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
-}
-
-function resolveDirectorBeatType(intent: unknown): DirectorBeatType {
-  if (intent === 'force_reply') return 'answer';
-  if (intent === 'cool_down') return 'cool_down';
-  if (intent === 'reveal') return 'reveal';
-  if (intent === 'inject_event') return 'invite';
-  if (intent === 'redirect') return 'deflect';
-  if (intent === 'summarize') return 'summarize';
-  if (intent === 'escalate') return 'escalate';
-  return 'invite';
-}
-
-function uniqueActorIds(ids: unknown) {
-  if (!Array.isArray(ids)) return [];
-  return ids.filter((id, index, array): id is string => typeof id === 'string' && id.trim().length > 0 && array.indexOf(id) === index);
-}
-
-function countAiResponsesAfter(messages: Message[], timestamp: number) {
-  return messages.filter((message) => message.type === 'ai' && !message.isDeleted && message.timestamp > timestamp).length;
-}
-
-function getPendingTargetActorIdsAfter(messages: Message[], timestamp: number, guidance: UserGuidanceIntent, characters: AICharacter[]) {
-  const progress = collectGuidanceProgressAfterTimestamp(messages, timestamp, guidance, characters);
-  const minTargetTurns = Math.max(1, Math.round(guidance.minTargetTurns || 1));
-  if (minTargetTurns <= 1) {
-    return uniqueActorIds(guidance.actorIds.filter((actorId) => !progress.completedActorIds.has(actorId)));
-  }
-  return uniqueActorIds(guidance.actorIds.filter((actorId) => (
-    progress.matchedMessages.filter((message) => message.senderId === actorId).length < minTargetTurns
-  )));
-}
-
-function countConsumedGuidanceTurnsAfter(messages: Message[], timestamp: number, guidance: UserGuidanceIntent, characters: AICharacter[]) {
-  return collectGuidanceProgressAfterTimestamp(messages, timestamp, guidance, characters).consumedTurns;
-}
-
-function countRestraintWindowTurnsAfterTargetFloor(messages: Message[], timestamp: number, guidance: UserGuidanceIntent, characters: AICharacter[]) {
-  const minTargetTurns = Math.max(1, Math.round(guidance.minTargetTurns || 1));
-  const progress = collectGuidanceProgressAfterTimestamp(messages, timestamp, guidance, characters);
-  const targetMessages = progress.matchedMessages
-    .filter((message) => guidance.actorIds.includes(message.senderId))
-    .sort((left, right) => left.timestamp - right.timestamp);
-  const floorSatisfiedAt = targetMessages[minTargetTurns - 1]?.timestamp;
-  if (typeof floorSatisfiedAt !== 'number') return 0;
-  return countAiResponsesAfter(messages, floorSatisfiedAt);
-}
-
-function isRestraintWindowActive(messages: Message[], timestamp: number, guidance: UserGuidanceIntent, characters: AICharacter[]) {
-  if (!(guidance.suppressedActorIds?.length || guidance.deferredActorIds?.length)) return false;
-  const minTargetTurns = Math.max(1, Math.round(guidance.minTargetTurns || 1));
-  const remainingWindowTurns = Math.max(0, Math.round(guidance.maxTurns || minTargetTurns) - minTargetTurns);
-  return countRestraintWindowTurnsAfterTargetFloor(messages, timestamp, guidance, characters) < remainingWindowTurns;
-}
-
-function isExplicitPersistentGuidance(guidance: UserGuidanceIntent) {
-  if (guidance.actorIds.length) return true;
-  if (guidance.kind === 'media_request') return true;
-  if (guidance.hasHardConstraints) return true;
-  return guidance.kind === 'direct_reply' && Boolean(guidance.focusText?.trim());
-}
-
-function guidanceIntentToDirectorIntent(guidance: UserGuidanceIntent, targetActorIds: string[]): DirectorIntent {
-  return {
-    source: 'user_message',
-    beatType: guidance.beatType,
-    targetActorIds,
-    pressure: guidance.pressure,
-    reason: guidance.reason,
-    userGuidance: guidance,
-  };
-}
-
-export function resolveLatestActiveUserGuidance(characters: AICharacter[], messages: Message[], now = Date.now()): HumanGuidanceResolution {
-  const humanMessages = messages
-    .filter((message) => !message.isDeleted && (message.type === 'user' || message.type === 'god'))
-    // "speak as" belongs to character participation, not topic/director guidance.
-    .filter((message) => !(message.type === 'user' && Boolean(message.metadata?.manualSpeaker)))
-    .slice()
-    .reverse();
-
-  for (const message of humanMessages) {
-    const guidance = readStoredUserGuidanceIntent(message, characters);
-    if (!guidance || !isExplicitPersistentGuidance(guidance)) continue;
-    if (now > message.timestamp + 10 * 60_000) return { intent: null, timestamp: message.timestamp };
-
-    if (guidance.actorIds.length) {
-      const pendingActorIds = getPendingTargetActorIdsAfter(messages, message.timestamp, guidance, characters);
-      if (pendingActorIds.length) {
-        return {
-          intent: guidanceIntentToDirectorIntent(guidance, pendingActorIds),
-          timestamp: message.timestamp,
-        };
-      }
-      if (isRestraintWindowActive(messages, message.timestamp, guidance, characters)) {
-        return {
-          intent: guidanceIntentToDirectorIntent(guidance, []),
-          timestamp: message.timestamp,
-        };
-      }
-      return { intent: null, timestamp: message.timestamp };
-    }
-
-    if (countConsumedGuidanceTurnsAfter(messages, message.timestamp, guidance, characters) >= guidance.maxTurns) {
-      return { intent: null, timestamp: message.timestamp };
-    }
-    return {
-      intent: guidanceIntentToDirectorIntent(guidance, uniqueActorIds(getGuidanceTargetActorIds(guidance))),
-      timestamp: message.timestamp,
-    };
-  }
-
-  return { intent: null, timestamp: null };
-}
-
-function isDirectorInterventionActive(event: NonNullable<GroupChat['runtimeEventsV2']>[number], messages: Message[], now: number) {
-  const payload = event.payload as Record<string, unknown>;
-  const expiresAt = typeof payload.expiresAt === 'number' ? payload.expiresAt : event.createdAt + 10 * 60_000;
-  if (now > expiresAt) return false;
-  const maxTurns = typeof payload.maxTurns === 'number' ? Math.max(1, Math.round(payload.maxTurns)) : 1;
-  return countAiResponsesAfter(messages, event.createdAt) < maxTurns;
-}
-
-function isDirectorInterventionExpired(event: NonNullable<GroupChat['runtimeEventsV2']>[number], now: number) {
-  const payload = event.payload as Record<string, unknown>;
-  const expiresAt = typeof payload.expiresAt === 'number' ? payload.expiresAt : event.createdAt + 10 * 60_000;
-  return now > expiresAt;
-}
-
-function getLatestDirectorInterventionIntent(chat: GroupChat, characters: AICharacter[], messages: Message[], now: number, ignoreBefore?: number | null): DirectorIntent | null {
-  const events = (chat.runtimeEventsV2 || []).slice().reverse().filter((item) => item.kind === 'director_intervention' && !isDirectorInterventionExpired(item, now));
-  for (const event of events) {
-    if (typeof ignoreBefore === 'number' && event.createdAt < ignoreBefore) continue;
-    const payload = event.payload as Record<string, unknown>;
-    const text = typeof payload.text === 'string' ? payload.text : event.summary;
-    const storedGuidance = typeof payload.userGuidance === 'object' && payload.userGuidance
-      ? payload.userGuidance as UserGuidanceIntent
-      : null;
-    const guidance = storedGuidance;
-    const hasPersistentTargetedGuidance = Boolean(
-      storedGuidance?.actorIds.length
-      || (storedGuidance?.kind === 'media_request' && storedGuidance.actorIds.length),
-    );
-    const pendingGuidanceActorIds = hasPersistentTargetedGuidance && guidance?.actorIds.length
-      ? getPendingTargetActorIdsAfter(messages, event.createdAt, guidance, characters)
-      : [];
-    if (!hasPersistentTargetedGuidance && !isDirectorInterventionActive(event, messages, now)) continue;
-    if (hasPersistentTargetedGuidance && !pendingGuidanceActorIds.length && !(guidance?.suppressedActorIds?.length || guidance?.deferredActorIds?.length)) continue;
-
-    const targetActorIds = uniqueActorIds(payload.targetActorIds);
-    const guidanceTargetActorIds = uniqueActorIds(getGuidanceTargetActorIds(guidance));
-    const hasFloorRestraintWindow = Boolean(
-      hasPersistentTargetedGuidance
-      && !pendingGuidanceActorIds.length
-      && (guidance?.suppressedActorIds?.length || guidance?.deferredActorIds?.length)
-      && isRestraintWindowActive(messages, event.createdAt, guidance, characters),
-    );
-    const activeTargetActorIds = pendingGuidanceActorIds.length
-      ? uniqueActorIds(pendingGuidanceActorIds)
-      : hasFloorRestraintWindow
-        ? []
-      : targetActorIds.length
-        ? targetActorIds
-        : guidanceTargetActorIds;
-    if (hasPersistentTargetedGuidance && !activeTargetActorIds.length && !hasFloorRestraintWindow) continue;
-    return {
-      source: 'user_message',
-      targetLineId: typeof payload.targetLineId === 'string' ? payload.targetLineId : undefined,
-      beatType: resolveDirectorBeatType(payload.intent),
-      targetActorIds: activeTargetActorIds,
-      pressure: clamp01(typeof payload.pressure === 'number' ? payload.pressure : 0.86),
-      reason: text || 'A director intervention is steering the next room beat.',
-      userGuidance: guidance,
-    };
-  }
-  return null;
 }
 
 export function projectRuntimePressure(params: {
@@ -233,7 +48,7 @@ export function projectRuntimePressure(params: {
     now,
   });
   const latestHumanGuidance = resolveLatestActiveUserGuidance(params.characters, activeMessages, now);
-  const directorIntervention = getLatestDirectorInterventionIntent(params.chat, params.characters, activeMessages, now, latestHumanGuidance.timestamp);
+  const directorIntervention = resolveActiveDirectorIntervention(params.chat, params.characters, activeMessages, now, latestHumanGuidance.timestamp)?.intent;
   if (directorIntervention) {
     return {
       narrativeLines,

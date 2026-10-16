@@ -27,6 +27,25 @@ function buildMessage(content: string, messageCount = 1): GeneratedRoundMessage 
 }
 
 describe('generatedMessageSegmenter', () => {
+  it('routes each send independently and never inherits turn targets once any part has routing', () => {
+    const message = { ...buildMessage('嗯。'), addressedTargetIds: ['old'], replyDebtTargetIds: ['old'],
+      messageParts: [
+        { content: '嗯。', addressedTargetIds: null, replyDebtTargetIds: null },
+        { content: '乙，你几点来？', addressedTargetIds: ['b'], primaryAddressedTargetId: 'b', replyDebtTargetIds: ['b'], primaryReplyDebtTargetId: 'b' },
+        { content: '我先去洗手。' },
+      ] };
+    const parts = splitGeneratedRoundMessage(message);
+    expect(parts.map((part) => part.addressedTargetIds)).toEqual([null, ['b'], null]);
+    expect(parts.map((part) => part.replyDebtTargetIds)).toEqual([null, ['b'], null]);
+    expect(parts.map((part) => part.primaryReplyDebtTargetId)).toEqual([null, 'b', null]);
+  });
+
+  it('keeps legacy turn routing on the first modern send when no part provides routing', () => {
+    const parts = splitGeneratedRoundMessage({ ...buildMessage('甲。'), addressedTargetIds: ['b'], replyDebtTargetIds: ['b'],
+      messageParts: [{ content: '甲。' }, { content: '乙。' }] });
+    expect(parts.map((part) => part.replyDebtTargetIds)).toEqual([['b'], null]);
+  });
+
   it.each(['modern', 'legacy'])('commits social events only with their evidence send (%s)', (format) => {
     const contents = ['先查卷宗。', '明天一起去城南探路。', '明天一起去城南探路。'];
     const hint = { eventKind: 'social_outing' as const, title: '城南探路',

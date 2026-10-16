@@ -11,6 +11,7 @@ import { applyPresenceUpdateToTransition } from './characterPresence';
 import { buildInlineInteractionContract, parseInlineInteractionEnvelope } from './inlineInteractionHint';
 import type { DirectorIntent } from './directorIntent';
 import { useSettingsStore } from '../stores/useSettingsStore';
+import { DEFAULT_CHAT_REPLY_PREFERENCES, DEFAULT_CHAT_REPLY_PREFERENCE_TEXT } from '../types/chatReplyPreferences';
 
 const generateResponseMock = vi.hoisted(() => vi.fn());
 
@@ -25,7 +26,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
-  useSettingsStore.setState({ developerMode: false });
+  useSettingsStore.setState({ developerMode: false, chatReplyPreferences: DEFAULT_CHAT_REPLY_PREFERENCES });
   delete (globalThis as { __AICHATGROUP_DEBUG_SCHEDULER__?: boolean }).__AICHATGROUP_DEBUG_SCHEDULER__;
 });
 
@@ -203,7 +204,170 @@ function buildGuidanceIntervention(
   };
 }
 
+describe('autonomous no-send delivery', () => {
+  it('carries distinct per-send recipients through generation and ignores legacy turn routing', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ delivery: 'send',
+      addressedTargets: { targetIds: ['hui'] }, replyDebtTargets: { targetIds: ['hui'] },
+      messages: [
+        { content: '嗯。', addressedTargets: null, replyDebtTargets: null },
+        { content: '灰太狼，你几点过来？', addressedTargets: { targetIds: ['hui'], primaryTargetId: 'hui' }, replyDebtTargets: { targetIds: ['hui'] } },
+        { content: '懒羊羊，带把伞。', addressedTargets: { targetIds: ['lan'] }, replyDebtTargets: null },
+      ], conversationUpdate: null }));
+    const characters = [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼'), buildCharacter('lan', '懒羊羊')];
+    const result = await generateSpeakerMessage({ chat: buildChat({ memberIds: ['mei', 'hui', 'lan'] }),
+      speaker: characters[0], characters, messages: [], apiConfig: buildProfiles() });
+    expect(result.addressedTargetIds).toBeNull();
+    expect(result.replyDebtTargetIds).toBeNull();
+    expect(result.messageParts?.map((part) => part.addressedTargetIds)).toEqual([[], ['hui'], ['lan']]);
+    expect(result.messageParts?.map((part) => part.replyDebtTargetIds)).toEqual([[], ['hui'], []]);
+    expect(generateResponseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])('consumes a silent turn once without retries, rotation, state commits or messages (has AI history: %s)', async (hasAiHistory) => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue('{"delivery":"no_send","messages":[]}');
+    const characters = [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')];
+    const selected = vi.fn();
+    const complete = vi.fn();
+    const silent = vi.fn();
+    const error = vi.fn();
+    const context = { allowNoSend: true, consumedSpeakerIds: new Set<string>() };
+    const messages = hasAiHistory ? [{ ...buildAiMessage('mei', '美羊羊', '雨还没停。'), replyDebtTargetIds: [] }] : [];
+    const callbacks = { onSpeakerSelected: selected, onMessageChunk: vi.fn(), onMessageComplete: complete, onNoSend: silent, onError: error, onQuiet: vi.fn() };
+    await runOneRound(buildChat(), characters, messages, buildProfiles(), callbacks, undefined, context);
+    expect(error).not.toHaveBeenCalled();
+    expect(generateResponseMock).toHaveBeenCalledTimes(1);
+    expect(complete).not.toHaveBeenCalled();
+    expect(silent).toHaveBeenCalledWith({ delivery: 'no_send', speakerId: selected.mock.calls[0][0] });
+    context.consumedSpeakerIds.add(selected.mock.calls[0][0]);
+    await runOneRound(buildChat(), characters, messages, buildProfiles(), callbacks, undefined, context);
+    expect(selected.mock.calls[1][0]).not.toBe(selected.mock.calls[0][0]);
+    context.consumedSpeakerIds.add(selected.mock.calls[1][0]);
+    await runOneRound(buildChat(), characters, messages, buildProfiles(), callbacks, undefined, context);
+    expect(generateResponseMock).toHaveBeenCalledTimes(2);
+    expect(callbacks.onQuiet).toHaveBeenCalledTimes(1);
+    expect(generateResponseMock.mock.calls[0][1]).toContain('This is an autonomous opportunity to speak');
+  });
+
+  it('reopens a consumed member only while an explicit reply debt targets them', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ delivery: 'send', messages: [{ content: '我下午过去。', addressedTargets: null, replyDebtTargets: null }] }));
+    const characters = [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')];
+    const request = { ...buildAiMessage('mei', '美羊羊', '灰太狼，你怎么看？'),
+      replyDebtTargetIds: ['hui'], primaryReplyDebtTargetId: 'hui' };
+    const selected = vi.fn();
+    const complete = vi.fn();
+    await runOneRound(buildChat(), characters, [request], buildProfiles(), {
+      onSpeakerSelected: selected,
+      onMessageChunk: vi.fn(),
+      onMessageComplete: complete,
+      onNoSend: vi.fn(),
+      onError: vi.fn(),
+      onQuiet: vi.fn(),
+    }, undefined, { allowNoSend: true, consumedSpeakerIds: new Set(['mei', 'hui']) });
+    expect(selected).toHaveBeenCalledWith('hui', expect.anything());
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ senderId: 'hui', content: '我下午过去。' }));
+  });
+
+  it('does not reopen a reply-debt member after that debt opportunity was consumed', async () => {
+    generateResponseMock.mockReset();
+    const characters = [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')];
+    const request = { ...buildAiMessage('mei', '美羊羊', '灰太狼，你怎么看？'),
+      replyDebtTargetIds: ['hui'], primaryReplyDebtTargetId: 'hui' };
+    const selected = vi.fn();
+    const quiet = vi.fn();
+    await runOneRound(buildChat(), characters, [request], buildProfiles(), {
+      onSpeakerSelected: selected,
+      onMessageChunk: vi.fn(),
+      onMessageComplete: vi.fn(),
+      onNoSend: vi.fn(),
+      onError: vi.fn(),
+      onQuiet: quiet,
+    }, undefined, {
+      allowNoSend: true,
+      consumedSpeakerIds: new Set(['mei', 'hui']),
+      consumedReplyDebtSpeakerIds: new Set(['hui']),
+    });
+    expect(selected).not.toHaveBeenCalled();
+    expect(quiet).toHaveBeenCalledTimes(1);
+    expect(generateResponseMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps a pending addressed reply mandatory even in an autonomous loop', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue('{"delivery":"no_send","messages":[]}');
+    const characters = [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')];
+    await expect(generateSpeakerMessage({ chat: buildChat(), speaker: characters[0], characters,
+      messages: [], apiConfig: buildProfiles(), allowNoSend: true,
+      directorIntent: { source: 'conversation_reply', targetActorIds: ['mei'], pressure: 0.9,
+        beatType: 'answer', reason: '美羊羊，你什么时候过来？' },
+    })).rejects.toMatchObject({ reason: 'output_protocol_invalid', protocolReason: 'invalid_delivery' });
+    expect(generateResponseMock).toHaveBeenCalledTimes(3);
+    expect(generateResponseMock.mock.calls[0][1]).toContain('This turn requires a delivered reply');
+  });
+
+  it('does not allow manual generation to silently succeed', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue('{"delivery":"no_send","messages":[]}');
+    const characters = [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')];
+    await expect(generateSpeakerMessage({ chat: buildChat(), speaker: characters[0], characters,
+      messages: [], apiConfig: buildProfiles(),
+    })).rejects.toMatchObject({ reason: 'output_protocol_invalid', protocolReason: 'invalid_delivery' });
+  });
+
+  it('does not record a cancelled response as silence', async () => {
+    generateResponseMock.mockReset();
+    const controller = new AbortController();
+    generateResponseMock.mockImplementation(async () => {
+      controller.abort();
+      return '{"delivery":"no_send","messages":[]}';
+    });
+    const characters = [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')];
+    await expect(generateSpeakerMessage({ chat: buildChat(), speaker: characters[0], characters,
+      messages: [], apiConfig: buildProfiles(), allowNoSend: true, signal: controller.signal,
+    })).rejects.toMatchObject({ name: 'GenerationCancelledError' });
+  });
+});
+
+describe('chatEngine reply preference injection', () => {
+  it.each(['default', 'custom', 'off'] as const)('carries %s chat preferences into the final request', async (mode) => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ content: '门口那辆车怎么又来了？' }));
+    useSettingsStore.setState({ chatReplyPreferences: { mode, text: '必要时列出依据，避免过度客套。' } });
+    const profiles = buildProfiles();
+    profiles.push({ ...profiles[0], id: 'character-text', name: '角色模型', model: 'character-model', isDefault: false });
+    const character = buildCharacter('mei', '美羊羊', { modelProfileIds: { text: 'character-text' } });
+    await generateSpeakerMessage({ chat: buildChat(), speaker: character, characters: [character, buildCharacter('hui', '灰太狼')], messages: [], apiConfig: profiles });
+    const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
+    expect(generateResponseMock.mock.calls[0]?.[0]).toMatchObject({ model: 'character-model' });
+    if (mode === 'off') {
+      expect(prompt).not.toContain('## Chat preferences');
+    } else {
+      expect(prompt).toContain(mode === 'default' ? DEFAULT_CHAT_REPLY_PREFERENCE_TEXT : '必要时列出依据，避免过度客套。');
+    }
+  });
+});
+
 describe('chatEngine streaming preview', () => {
+  it('carries authored personality and subjective biases into the generation request with preferences off', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ content: '那双鞋你真能走一天？' }));
+    useSettingsStore.setState({ chatReplyPreferences: { mode: 'off', text: '' } });
+    const speaker = buildCharacter('mei', '美羊羊', {
+      personality: { openness: 20, extroversion: 30, agreeableness: 15, neuroticism: 50, humor: 45, creativity: 40, assertiveness: 85, empathy: 35 },
+      coreProfile: { biases: ['贵的鞋也可能磨脚'] },
+    });
+    await generateSpeakerMessage({ chat: buildChat(), speaker, characters: [speaker, buildCharacter('hui', '灰太狼')], messages: [], apiConfig: buildProfiles() });
+    const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
+    expect(prompt).toContain('agreeableness 15');
+    expect(prompt).toContain('assertiveness 85');
+    expect(prompt).toContain('Subjective biases: 贵的鞋也可能磨脚');
+    expect(prompt).toContain('This is an ongoing chat');
+    expect(prompt).not.toContain('## Chat preferences');
+    expect(generateResponseMock).toHaveBeenCalledTimes(1);
+  });
+
   const knownContinuity = { items: [{ key: 'report', kind: 'commitment' as const, status: 'established' as const,
     summary: '美羊羊交回记录', participantIds: ['mei'], evidenceText: '我回来交记录',
     sourceMessageIds: ['seed'], updatedAt: 1 }] };
@@ -446,10 +610,9 @@ describe('chatEngine streaming preview', () => {
     expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid', protocolReason: 'missing_json_envelope' });
   });
 
-  it('reports parser failures outside developer mode without printing response text', async () => {
+  it.each(['private conversation prose', ' '.repeat(77), ''])('reports invalid envelope %j on every attempt outside developer mode without printing response text', async (raw) => {
     useSettingsStore.setState({ developerMode: false });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const raw = 'private conversation prose';
     generateResponseMock.mockReset();
     generateResponseMock.mockResolvedValue(raw);
     const callbacks = { onSpeakerSelected: vi.fn(), onMessageChunk: vi.fn(), onMessageComplete: vi.fn(), onError: vi.fn() };
@@ -462,8 +625,11 @@ describe('chatEngine streaming preview', () => {
       expect(logs[2]).toMatchObject({ reason: 'missing_json_envelope',
         details: { responseLength: raw.length, parseFailure: { stage: 'json_extraction' } } });
       expect(logs[2].details.rawResponse).toBeUndefined();
-      expect(JSON.stringify(warn.mock.calls)).not.toContain(raw);
+      if (raw) expect(JSON.stringify(warn.mock.calls)).not.toContain(raw);
       expect(callbacks.onMessageComplete).not.toHaveBeenCalled();
+      expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({
+        reason: 'output_protocol_invalid', protocolReason: 'missing_json_envelope',
+      });
     } finally {
       warn.mockRestore();
     }
@@ -626,6 +792,8 @@ describe('chatEngine streaming preview', () => {
     });
     expect(prompt).toContain('World event context:');
     expect(prompt).toContain('Attention context:');
+    expect(prompt).toContain('not a new request or a need to speak');
+    expect(prompt).not.toContain('可以在合适时自然接一下');
     expect(prompt).toContain('Upcoming schedule:');
     expect(prompt).toContain('Recent social signal:');
     expect(prompt).not.toContain('score');
@@ -903,7 +1071,7 @@ describe('chatEngine streaming preview', () => {
     expect(contract).toContain('do not use it to excuse template drift');
     expect(contract).toContain('socialEventHints reports either changes to a concrete shared social event OR the result of a known pending social intention');
     expect(contract).toContain('Recent transcript scope');
-    expect(contract).toContain('does not repeat raw dialogue');
+    expect(contract).toContain('Recorded sends are context, not output examples');
     expect(contract).not.toContain('美羊羊发个灰太狼证件照的图片');
     expect(contract).not.toContain('来啦，我先构思一下');
     expect(contract).not.toContain('一句自然的群聊回复');
@@ -1063,8 +1231,8 @@ describe('chatEngine streaming preview', () => {
     });
     const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
 
-    expect(prompt).toContain('## Turn Directive');
-    expect(prompt).toContain('Stay compact enough for ordinary group flow');
+    expect(prompt).toContain('## Turn Context');
+    expect(prompt).toContain('轻松闲聊只说此刻真正想说的，不必把前面的观点逐项答完。说到这里够了就发送；若还有想说的，再自然接着发。');
     expect(prompt).not.toContain('Use the depth the moment needs');
     expect(prompt).not.toContain('Current speaking intent');
     expect(prompt).not.toContain('Professional form is available');
@@ -1123,13 +1291,17 @@ describe('chatEngine streaming preview', () => {
     expect(prompt).not.toContain('## Natural Chat Rhythm');
     expect(prompt).not.toContain('## Style Quarantine');
     expect(prompt).not.toContain('## Turn Plan');
-    expect(prompt).toContain('Speak as this person among people who share this exchange');
+    expect(prompt).toContain('You are this person in this room');
     expect(prompt).not.toContain('## Expression Surface Choice');
     expect(prompt).toContain('阎君统辖幽都，牛头受其差遣并负责夜巡');
-    expect(prompt).toContain('not an assigned recipient');
-    expect(prompt).toContain('Emotional and dramatic context:');
+    expect(prompt).not.toContain('Choose from the whole exchange');
+    expect(prompt).toContain('Recorded emotional state:');
     expect(prompt).not.toContain('## Current speaking intent');
-    expect(prompt.match(/## Turn Directive/g)).toHaveLength(1);
+    expect(prompt.match(/## Turn Context/g)).toHaveLength(1);
+    expect(prompt.match(/## Visible Message Surface Contract/g)).toHaveLength(1);
+    expect(prompt).not.toContain('Optional attention cue');
+    expect(prompt).not.toContain('- Live:');
+    expect(prompt).not.toContain('Role actions:');
   });
 
   it('keeps scheduler reply debt as an optional attention cue in the model prompt', async () => {
@@ -1205,7 +1377,7 @@ describe('chatEngine streaming preview', () => {
     });
 
     const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
-    expect(prompt).toContain('Room atmosphere:');
+    expect(prompt).toContain('Room:');
     expect(prompt).toContain('话题正在发散');
     expect(prompt).toContain('当前最集中的交流发生在甲与乙之间');
     expect(prompt).not.toContain('target is required to speak');
@@ -1284,6 +1456,8 @@ describe('chatEngine streaming preview', () => {
 
     const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
     expect(prompt).toContain('You are the story-reader narrative engine');
+    expect(prompt).toContain('## Chat preferences');
+    expect(prompt).toContain(DEFAULT_CHAT_REPLY_PREFERENCE_TEXT);
     expect(prompt).toContain('## Prompt Play Mode');
     expect(prompt).toContain('Mode: story_reader');
     expect(prompt).toContain('Story reader prioritizes committed scene continuation');
@@ -1465,10 +1639,10 @@ describe('chatEngine streaming preview', () => {
     });
     const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
 
-    expect(prompt).toContain('## Turn Directive');
+    expect(prompt).toContain('## Turn Context');
     expect(prompt).toContain('## Character Grounding');
-    expect(prompt).toContain('Speak as this person among people who share this exchange');
-    expect(prompt).toContain('do not sprawl to keep airtime');
+    expect(prompt).toContain('You are this person in this room');
+    expect(prompt).not.toContain('do not sprawl to keep airtime');
     expect(prompt).not.toContain('## Persona Activation');
     expect(prompt).not.toContain('## Live Presence');
     expect(prompt).not.toContain('## Character Background Reference');
@@ -1476,6 +1650,34 @@ describe('chatEngine streaming preview', () => {
     expect(prompt).not.toContain('Focused Situational Job Contract');
     expect(prompt).not.toContain('Natural Chat Surface Contract');
     expect(prompt).not.toContain('Runtime Role Constraint');
+  });
+
+  it.each(['那双鞋在哪买的？', '嗯', '好的', '今天天气好好'])('preserves an ordinary utterance %s without prescribing a complete topical answer', async (content) => {
+    generateResponseMock.mockReset();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ content, interactionHints: null,
+      socialEventHints: null, conflictFocus: null }));
+    const speaker = buildCharacter('mei', '美羊羊');
+    const generated = await generateSpeakerMessage({ chat: buildChat(), speaker, characters: [speaker],
+      messages: [buildUserMessage('大家聊聊逛街穿什么', Date.now())], apiConfig: buildProfiles(),
+      directorIntent: { source: 'user_message', beatType: 'invite', targetActorIds: [], pressure: 0.5,
+        reason: '开放交流', userGuidance: { kind: 'topic_shift', rawText: '大家聊聊逛街穿什么',
+          actorIds: [], mentionedActorIds: [], focusText: '逛街穿什么', beatType: 'invite',
+          pressure: 0.5, maxTurns: 1, reason: '开放交流' } },
+    });
+    const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
+    expect(prompt).toContain('open invitation is not a questionnaire each member must complete');
+    expect(prompt).not.toContain('Your first semantic move must directly answer');
+    expect(prompt).not.toContain('Do not reply to the previous AI line first');
+    expect(prompt).not.toContain('Requested actor(s):');
+    expect(prompt).not.toContain('A current addressed need');
+    expect(prompt).toContain('This is an ongoing chat');
+    expect(prompt).toContain('Honor explicit requests for detailed work');
+    expect(prompt).not.toContain('Other members can carry what remains');
+    expect(prompt).not.toContain('Speech need not have a deliberate goal');
+    expect(prompt).not.toContain('Let your present purpose determine');
+    expect(prompt).not.toContain('only respond to something concrete');
+    expect(generated.content).toBe(content);
+    expect(generateResponseMock).toHaveBeenCalledTimes(1);
   });
 
   it('preserves deliverable-like generated text without requiring local surface classification', async () => {
@@ -1643,7 +1845,7 @@ describe('chatEngine streaming preview', () => {
     expect(prompt).toContain('## Room Floor State');
     expect(prompt).toContain('Phase: continue the same floor');
     expect(prompt).toContain('Some real chat turns mainly change social temperature');
-    expect(prompt).toContain('## Turn Directive');
+    expect(prompt).toContain('## Turn Context');
     expect(prompt).toContain('do not manufacture a new thesis');
     expect(prompt).not.toContain('可是');
     expect(prompt).not.toContain('唉');
@@ -1970,8 +2172,9 @@ describe('chatEngine streaming preview', () => {
     });
     const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
 
-    expect(prompt).toContain('Role actions:');
-    expect(prompt).toContain('No standalone stage directions, gesture beats, or parenthesized action asides');
+    expect(prompt).toContain('## Visible Message Surface Contract');
+    expect(prompt).not.toContain('Role actions:');
+    expect(prompt).toContain('write spoken words only, without parenthesized actions');
     expect(message.content).toBe('这个我先记下来，等会儿接着说。');
   });
 
@@ -3100,8 +3303,8 @@ describe('chatEngine streaming preview', () => {
     });
     const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
 
-    expect(prompt).toContain('## Turn Directive');
-    expect(prompt).toContain('the exchange decides the shape');
+    expect(prompt).toContain('## Turn Context');
+    expect(prompt).toContain('This is an ongoing chat');
     expect(prompt).not.toContain('## Turn Format Variety');
     expect(message.content).toBe('（轻叹一声，目光落向窗外竹影）\n\n热闹自有热闹的好，冷清也有冷清的趣。\n\n（转回视线，语气淡了几分）你且去别处热闹罢。');
   });
@@ -3132,7 +3335,9 @@ describe('chatEngine streaming preview', () => {
     const chatMessages = generateResponseMock.mock.calls[0]?.[2] as Array<{ role: string; content: string }>;
     expect(prompt).not.toContain('## Latest Human Turn Context');
     expect(prompt).not.toContain('你们换一种接法，别再只换开头继续同一个套路。');
-    expect(chatMessages.some((item) => item.content === '用户: 你们换一种接法，别再只换开头继续同一个套路。')).toBe(true);
+    expect(JSON.parse(chatMessages[0].content.split('\n').slice(1).join('\n'))).toContainEqual({
+      speaker: '用户', content: '你们换一种接法，别再只换开头继续同一个套路。',
+    });
     expect((message.metadata?.runtimeDecision as Record<string, unknown> | undefined)?.latestHumanTurn).toBeUndefined();
   });
 
@@ -3179,8 +3384,16 @@ describe('chatEngine streaming preview', () => {
     });
     expect(generateResponseMock.mock.calls[0]?.[4]).toMatchObject({ responseFormat: 'json' });
     const history = generateResponseMock.mock.calls[0]?.[2] as Array<{ role: string; content: string }>;
-    expect(JSON.parse(history.find((item) => item.role === 'assistant')!.content)).toEqual({ messages: [{ content: '这件先别扔。' }] });
-    expect(history.at(-1)).toMatchObject({ role: 'user', content: '阿强: 袖口还能改。' });
+    expect(history).toHaveLength(2);
+    expect(history.every(item => item.role === 'user')).toBe(true);
+    expect(history[0].content).toContain('earlier sends');
+    expect(history[1].content).toContain('most recent sends');
+    expect(JSON.parse(history[0].content.split('\n').slice(1).join('\n'))).toEqual([
+      { speaker: '自己', content: '这件先别扔。' },
+    ]);
+    expect(JSON.parse(history[1].content.split('\n').slice(1).join('\n'))).toEqual([
+      { speaker: '阿强', content: '袖口还能改。' },
+    ]);
     expect(onChunk).toHaveBeenCalled();
     expect(onChunk.mock.calls.every(([chunk]) => !String(chunk).includes('"messages"'))).toBe(true);
     expect(message.messageParts?.map((part) => part.content)).toEqual(['把袖口翻过来看看。', '阿强，这里还能改吗？']);
@@ -3646,10 +3859,13 @@ describe('chatEngine streaming preview', () => {
     }));
   });
 
-  it('keeps explicit leaving replies that omit presence metadata and reports the missing state marker', async () => {
+  it.each([
+    '这个点我先放这儿：样本偏差需要单独看租客视角。我真走了，再不走赶不上二路汽车。',
+    '我去年进店照了下价签就走了，多那800给的是话术，不是布料。',
+  ])('does not infer missing presence metadata from visible prose: %s', async (content) => {
     generateResponseMock.mockReset();
     generateResponseMock.mockResolvedValueOnce(JSON.stringify({
-      content: '这个点我先放这儿：样本偏差需要单独看租客视角。我真走了，再不走赶不上二路汽车。',
+      content,
       deliberationArtifacts: {
         issues: [{ text: '样本偏差需要单独看租客视角', reason: '可见回复提出待检验视角', confidence: 0.8 }],
       },
@@ -3677,11 +3893,10 @@ describe('chatEngine streaming preview', () => {
     });
 
     expect(generateResponseMock).toHaveBeenCalledTimes(1);
-    expect(onLocalInterception).toHaveBeenCalledWith(expect.objectContaining({
+    expect(onLocalInterception).not.toHaveBeenCalledWith(expect.objectContaining({
       kind: 'presence_metadata_missing',
-      reason: '可见回复表示离开、睡觉或忙碌，但模型没有返回下线状态标记；消息已保留，角色在线状态不变。',
     }));
-    expect(message.content).toContain('我真走了');
+    expect(message.content).toBe(content);
     expect(message.metadata?.presenceUpdate).toBeFalsy();
   });
 
@@ -3762,6 +3977,8 @@ describe('chatEngine streaming preview', () => {
     expect(generateResponseMock.mock.calls[0]?.[4]).toEqual(expect.objectContaining({ responseFormat: 'text' }));
     expect(prompt).toContain('Return exactly one JSON object');
     expect(prompt).toContain('deliberationArtifacts');
+    expect(prompt).toContain('## Chat preferences');
+    expect(prompt).toContain(DEFAULT_CHAT_REPLY_PREFERENCE_TEXT);
     expect(message.metadata?.deliberationArtifacts?.claims?.[0]?.text).toContain('独处空间');
   });
 
@@ -3835,11 +4052,11 @@ describe('chatEngine streaming preview', () => {
     expect(prompt).toContain('Mode: direct_private');
     expect(prompt).toContain('## Private Turn Priority');
     expect(prompt).toContain('This is a user direct chat');
-    expect(prompt).toContain('## Turn Directive');
+    expect(prompt).toContain('## Turn Context');
     expect(prompt).not.toContain('Response surface: live chat');
     expect(prompt).toContain('private conversation between this person and the user');
     expect(prompt).toContain('explicit request for help or a deliverable');
-    expect(prompt).toContain('Established facts and explicit user requests still apply');
+    expect(prompt).toContain('Honor explicit requests for detailed work');
     expect(prompt).not.toContain('Usually write one sentence');
     expect(prompt).not.toContain('prefer concise, non-intrusive wording');
     expect(message.content).toContain('合同违约责任');
@@ -3916,13 +4133,15 @@ describe('chatEngine streaming preview', () => {
     expect(generateResponseMock).toHaveBeenCalledTimes(1);
     expect(onLocalInterception).not.toHaveBeenCalled();
     expect(prompt).not.toContain('## Style Quarantine');
-    expect(prompt).toContain('Speak as this person among people who share this exchange');
+    expect(prompt).toContain('You are this person in this room');
     expect(prompt).not.toContain('Prefer sentence breaks, commas, or plain full stops over em dash');
     expect(prompt).toContain('The complete recent transcript is provided separately as chat messages');
     expect(prompt).not.toContain('这话扎心');
     expect(prompt).not.toContain('镜头到底对着谁');
     expect(chatMessages.every((item) => item.role === 'user')).toBe(true);
-    expect(chatMessages.some((item) => item.content.includes('娱乐记者: 这话扎心'))).toBe(true);
+    expect(JSON.parse(chatMessages[0].content.split('\n').slice(1).join('\n'))).toEqual(
+      expect.arrayContaining([expect.objectContaining({ speaker: '娱乐记者', content: expect.stringContaining('这话扎心') })]),
+    );
     expect(message.content).toBe('这个问题的关键——不是她发了什么，而是谁替她决定了发什么。');
   });
 
@@ -3958,8 +4177,8 @@ describe('chatEngine streaming preview', () => {
 
     expect(generateResponseMock).toHaveBeenCalledTimes(1);
     expect(onLocalInterception).not.toHaveBeenCalled();
-    expect(prompt).toContain('## Turn Directive');
-    expect(prompt).toContain('Choose what catches their attention and what they actually want to say now');
+    expect(prompt).toContain('## Turn Context');
+    expect(prompt).toContain('This is an ongoing chat');
     expect(prompt).not.toContain('## Turn Length Variety');
     expect(prompt).not.toContain('你这个问题问到了实务中的痛点');
     expect(prompt).not.toContain('你这个问题问到了实务中的另一个关键点');
@@ -4108,8 +4327,8 @@ describe('chatEngine streaming preview', () => {
 
     expect(generateResponseMock).toHaveBeenCalledTimes(1);
     expect(onLocalInterception).not.toHaveBeenCalled();
-    expect(prompt).toContain('## Turn Directive');
-    expect(prompt).toContain('the exchange decides the shape');
+    expect(prompt).toContain('## Turn Context');
+    expect(prompt).toContain('This is an ongoing chat');
     expect(prompt).not.toContain('## Expression Surface Choice');
     expect(message.content).toBe('我也有点想排队了😂');
   });
@@ -4899,7 +5118,7 @@ describe('chatEngine streaming preview', () => {
     });
 
     const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
-    expect(prompt).toContain('## Turn Directive');
+    expect(prompt).toContain('## Turn Context');
     expect(prompt).not.toContain('## Conversation Move Guidance');
     expect(prompt).not.toContain('## Expression Surface Choice');
     expect(prompt).not.toContain('## Turn Length Variety');
@@ -4936,26 +5155,36 @@ describe('chatEngine streaming preview', () => {
     expect(callbacks.onError).not.toHaveBeenCalled();
   });
 
-  it('keeps conversation interaction rules on a creative roleplay surface', async () => {
+  it.each(['free', 'roleplay'] as const)('keeps expression ownership in the actual %s request', async (style) => {
     generateResponseMock.mockReset();
     generateResponseMock.mockResolvedValue(JSON.stringify({ messages: [{ content: '二哥，刀先借俺使使。' }, { content: '大哥那边俺自己去说。' }] }));
     const mei = buildCharacter('mei', '美羊羊');
     const hui = buildCharacter('hui', '灰太狼');
     const result = await generateSpeakerMessage({
-      chat: buildChat({ style: 'roleplay', memberIds: ['mei', 'hui'] }),
+      chat: buildChat({ style, showRoleActions: false, memberIds: ['mei', 'hui'] }),
       speaker: mei, characters: [mei, hui],
       messages: [buildAiMessage('hui', '灰太狼', '这事我来办。', 1)], apiConfig: buildProfiles(),
-      generationContext: { promptContext: { responseStyle: 'creative', styleProfile: 'dramatic_room', allowMarkdown: true } },
     });
     const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
-    expect(prompt).toContain('## Turn Directive');
+    expect(prompt).toContain('## Turn Context');
     expect(prompt).not.toContain('## Natural Chat Rhythm');
-    expect(prompt).toContain('Acknowledgement is implicit by default');
+    expect(prompt).toContain('This is an ongoing chat; speak in character');
+    expect(prompt).not.toContain('without first reviewing someone else\'s contribution');
     expect(prompt).toContain('Write what this person actually wants to say in this exchange, then report only effects');
     expect(prompt).not.toContain('Appraise the exchange as this person, then write');
     expect(prompt).not.toContain('add one condition, cost, or limit that changes the next response');
     expect(prompt).not.toContain('Forbidden semantic overlap:');
     expect(prompt).not.toContain('## Conversation Move Guidance');
+    expect(prompt).toContain('write spoken words only, without parenthesized actions');
+    expect(prompt).not.toContain('natural, warm, and easy to join');
+    expect(prompt).not.toContain('Drive the scene through');
+    if (style === 'free') {
+      expect(prompt).toContain('Low pressure does not require warmth, agreement or reassurance');
+      expect(prompt).toContain('no agreement, reassurance or invitation to continue is required');
+    } else {
+      expect(prompt).toContain('each turn need not advance the plot');
+      expect(prompt).toContain('do not require progress or resolution in each turn');
+    }
     expect(result.content).toBe('二哥，刀先借俺使使。');
     expect(result.messageParts?.map((part) => part.content)).toEqual(['二哥，刀先借俺使使。', '大哥那边俺自己去说。']);
   });

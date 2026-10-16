@@ -92,6 +92,8 @@ function resolveTarget(params: {
   characters: AICharacter[];
   target?: { id: string; name?: string } | null;
 }) {
+  // null preserves an upstream decision that this turn has no counterpart.
+  if (params.target === null) return undefined;
   if (params.target) {
     return { id: params.target.id, name: params.target.name || characterName(params.target.id, params.characters) };
   }

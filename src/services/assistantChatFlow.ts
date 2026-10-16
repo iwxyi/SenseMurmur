@@ -15,6 +15,7 @@ import { api, ApiError, type AiSearchResponse, type AiSearchResultItem } from '.
 import { resolveRoomCapabilities } from './capabilityRuntime';
 import { resolveChatAgentCapabilities } from './chatAgentCapabilities';
 import { createLocalWorkspaceMutationPlan } from './localWorkspaceService';
+import { buildChatReplyPreferencesPrompt } from './chatReplyPreferences';
 
 const MAX_ASSISTANT_HISTORY = 24;
 const MAX_ASSISTANT_TITLE_CONTEXT = 12;
@@ -1515,6 +1516,7 @@ export async function runAssistantChatReplyFlow(params: {
       resolvedApi,
       [
         buildAssistantSystemPrompt(),
+        buildChatReplyPreferencesPrompt(params.chat, useSettingsStore.getState().chatReplyPreferences),
         buildAssistantImageInputPromptBlock(promptImageState),
       ].filter(Boolean).join('\n\n'),
       promptImageState.messages,

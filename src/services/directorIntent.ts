@@ -167,10 +167,13 @@ export function resolveDirectorIntent(params: {
     return resolveUserMessageDirectorIntent(latestMessage, params.characters);
   }
 
-  const primaryLine = selectPrimaryNarrativeLine((params.narrativeLines || []).filter((line) =>
-    line.visibility === 'public' || line.visibility === 'derived_public'));
-  const factualLine = selectPrimaryNarrativeLine((params.narrativeLines || []).filter((line) =>
-    line.type !== 'relationship' && (line.visibility === 'public' || line.visibility === 'derived_public')));
+  // Background without a proposed beat supplies context, not a task to
+  // synthesize through resolveLineIntent's legacy fallback.
+  const actionableLines = (params.narrativeLines || []).filter((line) =>
+    (line.visibility === 'public' || line.visibility === 'derived_public')
+    && (line.contextKind !== 'background' || line.possibleNextBeats.length > 0));
+  const primaryLine = selectPrimaryNarrativeLine(actionableLines);
+  const factualLine = selectPrimaryNarrativeLine(actionableLines.filter((line) => line.type !== 'relationship'));
 
   if (pending?.targetIds.length) {
     return finalize({
@@ -219,7 +222,7 @@ export function resolveDirectorIntent(params: {
   }
 
   const topicDrift = normalizePercent(room?.topicDrift);
-  if (room && topicDrift > 0.62) {
+  if (room && topicDrift > 0.62 && resolveSessionFamilyKey(params.chat) !== 'conversation') {
     return finalize({
       source: 'room_state',
       beatType: 'summarize',
@@ -229,12 +232,14 @@ export function resolveDirectorIntent(params: {
     });
   }
 
+  const ambientConversation = Boolean(latestAiMessage) && resolveSessionFamilyKey(params.chat) === 'conversation';
   return finalize({
     source: latestAiMessage ? 'topic' : 'room_state',
     beatType: latestAiMessage ? 'invite' : 'summarize',
-    targetActorIds: latestAiMessage ? uniqueActorIds([latestAiMessage.senderId], params.characters) : [],
-    pressure: latestAiMessage ? 0.34 : 0.22,
-    reason: latestAiMessage ? '延续当前正在进行的话题，不强行推进新剧情。' : '目前还没有明显的叙事压力。',
+    targetActorIds: latestAiMessage && !ambientConversation ? uniqueActorIds([latestAiMessage.senderId], params.characters) : [],
+    pressure: ambientConversation ? 0 : latestAiMessage ? 0.34 : 0.22,
+    reason: ambientConversation ? '最近发言仅提供话题背景，未产生新的受话对象或接话任务。'
+      : latestAiMessage ? '延续当前正在进行的话题，不强行推进新剧情。' : '目前还没有明显的叙事压力。',
   });
 }
 

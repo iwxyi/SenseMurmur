@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GroupChat } from '../types/chat';
-import { createApplicationSocialScheduler } from './useApplicationSocialFlow';
+import { createApplicationSocialScheduler, getDailyMomentImageErrorMessage } from './useApplicationSocialFlow';
+
+describe('daily moment image failure feedback', () => {
+  it('distinguishes service limits and quota without showing provider details', () => {
+    expect(getDailyMomentImageErrorMessage({ diagnostic: { status: 429 } })).toContain('请求受限');
+    expect(getDailyMomentImageErrorMessage({ diagnostic: { status: 403, code: 'insufficient_user_quota' } })).toContain('额度不足');
+    expect(getDailyMomentImageErrorMessage({ diagnostic: { status: 403 } })).toContain('无权访问');
+    expect(getDailyMomentImageErrorMessage(new Error('secret provider response'))).toBe('朋友圈配图生成失败，本次发布文字动态。');
+  });
+});
 
 describe('application social execution host', () => {
   let host: ReturnType<typeof createApplicationSocialScheduler>;

@@ -132,6 +132,7 @@ describe('assistant reply display', () => {
         currentMessages: [], upsertMessage: (message) => frames.push(message), updateChat: vi.fn(async () => undefined),
       });
       expect(result?.content).toBe(content);
+      expect(String(generateResponseMock.mock.calls[0]?.[1])).toContain('## Chat preferences');
       expect(frames.at(-1)?.isStreaming).toBe(false);
       expect(new Set(frames.map((frame) => frame.id)).size).toBe(1);
       expect(new Set(frames.map((frame) => frame.metadata?.branching?.nodeId)).size).toBe(1);

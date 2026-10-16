@@ -148,10 +148,10 @@ export const AI_PROVIDER_CATALOG: AIProviderCatalogEntry[] = [
     family: '官方模型',
     hidden: true,
     defaults: {
-      image: { baseUrl: '/api/ai', model: 'ace:image:nano-banana-pro' },
+      image: { baseUrl: '/api/ai', model: 'nano-banana-pro' },
     },
     popularModels: {
-      image: ['ace:image:nano-banana-pro'],
+      image: ['nano-banana-pro'],
     },
   },
   {

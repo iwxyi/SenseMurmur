@@ -44,7 +44,7 @@ import { buildGenerationRuntimeBundle } from './generationRuntime';
 import { buildConversationMovePrompt, planConversationMove } from './conversationMovePlanner';
 import { captureTurnParameters, finishTurnParameters } from './messageTurnParameters';
 import { buildPromptPlayModeBlock, composePromptBlocks, resolvePromptPlayMode, type PromptBlock } from './promptBlockComposer';
-import { buildTurnDirective, buildTurnDirectivePrompt, shouldUseUnifiedTurnDirective } from './turnDirective';
+import { buildTurnDirective, buildTurnContextPrompt, shouldUseUnifiedTurnDirective } from './turnDirective';
 import { resolveSessionEngineKey, resolveSessionFamilyKey } from './sessionEngineKeys';
 import { isCharacterAvailableForScheduling } from './characterPresence';
 import { enrichRuntimeBundleWithHumanAppraisal } from './humanAppraisal';
@@ -53,15 +53,19 @@ import type { StoryContinuationState } from './narrativeRuntime';
 import { sanitizeUserFacingText } from './displayTextSanitizer';
 import { enhanceImagePrompt } from './imagePromptComposer';
 import { useSettingsStore } from '../stores/useSettingsStore';
+import { buildChatReplyPreferencesPrompt } from './chatReplyPreferences';
 import { api, ApiError, type AiSearchResultItem } from './api';
 import { useAuthStore } from '../stores/useAuthStore';
 import { canUseStickerCapability } from './capabilityGraph';
 import { getPromptSpeakerLabel, getPromptTurnTypeLabel, isHumanDirectedMessage } from './chatMessageSemantics';
+import { GenerationCancelledError } from './generationCancellation';
 import { selectDominantInteraction } from './roomStateSynthesizer';
+
+type GeneratedPartRouting = Pick<Message, 'addressedTargetIds' | 'primaryAddressedTargetId' | 'replyDebtTargetIds' | 'primaryReplyDebtTargetId'>;
 
 export interface GeneratedRoundMessage extends Omit<Message, 'id' | 'timestamp' | 'isDeleted'> {
   extraMessages?: string[] | null;
-  messageParts?: Array<{ content: string; metadata?: MessageMetadata }> | null;
+  messageParts?: Array<{ content: string; metadata?: MessageMetadata } & GeneratedPartRouting> | null;
   interactionHint?: InteractionEventPayload | null;
   interactionHints?: InteractionEventPayload[] | null;
   incomingInteractionHint?: InteractionEventPayload | null;
@@ -71,6 +75,11 @@ export interface GeneratedRoundMessage extends Omit<Message, 'id' | 'timestamp' 
   primaryReplyDebtTargetId?: string | null;
   socialEventHints?: SocialEventHintEnvelope[] | null;
   conflictFocus?: ConflictFocusPayload | null;
+}
+
+export interface GeneratedNoSend {
+  delivery: 'no_send';
+  speakerId: string;
 }
 
 type SpeakerSelectionState = {
@@ -185,7 +194,7 @@ type GenerationWithGuidanceTrace = {
   storyChoices?: MessageMetadata['storyChoices'] | null;
   fullNarrativeResponse?: string;
   extraMessages?: string[] | null;
-  messageParts?: Array<{ content: string; mediaDecision?: MediaGenerationDecision | null }> | null;
+  messageParts?: Array<{ content: string; mediaDecision?: MediaGenerationDecision | null; addressedTargets?: AddressedTargetHintEnvelope | null; replyDebtTargets?: ReplyDebtTargetHintEnvelope | null }> | null;
   storyEvents?: import('../types/message').StoryEvent[] | null;
   guidanceExecution?: GuidanceExecutionTrace;
   streamedFallbackUsed?: boolean;
@@ -510,6 +519,7 @@ export interface ChatEngineCallbacks {
   ensureSpeakerDetail?: (characterId: string, speaker?: AICharacter) => Promise<AICharacter | null | undefined>;
   onMessageChunk: (content: string) => void;
   onMessageComplete: (message: GeneratedRoundMessage) => void | Promise<void>;
+  onNoSend?: (result: GeneratedNoSend) => void;
   onLocalInterception?: (event: LocalInterceptionEvent) => void | Promise<void>;
   onIdle?: (reason: string) => void;
   onQuiet?: () => void;
@@ -1152,12 +1162,6 @@ function buildStreamingDisplayContent(raw: string, speaker: AICharacter, showRol
   return showRoleActions === false ? stripRoleActions(withoutPrefix) : withoutPrefix;
 }
 
-function buildRoleActionVisibilityPrompt(showRoleActions: boolean) {
-  return showRoleActions
-    ? '\n\nRole actions: brief physical beats are optional only when they change meaning or social temperature; do not use a fixed action-dialogue-action wrapper.'
-    : '\n\nRole actions: visible content must be spoken chat only. No standalone stage directions, gesture beats, or parenthesized action asides.';
-}
-
 function createStreamingDisplayBridge(
   speaker: AICharacter,
   showRoleActions: boolean | undefined,
@@ -1352,7 +1356,7 @@ function buildNaturalChatSurfaceContract(messages: Message[], surface: ResponseS
 - This contract controls surface shape only. It must not override a focused job, handoff, direct answer, or decision/recommendation required above.
 - This is live chat, not an essay, speech, report, script page, or narrator prose.
 - Speak from inside the conversation. Never mention a turn, round, speaker order, selection, prompt, or that someone should "take the floor" as system mechanics; express yielding, interrupting, waiting, or refusing in the character's own situation.
-- Reply to one live point instead of recapping the whole debate or making a personal manifesto.
+- Speak from what actually moves this person now: an addressed need, a changed situation, or a felt reaction. A previous line alone does not require agreement, a recap, or another example of the same point.
 - Heat may make a reply sharper or slightly longer, but it should not force every next speaker to write longer.${lengthLine}${nameAddressingLine}
 ${roleActionLine}
 - Never use an action + speech + action + speech wrapper. Do not solve repetition by adding backstory, extra examples, or decorative actions.`;
@@ -1671,7 +1675,10 @@ function buildAnalysisRoomContractPrompt(chat: GroupChat) {
 
 function buildGenerationConstraints(chat: GroupChat, messages: Message[], speakerId: string, surface: ResponseSurface) {
   if (shouldUseUnifiedTurnDirective(chat)) {
-    return `\nHard constraints for this reply:\n- Write one speaker turn only, never another actor's line or internal planning fields.\n- Stay compact enough for ordinary group flow unless the current task clearly needs depth.`;
+    const scope = chat.type === 'group' && chat.style === 'free' && resolveSessionFamilyKey(chat) === 'conversation'
+      ? '轻松闲聊只说此刻真正想说的，不必把前面的观点逐项答完。说到这里够了就发送；若还有想说的，再自然接着发。'
+      : 'Stay compact enough for ordinary group flow unless the current task clearly needs depth.';
+    return `\nHard constraints for this reply:\n- Write one speaker turn only, never another actor's line or internal planning fields.\n- ${scope}`;
   }
   const recentLines = collectRecentConstraintLines(messages, speakerId);
   const forbiddenBlock = recentLines.length ? `\nForbidden semantic overlap:\n${recentLines.join('\n')}` : '';
@@ -1771,7 +1778,7 @@ function buildVisibleMessageSurfaceContractPrompt(chat: GroupChat, showRoleActio
     : '';
   const roleActionLine = showRoleActions
     ? '- Brief role actions are only allowed if this room explicitly uses them and they are short, non-standalone, and not a narrator camera.'
-    : '- Role actions are disabled here: do not include parenthesized actions, gesture beats, stage directions, or narrated camera movement.';
+    : '- Role actions are disabled here: write spoken words only, without parenthesized actions, gesture beats, stage directions, or narrated camera movement. Do not turn stage directions into spoken self-description to bypass this setting. Ground genuine spoken state reports in the known situation.';
   return `\n## Visible Message Surface Contract
 - Each messages[] item is one visible send from this speaker, not a script page, transcript editor, or narrator prose.
 ${roleActionLine}
@@ -2032,12 +2039,7 @@ function buildWorldEventContextPrompt(input: {
     const targetName = attention.targetId === 'user'
       ? '用户'
       : input.members.find((member) => member.id === attention.targetId)?.name || '相关成员';
-    const pressure = attention.restraint >= 0.72
-      ? '保持低压力，不要反复催促'
-      : attention.attentionScore >= 0.68
-        ? '可以在合适时自然接一下'
-        : '只作为轻微背景';
-    lines.push(`- Attention context: ${targetName} may need ${pressure}.`);
+    lines.push(`- Attention context: You previously paid attention to ${targetName}. This records past attention, not a new request or a need to speak.${attention.restraint >= 0.72 ? ' Keep pressure low; do not repeatedly prompt them.' : ''}`);
   }
   upcomingCalendar.forEach((item) => {
     const timing = item.status === 'in_progress' ? 'Last recorded ongoing activity' : item.startAt == null ? 'Schedule with unconfirmed time' : 'Upcoming schedule';
@@ -2359,7 +2361,7 @@ function buildUserGuidancePrompt(guidance: UserGuidanceIntent | null | undefined
     ? `\n- Requested actor(s): ${requestedActors.join('、')}. ${isRequestedActor ? 'The user is addressing you; respond from your own position in this exchange.' : 'You are not the requested actor; do not hijack the request.'}`
     : '';
   const topicLine = guidance.kind === 'topic_shift'
-    ? '\n- Topic guidance: this replaces the previous tangent. Your first semantic move must directly answer, question, or take a stance on this exact focus. If the user gave a question, answer that question first. Do not continue the old joke unless you tie it back to the new topic in the same sentence.\n- Do not reply to the previous AI line first. Anchor the reply in the user guidance, then you may add characterful banter.'
+    ? '\n- Topic guidance: move the exchange onto this focus. Respond to the user’s actual request in the live conversation; an open invitation is not a questionnaire each member must complete. You may react to what others have already said, pick one aspect that matters to you, or contribute your own thought. There is no required answer-then-banter order. Honor any explicit task or constraints without restarting the discussion for each speaker.'
     : '';
   const directLine = guidance.kind === 'direct_reply'
     ? '\n- Direct reply guidance: respond to what the user means in this exchange. Being addressed gives you the floor, not a required answer-then-comment structure. A conversational question, challenge, or bid for closeness is part of the interaction; choose the response that fits your relationship and present feelings.\n- Honor explicit output form, quantity, and length requirements in the user guidance. If the user asks for an essay, article, analysis, list, or other deliverable, produce that deliverable in this speaker’s own voice instead of merely discussing the topic.\n- For article/essay/longform deliverables, preserve readable paragraphs in the content string with escaped newline sequences, for example \\n\\n between paragraphs. Do not put a heading marker, separator, and the whole article on one line.\n- When multiple requested actors are listed, each speaks for themselves. If the user explicitly asks each actor for a deliverable, each must complete their own; otherwise their contributions can differ in form and size.'
@@ -2429,11 +2431,17 @@ function mergeGuidanceMediaDecision(params: {
   return hasSupportedDecision ? supportedDecision : undefined;
 }
 
-function resolveApiConfigForCharacter(character: AICharacter, apiConfig: APIConfig | AIModelProfile[], profiles?: AIModelProfile[]) {
+function resolveTextProfileForCharacter(character: AICharacter, apiConfig: APIConfig | AIModelProfile[], profiles?: AIModelProfile[]) {
   const availableProfiles = Array.isArray(apiConfig) ? apiConfig : (profiles || []);
-  if (availableProfiles.length > 0) {
-    const textProfileId = getCharacterModelProfileId(character, 'text');
-    const matched = availableProfiles.find((profile) => profile.id === textProfileId) || getPreferredAIProfile(availableProfiles, 'text') || availableProfiles[0];
+  if (!availableProfiles.length) return null;
+  const textProfileId = getCharacterModelProfileId(character, 'text');
+  return availableProfiles.find((profile) => profile.id === textProfileId && profile.type === 'text')
+    || getPreferredAIProfile(availableProfiles, 'text');
+}
+
+function resolveApiConfigForCharacter(character: AICharacter, apiConfig: APIConfig | AIModelProfile[], profiles?: AIModelProfile[]) {
+  const matched = resolveTextProfileForCharacter(character, apiConfig, profiles);
+  if (matched) {
     return {
       provider: matched.provider,
       apiKey: matched.apiKey,
@@ -2937,13 +2945,6 @@ function buildDeliberationArtifactTrace(params: {
   };
 }
 
-function contentExplicitlySignalsAway(content: string) {
-  const normalized = content.replace(/\s+/g, ' ').trim();
-  if (!normalized) return false;
-  return /(?:^|[。！？!?，,\s])(我|俺|大妈|大姐|这边|我这边|这回|这就|我先|先|我真|真|真的).{0,12}(走了|撤了|下线|关机|睡了|睡觉|去睡|去忙|忙去了|去收租|收租去了|赶车|赶公交|去开会|去洗澡|离开|不回了|挂了|先到这|先这样|回头聊)(?:$|[。！？!?，,\s])/.test(normalized)
-    || /(晚安|明天见|回头见|包子铺见).{0,16}(我|俺|大妈|大姐)?.{0,8}(走了|撤了|睡了|下线|关机|挂了)/.test(normalized);
-}
-
 function appendRuntimeTraceDiagnostics(
   runtimeBundle: SessionGenerationRuntimeBundle,
   diagnostics: ReturnType<typeof buildDeliberationArtifactTrace>,
@@ -3194,6 +3195,7 @@ async function generateWithPrompt(params: {
   turnPlan?: TurnPlan | null;
   onChunk?: (content: string) => void;
   signal?: AbortSignal;
+  allowNoSend?: boolean;
 }) {
   const streamBridge = createStreamingDisplayBridge(params.speaker, params.showRoleActions, params.onChunk);
   // Formatting is an application instruction, not a new turn from a person.
@@ -3204,13 +3206,7 @@ async function generateWithPrompt(params: {
   const jsonPrompt = `${params.systemPrompt}\n\n${protocolReminder}`;
   const useJsonResponseFormat = shouldUseJsonResponseFormat(params.chat, params.resolvedApi);
   const requiresGroupEnvelope = requiresOrdinaryGroupEnvelope(params.chat);
-  // Past visible speech is context, but assistant examples must follow the
-  // current wire format or they teach the model to keep replying in prose.
-  const requestMessages = requiresGroupEnvelope
-    ? params.chatMessages.map((message) => message.role === 'assistant'
-      ? { ...message, content: JSON.stringify({ messages: [{ content: message.content }] }) }
-      : message)
-    : params.chatMessages;
+  const requestMessages = params.chatMessages;
   const requestStartedAt = nowMs();
   let firstRawChunkLogged = false;
   let streamedProtocolError = false;
@@ -3285,6 +3281,7 @@ async function generateWithPrompt(params: {
     allowContentSalvage: !requiresGroupEnvelope,
     requireConversationUpdate: requiresConversationUpdate,
     validateActivityUpdate: requiresGroupEnvelope,
+    allowNoSend: params.allowNoSend,
     onFailure: (failure) => { parseFailure = failure; },
   });
   const protocolFailure = <T extends string>(protocolError: T) => ({
@@ -3304,14 +3301,16 @@ async function generateWithPrompt(params: {
     || (parsedEnvelope && containsUnsupportedToolProtocol(JSON.stringify(parsedEnvelope)))) {
     return protocolFailure('unsupported_tool_protocol');
   }
-  if (requiresGroupEnvelope && response.trim() && !parsedEnvelope) {
+  if (parseFailure?.stage === 'delivery') return protocolFailure('invalid_delivery');
+  if (parseFailure?.stage === 'message_routing') return protocolFailure('invalid_message_routing');
+  if (requiresGroupEnvelope && !parsedEnvelope) {
     return protocolFailure('missing_json_envelope');
   }
   if (requiresGroupEnvelope && parsedEnvelope && hasInvalidStateEvidence(parsedEnvelope)) {
     return protocolFailure('invalid_state_evidence');
   }
-  if (requiresGroupEnvelope && parsedEnvelope
-    && hasInvalidConversationMemberReferences(parsedEnvelope, params.chat.memberIds)) {
+  if (parsedEnvelope && (requiresGroupEnvelope || parsedEnvelope.messages?.some((part) => Object.hasOwn(part, 'addressedTargets') || Object.hasOwn(part, 'replyDebtTargets')))
+    && hasInvalidConversationMemberReferences(parsedEnvelope, [...params.chat.memberIds, ...(params.chat.type === 'direct' ? ['user'] : [])], params.speaker.id)) {
     return protocolFailure('invalid_member_reference');
   }
   const narrativeRuntime = isStoryReader ? await loadNarrativeRuntime() : null;
@@ -3337,12 +3336,14 @@ async function generateWithPrompt(params: {
     ? null
     : (() => {
       const parts = parsedEnvelope.messages
-        .filter((part): part is { content: string; mediaDecision?: MediaGenerationDecision | null } => Boolean(part && typeof part.content === 'string' && part.content.trim()));
+        .filter((part) => Boolean(part && typeof part.content === 'string' && part.content.trim()));
       // The plan is a tendency, not a truncation rule. Preserve model-selected
       // send boundaries; the protocol parser owns the defensive cap.
       return parts.map((part) => ({
         content: part.content.trim(),
         mediaDecision: part.mediaDecision || null,
+        ...(Object.hasOwn(part, 'addressedTargets') ? { addressedTargets: part.addressedTargets } : {}),
+        ...(Object.hasOwn(part, 'replyDebtTargets') ? { replyDebtTargets: part.replyDebtTargets } : {}),
       }));
     })();
   const rawContent = storyEventContent || (messageParts?.[0]?.content || (parsedEnvelope ? parsedEnvelope.content : isLikelyInlineEnvelopeResponse(response) ? '' : response));
@@ -3409,6 +3410,7 @@ async function generateNonDuplicateResponse(params: {
   onChunk?: (content: string) => void;
   onLocalInterception?: (event: LocalInterceptionEvent) => void | Promise<void>;
   signal?: AbortSignal;
+  allowNoSend?: boolean;
 }): Promise<GenerationWithGuidanceTrace> {
   const isStoryReader = params.chat.sessionKind?.scenarioId === 'story-reader';
   const narrativeRuntime = isStoryReader ? await loadNarrativeRuntime() : null;
@@ -3509,20 +3511,29 @@ async function generateNonDuplicateResponse(params: {
       const unsupportedTool = generated.protocolError === 'unsupported_tool_protocol';
       const invalidStateEvidence = generated.protocolError === 'invalid_state_evidence';
       const invalidMemberReference = generated.protocolError === 'invalid_member_reference';
+      const invalidDelivery = generated.protocolError === 'invalid_delivery';
+      const invalidRouting = generated.protocolError === 'invalid_message_routing';
       logAiGenerationFailure({
         chat: params.chat, speaker: params.speaker, reason: generated.protocolError,
         details: generated.diagnostic,
         message: unsupportedTool ? 'AI 返回了不支持的工具调用协议，本次生成未提交。'
           : invalidStateEvidence ? 'AI 状态更新的证据不属于本轮发言，本次生成未提交。'
-            : invalidMemberReference ? 'AI 状态更新引用了不存在的群成员，本次生成未提交。'
+            : invalidMemberReference ? 'AI 输出引用了无效的成员对象，本次生成未提交。'
+              : invalidDelivery ? 'AI 返回了不允许或相互矛盾的发送状态，本次生成未提交。'
+                : invalidRouting ? 'AI 逐条消息的回应对象字段无效，本次生成未提交。'
             : 'AI 回复缺少有效的结构化输出，本次生成未提交。', attempt: attempt + 1,
       });
       if (attempt < 2) {
         const failure = unsupportedTool ? 'unsupported tool-call markup'
           : invalidStateEvidence ? 'a state update whose evidenceText was not an exact quote from one of this response\'s visible sends'
-            : invalidMemberReference ? 'a conversation state update that referenced an id outside the supplied member list'
+            : invalidMemberReference ? 'a target or state update referencing an id outside the supplied member list or targeting the current speaker'
+              : invalidDelivery ? 'an invalid delivery state or fields that contradict it'
+                : invalidRouting ? 'invalid per-send routing fields; follow the supplied schema and field diagnostic'
             : 'no valid JSON envelope';
-        prompt = `${params.systemPrompt}\n\nOutput protocol retry:\n- The previous attempt returned ${failure}. Return one valid JSON object using the supplied output contract and actual visible character speech. Preserve the supported structured fields for this turn; use null when there is no supported update. If known public items exist, explicitly include top-level conversationUpdate after checking whether this turn changes them: null or an update object with items; never omit it. State evidenceText must be copied exactly from one visible send in this response, never from the earlier transcript or known records. Do not add spoken confirmations merely to manufacture evidence. Do not invent updates, emit tool-call markup or simulate unavailable tools. Do not repeat or continue the previous plain-text draft; discard it and write the visible content inside the new JSON envelope. The response must begin with the JSON object and contain no prose before or after it. Do not mention this retry to participants.`;
+        const deliveryRule = params.allowNoSend
+          ? 'You may still return exactly {"delivery":"no_send","messages":[]} when you have nothing to express; no other fields are needed then. For delivery=send, follow these rules.'
+          : 'This turn requires delivery=send with visible character speech.';
+        prompt = `${params.systemPrompt}\n\nOutput protocol retry:\n- The previous attempt returned ${failure}. Return one valid JSON object using the supplied output contract. ${deliveryRule} Preserve the supported structured fields for this turn; use null when there is no supported update. If known public items exist, explicitly include top-level conversationUpdate after checking whether this turn changes them: null or an update object with items; never omit it. State evidenceText must be copied exactly from one visible send in this response, never from the earlier transcript or known records. Do not add spoken confirmations merely to manufacture evidence. Do not invent updates, emit tool-call markup or simulate unavailable tools. Do not repeat or continue the previous plain-text draft; discard it and write the visible content inside the new JSON envelope. The response must begin with the JSON object and contain no prose before or after it. Do not mention this retry to participants.`;
         continue;
       }
       throw new EmptyGeneratedResponseError(params.speaker.name, {
@@ -3542,6 +3553,9 @@ async function generateNonDuplicateResponse(params: {
     lastStoryEvents = generated.storyEvents || null;
     lastStoryChoices = generated.storyChoices || null;
     lastStreamedFallbackUsed = Boolean(generated.streamedFallbackUsed);
+    if (generated.parsedEnvelope?.delivery === 'no_send') {
+      return { parsedEnvelope: generated.parsedEnvelope, finalResponse: '', fullResponse: '' };
+    }
     // Some reasoning models can consume the completion budget without
     // emitting visible text (especially for media or artifact-heavy study
     // requests). Retry with an explicit concise-output contract instead of
@@ -3758,25 +3772,6 @@ async function generateNonDuplicateResponse(params: {
           reason,
         });
       }
-      if (contentExplicitlySignalsAway(evaluationResponse) && !generated.parsedEnvelope?.presenceUpdate
-        && generated.parsedEnvelope?.activityUpdate?.availability !== 'away') {
-        const reason = '可见回复表示离开、睡觉或忙碌，但模型没有返回下线状态标记；消息已保留，角色在线状态不变。';
-        logDeveloperDiagnostic('chat-run:presence-metadata-missing', {
-          chatId: params.chat.id,
-          speakerId: params.speaker.id,
-          speakerName: params.speaker.name,
-          kind: 'presence_metadata_missing',
-          draft: evaluationResponse,
-          reason,
-        }, 'warn', 'chat-run');
-        await params.onLocalInterception?.({
-          kind: 'presence_metadata_missing',
-          speakerId: params.speaker.id,
-          speakerName: params.speaker.name,
-          draft: evaluationResponse,
-          reason,
-        });
-      }
       if (params.guidance || attempt > 0) params.onChunk?.(generated.narrativeText || generated.finalResponse);
       return {
         parsedEnvelope: generated.parsedEnvelope,
@@ -3858,7 +3853,7 @@ function buildCompletedMessage(params: {
   finalResponse: string;
   fullResponse: string;
   extraMessages?: string[] | null;
-  messageParts?: Array<{ content: string; metadata?: MessageMetadata }> | null;
+  messageParts?: GeneratedRoundMessage['messageParts'];
   emotion: number;
   parsedEnvelope: ReturnType<typeof parseInlineInteractionEnvelope>;
   addressedTargets?: ReconciledAddressedTargets;
@@ -4007,7 +4002,7 @@ function resolveRoundtableTurnSpeaker(chat: GroupChat, chatMembers: AICharacter[
   };
 }
 
-export async function generateSpeakerMessage(params: {
+type GenerateSpeakerMessageParams = {
   chat: GroupChat;
   speaker: AICharacter;
   characters: AICharacter[];
@@ -4029,7 +4024,12 @@ export async function generateSpeakerMessage(params: {
   onLocalInterception?: (event: LocalInterceptionEvent) => void | Promise<void>;
   delay?: (ms: number) => Promise<void>;
   signal?: AbortSignal;
-}): Promise<GeneratedRoundMessage> {
+};
+
+export function generateSpeakerMessage(params: GenerateSpeakerMessageParams & { allowNoSend: true }): Promise<GeneratedRoundMessage | GeneratedNoSend>;
+export function generateSpeakerMessage(params: GenerateSpeakerMessageParams & { allowNoSend?: false }): Promise<GeneratedRoundMessage>;
+export function generateSpeakerMessage(params: GenerateSpeakerMessageParams & { allowNoSend: boolean }): Promise<GeneratedRoundMessage | GeneratedNoSend>;
+export async function generateSpeakerMessage(params: GenerateSpeakerMessageParams & { allowNoSend?: boolean }): Promise<GeneratedRoundMessage | GeneratedNoSend> {
   const startedAt = nowMs();
   const chatMembers = resolveEffectiveChatMembers(params.chat, params.characters);
   const effectiveMembers = chatMembers.length ? chatMembers : params.characters;
@@ -4284,7 +4284,9 @@ export async function generateSpeakerMessage(params: {
   const promptAssembly = resolveSessionEngineKey(params.chat) === 'open_chat'
     && resolveSessionFamilyKey(params.chat) !== 'analysis'
     ? buildPromptAssemblyWithContext(params.speaker, params.chat, emotion, activeMessages, characterMap, {
-      preferredTargetActorId: conversationMovePlan.targetActorId || intent.target,
+      preferredTargetActorId: hasExplicitConversationTarget
+        ? conversationMovePlan.targetActorId || intent.target
+        : undefined,
     })
     : null;
   const memoryTrace = promptAssembly?.memoryTrace || buildPromptMemoryTrace(params.speaker, params.chat, activeMessages, characterMap);
@@ -4316,7 +4318,6 @@ export async function generateSpeakerMessage(params: {
     speaker: params.speaker,
     members: effectiveMembers,
     messages: activeMessages,
-    styleProfile: enginePromptContext?.styleProfile,
     intent,
     innerLife,
     conversationMovePlan,
@@ -4326,6 +4327,8 @@ export async function generateSpeakerMessage(params: {
     narrativeLines: params.narrativeLines,
     directorIntent: effectiveDirectorIntent,
   });
+  const allowNoSend = params.allowNoSend === true && requiresOrdinaryGroupEnvelope(params.chat)
+    && Boolean(unifiedTurnDirective && !unifiedTurnDirective.addressedNeed) && !userGuidance;
   const isStoryReader = params.chat.sessionKind?.scenarioId === 'story-reader';
   const promptPlayMode = resolvePromptPlayMode(params.chat);
   const usesUnifiedGroupTurn = shouldUseUnifiedTurnDirective(params.chat);
@@ -4345,8 +4348,8 @@ export async function generateSpeakerMessage(params: {
     { id: 'engine_prefix', layer: 'core', priority: -100, content: promptPrefix },
     { id: 'speaker_identity', layer: 'core', priority: 0, content: speakerSystemPrompt },
     buildPromptPlayModeBlock(promptPlayMode),
-    // Ordinary groups supply speech/state evidence here; the unified directive
-    // owns expression guidance. Dedicated modes keep their existing contracts.
+    // Ordinary groups supply speech/state evidence here; compact turn context
+    // supplies background. Dedicated modes keep their existing contracts.
     { id: 'humanization', layer: 'character', priority: 20, content: buildHumanizationPrompt(params.speaker, intent, activeMessages, userGuidance, { family: resolveSessionFamilyKey(params.chat), type: params.chat.type }) },
     { id: 'inner_life', layer: 'character', priority: 30, content: buildInnerLifePromptBlock(innerLife, { stateOnly: usesObservedInnerState }) },
     { id: 'pending_reply', layer: 'task', priority: 10, content: pendingReplyPrompt },
@@ -4358,13 +4361,14 @@ export async function generateSpeakerMessage(params: {
     { id: 'private_turn_priority', layer: 'task', priority: 35, content: buildPrivateTurnPriorityPrompt(params.chat) },
     { id: 'engine_constraints', layer: 'task', priority: 40, content: additionalConstraints },
     { id: 'analysis_room_contract', layer: 'task', priority: 45, content: buildAnalysisRoomContractPrompt(params.chat) },
-    { id: 'role_action_visibility', layer: 'runtime', priority: 10, content: buildRoleActionVisibilityPrompt(showRoleActions) },
     { id: 'expression_feedback', layer: 'runtime', priority: 20, content: buildExpressionFeedbackPrompt(expressionFeedbackTrace) },
-    { id: 'turn_directive', layer: 'task', priority: 48, content: buildTurnDirectivePrompt(unifiedTurnDirective) },
+    // Previous expression instructions retained in turnDirective.ts for rollback:
+    // content: buildTurnDirectivePrompt(unifiedTurnDirective)
+    { id: 'turn_directive', layer: 'task', priority: 48, content: buildTurnContextPrompt(unifiedTurnDirective) },
+    { id: 'chat_reply_preferences', layer: 'style', priority: 5, content: buildChatReplyPreferencesPrompt(params.chat, useSettingsStore.getState().chatReplyPreferences) },
     { id: 'natural_chat_rhythm', layer: 'style', priority: 10, content: buildNaturalChatRhythmPrompt(activeMessages, innerLife, responseSurface, richDelivery) },
-    // Ordinary conversation has one expression owner: Turn Directive. The
-    // other blocks are useful for dedicated task/scenario rooms, but stacking
-    // them here turns a social turn into a list of semantic chores.
+    // Ordinary conversation uses compact context. The detailed expression
+    // blocks remain available for dedicated task/scenario rooms.
     { id: 'conversation_move', layer: 'task', priority: 50, content: usesUnifiedGroupTurn ? '' : buildConversationMovePrompt(conversationMovePlan, params.chat, conversationMovePlan.targetActorId ? characterMap.get(conversationMovePlan.targetActorId)?.name : null) },
     { id: 'expression_surface_choice', layer: 'style', priority: 20, content: usesUnifiedGroupTurn ? '' : buildExpressionSurfaceChoicePrompt({ chat: params.chat, speaker: params.speaker, messages: activeMessages, intent, surface: responseSurface, turnPlan: finalTurnPlan }) },
     { id: 'turn_length_variety', layer: 'style', priority: 30, content: usesUnifiedGroupTurn ? '' : buildTurnLengthVarietyPrompt(activeMessages, params.speaker.id, responseSurface, runtimeBundleWithMovePlan) },
@@ -4377,7 +4381,7 @@ export async function generateSpeakerMessage(params: {
     { id: 'focused_situational_job_contract', layer: 'output', priority: 5, content: usesUnifiedGroupTurn ? '' : buildFocusedSituationalJobContract(activeMessages, params.speaker, responseSurface) },
     { id: 'natural_chat_surface_contract', layer: 'output', priority: 7, content: buildNaturalChatSurfaceContract(activeMessages, responseSurface, showRoleActions) },
     { id: 'generation_constraints', layer: 'output', priority: 10, content: buildGenerationConstraints(params.chat, activeMessages, params.speaker.id, responseSurface) },
-    { id: 'inline_interaction_contract', layer: 'output', priority: 20, content: buildInlineInteractionContract({ chat: params.chat, speaker: params.speaker, characters: effectiveMembers, recentMessages: activeMessages, turnPlan: finalTurnPlan, mediaCapabilities, richDelivery, mediaRequested: Boolean(userGuidance?.mediaRequest), webSearchEnabled }) },
+    { id: 'inline_interaction_contract', layer: 'output', priority: 20, content: buildInlineInteractionContract({ chat: params.chat, speaker: params.speaker, characters: effectiveMembers, recentMessages: activeMessages, turnPlan: finalTurnPlan, mediaCapabilities, richDelivery, mediaRequested: Boolean(userGuidance?.mediaRequest), webSearchEnabled, allowNoSend }) },
     { id: 'engine_suffix', layer: 'suffix', priority: 100, content: promptSuffix },
   ];
   const baseSystemPrompt = isStoryReader
@@ -4389,7 +4393,7 @@ export async function generateSpeakerMessage(params: {
       promptPrefix,
       additionalConstraints,
       promptSuffix,
-    })
+    }) + buildChatReplyPreferencesPrompt(params.chat, useSettingsStore.getState().chatReplyPreferences)
     : composePromptBlocks(promptBlocks, promptPlayMode);
   const systemPrompt = baseSystemPrompt;
   const resolvedApi = resolveApiConfigForCharacter(params.speaker, params.apiConfig, params.profiles);
@@ -4398,6 +4402,7 @@ export async function generateSpeakerMessage(params: {
     currentSpeakerId: isStoryReader ? undefined : params.speaker.id,
     chatType: params.chat.type,
     imageAttachmentMode: textInputCapabilities.imageInput ? 'latest-user' : 'none',
+    historyFormat: requiresOrdinaryGroupEnvelope(params.chat) ? 'room-record' : undefined,
   });
   const promptPrepElapsedMs = Number((nowMs() - promptPrepStartedAt).toFixed(2));
   logDeveloperDiagnostic('chat-run:prompt-prep-ready', {
@@ -4439,7 +4444,12 @@ export async function generateSpeakerMessage(params: {
     onChunk: params.onChunk,
     onLocalInterception: params.onLocalInterception,
     signal: params.signal,
+    allowNoSend,
   });
+  if (generated.parsedEnvelope?.delivery === 'no_send') {
+    if (params.signal?.aborted) throw new GenerationCancelledError();
+    return { delivery: 'no_send', speakerId: params.speaker.id };
+  }
   const generatedDialogueResponse = generated.fullResponse || '';
   const generatedStoryResponse = generated.fullNarrativeResponse || generatedDialogueResponse || '';
   if (!normalizeForComparison(generatedStoryResponse)) {
@@ -4466,15 +4476,33 @@ export async function generateSpeakerMessage(params: {
     : params.chat.type === 'ai_direct' && otherMemberIds.length === 1
       ? otherMemberIds[0]
       : undefined;
-  const addressedTargets = reconcileAddressedTargets(
+  const validTargetIds = new Set([...otherMemberIds, ...(params.chat.type === 'direct' ? ['user'] : [])]);
+  const hasPartRouting = generated.messageParts?.some((part) => Object.hasOwn(part, 'addressedTargets') || Object.hasOwn(part, 'replyDebtTargets'));
+  const partRouting = hasPartRouting ? generated.messageParts?.map((part) => {
+    const addressed = reconcileReplyDebt(part.addressedTargets, validTargetIds);
+    const debt = reconcileReplyDebt(part.replyDebtTargets, validTargetIds);
+    return {
+      addressedTargetIds: addressed.targetIds,
+      primaryAddressedTargetId: addressed.primaryTargetId,
+      replyDebtTargetIds: debt.targetIds,
+      primaryReplyDebtTargetId: debt.primaryTargetId,
+    };
+  }) : null;
+  const addressedTargets = partRouting?.length ? {
+    targetIds: partRouting[0].addressedTargetIds,
+    primaryTargetId: partRouting[0].primaryAddressedTargetId,
+  } : reconcileAddressedTargets(
     generated.parsedEnvelope?.addressedTargets,
-    new Set([...params.chat.memberIds.filter((memberId) => memberId !== params.speaker.id), ...(params.chat.type === 'direct' ? ['user'] : [])]),
+    validTargetIds,
     normalizeInteractionHintCollection(generated.parsedEnvelope?.interactionHints || null, params.speaker.id, generated.fullResponse || generated.rawResponse || ''),
     soleConversationPartnerId,
   );
-  const replyDebt = reconcileReplyDebt(
+  const replyDebt = partRouting?.length ? {
+    targetIds: partRouting[0].replyDebtTargetIds,
+    primaryTargetId: partRouting[0].primaryReplyDebtTargetId,
+  } : reconcileReplyDebt(
     generated.parsedEnvelope?.replyDebtTargets,
-    new Set([...params.chat.memberIds.filter((memberId) => memberId !== params.speaker.id), ...(params.chat.type === 'direct' ? ['user'] : [])]),
+    validTargetIds,
   );
 
   const emotionSource = generated.fullResponse || generated.rawResponse || generatedStoryResponse;
@@ -4635,6 +4663,7 @@ export async function generateSpeakerMessage(params: {
   });
   const messageParts = generated.messageParts?.map((part, index) => ({
     content: part.content,
+    ...(partRouting?.[index] || {}),
     metadata: buildMessageMetadata({
       decision: part.mediaDecision || null,
       capabilities: mediaCapabilities,
@@ -4714,6 +4743,9 @@ export const runOneRound = async (
   callbacks: ChatEngineCallbacks,
   profiles?: AIModelProfile[],
   generationContext?: {
+    allowNoSend?: boolean;
+    consumedSpeakerIds?: ReadonlySet<string>;
+    consumedReplyDebtSpeakerIds?: ReadonlySet<string>;
     knownConversations?: GroupChat[];
     promptContext?: SessionGenerationPromptContext | null;
     buildPromptContext?: (speaker: AICharacter) => SessionGenerationPromptContext | null | undefined;
@@ -4763,11 +4795,24 @@ export const runOneRound = async (
   const runtimePressure = projectRuntimePressure({ chat, characters: autoSpeakableMembers, messages: activeMessages, pendingReplyContext });
   const narrativeLines = runtimePressure.narrativeLines;
   const directorIntent = runtimePressure.directorIntent;
-  const candidates = calculateWeights(autoSpeakableMembers, activeMessages, effectiveCooldownMap, chat.speed, BASE_COOLDOWN_MS, pendingReplyContext, chat, directorIntent);
-  const lockedGuidanceSpeaker = resolveUserGuidanceLockedSpeaker(autoSpeakableMembers, directorIntent);
+  const allowNoSend = generationContext?.allowNoSend === true && requiresOrdinaryGroupEnvelope(chat)
+    && Boolean(callbacks.onNoSend);
+  const pendingReplyTargetIds = new Set(pendingReplyContext?.targetIds || []);
+  const remainingMembers = allowNoSend
+    ? autoSpeakableMembers.filter((member) => !generationContext?.consumedSpeakerIds?.has(member.id)
+      || (pendingReplyTargetIds.has(member.id)
+        && !generationContext?.consumedReplyDebtSpeakerIds?.has(member.id)))
+    : autoSpeakableMembers;
+  if (allowNoSend && !remainingMembers.length) {
+    callbacks.onQuiet?.();
+    return;
+  }
+  const candidates = calculateWeights(remainingMembers, activeMessages, effectiveCooldownMap, chat.speed, BASE_COOLDOWN_MS, pendingReplyContext, chat, directorIntent);
+  const lockedGuidanceSpeaker = resolveUserGuidanceLockedSpeaker(remainingMembers, directorIntent);
   const roundtableTurnSpeaker = resolveRoundtableTurnSpeaker(chat, autoSpeakableMembers);
   const latestVisibleMessage = activeMessages.findLast((message) => message.type !== 'event' && message.type !== 'system');
   if (chat.type === 'group' && resolveSessionFamilyKey(chat) === 'conversation'
+    && !allowNoSend
     && latestVisibleMessage?.type === 'ai'
     && candidates.length > 0 && candidates.every((candidate) => candidate.prefersSilence)
     && !storyNarrator && !lockedGuidanceSpeaker && !roundtableTurnSpeaker) {
@@ -4797,7 +4842,7 @@ export const runOneRound = async (
     }
     : roundtableTurnSpeaker
       ? roundtableTurnSpeaker
-    : getSpeakerSelectionResult(chatMembers, effectiveCooldownMap, chat.speed, BASE_COOLDOWN_MS, candidates);
+    : getSpeakerSelectionResult(remainingMembers, effectiveCooldownMap, chat.speed, BASE_COOLDOWN_MS, candidates);
   const selectionElapsedMs = Number((nowMs() - roundStartedAt).toFixed(2));
   logDeveloperDiagnostic('chat-run:speaker-selection-ready', {
     chatId: chat.id,
@@ -4910,7 +4955,7 @@ export const runOneRound = async (
 
   try {
     let activeSpeaker = hydratedSpeaker || speaker;
-    let completedMessage: GeneratedRoundMessage;
+    let completedMessage: GeneratedRoundMessage | GeneratedNoSend;
     try {
       const hasActiveSpeakerInCharacters = characters.some((item) => item.id === activeSpeaker.id);
       const generationCharacters = activeSpeaker === speaker && hasActiveSpeakerInCharacters
@@ -4934,6 +4979,7 @@ export const runOneRound = async (
         onChunk: callbacks.onMessageChunk,
         onLocalInterception: callbacks.onLocalInterception,
         signal: callbacks.signal,
+        allowNoSend,
       });
     } catch (error) {
       if (!(error instanceof EmptyGeneratedResponseError)) throw error;
@@ -4995,7 +5041,13 @@ export const runOneRound = async (
         onChunk: callbacks.onMessageChunk,
         onLocalInterception: callbacks.onLocalInterception,
         signal: callbacks.signal,
+        allowNoSend,
       });
+    }
+    if (callbacks.signal?.aborted) throw new GenerationCancelledError();
+    if ('delivery' in completedMessage) {
+      callbacks.onNoSend?.(completedMessage);
+      return;
     }
     await callbacks.onMessageComplete(completedMessage);
   } catch (error) {

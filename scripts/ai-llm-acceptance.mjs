@@ -33,11 +33,12 @@ Optional environment:
   PNEUMATA_TEST_LLM_MIN_SCORE     Minimum model-judge score. Defaults to 75.
 
 Optional CLI overrides:
+  --model=gpt-5.4                 Override PNEUMATA_TEST_LLM_MODELS with one model.
   --cases=chatflow                 Override PNEUMATA_TEST_LLM_CASES.
   --report-dir=tmp/ai-reports      Override PNEUMATA_TEST_LLM_REPORT_DIR.
   --provider=openai                Override PNEUMATA_TEST_LLM_PROVIDER.
   --chatflow-turns=6               Override PNEUMATA_TEST_LLM_CHATFLOW_TURNS.
-  --capture-prompts               Save fixture-only runtime request messages, without headers or credentials.
+  --capture-prompts               Save fixture-only messages and allowlisted generation settings, without headers or credentials.
   --capture-responses             Save fixture-only generated text before envelope parsing.
   --activity-readback             Experiment: read frozen patrol dialogue before production commit.
   --chatflow-scenarios=story_choice_room,deliberation_artifact_room
@@ -76,11 +77,12 @@ try {
   const casesArg = readArgValue('cases');
   const reportDirArg = readArgValue('report-dir');
   const providerArg = readArgValue('provider');
+  const modelArg = readArgValue('model');
   const chatflowTurnsArg = readArgValue('chatflow-turns');
   const chatflowScenariosArg = readArgValue('chatflow-scenarios');
   config = {
     apiKey: process.env.PNEUMATA_TEST_LLM_API_KEY || '',
-    models: parseList(process.env.PNEUMATA_TEST_LLM_MODELS || process.env.PNEUMATA_TEST_LLM_MODEL || ''),
+    models: parseList(modelArg || process.env.PNEUMATA_TEST_LLM_MODELS || process.env.PNEUMATA_TEST_LLM_MODEL || ''),
     baseUrl: process.env.PNEUMATA_TEST_LLM_BASE_URL || DEFAULT_BASE_URL,
     timeoutMs: parseTimeoutMs(process.env.PNEUMATA_TEST_LLM_TIMEOUT_MS),
     cases: parseCases(casesArg || process.env.PNEUMATA_TEST_LLM_CASES),
@@ -2731,6 +2733,7 @@ async function loadRuntimeChatModules() {
           loadSessionEngine: sessionEngineLoader.loadSessionEngine,
           runSessionActionExecutor: sessionActionExecutors.runSessionActionExecutor,
           shouldPauseSettledConversation: sessionRunner.shouldPauseSettledConversation,
+          buildNoSendContextKey: sessionRunner.buildNoSendContextKey,
           settingsStore: settingsStore.useSettingsStore,
           applyConversationUpdate: continuity.applyConversationUpdate,
           applyPresenceUpdateToTransition: presence.applyPresenceUpdateToTransition,
@@ -3098,6 +3101,42 @@ function runtimeChatflowScenarios() {
       seedMessages: [
         acceptanceAiMessage('acceptance-chatflow-late-night', 'awan-night', '阿晚', '睡不着，有人在吗', now - 20_000),
       ],
+    },
+    {
+      name: 'fashion_shopping_room',
+      roomKind: 'open_chat',
+      turns: 8,
+      naturalQuietAllowed: true,
+      rubricHint: '从真实逛街经验开启普通群聊。观察成员是否有自己的注意和表达，而非连续赞同、复述、轮流交心得；允许小反应、不同关注和自然暂停，不要求人为制造分歧或不断追问。',
+      chat: {
+        id: 'acceptance-fashion-shopping', name: '逛街穿搭大赏',
+        topic: '买衣服时穿什么去，试衣间的翻车经历与逛街战袍。',
+        memberIds: ['user', 'buyer', 'saver', 'tailor', 'blogger', 'editor'],
+      },
+      characters: [
+        acceptanceCharacter('buyer', '时尚买手小A', {
+          speakingStyle: '熟悉品牌和试衣，讲自己的购买失误也很坦然，偶尔追问具体店铺。',
+          expertise: ['选品', '穿搭'],
+          coreProfile: { coreDesire: '找到穿上身真正适合自己的东西', coreFear: '花大钱买到只有照片好看的衣服', conflictStyle: '拿实穿经验说话' },
+        }),
+        acceptanceCharacter('saver', '精明省钱达人', {
+          speakingStyle: '爱报实际成交价，算账具体，对高价单品有点嘴欠。', expertise: ['折扣', '预算'],
+          coreProfile: { coreDesire: '用低预算买到实用好物', coreFear: '为包装和销售话术付钱', conflictStyle: '算明白实际成本再决定' },
+        }),
+        acceptanceCharacter('tailor', '旧衣改造师阿强', {
+          speakingStyle: '讲手上见过的衣服和改坏的地方，语言朴素，有时一眼就看出做工问题。', expertise: ['旧衣改造', '裁剪'],
+          coreProfile: { coreDesire: '让合适的旧衣服继续被穿', coreFear: '被当成什么衣服都能救的万能裁缝', conflictStyle: '指出具体能改和不能改的部位' },
+        }),
+        acceptanceCharacter('blogger', '穿搭博主苏苏', {
+          speakingStyle: '爱拍照也会自嘲，聊穿搭时会想起当时的场景。', expertise: ['搭配', '摄影'],
+          coreProfile: { coreDesire: '穿出自己喜欢且有记忆的样子', coreFear: '为了实用把自己穿得毫无意思', conflictStyle: '用具体画面讲自己的偏好' },
+        }),
+        acceptanceCharacter('editor', '时尚编辑Lily', {
+          speakingStyle: '对版型和面料挑剔，意见直接，不太爱听泛泛的推荐。', expertise: ['版型', '时装编辑'],
+          coreProfile: { coreDesire: '分清真正的好设计和噱头', coreFear: '被漂亮照片和低价掩盖衣服的问题', conflictStyle: '追到具体细节' },
+        }),
+      ],
+      seedMessages: [acceptanceUserMessage('acceptance-fashion-shopping', '买衣服一定要穿最好看的那套去逛街！大家来分享自己的逛街穿搭心得、翻车经历和最佳战袍', now - 20_000)],
     },
     {
       name: 'fashion_approval_scaffold_room',
@@ -4006,6 +4045,7 @@ function summarizeRuntimeTurn(message) {
     generatedBubbleCount: message.generatedBubbleCount || 1,
     persistedBubbleCount: message.persistedBubbleCount || 1,
     visibleBubbles: message.visibleBubbles || [],
+    routingScope: 'first_visible_bubble',
     visibleStoryBlocks: message.metadata?.narrativeTurn?.blocks || [],
     scenarioStateBefore: message.scenarioStateBefore || null,
     addressedTargetIds: message.addressedTargetIds || [],
@@ -4414,6 +4454,26 @@ const CHATFLOW_JUDGE_CALIBRATION_CASES = [
     rubricHint: '这是合格的短期情绪变化。评审不得因为没有永久 warmth/trust/attachment 变化而扣分；一次吃醋可以只体现在当下语气、情绪和下一句互动中。',
   },
   {
+    name: 'ordinary_chat_without_reply_or_progress_good',
+    expected: 'pass',
+    minScore: 75,
+    sample: {
+      roomKind: 'open_chat',
+      seedUserMessages: [{ senderName: '用户', content: '随便坐会儿，我去倒杯水。' }],
+      characters: [
+        { name: '小林', speakingStyle: '熟人面前话少，刚下班有点累。' },
+        { name: '阿乔', speakingStyle: '随性，想到什么说什么。' },
+      ],
+      transcript: [
+        { turn: 1, senderName: '小林', content: '嗯' },
+        { turn: 2, senderName: '阿乔', content: '今天外面天好蓝，坐办公室一天都没发现' },
+        { turn: 3, senderName: '小林', content: '我袜子又穿反了' },
+        { turn: 4, senderName: '小林', content: '算了，不想动' },
+      ],
+    },
+    rubricHint: '熟人随意闲坐，没有待答问题或交付。应声、随口看天气、个人状态和接着自己的话说均成立，不因缺少逐句承接、信息增量、互动钩子或剧情推进而扣分；不必把普通状态解读为求助。',
+  },
+  {
     name: 'apology_repair_without_permanent_change_good',
     expected: 'pass',
     minScore: 78,
@@ -4437,13 +4497,16 @@ function calibrationPassed(caseItem, review) {
   return review.score >= caseItem.minScore && review.pass === true;
 }
 
+const CHATFLOW_NATURALNESS_REVIEW_BOUNDARY = '普通闲聊不要求每次回应某个人、逐句承接、说明发言目的、提供新知识或给下一位留下接口。应声、个人状态、随口岔题和接着自己的话说均可能自然；结合上下文判断，不按反应类型或出现次数打分。明确提问、用户边界、具体交付和已发生的事实仍须尊重。建议必须针对可观察的问题，不能统一要求补承接、补钩子、补情绪或增加戏剧变化。';
+
 async function runChatflowJudgeCalibration(model) {
   const cases = [];
   for (const caseItem of CHATFLOW_JUDGE_CALIBRATION_CASES) {
     const review = await callJudge(model, [
       '这是群聊质量评审器校准样本。请只根据样本质量评分，不要猜测测试意图。',
       '重点检查：附和循环、只接上一句的机械接龙、无意义名字开头、跨消息回应、独立角度、长度漂移、动作漂移、用户插话承接、冲突推进、角色差异、协议泄漏。',
-      '自然感按“社交因果”判断，而不是按温柔、口语词或短句数量判断：为什么偏偏是这个人这样说；他在保护、试探、争面子、躲避、拆台还是靠近；这句话是否改变了下一人的情绪、距离、注意或选择。冷淡、疏远、厌恶、沉默和争执同样可以很自然。',
+      '自然感结合人物与上下文判断，而不是按温柔、口语词、短句数量或每句话造成的后果判断。冷淡、疏远、厌恶、沉默和争执同样可以很自然。',
+      CHATFLOW_NATURALNESS_REVIEW_BOUNDARY,
       '共同经历只有在改变当下理解时才加分；机械复述人物设定、轮流给建议、人人正确友善、空泛保证陪伴，都不构成人情味。',
       '关系评审边界：短期吃醋、一次争执、一次道歉或情绪缓和可以只影响即时情绪、innerLife、interactionHints 与房间压力；除非有持续证据、明确关系判断或跨轮稳定变化，不得因为没有长期 relationship delta 而扣分。',
       '高分样本应能自然推进群聊；低分样本即使语句通顺，也应因为结构性质量问题被明显压低。',
@@ -4694,11 +4757,14 @@ async function runRuntimeChatflowScenario(model, scenario) {
   const judgeErrors = [];
   const localInterceptions = [];
   const quietTurns = [];
+  const noSendTurns = [];
   const settledTurns = [];
   let naturallySettled = false;
   const profiles = runtimeProfile(model);
   const api = profiles[0];
   const cooldownMap = {};
+  const noSendSpeakerIds = new Set();
+  let noSendContextKey = '';
   const eventMessages = [];
   const userInjectionLog = [];
   const promptRequests = [];
@@ -4749,6 +4815,11 @@ async function runRuntimeChatflowScenario(model, scenario) {
     const scenarioStateBefore = collectScenarioStateSnapshot(chat);
     logProgress('chatflow turn generate', { model, scenario: scenario.name, turn, turnCount });
     let completed = null;
+    const roundContextKey = runtime.buildNoSendContextKey(chat, characters, messages);
+    if (roundContextKey !== noSendContextKey) {
+      noSendSpeakerIds.clear();
+      noSendContextKey = roundContextKey;
+    }
     const originalFetch = globalThis.fetch;
     const originalDebug = console.debug;
     const originalDeveloperMode = runtime.settingsStore.getState().developerMode;
@@ -4764,13 +4835,25 @@ async function runRuntimeChatflowScenario(model, scenario) {
     }
     if (config.capturePrompts) {
       globalThis.fetch = async (input, init) => {
-        // Capture only the synthetic fixture payload. Never retain URLs,
+        // Capture only synthetic fixture messages and allowlisted settings. Never retain URLs,
         // headers, API profiles, response bodies, or authorization data.
         if (typeof init?.body === 'string') {
           const payload = JSON.parse(init.body);
           if (Array.isArray(payload.messages)) {
             const requestMessages = payload.messages.map(({ role, content }) => ({ role, content }));
-            promptRequests.push({ turn, messages: requestMessages });
+            const generationSettings = {
+              provider: config.provider,
+              ...(typeof payload.model === 'string' ? { model: payload.model } : {}),
+              ...(typeof payload.temperature === 'number' ? { temperature: payload.temperature } : {}),
+              ...(typeof payload.top_p === 'number' ? { top_p: payload.top_p } : {}),
+              ...(typeof payload.max_tokens === 'number' ? { max_tokens: payload.max_tokens } : {}),
+              ...(typeof payload.max_completion_tokens === 'number' ? { max_completion_tokens: payload.max_completion_tokens } : {}),
+              ...(typeof payload.stream === 'boolean' ? { stream: payload.stream } : {}),
+              ...(['enabled', 'disabled'].includes(payload.thinking?.type) ? { thinking: { type: payload.thinking.type } } : {}),
+              ...(['json_object', 'json_schema', 'text'].includes(payload.response_format?.type)
+                ? { response_format: { type: payload.response_format.type } } : {}),
+            };
+            promptRequests.push({ turn, messages: requestMessages, generationSettings });
           }
         }
         return originalFetch(input, init);
@@ -4791,10 +4874,17 @@ async function runRuntimeChatflowScenario(model, scenario) {
         onLocalInterception: (event) => { localInterceptions.push({ turn, ...event }); },
         onIdle: (reason) => { errors.push(new Error(`idle on turn ${turn}: ${reason}`)); },
         onQuiet: () => { quietTurns.push(turn); },
+        onNoSend: ({ speakerId }) => {
+          noSendTurns.push({ turn, speakerId });
+          noSendSpeakerIds.add(speakerId);
+        },
         onError: (error) => { errors.push(error instanceof Error ? error : new Error(String(error))); },
       },
       profiles,
-      undefined,
+      {
+        allowNoSend: true,
+        noSendSpeakerIds,
+      },
       cooldownMap,
     );
     } finally {
@@ -4805,6 +4895,16 @@ async function runRuntimeChatflowScenario(model, scenario) {
       }
     }
     if (errors.length) break;
+    if (noSendTurns.some((item) => item.turn === turn)) {
+      assertCondition(!completed && noSendTurns.filter((item) => item.turn === turn).length === 1
+        && selectedSpeakers.some((item) => item.turn === turn
+          && item.characterId === noSendTurns.findLast((item) => item.turn === turn)?.speakerId),
+        `chatflow ${scenario.name} no-send turn completed a reply or lost its selected speaker`);
+      logProgress('chatflow no-send', { model, scenario: scenario.name, turn,
+        speakerId: noSendTurns.findLast((item) => item.turn === turn)?.speakerId });
+      await commitUserInjections(turn);
+      continue;
+    }
     if (quietTurns.includes(turn)) {
       try {
         assertCondition(scenario.quietExpectedTurns?.includes(turn) || scenario.naturalQuietAllowed === true,
@@ -4960,7 +5060,14 @@ async function runRuntimeChatflowScenario(model, scenario) {
       turn,
       generatedBubbleCount,
       persistedBubbleCount: logicalTurnMessages.length,
-      visibleBubbles: logicalTurnMessages.map((item) => ({ content: item.content })),
+      visibleBubbles: logicalTurnMessages.map((item) => ({
+        content: item.content,
+        addressedTargetIds: item.addressedTargetIds || [],
+        primaryAddressedTargetId: item.primaryAddressedTargetId || null,
+        replyDebtTargetIds: item.replyDebtTargetIds ?? null,
+        primaryReplyDebtTargetId: item.primaryReplyDebtTargetId ?? null,
+        interactionHints: (item.interactionHints || [item.interactionHint]).filter(Boolean),
+      })),
       scenarioStateBefore,
       scenarioStateAfter: collectScenarioStateSnapshot(chat),
       storyEvents: primaryPersisted.metadata?.storyEvents || [],
@@ -5038,12 +5145,13 @@ async function runRuntimeChatflowScenario(model, scenario) {
         '3. 结构化 metadata、故事选项或审议产物是否和回复一致。注意：innerLife.expressionPlan.suggestedMessageCount 和 turnPlan.maxBubbleCount 都是生成前的倾向或软上限，不是截断规则；有语义需要时模型可超过软上限。visibleBubbles 记录真正保存的气泡边界，content 只是合并后的台词；不能按段落换行猜气泡数。应检查实际 messageCount/generatedBubbleCount 与显示的消息是否一致，不要仅因实际数超过建议值而扣分。',
         '4. 如果用户刚插话，必须判断这一轮是否回应或推进了插话，不应被无视。',
         '5. 不要默认回复只能针对最后一条：如果此前存在未结点名、冲突或情绪焦点，应检查这一轮是否合理回到它；第三人插话可以成立，但不能凭空抹掉回应债。称呼对方名字应当承担施压、亲近、确认或转移注意等功能，不能只是每轮回复格式。',
-        '6. 检查社交因果：这句话是否由当前人物的欲望、顾虑、关系位置、共同经历或即时情绪具体地产生，并给下一位留下可感知的面子、距离、情绪、选择或注意力变化。只增加信息、建议或任务项不等于自然回应。',
+        '6. 结合人物和上下文检查表达是否可信，是否持续退化为可以互换的建议或任务接龙。没有显著情绪、关系或局面变化本身不是缺点。',
         '7. 自然不等于温暖、短句或口语化。冷淡、回避、讨厌、服从、争权、嘴硬、沉默和不完美修复都可以成立；不得用“更温柔”作为通用优化建议。',
         '8. 故事房一条持久化消息是一轮生成，不是一个可见气泡：页面按 visibleStoryBlocks 顺序展示旁白段落和人物气泡。旁白是叙事代理，没有普通角色 innerLife。是否必须输出选项，以 scenarioStateBefore 的 choicePolicy 为准；scenarioStateAfter 是下一节拍状态，不能拿来要求本轮补选项。',
         '9. 学习房还要核查本轮讲解的事实与例句是否一致，不能因语气自然就放过自相矛盾的规则或误导性纠错。',
         '10. 产品目标是可信且有观赏性的人物互动：情绪、人格与关系应在措辞、留白、语气或选择中可辨认，而非只在 metadata 里存在。不要按感叹号、长短句或冲突数量打分；平静、克制的回合也可以有表现力。生成前的情绪与动作估计不是成稿必须完成的指令。',
-        '11. 评审边界：innerLife.impulse/tone/pressure/typoLevel 是调度或表达估值，不要求正文逐项照演。addressedTargetIds 表示当前受话对象；replyDebtTargetIds 表示明确期待后续回答的对象，二者可以不同，提及不等于受话或回应债。memoryContext 是生成前选取的记忆视角，不是成稿的唯一受话对象。记忆可以隐含生效，单轮不要求所有成员出场或所有旧事复述；仍需检查真正未处理的点名、持续机械对答和角色趋同。',
+        '11. 评审边界：innerLife.impulse/tone/pressure/typoLevel 是调度或表达估值，不要求正文逐项照演。addressedTargetIds 表示当前受话对象；replyDebtTargetIds 表示明确期待后续回答的对象，二者可以不同，提及不等于受话或回应债。路由按 visibleBubbles 逐条核对，顶层 routingScope=first_visible_bubble 的路由和 interactionHints 仅属于首条气泡，不能用于要求合并正文中其他气泡的对象；空值不应猜测为其他气泡的路由。memoryContext 是生成前选取的记忆视角，不是成稿的唯一受话对象。记忆可以隐含生效，单轮不要求所有成员出场或所有旧事复述；仍需检查真正未处理的点名、持续机械对答和角色趋同。',
+        CHATFLOW_NATURALNESS_REVIEW_BOUNDARY,
         `玩法类型：${scenario.roomKind}。场景要求：${scenario.rubricHint}`,
       ].join('\n'), {
         scenario: scenario.name,
@@ -5112,17 +5220,18 @@ async function runRuntimeChatflowScenario(model, scenario) {
         '2. 多轮对话是否自然推进，不像轮流写作文、主持总结、客服问答或模板化复述。',
         '3. 角色身份、人格、说话风格、背景和关系是否在可见回复中有稳定差异。',
         '4. 每轮是否只代表当前说话角色，不替其他角色发言，不泄漏系统、JSON、内部 ID、prompt。',
-        '5. 检查成稿模型事件 interactionHints、relationshipSignals 与可见回复是否一致，并判断真实保存的多条发送是否有语义价值。发言前的调度估值不是正文情绪证据。',
+        '5. 检查成稿模型事件 interactionHints、relationshipSignals 与可见回复是否一致，并判断真实保存的多条发送是否有语义价值。路由和 interactionHints 按 visibleBubbles 逐条核对；routingScope=first_visible_bubble 时顶层对应字段只属于首条气泡。提及、受话对象和明确期待回答的对象不等同。发言前的调度估值不是正文情绪证据。',
         '6. 关系变化和房间态势是否克制，避免为了有 metadata 而过度写入。',
         '7. 故事房需要检查选项数量、选项间隔、选择代价和剧情承接；审议房需要检查 claims/evidence/issues/verdicts 等产物是否合理。',
         '8. 如果质量不足，用实际台词和上下文说明原因；区分输入证据不足、任务结构、生成表达和调度问题，不预设必须添加提示词规则。',
         '9. 用户插话不会重复出现在 transcript 的 AI 行中，但会出现在 userInjectionLog 和 conversationMessages；必须按时间顺序检查插话之后的实际回复，不得仅因 transcript 没有用户行就判定用户输入未被转录。',
         '10. 检查对话焦点是否能跨消息保留：不得把每轮“认可上一句 + 补一个条件 + 点上一位名字”误判为自然推进；明确点名后的第三人插话可以自然发生，但原目标后续应当结清回应债，除非场景给出合理回避。',
-        '11. 检查社交因果与情绪传递：每个重要回合应能解释为“这个人因为自己的欲望/顾虑/关系位置/共同经历而这样说”，并改变后续人物的面子、距离、情绪、注意或选择。纯信息增量、建议接龙和任务分工不能冒充人物互动。',
+        '11. 结合人物与上下文观察整段交流，检查持续的建议接龙和任务分工是否挤占了个人表达；不要求每个回合都改变人物关系、情绪或局面。',
         '12. 自然感不绑定某一种表面风格：温暖陪伴、冷淡拒绝、权力压迫、陌生试探、熟人揭短、任务争执都应各自成立。不要把所有优化收敛为更温柔、更短、更口语；也不要要求每轮制造戏剧转折。',
         '13. 另行检查观赏性：人物声音能否区分，重要刺激是否留下可见反应，场景是否有张弛和后续想看的选择或悬念。不能把平淡的信息接龙、比喻接龙评为戏剧张力，也不能奖励无依据的新秘密、强行争吵或每轮升级。任务、审议与教学首先要正确完成目标。',
         '14. 调度估值不是成稿情绪事实：innerLife.impulse/tone/pressure 可用于选择发言者，不能要求正文照演这些本地估值。addressedTargetIds 是当前受话对象，replyDebtTargetIds 才是明确期待后续回答的对象；本报告的空回应债不表示没有受话对象，不能单独判为回复对象错误。记忆可以作为隐含底色，不要求注入的旧事逐条说出；短样本中也不要求所有成员轮流出场，应检查是否存在真正未处理的点名或参与机会。',
         '15. 单聊、AI 私聊和学习房每次启动只生成一轮，然后等待用户再次启动或输入。本次运行只覆盖已触发的回合；没有后续触发时，一轮回复是合法样本，不是缺失私聊闭环。只评估可观察范围，不要求凭空增加回合。',
+        CHATFLOW_NATURALNESS_REVIEW_BOUNDARY,
         `场景额外要求：${scenario.rubricHint}`,
       ].join('\n'), {
         scenario: {
@@ -5145,6 +5254,8 @@ async function runRuntimeChatflowScenario(model, scenario) {
         executionScope: {
           requestedTurnLimit: turnCount,
           generatedTurns: transcript.length,
+          noSendTurns,
+          quietTurns,
           pausesAfterReply: chat.type === 'direct' || chat.type === 'ai_direct' || scenario.roomKind === 'study',
         },
         transcript: transcript.map(projectObservableTurn),
@@ -5180,6 +5291,7 @@ async function runRuntimeChatflowScenario(model, scenario) {
     turnCount: transcript.length,
     naturallySettled,
     quietTurns,
+    noSendTurns,
     settledTurns,
     selectedSpeakers,
     transcript,
@@ -5274,6 +5386,7 @@ async function runChatflowCase(model) {
         '2. 故事房的一个生成回合可以含多个 narration/speech 事件；事件数量不是消息气泡数。生成前的节奏和长度规划是倾向，不是成稿硬约束。',
         '3. 指出跨场景重复出现的具体问题；不要把单场景评语当作新的事实，也不要因暂未独立验证知识而要求学习进度提前升为 verified。',
         '4. 按各房间的 executionScope、seedMessages 与 visibleBubbles 判断：单轮暂停合法，段落不是发送边界；普通聊天无需故事、审议或学习的专属状态，简短确认也无需每轮重述已有方案。',
+        CHATFLOW_NATURALNESS_REVIEW_BOUNDARY,
       ].join('\n'), {
         scenarios: Object.fromEntries(Object.entries(runs).map(([name, run]) => {
           const scenario = scenarios.find((item) => item.name === name);

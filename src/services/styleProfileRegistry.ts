@@ -43,7 +43,7 @@ const styleProfiles = new Map<ChatStyleProfile, StyleProfileDefinition>([
     label: 'Casual room',
     promptContext: {
       styleProfile: 'casual_room',
-      additionalConstraints: ['Keep the social flow easy and low-pressure. Do not over-structure ordinary chat.'],
+      additionalConstraints: ['Keep ordinary chat low-pressure and conversational. The character and exchange determine the tone; no agreement, reassurance or invitation to continue is required.'],
       responseStyle: 'chat',
       allowMarkdown: true,
     },
@@ -87,7 +87,7 @@ const styleProfiles = new Map<ChatStyleProfile, StyleProfileDefinition>([
     label: 'Dramatic room',
     promptContext: {
       styleProfile: 'dramatic_room',
-      additionalConstraints: ['Let scene tension, implication, and role-specific friction shape the line more than neutral explanation.'],
+      additionalConstraints: ['Let established motives and relationships shape expression in the current scene. Tension or friction may matter when supported by the exchange; do not require progress or resolution in each turn.'],
       responseStyle: 'creative',
       allowMarkdown: true,
     },

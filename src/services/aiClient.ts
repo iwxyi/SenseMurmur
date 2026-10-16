@@ -980,7 +980,7 @@ async function generateOfficialResponse(
 ) {
   const requestBody = {
     provider: resolveOfficialBackendProvider(config.provider),
-    model: config.model,
+    model: config.model.trim(),
     messages: buildOfficialMessages(messages, systemPrompt, options.responseFormat === 'json'),
     stream: Boolean(onChunk),
     max_tokens: options.maxTokens,

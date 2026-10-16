@@ -16,6 +16,7 @@ export interface ConversationProjectionOptions {
   currentSpeakerId?: string;
   chatType?: GroupChat['type'];
   imageAttachmentMode?: 'none' | 'latest-user' | 'all';
+  historyFormat?: 'room-record';
 }
 
 export interface ConversationProjectionInput {
@@ -111,6 +112,39 @@ export function projectConversationForModel(input: ConversationProjectionInput):
     .slice(-(input.limit ?? 12));
   const options = input.options || {};
   const currentSpeakerId = options.currentSpeakerId;
+  if (options.historyFormat === 'room-record') {
+    if (!visible.length) return [];
+    // Separate the latest speaker's consecutive sends from earlier context.
+    // This is a chronological boundary, not a restriction on reply targets.
+    const latest = visible[visible.length - 1];
+    let recentStart = visible.length - 1;
+    while (recentStart > 0 && visible[recentStart - 1].senderId === latest.senderId
+      && visible[recentStart - 1].type === latest.type) recentStart -= 1;
+    const sections = [
+      { messages: visible.slice(0, recentStart), label: 'earlier sends, already said' },
+      { messages: visible.slice(recentStart), label: 'most recent sends' },
+    ];
+    return sections.filter(section => section.messages.length).map((section): ProjectedChatMessage => {
+      const attachments: NonNullable<ProjectedChatMessage['attachments']> = [];
+      const sends = section.messages.map((message) => {
+        const images = shouldProjectImageAttachments(message, visible, options.imageAttachmentMode)
+          ? buildProjectedImageAttachments(message) : undefined;
+        const imageStart = attachments.length;
+        if (images) attachments.push(...images);
+        return {
+          speaker: buildTranscriptHeader(message, input.characters, currentSpeakerId),
+          content: [compactTranscriptContent(message.content), buildImageAttachmentText(message),
+            buildAudioAttachmentText(message), buildOtherAttachmentText(message)].filter(Boolean).join('\n'),
+          ...(images ? { imageNumbers: images.map((_, index) => imageStart + index + 1) } : {}),
+        };
+      });
+      return {
+        role: 'user',
+        content: `Room transcript (${section.label}; oldest first; each entry is one recorded send):\n${JSON.stringify(sends)}`,
+        ...(attachments.length ? { attachments } : {}),
+      };
+    });
+  }
   const projected: ProjectedChatMessage[] = [];
   // Channel instructions belong to the system prompt. Every projected item
   // corresponds to a visible send, including consecutive sends by one person.

@@ -19,6 +19,73 @@ function message(patch: Partial<Message>): Message {
 }
 
 describe('projectConversationForModel', () => {
+  it('separates earlier context from latest sends without losing history or making assistant demonstrations', () => {
+    const projected = projectConversationForModel({
+      messages: [
+        message({ id: 'u', type: 'user', senderId: 'user', content: '大家随便聊聊' }),
+        message({ id: 'a1', content: '先等一下' }),
+        message({ id: 'a2', content: '我去拿水' }),
+        message({ id: 'b', senderId: 'char-b', senderName: '乙', content: '你们继续' }),
+        message({ id: 'b2', senderId: 'char-b', senderName: '乙', content: '我先吃饭' }),
+        message({ id: 'deleted', content: 'hidden', isDeleted: true }),
+      ], characters: new Map(),
+      options: { currentSpeakerId: 'char-a', chatType: 'group', historyFormat: 'room-record' },
+    });
+    expect(projected).toHaveLength(2);
+    expect(projected.every(item => item.role === 'user')).toBe(true);
+    expect(projected[0].content).toContain('earlier sends');
+    expect(projected[1].content).toContain('most recent sends');
+    expect(JSON.parse(projected[0].content.split('\n').slice(1).join('\n'))).toEqual([
+      { speaker: '用户', content: '大家随便聊聊' },
+      { speaker: '自己', content: '先等一下' },
+      { speaker: '自己', content: '我去拿水' },
+    ]);
+    expect(JSON.parse(projected[1].content.split('\n').slice(1).join('\n'))).toEqual([
+      { speaker: '乙', content: '你们继续' },
+      { speaker: '乙', content: '我先吃饭' },
+    ]);
+  });
+
+  it('handles an empty room record without inventing a send', () => {
+    expect(projectConversationForModel({ messages: [], characters: new Map(),
+      options: { historyFormat: 'room-record' } })).toEqual([]);
+  });
+
+  it('keeps topic guidance separate from subsequent human sends by the same sender', () => {
+    const projected = projectConversationForModel({
+      messages: [message({ type: 'god', senderId: 'user', content: '聊穿搭' }),
+        message({ type: 'user', senderId: 'user', content: '先看这双鞋' })],
+      characters: new Map(), options: { historyFormat: 'room-record' },
+    });
+    expect(projected).toHaveLength(2);
+    expect(projected[0].content).toContain('话题引导');
+    expect(projected[1].content).toContain('先看这双鞋');
+  });
+
+  it('keeps each record image references local and applies latest-user policy across both records', () => {
+    const inputMessages = ['user', 'char-b'].map((senderId, index) => message({
+      id: `image-${index}`, senderId, type: index === 0 ? 'user' : 'ai',
+      content: `图片${index}`, metadata: { attachments: [{
+        id: `attachment-${index}`, kind: 'image', status: 'ready',
+        url: `data:image/png;base64,${index}`, createdAt: 1, updatedAt: 1,
+      }] },
+    }));
+    const project = (imageAttachmentMode: 'all' | 'latest-user') => projectConversationForModel({
+      messages: inputMessages, characters: new Map(),
+      options: { historyFormat: 'room-record', imageAttachmentMode },
+    });
+    const all = project('all');
+    expect(all).toHaveLength(2);
+    all.forEach((record, index) => {
+      expect(record.attachments).toEqual([{ url: `data:image/png;base64,${index}`, mimeType: undefined }]);
+      expect(JSON.parse(record.content.split('\n').slice(1).join('\n'))[0].imageNumbers).toEqual([1]);
+    });
+    const latest = project('latest-user');
+    expect(latest[0].attachments).toEqual(all[0].attachments);
+    expect(latest[1].attachments).toBeUndefined();
+    expect(JSON.parse(latest[1].content.split('\n').slice(1).join('\n'))[0].imageNumbers).toBeUndefined();
+  });
+
   it.each(['group', 'direct', 'ai_direct', 'assistant'] as const)('projects only actual sends in %s without merging consecutive bubbles', (chatType) => {
     const projected = projectConversationForModel({
       messages: [
@@ -154,7 +221,7 @@ describe('projectConversationForModel', () => {
     expect(projected[0]?.attachments).toBeUndefined();
   });
 
-  it('projects only the latest user image attachments when latest-user mode is enabled', () => {
+  it.each([undefined, 'room-record'] as const)('projects only the latest user image attachments in %s history', (historyFormat) => {
     const projected = projectConversationForModel({
       messages: [
         message({
@@ -195,11 +262,20 @@ describe('projectConversationForModel', () => {
         }),
       ],
       characters: new Map<string, AICharacter>(),
-      options: { currentSpeakerId: 'char-a', chatType: 'group', imageAttachmentMode: 'latest-user' },
+      options: { currentSpeakerId: 'char-a', chatType: 'group', imageAttachmentMode: 'latest-user', historyFormat },
     });
 
-    expect(projected[0]?.attachments).toBeUndefined();
-    expect(projected[1]?.attachments).toEqual([{ url: 'data:image/png;base64,BBB', mimeType: undefined }]);
+    if (historyFormat === 'room-record') {
+      expect(projected).toHaveLength(1);
+      expect(projected[0]?.attachments).toEqual([{ url: 'data:image/png;base64,BBB', mimeType: undefined }]);
+      expect(JSON.parse(projected[0].content.split('\n').slice(1).join('\n'))).toEqual([
+        { speaker: '用户', content: '早先的图。\n[图片] 旧图' },
+        { speaker: '用户', content: '最新上传的图。\n[图片] 新图', imageNumbers: [1] },
+      ]);
+    } else {
+      expect(projected[0]?.attachments).toBeUndefined();
+      expect(projected[1]?.attachments).toEqual([{ url: 'data:image/png;base64,BBB', mimeType: undefined }]);
+    }
   });
 
   it('formats audio and other resources as compact semantic transcript markers', () => {

@@ -7,6 +7,57 @@ import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import { buildInlineInteractionContract, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope } from './inlineInteractionHint';
 
 describe('envelope rejection diagnostics', () => {
+  it('preserves per-send nulls, distinct targets and routed sends beyond the legacy text cap', () => {
+    const messages = Array.from({ length: 10 }, (_, index) => ({ content: `第${index}条`,
+      addressedTargets: index ? { targetIds: ['b'], primaryTargetId: 'b' } : null,
+      replyDebtTargets: null }));
+    const parsed = parseInlineInteractionEnvelope(JSON.stringify({ messages }));
+    expect(parsed?.messages).toEqual(messages.map((part) => ({ ...part, mediaDecision: null })));
+    expect(hasInvalidConversationMemberReferences(parsed!, ['a', 'b'], 'a')).toBe(false);
+    expect(hasInvalidConversationMemberReferences(parsed!, ['a'], 'a')).toBe(true);
+    expect(hasInvalidConversationMemberReferences(parsed!, ['a', 'b'], 'b')).toBe(true);
+  });
+
+  it.each([
+    { content: '', addressedTargets: null },
+    { content: '嗯', addressedTargets: { targetIds: 'b' } },
+    { content: '嗯', replyDebtTargets: { targetIds: ['b'], primaryTargetId: 'c' } },
+    { content: '嗯', addressedTargets: { targetIds: [''] } },
+  ])('reports invalid per-send routing without salvaging content: %j', (part) => {
+    const failures: unknown[] = [];
+    expect(parseInlineInteractionEnvelope(JSON.stringify({ messages: [part], content: '不能兜底成这句话' }), {
+      onFailure: (failure) => failures.push(failure),
+    })).toBeNull();
+    expect(failures).toEqual([expect.objectContaining({ stage: 'message_routing' })]);
+  });
+
+  it('accepts explicit no-send without requiring continuity writeback or visible content', () => {
+    expect(parseInlineInteractionEnvelope('{"delivery":"no_send","messages":[]}', {
+      allowNoSend: true, requireConversationUpdate: true, validateActivityUpdate: true,
+    })).toEqual({ delivery: 'no_send', messages: [], content: '' });
+  });
+
+  it.each([
+    [{ delivery: 'no_send', messages: [] }, false, 'delivery'],
+    [{ delivery: 'no_send', messages: [{ content: '嗯' }] }, true, 'messages'],
+    [{ delivery: 'no_send', messages: [], content: '嗯' }, true, 'content'],
+    [{ delivery: 'no_send', messages: [], presenceUpdate: { status: 'away' } }, true, 'presenceUpdate'],
+    [{ delivery: 'no_send', messages: [], conversationUpdate: { items: [] } }, true, 'conversationUpdate'],
+    [{ delivery: 'no_send', messages: [], toolRequest: { type: 'web_search', query: '新闻' } }, true, 'toolRequest'],
+    [{ delivery: 'silent', messages: [{ content: '嗯' }] }, true, 'delivery'],
+    [{ delivery: null, messages: [{ content: '嗯' }] }, true, 'delivery'],
+  ])('rejects invalid delivery without salvaging it: %j', (envelope, allowNoSend, field) => {
+    const failures: Array<{ stage: string; field?: string }> = [];
+    expect(parseInlineInteractionEnvelope(JSON.stringify(envelope), {
+      allowNoSend, onFailure: (failure) => failures.push(failure),
+    })).toBeNull();
+    expect(failures).toEqual([expect.objectContaining({ stage: 'delivery', field })]);
+  });
+
+  it.each([{ content: '嗯' }, { delivery: 'send', messages: [{ content: '嗯' }] }])('retains explicit and legacy sends: %j', (envelope) => {
+    expect(parseInlineInteractionEnvelope(JSON.stringify(envelope), { allowNoSend: true })?.content).toBe('嗯');
+  });
+
   it.each([
     ['', 'json_extraction'],
     ['plain text', 'json_extraction'],
@@ -413,6 +464,27 @@ describe('buildInlineInteractionContract analysis room detection', () => {
     expect(contract).toContain('visible content must either make a deliberative move');
   });
 
+  it('keeps ordinary group send boundaries free of previous-send and ceiling cues', () => {
+    const speaker = { id: 'speaker', name: '说话人' } as AICharacter;
+    const contract = buildInlineInteractionContract({
+      chat: createTestChat({ id: 'room', memberIds: ['speaker', 'other'] }),
+      speaker,
+      characters: [speaker, { id: 'other', name: '对方' } as AICharacter],
+      recentMessages: [],
+      richDelivery: { multiBubble: { proactivity: 'high', maxBubbles: 5, organization: 'conversational' },
+        image: { proactivity: 'off', explicitRequest: true }, audio: { proactivity: 'off', explicitRequest: true },
+        sticker: { proactivity: 'off', explicitRequest: true } },
+      turnPlan: { rhythm: 'multi_bubble', maxBubbleCount: 5, lengthBand: 'medium',
+        allowExtraMessages: true, waitSensitive: false, reasons: ['test'] },
+    });
+    expect(contract).toContain('"messages":[{"content":"visible send"');
+    expect(contract).toContain("One thought may be enough, or more may follow");
+    expect(contract).toContain('not a checklist or a pattern for how many sends');
+    expect(contract).not.toContain('later text sends=');
+    expect(contract).not.toContain('soft ceiling is 5');
+    expect(contract).not.toContain('A shift from speaking to one person to speaking to another');
+  });
+
   it('lets conversational follow-ups be separate sends without making each a self-contained point', () => {
     const contract = buildInlineInteractionContract({
       chat: {
@@ -477,11 +549,12 @@ describe('buildInlineInteractionContract analysis room detection', () => {
     });
 
     expect(contract).toContain('"addressedTargets":null');
-    expect(contract).toContain('addressedTargets records the current visible addressee');
-    expect(contract).toContain('replyDebtTargets is a separate field');
-    expect(contract).toContain('A member merely mentioned or affected is not addressed');
-    expect(contract).toContain('Use null for replyDebtTargets when no next answer is expected');
-    expect(contract).toContain('a goodbye may still address someone, but with no expected immediate reply it has replyDebtTargets=null');
+    expect(contract).toContain('Each messages[] item has its own addressedTargets and replyDebtTargets');
+    expect(contract).toContain('addressedTargets records who this send is actually directed to');
+    expect(contract).toContain('Merely mentioning or affecting someone is not addressing them');
+    expect(contract).toContain('only when this send actually expects that member to answer next');
+    expect(contract).toContain('a goodbye alone need not create a debt');
+    expect(contract).toContain('Top-level routing is legacy only');
     expect(contract).not.toContain('a goodbye with no expected immediate reply has addressedTargets=null');
   });
 

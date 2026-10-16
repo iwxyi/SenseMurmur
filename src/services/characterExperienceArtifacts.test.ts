@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildCharacterBirthLetterContext, buildCharacterDailyDiaryContext, buildCharacterExperienceArtifactContext, buildCharacterFinalLetterContext, buildLocalCharacterExperienceArtifact, generateCharacterDailyDiaryArtifact, generateCharacterExperienceArtifact, looksLikeRawArtifactContext } from './characterExperienceArtifacts';
+import { buildCharacterBirthLetterContext, buildCharacterDailyDiaryContext, buildCharacterExperienceArtifactContext, buildCharacterFinalLetterContext, buildLocalCharacterExperienceArtifact, decideCharacterDailyDiaryArtifact, generateCharacterDailyDiaryArtifact, generateCharacterExperienceArtifact, looksLikeRawArtifactContext } from './characterExperienceArtifacts';
 import type { AICharacter } from '../types/character';
 import { generateResponse } from './aiClient';
 
@@ -8,6 +8,17 @@ vi.mock('./aiClient', () => ({
 }));
 
 const generateResponseMock = vi.mocked(generateResponse);
+
+describe('automatic diary worthiness decision', () => {
+  it('allows silence and does not fall back to a local diary', async () => {
+    generateResponseMock.mockResolvedValueOnce('{"write":false,"text":""}');
+    expect(await decideCharacterDailyDiaryArtifact({ config: {} as Parameters<typeof decideCharacterDailyDiaryArtifact>[0]['config'], character: buildCharacter(), dateKey: '2026-10-15' })).toBeNull();
+  });
+  it('rejects invalid decisions instead of storing a fabricated entry', async () => {
+    generateResponseMock.mockResolvedValueOnce('{"write":true,"text":""}');
+    await expect(decideCharacterDailyDiaryArtifact({ config: {} as Parameters<typeof decideCharacterDailyDiaryArtifact>[0]['config'], character: buildCharacter(), dateKey: '2026-10-15' })).rejects.toThrow('没有返回有效正文');
+  });
+});
 
 function buildCharacter(): Partial<AICharacter> {
   return {

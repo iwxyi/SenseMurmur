@@ -16,6 +16,55 @@ import { logDeveloperDiagnostic } from './developerDiagnostics';
 import { isAutoRunnableSessionAction } from './conversationCapabilities';
 import { applyAnalysisRunPolicy, buildAnalysisRunPolicyEvent, type SessionLoopDecision } from './analysisRunPolicy';
 import { resolvePendingReplyContext } from './scheduler';
+import { getEffectiveCharacterPresence } from './characterPresence';
+
+// An autonomous group burst is scoped by external input. AI messages and the
+// runtime facts they write back belong to the burst itself; treating them as a
+// new context gives every member another turn after every send.
+export function buildNoSendContextKey(chat: GroupChat, messages: Message[]) {
+  const branchName = chat.messageBranchState?.activeBranchName;
+  return JSON.stringify({
+    branch: branchName,
+    messages: messages.filter((message) => !message.isDeleted && !message.isStreaming
+      && (message.type === 'user' || message.type === 'god')).map((message) => [
+      message.id, message.type, message.senderId, message.content,
+      message.addressedTargetIds, message.replyDebtTargetIds, message.metadata?.withdrawal,
+    ]),
+    room: [chat.topic, chat.runtimeSeed],
+  });
+}
+
+function isAutonomousConversation(chat: GroupChat) {
+  return chat.type === 'group' && chat.sessionKind?.scenarioId !== 'story-reader'
+    && resolveSessionFamilyKey(chat) === 'conversation';
+}
+
+function refreshMemberOpportunityState(
+  chat: GroupChat,
+  characters: AICharacter[],
+  consumedSpeakerIds: Set<string>,
+  consumedReplyDebtSpeakerIds: Set<string>,
+  presenceByMemberId: Map<string, string>,
+) {
+  const memberIds = new Set(chat.memberIds);
+  for (const memberId of presenceByMemberId.keys()) {
+    if (!memberIds.has(memberId)) {
+      presenceByMemberId.delete(memberId);
+      consumedSpeakerIds.delete(memberId);
+      consumedReplyDebtSpeakerIds.delete(memberId);
+    }
+  }
+
+  for (const character of characters) {
+    if (!memberIds.has(character.id)) continue;
+    const status = getEffectiveCharacterPresence(character).status;
+    if (presenceByMemberId.get(character.id) === 'away' && status === 'online') {
+      consumedSpeakerIds.delete(character.id);
+      consumedReplyDebtSpeakerIds.delete(character.id);
+    }
+    presenceByMemberId.set(character.id, status);
+  }
+}
 
 export function shouldPauseSettledConversation(runStart: GroupChat, after: GroupChat, characters: AICharacter[], messages: Message[]) {
   const settledAt = after.worldState.conversationContinuity?.settledAt;
@@ -28,7 +77,7 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-type SessionLoopPhase = 'starting' | 'paused' | 'waiting_commit' | 'selecting' | 'running_round' | 'sleeping' | 'error_sleeping';
+type SessionLoopPhase = 'starting' | 'paused' | 'waiting_commit' | 'waiting_context' | 'selecting' | 'running_round' | 'sleeping' | 'error_sleeping';
 
 const activeSessionLoops = new Map<string, {
   chatId: string;
@@ -254,6 +303,7 @@ export async function runSessionLoop(params: {
   onQuiet?: () => void;
   onMessageChunk: (content: string) => void;
   onStreamingComplete?: () => void;
+  onDiscardStreamingMessage: () => void;
   onLocalInterception?: (event: LocalInterceptionEvent) => void | Promise<void>;
   onClearStreamingState: () => void;
   onEngineError: (error: Error) => void;
@@ -281,6 +331,10 @@ export async function runSessionLoop(params: {
 }) {
   const random = params.random || Math.random;
   let conversationRunStart: GroupChat | null = null;
+  let noSendContextKey: string | null = null;
+  const consumedSpeakerIds = new Set<string>();
+  const consumedReplyDebtSpeakerIds = new Set<string>();
+  const presenceByMemberId = new Map<string, string>();
   activeSessionLoops.set(params.loopId, {
     chatId: params.chatId,
     startedAt: Date.now(),
@@ -302,6 +356,25 @@ export async function runSessionLoop(params: {
         markSessionLoop(params.loopId, { phase: 'waiting_commit' });
         await sleep(80);
         continue;
+      }
+
+      if (consumedSpeakerIds.size) {
+        const waitingChat = params.getCurrentChat?.() || params.chat;
+        const waitingCharacters = params.getCurrentCharacters?.() || params.characters;
+        const waitingMessages = params.getCurrentMessages();
+        if (isAutonomousConversation(waitingChat)) {
+          refreshMemberOpportunityState(waitingChat, waitingCharacters, consumedSpeakerIds, consumedReplyDebtSpeakerIds, presenceByMemberId);
+          const pendingReply = resolvePendingReplyContext(waitingCharacters, waitingMessages, waitingChat);
+          const hasPendingReply = Boolean(pendingReply?.targetIds.some((id) => !consumedReplyDebtSpeakerIds.has(id)));
+          if (buildNoSendContextKey(waitingChat, waitingMessages) === noSendContextKey
+            && !hasPendingReply
+            && waitingCharacters.filter((character) => waitingChat.memberIds.includes(character.id))
+              .every((character) => getEffectiveCharacterPresence(character).status === 'away' || consumedSpeakerIds.has(character.id))) {
+            markSessionLoop(params.loopId, { phase: 'waiting_context' });
+            await sleep(250);
+            continue;
+          }
+        }
       }
 
       try {
@@ -355,6 +428,15 @@ export async function runSessionLoop(params: {
       }
 
       const effectiveCharacters = loopCharacters.length ? loopCharacters : currentCharacters;
+      const roundContextKey = buildNoSendContextKey(currentChat, currentMessages);
+      if (roundContextKey !== noSendContextKey) {
+        consumedSpeakerIds.clear();
+        consumedReplyDebtSpeakerIds.clear();
+        noSendContextKey = roundContextKey;
+      }
+      if (isAutonomousConversation(currentChat)) {
+        refreshMemberOpportunityState(currentChat, effectiveCharacters, consumedSpeakerIds, consumedReplyDebtSpeakerIds, presenceByMemberId);
+      }
       const engine = await getSessionEngine(currentChat, params.resolveSessionEngine);
       const generationContext = buildEngineGenerationContext(currentChat, effectiveCharacters, currentMessages);
       const rawLoopDecision = resolveEngineLoopDecision(engine, currentChat, effectiveCharacters, currentMessages);
@@ -460,6 +542,11 @@ export async function runSessionLoop(params: {
         characterCount: effectiveCharacters.length,
         elapsedMs: Number((roundStartedAt - turnStartedAt).toFixed(2)),
       }, 'info', 'chat-run');
+      const pendingReplyTargetIdsForRound = new Set(
+        (isAutonomousConversation(currentChat)
+          ? resolvePendingReplyContext(effectiveCharacters, currentMessages, currentChat)?.targetIds
+          : []) || [],
+      );
       let firstChunkLogged = false;
       await runOneRound(
         currentChat,
@@ -506,6 +593,20 @@ export async function runSessionLoop(params: {
             if (!isActiveLoop(params)) return;
             params.onQuiet?.();
           },
+          onNoSend: ({ speakerId }) => {
+            if (!isActiveLoop(params) || params.signal?.aborted) return;
+            const latestChat = params.getCurrentChat?.() || currentChat;
+            const latestKey = buildNoSendContextKey(latestChat, params.getCurrentMessages());
+            if (latestKey === roundContextKey && isAutonomousConversation(latestChat)) consumedSpeakerIds.add(speakerId);
+            if (latestKey === roundContextKey && isAutonomousConversation(latestChat)
+              && pendingReplyTargetIdsForRound.has(speakerId)) consumedReplyDebtSpeakerIds.add(speakerId);
+            logDeveloperDiagnostic('chat-run:no-send', {
+              chatId: params.chatId, loopId: params.loopId, speakerId,
+              contextChanged: latestKey !== roundContextKey,
+              consumedSpeakerCount: consumedSpeakerIds.size,
+            }, 'info', 'chat-run');
+            params.onDiscardStreamingMessage();
+          },
           onMessageComplete: async (message) => {
             if (!isActiveLoop(params)) return;
             logDeveloperDiagnostic('chat-run:message-complete', {
@@ -543,6 +644,12 @@ export async function runSessionLoop(params: {
                 getCurrentCharacters: params.getCurrentCharacters,
                 shouldContinue: () => isActiveLoop(params),
               });
+              const latestChat = params.getCurrentChat?.() || currentChat;
+              const latestKey = buildNoSendContextKey(latestChat, params.getCurrentMessages());
+              if (latestKey === roundContextKey && isAutonomousConversation(latestChat)) {
+                consumedSpeakerIds.add(message.senderId);
+                if (pendingReplyTargetIdsForRound.has(message.senderId)) consumedReplyDebtSpeakerIds.add(message.senderId);
+              }
             } catch (error) {
               if (isGenerationCancelledError(error) || !isActiveLoop(params)) return;
               params.onLoopError(error);
@@ -580,13 +687,16 @@ export async function runSessionLoop(params: {
         engine.buildGenerationPromptContext
           ? {
               sessionEngine: engine,
+              allowNoSend: true,
+              consumedSpeakerIds,
+              consumedReplyDebtSpeakerIds,
               knownConversations: params.getKnownConversations?.(),
               buildPromptContext: (speaker) => engine.buildGenerationPromptContext?.({
                 ...generationContext,
                 speaker,
               }) || null,
             }
-          : { sessionEngine: engine, knownConversations: params.getKnownConversations?.() },
+          : { sessionEngine: engine, knownConversations: params.getKnownConversations?.(), allowNoSend: true, consumedSpeakerIds, consumedReplyDebtSpeakerIds },
         params.getCooldownMap?.()
       );
 

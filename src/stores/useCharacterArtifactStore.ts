@@ -10,6 +10,7 @@ import { buildDiaryCompanionshipReflectionEvents, pickChatsForDiaryCompanionship
 import { useSettingsStore } from './useSettingsStore';
 import { useChatStore } from './useChatStore';
 import { isCharacterFeatureEnabled } from '../services/characterGenerationPolicy';
+import type { GroupChat } from '../types/chat';
 import { scopedStorageKey, storageKey } from '../constants/brand';
 import { api, type CharacterArtifactQuery, type CharacterArtifactSummaryEntry, type CharacterArtifactSyncEntry, type SyncChangeScope } from '../services/api';
 import { getLocalDataUserId } from '../services/authStorageScope';
@@ -17,6 +18,7 @@ import { isCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { isCloudSyncBootstrapLocked } from '../services/cloudSyncBootstrapLock';
 import { createSyncScheduler } from './storeSyncScheduler';
 import { completeLocalOutboxWorkerOperation, markLocalOutboxWorkerOperation, mirrorLocalOutboxWorkerQueue, removeLocalOutboxWorkerOperation } from '../services/localOutboxWorkerBridge';
+import { characterPublicationOffset, DIARY_SPREAD_WINDOW_MS } from '../services/characterPublicationSchedule';
 
 export type CharacterArtifactKind = 'birth_letter' | 'diary' | 'final_letter';
 export type CharacterArtifactJobStatus = 'pending' | 'running' | 'succeeded' | 'failed';
@@ -60,11 +62,14 @@ interface CharacterArtifactJob {
   attempts: number;
   createdAt: number;
   updatedAt: number;
+  readyAt?: number;
+  inputSignature?: string;
 }
 
 interface ArtifactSnapshot {
   items: CharacterArtifactEntry[];
   jobs: CharacterArtifactJob[];
+  diaryDecisions?: Record<string, string>;
 }
 
 interface CharacterArtifactStore extends ArtifactSnapshot {
@@ -80,6 +85,7 @@ interface CharacterArtifactStore extends ArtifactSnapshot {
   enqueueBirthLetter: (character: AICharacter, relatedCharacters: Array<{ id: string; name: string }>) => void;
   enqueueFinalLetter: (character: AICharacter, relatedCharacters: Array<{ id: string; name: string }>) => void;
   markLettersRead: () => void;
+  markLetterRead: (itemId: string) => void;
   getDiaryEntries: (characterId: string) => CharacterArtifactEntry[];
   getLetterEntries: () => CharacterArtifactEntry[];
   regenerateArtifact: (params: {
@@ -169,6 +175,7 @@ export async function resetCharacterArtifactStoreForAccountBoundary() {
   useCharacterArtifactStore.setState({
     items: [],
     jobs: [],
+    diaryDecisions: {},
     isProcessing: false,
     unreadLetterCount: 0,
   });
@@ -304,6 +311,19 @@ function collectCharacterSourceDateKeys(character: Partial<AICharacter>) {
   return Array.from(keys).sort();
 }
 
+export function collectCharacterDiarySnapshot(character: AICharacter, chats: GroupChat[]): AICharacter {
+  const existing = character.layeredMemories || [];
+  const existingIds = new Set(existing.map((item) => item.id));
+  const shared = chats.filter((chat) => chat.deletedAt == null && chat.memberIds.includes(character.id))
+    .flatMap((chat) => chat.layeredMemories || [])
+    .filter((item) => item.ownerId === character.id && item.subjectOwner !== 'user'
+      && !item.subjectIds?.includes('user') && !item.archivedAt && item.validity !== 'contradicted'
+      && item.scope !== 'system_runtime' && item.kind !== 'taboo' && item.visibility !== 'never_surface'
+      && Boolean(item.text.trim()))
+    .filter((item) => !existingIds.has(item.id));
+  return shared.length ? { ...character, layeredMemories: [...existing, ...shared] } : character;
+}
+
 function buildDiaryJobKey(characterId: string, dateKey: string) {
   return `diary:${characterId}:${dateKey}`;
 }
@@ -368,18 +388,28 @@ function chooseBetterArtifactEntry(a: CharacterArtifactEntry, b: CharacterArtifa
 }
 
 function mergeArtifactItems(...sources: CharacterArtifactEntry[][]) {
+  const mergeEntry = (a: CharacterArtifactEntry, b: CharacterArtifactEntry) => {
+    const preferred = chooseBetterArtifactEntry(a, b);
+    // Reading a letter is irreversible; a stale summary/detail must not restore its badge.
+    if (isLetterKind(preferred.kind) && a.unread !== b.unread) {
+      const readEntry = a.unread ? b : a;
+      const unreadEntry = a.unread ? a : b;
+      return { ...preferred, unread: false, updatedAt: Math.max(readEntry.updatedAt, unreadEntry.updatedAt + 1), revision: Math.max(a.revision || 0, b.revision || 0) };
+    }
+    return preferred;
+  };
   const byId = new Map<string, CharacterArtifactEntry>();
   sources.flat().forEach((item) => {
     if (!item?.id || !item.kind || !item.characterId) return;
     const existing = byId.get(item.id);
-    byId.set(item.id, existing ? chooseBetterArtifactEntry(existing, item) : item);
+    byId.set(item.id, existing ? mergeEntry(existing, item) : item);
   });
 
   const byLogicalKey = new Map<string, CharacterArtifactEntry>();
   Array.from(byId.values()).forEach((item) => {
     const key = buildArtifactLogicalKey(item);
     const existing = byLogicalKey.get(key);
-    byLogicalKey.set(key, existing ? chooseBetterArtifactEntry(existing, item) : item);
+    byLogicalKey.set(key, existing ? mergeEntry(existing, item) : item);
   });
 
   return Array.from(byLogicalKey.values()).sort((a, b) => b.createdAt - a.createdAt);
@@ -834,6 +864,7 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
       let cloudSyncPendingQuery: CharacterArtifactQuery | undefined;
       let cloudSyncDirty = false;
       let processingPromise: Promise<void> | null = null;
+      let publicationTimer: ReturnType<typeof setTimeout> | null = null;
 
       const scheduleCloudSync = () => {
         if (!isCloudMode()) return;
@@ -873,7 +904,7 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
         processingPromise = (async () => {
           await mirrorLocalOutboxWorkerQueue('artifact', get().jobs);
           for (;;) {
-            const nextJob = get().jobs.find((job) => job.status === 'pending');
+            const nextJob = get().jobs.find((job) => job.status === 'pending' && (job.readyAt || 0) <= now());
             if (!nextJob) break;
 
             set((state) => ({
@@ -883,12 +914,16 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
             markLocalOutboxWorkerOperation({ id: nextJob.id, status: 'syncing', attemptCount: nextJob.attempts });
 
             const modelProfile = getUsableDefaultTextAIProfile(useSettingsStore.getState().aiProfiles);
-            if (isLetterKind(nextJob.kind) && !modelProfile) {
+            if (!modelProfile) {
               set((state) => ({
-                jobs: state.jobs.filter((job) => job.id !== nextJob.id),
+                jobs: state.jobs.map((job) => job.id === nextJob.id
+                  ? { ...job, status: 'failed', error: '文本模型尚不可用，配置后可继续生成。', updatedAt: now() }
+                  : job),
                 isProcessing: false,
               }));
-              removeLocalOutboxWorkerOperation(nextJob.id);
+              console.error('[character-artifact] text model unavailable', { kind: nextJob.kind });
+              markLocalOutboxWorkerOperation({ id: nextJob.id, status: 'failed',
+                attemptCount: nextJob.attempts, lastError: '文本模型尚不可用，配置后可继续生成。' });
               continue;
             }
             try {
@@ -899,7 +934,24 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
                     .slice(0, 5)
                     .map((item) => item.text)
                 : [];
-              const text = (await generateArtifactText(nextJob.kind, nextJob.snapshot, nextJob.relatedCharacters, nextJob.dateKey || null, modelProfile, recentDiaryTexts)).trim();
+              const accountId = getLocalDataUserId();
+              const generated = nextJob.kind === 'diary'
+                ? await (await import('../services/characterExperienceArtifacts')).decideCharacterDailyDiaryArtifact({
+                  config: modelProfile, character: nextJob.snapshot, relatedCharacters: nextJob.relatedCharacters,
+                  dateKey: nextJob.dateKey!, recentDiaryTexts,
+                  language: useSettingsStore.getState().language === 'zh' ? 'zh' : 'en',
+                })
+                : await generateArtifactText(nextJob.kind, nextJob.snapshot, nextJob.relatedCharacters, nextJob.dateKey || null, modelProfile, recentDiaryTexts);
+              if (getLocalDataUserId() !== accountId || !get().jobs.some((job) => job.id === nextJob.id)) continue;
+              if (generated === null) {
+                set((state) => ({
+                  jobs: state.jobs.filter((job) => job.id !== nextJob.id),
+                  diaryDecisions: { ...state.diaryDecisions, [nextJob.key]: nextJob.inputSignature || '' },
+                }));
+                removeLocalOutboxWorkerOperation(nextJob.id);
+                continue;
+              }
+              const text = generated.trim();
               const characterName = normalizeString(nextJob.snapshot.name) || '角色';
               const entry = createArtifactEntry({
                 kind: nextJob.kind,
@@ -942,9 +994,10 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
                 recentDiaryTexts,
               });
               completeLocalOutboxWorkerOperation(nextJob.id);
-              window.setTimeout(() => removeLocalOutboxWorkerOperation(nextJob.id), 1500);
+              setTimeout(() => removeLocalOutboxWorkerOperation(nextJob.id), 1500);
               scheduleCloudSync();
             } catch (error) {
+              console.error('[character-artifact] generation failed', { kind: nextJob.kind, error });
               const message = error instanceof Error ? error.message : String(error);
               set((state) => ({
                 jobs: state.jobs.map((job) => job.id === nextJob.id ? { ...job, status: 'failed' as const, error: message, attempts: job.attempts + 1, updatedAt: now() } : job),
@@ -962,6 +1015,15 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
         })().finally(() => {
           processingPromise = null;
           set({ isProcessing: false });
+          if (publicationTimer) clearTimeout(publicationTimer);
+          const pendingTimes = get().jobs.filter((job) => job.status === 'pending').map((job) => job.readyAt || now());
+          if (pendingTimes.length) {
+            const accountId = getLocalDataUserId();
+            publicationTimer = setTimeout(() => {
+              publicationTimer = null;
+              if (getLocalDataUserId() === accountId) void processNext();
+            }, Math.max(1, Math.min(...pendingTimes) - now()));
+          }
         });
 
         return processingPromise;
@@ -981,7 +1043,19 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
             .map((item) => `${item.characterId}:${item.dateKey}`));
           const existingJobKeys = new Set(get().jobs.map((job) => job.key));
 
-          characters
+          const diaryCharacters = characters.map((character) => collectCharacterDiarySnapshot(character, useChatStore.getState().chats));
+          characters.filter((character) => !character.isPreset && character.deletedAt == null)
+            .forEach((character) => {
+              if (get().items.some((item) => item.kind === 'birth_letter' && item.characterId === character.id)
+                || get().jobs.some((job) => job.kind === 'birth_letter' && job.characterId === character.id)) return;
+              get().enqueueLetterArtifact({
+                kind: 'birth_letter',
+                character,
+                relatedCharacters: buildRelatedCharacters(character, characters),
+                sourceKey: `${character.createdAt || now()}`,
+              });
+            });
+          diaryCharacters
             .filter((character) => character.deletedAt == null)
             .filter((character) => isCharacterFeatureEnabled(character, 'diaries'))
             .forEach((character) => {
@@ -994,20 +1068,33 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
               const relatedCharacters = buildRelatedCharacters(character, characters);
               sourceDates.forEach((dateKey) => {
                 const key = buildDiaryJobKey(character.id, dateKey);
+                const diarySnapshot = {
+                  ...character,
+                  layeredMemories: (character.layeredMemories || []).filter((item) => dateKeyOf(item.updatedAt || item.createdAt) <= dateKey),
+                  relationships: (character.relationships || []).filter((item) => !item.updatedAt || dateKeyOf(item.updatedAt) <= dateKey),
+                };
+                const inputSignature = String(characterPublicationOffset(JSON.stringify({
+                  memories: diarySnapshot.layeredMemories,
+                  relationships: diarySnapshot.relationships, dateKey,
+                }), 0xffffffff));
                 if (existingDiaryKeys.has(`${character.id}:${dateKey}`) || existingJobKeys.has(key)) return;
+                if (get().diaryDecisions?.[key] === inputSignature) return;
                 diaryJobs.push({
                   id: `${key}-${now()}-${Math.random().toString(36).slice(2, 8)}`,
                   key,
                   kind: 'diary',
                   characterId: character.id,
                   dateKey,
-                  snapshot: character,
+                  snapshot: diarySnapshot,
                   relatedCharacters,
                   status: 'pending',
                   error: null,
                   attempts: 0,
                   createdAt: now(),
                   updatedAt: now(),
+                  inputSignature,
+                  readyAt: now() + (diaryCharacters.filter((item) => item.deletedAt == null && isCharacterFeatureEnabled(item, 'diaries')).length > 1
+                    ? characterPublicationOffset(key, DIARY_SPREAD_WINDOW_MS) : 0),
                 });
               });
             });
@@ -1016,7 +1103,6 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
           void get().resumeProcessing();
         },
         enqueueLetterArtifact: ({ kind, character, relatedCharacters, sourceKey = '' }) => {
-          if (!hasUsableDefaultTextAI(useSettingsStore.getState().aiProfiles)) return;
           const key = buildLetterJobKey(kind, character.id, sourceKey);
           const hasEntry = get().items.some((item) => item.kind === kind && item.characterId === character.id && (item.sourceKey || '') === sourceKey);
           if (get().jobs.some((job) => job.key === key) || hasEntry) return;
@@ -1052,8 +1138,16 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
             sourceKey: character.deletedAt ? `${character.deletedAt}` : `${now()}`,
           });
         },
+        markLetterRead: (itemId) => set((state) => {
+          const target = state.items.find((item) => item.id === itemId);
+          if (!target || !isLetterKind(target.kind) || !target.unread || target.deletedAt != null || !hasArtifactText(target)) return state;
+          const items = state.items.map((item) => item.id === itemId ? { ...item, unread: false, updatedAt: Math.max(now(), item.updatedAt + 1) } : item);
+          queueMicrotask(scheduleCloudSync);
+          return { items, unreadLetterCount: computeUnreadLetterCount(items) };
+        }),
         markLettersRead: () => set((state) => {
-          const items = state.items.map((item) => (item.kind === 'final_letter' || item.kind === 'birth_letter') ? { ...item, unread: false, updatedAt: now() } : item);
+          if (!state.items.some((item) => isLetterKind(item.kind) && item.unread && item.deletedAt == null)) return state;
+          const items = state.items.map((item) => isLetterKind(item.kind) && item.unread && item.deletedAt == null ? { ...item, unread: false, updatedAt: Math.max(now(), item.updatedAt + 1) } : item);
           queueMicrotask(scheduleCloudSync);
           return { items, unreadLetterCount: computeUnreadLetterCount(items) };
         }),
@@ -1177,6 +1271,7 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
               localItems,
               remotePlaceholders,
               remoteDetails.filter((item): item is CharacterArtifactEntry => Boolean(item)),
+              get().items,
             );
             const projectedItems = applyRemoteDeletedArtifactSummaries(mergedItems, remoteDeletedSummaries);
             const localSignature = buildItemsSignature(get().items);
@@ -1264,10 +1359,14 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
         },
         getSyncScopeStates: () => artifactSyncScopes.listStates(),
         resumeProcessing: async () => {
+          if (processingPromise) return processingPromise;
+          const hasTextModel = hasUsableDefaultTextAI(useSettingsStore.getState().aiProfiles);
           set((state) => ({
             jobs: state.jobs.map((job) => {
               if (job.status === 'running') return { ...job, status: 'pending' as const, updatedAt: now() };
-              if (job.status === 'failed' && job.attempts < 3) return { ...job, status: 'pending' as const, error: null, updatedAt: now() };
+              if (job.status === 'failed' && job.attempts < 3 && hasTextModel) {
+                return { ...job, status: 'pending' as const, error: null, updatedAt: now() };
+              }
               return job;
             }),
             unreadLetterCount: computeUnreadLetterCount(state.items),
@@ -1291,6 +1390,7 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
       partialize: (state) => ({
         items: state.items,
         jobs: state.jobs,
+        diaryDecisions: state.diaryDecisions,
       }),
       migrate: (persistedState): ArtifactSnapshot => {
         const snapshot = persistedState as Partial<ArtifactSnapshot> | undefined;
@@ -1299,6 +1399,7 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
         return {
           items,
           jobs,
+          diaryDecisions: snapshot?.diaryDecisions || {},
         };
       },
       skipHydration: true,

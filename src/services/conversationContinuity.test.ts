@@ -26,12 +26,11 @@ describe('conversation continuity commit boundary', () => {
     const current = { ...initial, worldState: { ...initial.worldState, conversationContinuity: first.continuity } };
     const lines = projectNarrativeLines({ chat: current, messages: [accepted] });
     expect(lines.find((line) => line.id === 'continuity:scout-report')).toMatchObject({
-      contextKind: 'unresolved', status: 'active', tension: 0,
-      openQuestions: ['已接受，尚未报告兑现：甲答应把关口记录交给乙'],
-      possibleNextBeats: [{ beatType: 'answer', targetActorIds: ['a', 'b'] }],
+      contextKind: 'background', status: 'active', tension: 0,
+      openQuestions: [], possibleNextBeats: [],
     });
-    expect(resolveDirectorIntent({ chat: current, characters: [], messages: [accepted], narrativeLines: lines }))
-      .toMatchObject({ targetLineId: 'continuity:scout-report', beatType: 'answer' });
+    expect(resolveDirectorIntent({ chat: current, characters: [], messages: [accepted], narrativeLines: lines })?.targetLineId)
+      .not.toBe('continuity:scout-report');
     const evidence = status === 'resolved' ? '关口记录给你了' : '这回记录我交不了了';
     const result = message({ items: [{ ...promise, status, evidenceText: evidence }] },
       { id: 'result', content: evidence, timestamp: 20 });

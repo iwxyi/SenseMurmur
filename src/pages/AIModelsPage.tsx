@@ -241,7 +241,7 @@ const ModelAutocomplete = memo(function ModelAutocomplete({
 }: ModelAutocompleteProps) {
   const centeredForCurrentOpenRef = useRef(false);
   const selectedModelOption = options.find((item) => item.value === model) || null;
-  const selectedModelLabel = selectedModelOption?.label || (model.startsWith('ace:') ? model.split(':').slice(2).join(':') : model);
+  const selectedModelLabel = selectedModelOption?.label || model;
   const [inputValue, setInputValue] = useState(selectedModelLabel);
   const firstModelGroup = options[0]?.group || '';
   const showModelPriceColumn = options.some((item) => Boolean(item.priceLabel));
@@ -524,7 +524,7 @@ function buildRemoteModelOption(model: AvailableModelInfo, type: AIModelType, pr
   // Keep the model name independent from billing metadata. The autocomplete
   // renders prices in their own column; appending them here makes the price
   // look like part of the model name and also leaks into the input value.
-  const label = model.id.startsWith('ace:') ? model.label : model.id;
+  const label = provider === 'official-acedata' ? model.label : model.id;
   const aceGroup = typeof raw.aceModality === 'string' ? String(raw.aceProvider || (isZh ? 'ACE 模型' : 'ACE models')) : '';
   if (type === 'image' && provider === 'official-nanobanana') {
     return {
@@ -700,10 +700,6 @@ function providerSupportsType(option: AIProviderOption, type: AIModelType) {
 
 function resolveSelectableProviderKey(provider: string, type: AIModelType, providerOptions: AIProviderOption[] = getProvidersForType(type)) {
   const catalogType = type === 'tts' || type === 'stt' ? 'audio' : type;
-  if (provider === 'official-acedata') {
-    const aceProvider = providerOptions.find((item) => !item.unavailableReason && item.defaults.image?.model.startsWith('ace:'));
-    if (aceProvider?.defaults[catalogType]) return aceProvider.key;
-  }
   const exactProvider = providerOptions.find((item) => item.key === provider);
   if (exactProvider?.defaults[catalogType]) return exactProvider.key;
   if (isOfficialProviderKey(provider)) {
@@ -868,10 +864,7 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
             || isSelected
           ) && (!item.hidden || isSelected);
         });
-    const aceDefaultProvider = selectedProvider === 'official-acedata'
-      ? onlineOfficialProviderOptions.find((item) => item.defaults.image?.model.startsWith('ace:'))?.key
-      : undefined;
-    const resolvedSelectedProvider = aceDefaultProvider || (selectedProvider ? resolveLegacyOfficialProviderKey(selectedProvider) : '');
+    const resolvedSelectedProvider = selectedProvider ? resolveLegacyOfficialProviderKey(selectedProvider) : '';
     const selectedOfficialKey = selectedProvider && (isOfficialProviderKey(selectedProvider) || onlineOfficialProviderKeySet.has(resolvedSelectedProvider as AIProvider))
       ? resolvedSelectedProvider
       : '';
@@ -1229,7 +1222,7 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
       const options = filterModelsForType(uniqueModels, activeType)
         .map((item) => buildRemoteModelOption(item, activeType, effectiveProfile.provider, profileUsesOfficialProxy, i18n.language.startsWith('zh')));
       options.sort((left, right) => {
-        if (left.value.startsWith('ace:') && right.value.startsWith('ace:')) {
+        if (effectiveProfile.provider === 'official-acedata') {
           const groupOrder = left.group.localeCompare(right.group);
           if (groupOrder) return groupOrder;
           return compareModelVersionsDescending(left.value, right.value);

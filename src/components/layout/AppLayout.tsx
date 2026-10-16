@@ -25,6 +25,10 @@ import { APP_DIAGNOSTIC_TOAST_EVENT, type DiagnosticToastDetail } from '../../se
 import { CONTENT_SCROLL_TO_TOP_EVENT, type ContentScrollToTopDetail } from '../../services/contentScrollRegion';
 import { useApplicationSocialFlow } from '../../hooks/useApplicationSocialFlow';
 import { usePrivateSocialIntentFlow } from '../../hooks/usePrivateSocialIntentFlow';
+import { useChatStore } from '../../stores/useChatStore';
+import { useCharacterStore } from '../../stores/useCharacterStore';
+import { useSettingsStore } from '../../stores/useSettingsStore';
+import { getLocalDataUserId } from '../../services/authStorageScope';
 
 const routeMeta = [
   { match: (pathname: string) => pathname === '/', titleKey: 'nav.home' },
@@ -62,6 +66,30 @@ const SIDEBAR_COLLAPSED_WIDTH = 72;
 export default function AppLayout() {
   useApplicationSocialFlow();
   usePrivateSocialIntentFlow();
+  const artifactChats = useChatStore((state) => state.chats);
+  const artifactCharacters = useCharacterStore((state) => state.characters);
+  const artifactProfiles = useSettingsStore((state) => state.aiProfiles);
+  const [artifactCalendarDay, setArtifactCalendarDay] = React.useState(() => new Date().toDateString());
+  React.useEffect(() => {
+    const checkDay = () => setArtifactCalendarDay(new Date().toDateString());
+    const timer = setInterval(checkDay, 60_000);
+    document.addEventListener('visibilitychange', checkDay);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', checkDay);
+    };
+  }, []);
+  React.useEffect(() => {
+    const accountId = getLocalDataUserId();
+    const timer = setTimeout(() => {
+      void import('../../stores/useCharacterArtifactStore').then(async ({ ensureCharacterArtifactStoreHydrated, useCharacterArtifactStore }) => {
+        await ensureCharacterArtifactStoreHydrated();
+        if (getLocalDataUserId() !== accountId) return;
+        useCharacterArtifactStore.getState().syncCharacters(useCharacterStore.getState().characters);
+      }).catch((error) => console.error('[character-artifact] scheduling failed', error));
+    }, 6000);
+    return () => clearTimeout(timer);
+  }, [artifactChats, artifactCharacters, artifactProfiles, artifactCalendarDay]);
   const { t } = useTranslation();
   const location = useLocation();
   const { isMobile, isTablet, isDesktop } = useResponsive();

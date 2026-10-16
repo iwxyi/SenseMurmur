@@ -1,6 +1,5 @@
 import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
-import type { Message } from '../types/message';
 import type { DirectorIntent } from './directorIntent';
 import { getRelationshipWeight } from './relationshipEngine';
 

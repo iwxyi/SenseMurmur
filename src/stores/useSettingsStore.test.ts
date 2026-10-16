@@ -35,7 +35,9 @@ vi.mock('../services/api', async () => {
 describe('useSettingsStore', () => {
   beforeEach(() => {
     vi.resetModules();
-    vi.stubGlobal('localStorage', createStorageMock());
+    const storage = createStorageMock();
+    vi.stubGlobal('localStorage', storage);
+    vi.stubGlobal('window', { localStorage: storage, addEventListener: vi.fn(), removeEventListener: vi.fn() });
     localStorage.setItem(storageKey('token'), 'token');
     localStorage.setItem(storageKey('auth-mode'), 'cloud');
     apiMocks.getSyncChanges.mockReset();
@@ -73,5 +75,33 @@ describe('useSettingsStore', () => {
       since: null,
     });
     expect(apiMocks.getSettings).not.toHaveBeenCalled();
+  });
+
+  it('persists custom and disabled reply preferences without restoring the default on rehydration', async () => {
+    const { useSettingsStore, buildSettingsPayload } = await import('./useSettingsStore');
+    const storageName = useSettingsStore.persist.getOptions().name!;
+    for (const mode of ['custom', 'off'] as const) {
+      useSettingsStore.getState().setChatReplyPreferences({ mode, text: '' });
+      const persisted = useSettingsStore.persist.getOptions().storage?.getItem(storageName);
+      useSettingsStore.setState({ chatReplyPreferences: { mode: 'default', text: '' } });
+      const stored = await persisted;
+      expect(stored?.state.chatReplyPreferences).toEqual({ mode, text: '' });
+      if (stored) await useSettingsStore.persist.getOptions().storage?.setItem(storageName, stored);
+      await useSettingsStore.persist.rehydrate();
+      expect(useSettingsStore.getState().chatReplyPreferences).toEqual({ mode, text: '' });
+      const payload = buildSettingsPayload(useSettingsStore.getState());
+      expect(payload.chatReplyPreferences).toEqual({ mode, text: '' });
+    }
+  });
+
+  it('loads chat preferences from the cloud', async () => {
+    apiMocks.getSyncChanges.mockResolvedValueOnce({ status: 'modified', changes: [] });
+    apiMocks.getSettings.mockResolvedValueOnce({
+      chatReplyPreferences: { mode: 'custom', text: '语气克制，保留细节。' },
+    });
+    const { useSettingsStore } = await import('./useSettingsStore');
+    useSettingsStore.setState({ _loaded: false, settingsDirty: false });
+    await useSettingsStore.getState().loadSettings();
+    expect(useSettingsStore.getState().chatReplyPreferences).toEqual({ mode: 'custom', text: '语气克制，保留细节。' });
   });
 });

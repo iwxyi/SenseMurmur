@@ -16,6 +16,7 @@ export interface CalendarDayRenderMeta {
   inMonth?: boolean;
   hasDot?: boolean;
   eventCount?: number;
+  countLabel?: string;
   dotColors?: string[];
   warning?: boolean;
   titles?: string[];
@@ -457,7 +458,12 @@ export default function BaseCalendar({
                     {`+${hiddenTitleCount}`}
                   </Typography>
                 ) : null}
-                {!visibleTitles.length && eventCount > 0 ? (
+                {meta.countLabel ? (
+                  <Typography sx={{ fontSize: 12, lineHeight: 1.2, color: dotColors[0], fontWeight: 400, fontVariantNumeric: 'tabular-nums', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {meta.countLabel}
+                  </Typography>
+                ) : null}
+                {!meta.countLabel && !visibleTitles.length && eventCount > 0 ? (
                   <Box
                     aria-hidden
                     sx={{

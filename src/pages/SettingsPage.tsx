@@ -65,6 +65,8 @@ import { getWebDirectoryPickerSupport } from '../services/localWorkspaceService'
 import { AIModelsPanel } from './AIModelsPage';
 import { SETTINGS_TAB_KEYS, buildSettingsPath, getSettingsTabForCard, resolveSettingsTab, type SettingsTabKey } from '../routes/settingsRoute';
 import { clearAllCachedSpeechPlayback } from '../services/speechPlaybackCache';
+import ChatReplyPreferencesSection from '../components/settings/ChatReplyPreferencesSection';
+import { normalizeChatReplyPreferences } from '../types/chatReplyPreferences';
 
 function buildPageSx(activeTab: SettingsTabKey) {
   return {
@@ -516,7 +518,7 @@ function collectNodeStats(data: BackupFileShape): BackupNodeStats {
   stats['settings.aiProfiles'] = Array.isArray(settings?.aiProfiles) ? settings.aiProfiles.length : 0;
   stats['settings.aiProfiles.credentials'] = Array.isArray(settings?.aiProfiles) ? settings.aiProfiles.filter((profile) => profile.apiKey).length : 0;
   stats['settings.appearance'] = settings && ('theme' in settings || 'themePreset' in settings || 'themeColor' in settings || 'language' in settings || 'customBubbleStyles' in settings || 'userBubbleStyleId' in settings || 'userBubbleStyle' in settings || 'artifactAppearance' in settings) ? 1 : 0;
-  stats['settings.generation'] = settings && ('avatarGeneration' in settings || 'aiGeneration' in settings || 'companionship' in settings || 'chatMemory' in settings) ? 1 : 0;
+  stats['settings.generation'] = settings && ('avatarGeneration' in settings || 'aiGeneration' in settings || 'companionship' in settings || 'chatMemory' in settings || 'chatReplyPreferences' in settings) ? 1 : 0;
   stats['settings.chatDraftDefaults'] = settings && ('defaultSpeed' in settings || 'chatDraftDefaults' in settings) ? 1 : 0;
   stats['settings.developer'] = settings && ('developerMode' in settings || 'developerUI' in settings || 'memoryUI' in settings) ? 1 : 0;
   stats['settings.usageStats'] = settings && 'usageStats' in settings ? 1 : 0;
@@ -858,6 +860,7 @@ function buildBackupPayload(selection: BackupSelection, source: {
       settingsPayload.aiGeneration = source.settings.aiGeneration;
       settingsPayload.companionship = source.settings.companionship;
       settingsPayload.chatMemory = source.settings.chatMemory;
+      settingsPayload.chatReplyPreferences = source.settings.chatReplyPreferences;
     }
     if (selection['settings.chatDraftDefaults']) {
       settingsPayload.defaultSpeed = source.settings.defaultSpeed;
@@ -1132,7 +1135,7 @@ function buildRestoreAvailabilityFromData(data: BackupFileShape): BackupSelectio
     'settings.aiProfiles': hasCount('settings.aiProfiles') || (Array.isArray(data.settings?.aiProfiles) && data.settings.aiProfiles.length > 0),
     'settings.aiProfiles.credentials': hasCount('settings.aiProfiles.credentials') || Boolean(data.settings?.aiProfiles?.some((profile) => profile.apiKey)),
     'settings.appearance': hasCount('settings.appearance') || Boolean(data.settings && ('theme' in data.settings || 'themePreset' in data.settings || 'themeColor' in data.settings || 'language' in data.settings || 'customBubbleStyles' in data.settings || 'userBubbleStyleId' in data.settings || 'userBubbleStyle' in data.settings || 'artifactAppearance' in data.settings)),
-    'settings.generation': hasCount('settings.generation') || Boolean(data.settings && ('avatarGeneration' in data.settings || 'aiGeneration' in data.settings || 'companionship' in data.settings)),
+    'settings.generation': hasCount('settings.generation') || Boolean(data.settings && ('avatarGeneration' in data.settings || 'aiGeneration' in data.settings || 'companionship' in data.settings || 'chatMemory' in data.settings || 'chatReplyPreferences' in data.settings)),
     'settings.chatDraftDefaults': hasCount('settings.chatDraftDefaults') || Boolean(data.settings && ('defaultSpeed' in data.settings || 'chatDraftDefaults' in data.settings)),
     'settings.developer': hasCount('settings.developer') || Boolean(data.settings && ('developerMode' in data.settings || 'developerUI' in data.settings || 'memoryUI' in data.settings)),
     'settings.usageStats': hasCount('settings.usageStats') || Boolean(data.settings && 'usageStats' in data.settings),
@@ -1270,6 +1273,7 @@ function filterSettingsForRestore(data: NonNullable<BackupFileShape['settings']>
     if (data.aiGeneration !== undefined) nextSettings.aiGeneration = data.aiGeneration;
     if (data.companionship !== undefined) nextSettings.companionship = data.companionship;
     if (data.chatMemory !== undefined) nextSettings.chatMemory = data.chatMemory;
+    if (data.chatReplyPreferences !== undefined) nextSettings.chatReplyPreferences = normalizeChatReplyPreferences(data.chatReplyPreferences);
   }
   if (selection['settings.chatDraftDefaults']) {
     if (data.defaultSpeed !== undefined) nextSettings.defaultSpeed = data.defaultSpeed;
@@ -1342,7 +1346,7 @@ const BACKUP_TREE: BackupTreeNode[] = [
         ],
       },
       { key: 'settings.appearance', labelZh: '外观与界面', labelEn: 'Appearance & UI', descriptionZh: '主题、颜色、语言、用户气泡、信纸样式、自定义气泡', descriptionEn: 'Theme, color, language, user bubble, letter background, custom bubbles' },
-      { key: 'settings.generation', labelZh: '生成、陪伴与记忆', labelEn: 'Generation, companionship & memory', descriptionZh: '头像生成、朋友圈、日记、主动陪伴、聊天记忆等', descriptionEn: 'Avatar generation, moments, diaries, proactive companionship, chat memory' },
+      { key: 'settings.generation', labelZh: '生成、聊天偏好、陪伴与记忆', labelEn: 'Generation, chat preferences, companionship & memory', descriptionZh: '头像生成、聊天偏好、朋友圈、日记、主动陪伴、聊天记忆等', descriptionEn: 'Avatar generation, chat preferences, moments, diaries, proactive companionship, chat memory' },
       { key: 'settings.chatDraftDefaults', labelZh: '聊天默认行为', labelEn: 'Chat defaults', descriptionZh: '默认聊天草稿与群聊变化强度', descriptionEn: 'Default chat draft behavior and evolution intensity' },
       { key: 'settings.developer', labelZh: '开发者与调试', labelEn: 'Developer & debug', descriptionZh: '开发者模式、调试面板、记忆调试开关', descriptionEn: 'Developer mode, debug panels, memory debug toggles' },
       { key: 'settings.usageStats', labelZh: '使用统计', labelEn: 'Usage stats', descriptionZh: '本地使用统计与计数', descriptionEn: 'Local usage stats and counters' },
@@ -2476,6 +2480,9 @@ export default function SettingsPage() {
                 label={i18n.language.startsWith('zh') ? '默认显示语音文字' : 'Show voice transcript by default'}
               />
             </Box>
+          </Box>
+          <Box id="settings-card-chat-reply-preferences" sx={{ mt: 1.5, scrollMarginTop: { xs: 128, sm: 96 } }}>
+            <ChatReplyPreferencesSection />
           </Box>
         </SurfaceCard>
 

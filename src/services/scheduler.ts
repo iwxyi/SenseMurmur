@@ -253,12 +253,12 @@ export function resolvePendingReplyContext(characters: AICharacter[], recentMess
   const recentAiMessages = recentMessages.filter((message) => message.type === 'ai' && !message.isDeleted);
   if (!recentAiMessages.length) return null;
 
-  // Reply debt belongs to the addressed turn, not to whichever message happens
-  // to be last. Scan backwards so an interruption does not erase an earlier
-  // direct address; speaking once after the address settles that actor's debt.
+  // Scan backwards so an interruption does not erase an earlier request;
+  // speaking once after the request settles that actor's debt.
   const recentWindow = recentAiMessages.slice(-12);
   const pending: Array<{
     sourceMessage: Message;
+    countFromMessageId: string;
     targetIds: string[];
     explicitTargetIds: string[];
     replyWorthyTargetIds: string[];
@@ -285,19 +285,25 @@ export function resolvePendingReplyContext(characters: AICharacter[], recentMess
     ));
     if (!unresolvedTargets.length) continue;
     const segment = candidate.metadata?.turnSegment;
-    const turnEnd = segment && segment.count > 1
-      ? recentWindow.slice(sourceIndex, sourceIndex + segment.count)
-        .find((message) => message.senderId === candidate.senderId
-          && message.metadata?.turnSegment?.count === segment.count
-          && message.metadata.turnSegment.index === segment.count - 1)
-      : null;
-    const sourceMessage = turnEnd || candidate;
+    let turnTail = candidate;
+    if (segment && segment.count > 1) {
+      for (const next of recentWindow.slice(sourceIndex + 1)) {
+        const nextSegment = next.metadata?.turnSegment;
+        if (next.senderId !== candidate.senderId || nextSegment?.count !== segment.count
+          || nextSegment.index !== (turnTail.metadata?.turnSegment?.index ?? -1) + 1) break;
+        turnTail = next;
+      }
+    }
+    // New reply debt belongs to the exact send. Legacy turn-level routing
+    // still points at the final bubble for compatibility with older history.
+    const sourceMessage = hasReplyDebtDecision ? candidate : turnTail;
     pending.push({
       sourceMessage,
+      countFromMessageId: turnTail.id,
       targetIds: unresolvedTargets,
       explicitTargetIds: explicit.filter((targetId) => unresolvedTargets.includes(targetId)),
       replyWorthyTargetIds: replyWorthyTargetIds.filter((targetId) => unresolvedTargets.includes(targetId)),
-      unmetTurns: countUnmetTurns(recentAiMessages, unresolvedTargets[0], sourceMessage.id),
+      unmetTurns: countUnmetTurns(recentAiMessages, unresolvedTargets[0], turnTail.id),
     });
   }
   // A newer exchange may take one turn, but cannot indefinitely displace an
@@ -305,7 +311,7 @@ export function resolvePendingReplyContext(characters: AICharacter[], recentMess
   const selected = pending.filter((item) => item.explicitTargetIds.length && item.unmetTurns >= 2).at(-1)
     || pending[0];
   if (!selected) return null;
-  const { sourceMessage, targetIds, explicitTargetIds, replyWorthyTargetIds } = selected;
+  const { sourceMessage, countFromMessageId, targetIds, explicitTargetIds, replyWorthyTargetIds } = selected;
 
   const primaryTargetId = explicitTargetIds.find((targetId) => targetIds.includes(targetId)) || targetIds[0] || null;
   if (!primaryTargetId) return null;
@@ -321,7 +327,7 @@ export function resolvePendingReplyContext(characters: AICharacter[], recentMess
     })
     .length;
 
-  const unmetTurns = countUnmetTurns(recentAiMessages, primaryTargetId, sourceMessage.id);
+  const unmetTurns = countUnmetTurns(recentAiMessages, primaryTargetId, countFromMessageId);
 
   return {
     targetIds,
@@ -563,11 +569,9 @@ export function calculateWeights(
           weight += relationDramaBoost;
           relationshipPressure += relationDramaBoost;
         }
-        const addressedMessage = lastAiMessage as Message & { addressedTargetIds?: string[] | null; primaryAddressedTargetId?: string | null };
         const explicitTargets = [
-          addressedMessage.primaryAddressedTargetId,
-          ...(addressedMessage.addressedTargetIds || []),
-          ...getReplyWorthyInteractionTargetIds(lastAiMessage, characters),
+          ...getExplicitReplyTargetIds(lastAiMessage),
+          ...('replyDebtTargetIds' in lastAiMessage ? [] : getReplyWorthyInteractionTargetIds(lastAiMessage, characters)),
         ].filter((targetId, index, array): targetId is string => Boolean(targetId) && array.indexOf(targetId) === index);
         const directCue = explicitTargets.includes(char.id);
         if (directCue) {

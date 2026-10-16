@@ -96,11 +96,14 @@ export interface InlineDeliberationArtifacts {
 }
 
 export interface InlineInteractionEnvelope {
+  delivery?: 'send' | 'no_send';
   conversationUpdate?: ConversationUpdate | null;
   content: string;
   messages?: Array<{
     content: string;
     mediaDecision?: MediaGenerationDecision | null;
+    addressedTargets?: AddressedTargetHintEnvelope | null;
+    replyDebtTargets?: ReplyDebtTargetHintEnvelope | null;
   }> | null;
   narrativeText?: string | null;
   storyEvents?: InlineStoryEvent[] | null;
@@ -282,11 +285,14 @@ function sanitizeEnvelope(envelope: InlineInteractionEnvelope): InlineInteractio
       .map((part) => ({
         content: part.content.trim(),
         mediaDecision: part.mediaDecision && typeof part.mediaDecision === 'object' ? part.mediaDecision : null,
+        ...(Object.hasOwn(part, 'addressedTargets') ? { addressedTargets: part.addressedTargets } : {}),
+        ...(Object.hasOwn(part, 'replyDebtTargets') ? { replyDebtTargets: part.replyDebtTargets } : {}),
       }))
     : null;
   // The room policy is a soft norm for the model. This is only a defensive
   // transport cap for malformed/runaway output; overflow text remains visible.
   const messages = cleanMessages && cleanMessages.length > 8
+    && !cleanMessages.some((part) => Object.hasOwn(part, 'addressedTargets') || Object.hasOwn(part, 'replyDebtTargets'))
     && !cleanMessages.slice(8).some((part) => part.mediaDecision)
     ? [
         ...cleanMessages.slice(0, 7),
@@ -344,10 +350,15 @@ export function hasInvalidStateEvidence(envelope: InlineInteractionEnvelope) {
 export function hasInvalidConversationMemberReferences(
   envelope: InlineInteractionEnvelope,
   memberIds: Iterable<string>,
+  speakerId?: string,
 ) {
+  const members = new Set(memberIds);
+  if (envelope.messages?.some((part) => [part.addressedTargets, part.replyDebtTargets].some((routing) => (
+    routing?.targetIds?.some((id) => !members.has(id) || id === speakerId)
+    || (routing?.primaryTargetId && (!members.has(routing.primaryTargetId) || routing.primaryTargetId === speakerId))
+  )))) return true;
   const update = envelope.conversationUpdate;
   if (!update) return false;
-  const members = new Set(memberIds);
   members.add('user');
   const valid = (id: string) => members.has(id);
   if (update.items.some((item) => item.participantIds.some((id) => !valid(id)))) return true;
@@ -405,7 +416,7 @@ function buildRecentTranscriptScope(messages: Message[]) {
   const latest = recent.at(-1);
   const speakers = Array.from(new Set(recent.map((message) => getPromptSpeakerLabel(message)))).slice(-6);
   return [
-    '- The complete recent transcript is supplied as separate chat messages. Only the current speaker\'s own prior visible turns are assistant messages. This contract intentionally does not repeat raw dialogue.',
+    '- The recent transcript is supplied separately with speaker labels. Recorded sends are context, not output examples.',
     `- Recent window for judging interaction fields: ${recent.length} turns (${humanCount} human / ${aiCount} AI).`,
     `- Latest turn: ${latest ? `${getPromptTurnTypeLabel(latest)} from ${getPromptSpeakerLabel(latest)}` : 'none'}.`,
     `- Speakers in window: ${speakers.join(', ') || 'none'}.`,
@@ -453,6 +464,7 @@ export function buildInlineInteractionContract(params: {
   mediaRequested?: boolean;
   webSearchEnabled?: boolean;
   webSearchResultInjected?: boolean;
+  allowNoSend?: boolean;
 }) {
   const isStoryReader = params.chat.sessionKind?.scenarioId === 'story-reader';
   const storyBeatPlan = isStoryReader ? resolveStoryBeatPlan(params.chat) : null;
@@ -496,7 +508,7 @@ export function buildInlineInteractionContract(params: {
     : '';
 
   const deliveryPolicyRules = richDelivery
-    ? `\nDelivery policy for this room: later text sends=${richDelivery.multiBubble.proactivity}; organization=${richDelivery.multiBubble.organization || 'balanced'}; image=${richDelivery.image.proactivity}; audio=${richDelivery.audio.proactivity}; sticker=${richDelivery.sticker.proactivity}. These are willingness priors, not a quota or target. “off” means do not initiate that form, but honor explicit requests when available; other levels adjust willingness only. Keep media relevant.`
+    ? `\nDelivery policy for this room: ${isOrdinaryConversation && params.chat.type === 'group' ? '' : `later text sends=${richDelivery.multiBubble.proactivity}; organization=${richDelivery.multiBubble.organization || 'balanced'}; `}image=${richDelivery.image.proactivity}; audio=${richDelivery.audio.proactivity}; sticker=${richDelivery.sticker.proactivity}. These are willingness priors, not a quota or target. “off” means do not initiate that form, but honor explicit requests when available; other levels adjust willingness only. Keep media relevant.`
     : '';
   const mediaRules = (shouldIncludeMediaDecision
     ? `\n\nRules for mediaDecision:\n1. Media is optional. Follow this room's delivery policy before deciding; never pretend media was sent when no task is queued.\n${mediaCapabilities.image ? `2. Use images for requested or genuinely useful visual content. Infer the user's actual image goal from the latest message plus recent conversation. images is an array of 1-9 distinct image tasks; use one entry per image, never repeat the same prompt. Each image prompt must be final model-ready text and altText must be concise and specific.\n3. imageReferenceRegistry below lists recent chat images. Use IDs only when the request clearly identifies a reference; never output URLs, base64, or markdown image links.\nImage reference registry:\n${JSON.stringify(imageReferenceRegistry)}\n` : ''}${mediaCapabilities.audio ? '4. Use audio when the user asks for a voice reply or when the delivery policy permits it and speaking is a natural expression of the character\'s current emotion and relationship context. audio.text is the exact spoken content and must not add facts beyond the visible reply. When audio is selected, keep visible text concise and semantically aligned with the spoken content; do not send a long essay followed by a short unrelated audio clip.\n' : ''}5. Text, audio, and images may be combined in one turn. Each messages[] item has content and its own optional mediaDecision. A voice item must be a standalone bubble; text and images may be combined or sent separately when there are distinct communicative acts.`
@@ -514,7 +526,9 @@ export function buildInlineInteractionContract(params: {
       : 'Let the exchange decide whether this is a brief reaction, a developed answer, or several conversational beats.';
   const sendBoundaryRule = params.turnPlan?.allowExtraMessages === false
     ? '\nSend boundaries: this turn uses one bubble; paragraphs may organize related thoughts within it.'
-    : `\nSend boundaries: ${organizationRule} Use messages[] for the sends this person would actually make; their boundaries may be semantic, expressive, or temporal. A shift from speaking to one person to speaking to another can be a separate send; connected reasoning can stay in one send. Neither one send nor several is the default target. The room's soft ceiling is ${turnPlanMaxBubbles}, not a target or hard limit. Honor explicit multi-message requests and preserve meaningful sends rather than splitting mechanically.`;
+    : isOrdinaryConversation && params.chat.type === 'group'
+      ? '\nSend boundaries: messages[] contains this person\'s actual sends. One thought may be enough, or more may follow. Earlier sends and their topics are room context, not a checklist or a pattern for how many sends to make now.'
+      : `\nSend boundaries: ${organizationRule} Use messages[] for the sends this person would actually make; their boundaries may be semantic, expressive, or temporal. A shift from speaking to one person to speaking to another can be a separate send; connected reasoning can stay in one send. Neither one send nor several is the default target. The room's soft ceiling is ${turnPlanMaxBubbles}, not a target or hard limit. Honor explicit multi-message requests and preserve meaningful sends rather than splitting mechanically.`;
   const aiDirectInteractionRules = params.chat.type === 'ai_direct'
     ? '\n8. In AI direct chats, target the other participant when the turn clearly supports, challenges, probes, defends, mocks, or dismisses them; do not target the speaker or the user unless the user is an actual participant.'
     : '';
@@ -628,7 +642,7 @@ Known public continuity (keys are only for writeback):\n${continuityContext || '
   const interactionRule = isOrdinaryConversation
     ? `${compactInteractionRule}${aiDirectInteractionRules}`
     : `Before writing, appraise the latest visible human turn's immediate effect on the current speaker. If that latest turn is from the user or director and it clearly warms, needles, embarrasses, pressures, reassures, alarms, or excites this speaker, emit incomingImpact as {"kind":"${interactionKinds}","tone":"warm|annoyed|defensive|excited|sarcastic|cold","intensity":3,"confidence":0.86,"evidenceText":"exact short quote from the human turn","reason":"why that quote has this effect","immediateImpact":{"targetEmotionDelta":{"irritation":8,"insecurity":4}}}; otherwise incomingImpact is null. The incoming targetEmotionDelta is the immediate effect on the current speaker, not a relationship change. Write the visible reply from this person's reaction first, then classify only the effect actually visible in it. Never insert an agreement, concession, apology, or named preface just to make an interaction kind or evidenceText easy to report. interactionHints is the outgoing fast-affect channel: emit it whenever the speaker's own words clearly land on a particular member by warming them, needling them, embarrassing them, putting them on the spot, defending them, dismissing them, apologizing or conceding to them, taking responsibility toward them, including or excluding them, setting a boundary, making them wary, or making them excited. Do not omit a hint merely because the exchange is ordinary or because the slow relationship does not change. Use null only when no member-specific emotional effect is visible. When used, targetId must be a member id: {"primary":{"targetId":"member-id","kind":"${interactionKinds}","tone":"warm|annoyed|defensive|excited|sarcastic|cold","intensity":3,"confidence":0.86,"evidenceText":"exact short quote from this reply","reason":"why the quote has this effect","immediateImpact":{"speakerEmotionDelta":{"irritation":-8},"targetEmotionDelta":{"insecurity":12},"roomDelta":{"heat":5,"cohesion":-2,"topicDrift":0}},"relationship":null},"secondary":[]}. immediateImpact is your semantic judgement of this visible line, not a local keyword score: use signed integer deltas, emotion axes within -40..40 and room axes within -20..20. Positive raises an axis and negative releases it. Put the whole-turn speaker release and room effect on primary only; secondary hints contain only their own targetEmotionDelta so effects are not duplicated. Omit zero axes. evidenceText is required, must be a short exact substring of the visible source turn, and must support the chosen kind, tone, and impact by itself; never use the whole reply as evidence. Classify what the quoted words actually do, not their hoped-for outcome: admitting fault is apologize or take_responsibility, yielding a point is concede, and naming who was left out is exclude rather than support. intensity is the immediate spike (1-5), not a permanent score: one sharp line may be 4-5, a small sting or warmth 1-2. The interaction event may exist without any lasting relationship change. Include relationship only when this turn itself gives evidence for a slow relationship update: {"delta":{"warmth":0,"competence":0,"trust":0,"threat":0,"attachment":0,"deference":0},"labels":["meaning"],"stance":"stance"}. attachment and deference are especially slow axes: omit them or keep them within -2..2 unless this turn contains a real turning point. Omit uncertain hints.${aiDirectInteractionRules}`;
-  const addressedTargetRule = `addressedTargets records the current visible addressee, even when this is simply a reply and does not require another turn. Emit {"targetIds":["member-id"],"primaryTargetId":"member-id","confidence":0.9,"reason":"why this turn is directed to this member"} when the speaker is replying to, speaking to, or emotionally directing a line at a member. A member merely mentioned or affected is not addressed. replyDebtTargets is a separate field: emit {"targetIds":["member-id"],"primaryTargetId":"member-id","confidence":0.9,"reason":"why this member is expected to answer next"} only when the visible reply directly asks, calls on, challenges, or hands the floor to that member. Use null for replyDebtTargets when no next answer is expected. Both fields must use valid member ids below.`;
+  const addressedTargetRule = `Each messages[] item has its own addressedTargets and replyDebtTargets; use null when absent. addressedTargets records who this send is actually directed to, even without expecting an answer: {"targetIds":["member-id"],"primaryTargetId":"member-id","confidence":0.9,"reason":"why this send is directed to this member"}. Merely mentioning or affecting someone is not addressing them. replyDebtTargets uses the same shape only when this send actually expects that member to answer next; agreement, a brief reaction, or a goodbye alone need not create a debt. Use valid member ids below, never the speaker. Personal expression may have both fields null. Top-level routing is legacy only: leave it null when providing item routing; it cannot supply targets for another send.`;
   const ownActivityContext = projectWorldCalendar([params.chat], params.characters, { inferTemporalStatus: false, publicOnly: true }).items
     .filter((item) => !item.derivedFromItemId && item.participantIds.includes(params.speaker.id))
     .slice(0, 8)
@@ -650,7 +664,9 @@ ${pendingSocialIntents ? `Your pending social intentions (optional attention, ne
   const activityRule = `activityUpdate records an actual calendar arrangement, including solo activities: {"title":"actual activity","kind":"activity|travel|rest|preparation|blocked_time|reminder","status":"planned|in_progress|completed|cancelled","participantIds":["member-id"],"startsNow":true,"startAt":null,"durationMinutes":60,"timeHint":"time as spoken","locationHint":"place as spoken","availability":"away|online","calendarItemId":null,"evidenceText":"short exact quote from one visible send"}. Use null when nothing changes. Describe only what this turn actually establishes. Other participants are invited, never forced offline. availability changes ONLY this speaker and is optional: doing an activity may still allow chatting. Use away when actually leaving now; a goodbye may still address someone, but with no expected immediate reply it has replyDebtTargets=null. Do not keep saying goodbye to someone who has left. startsNow is true only for actually starting now; future plans are planned and never set current availability. startAt is Unix milliseconds only when an exact real-world time is known, otherwise omit it and keep timeHint; never convert a fictional historical date to today's date. Duration is minutes, 3..43200, default away duration 30 when unknown. A three-day report interval is not a three-day absence: set 4320 only if the absence itself lasts three days. For returning or cancelling use the known calendarItemId, completed/cancelled; presenceUpdate online also ends the linked absence. Current speaker activity key: ${params.speaker.presence?.calendarItemId || '(none)'}. Do not expose these internal fields in dialogue.`;
   return `${mediaCapabilityInstruction}\n## Output Contract
 Return exactly one JSON object. It must be parseable. messages is the ordered list of this speaker's visible sends, including a single send; use null for absent fields and never expose protocol text.
-{"messages":[{"content":"visible send"${mediaExample}}],"intentionalRepeat":false${deliberationExample}${studyUpdateExample},"presenceUpdate":null,"activityUpdate":null,"conflictFocus":null,"incomingImpact":null,"interactionHints":null,"addressedTargets":null,"replyDebtTargets":null,"socialEventHints":null${continuityEnabled ? ',"conversationUpdate":null' : ''}${toolRequestExample}}
+{"delivery":"send","messages":[{"content":"visible send","addressedTargets":null,"replyDebtTargets":null${mediaExample}}],"intentionalRepeat":false${deliberationExample}${studyUpdateExample},"presenceUpdate":null,"activityUpdate":null,"conflictFocus":null,"incomingImpact":null,"interactionHints":null,"socialEventHints":null${continuityEnabled ? ',"conversationUpdate":null' : ''}${toolRequestExample}}
+
+${params.allowNoSend ? 'This is an autonomous opportunity to speak, not an obligation. If you have nothing you want to express now, return exactly {"delivery":"no_send","messages":[]}. This sends nothing and changes no state; it does not mean leaving or ending the room. Otherwise use delivery="send" and the contract below.' : 'This turn requires a delivered reply. Use delivery="send"; delivery="no_send" is not available.'}
 
 Each messages[] item has non-empty content and optional mediaDecision. No duplicate top-level content or extraMessages is needed. Audio must be the only media in its item. Write only this speaker. Unless a formal deliverable is requested, this is chat even when the topic is serious: punctuation follows the voice and moment, not a mandatory full stop on every bubble.${sendBoundaryRule}${deliveryPolicyRules}
 
@@ -700,7 +716,7 @@ function activityUpdateInputFailure(update: InlineInteractionEnvelope['activityU
 }
 
 export interface InlineEnvelopeParseFailure {
-  stage: 'json_extraction' | 'json_parse' | 'visible_content' | 'activity_update' | 'conversation_update' | 'normalization';
+  stage: 'json_extraction' | 'json_parse' | 'delivery' | 'message_routing' | 'visible_content' | 'activity_update' | 'conversation_update' | 'normalization';
   message: string;
   field?: string;
   receivedKeys?: string[];
@@ -710,6 +726,7 @@ export function parseInlineInteractionEnvelope(raw: string, options: {
   allowContentSalvage?: boolean;
   requireConversationUpdate?: boolean;
   validateActivityUpdate?: boolean;
+  allowNoSend?: boolean;
   onFailure?: (failure: InlineEnvelopeParseFailure) => void;
 } = {}): InlineInteractionEnvelope | null {
   let stage: InlineEnvelopeParseFailure['stage'] = 'json_extraction';
@@ -725,7 +742,43 @@ export function parseInlineInteractionEnvelope(raw: string, options: {
       : 'The model returned empty or whitespace-only text.' });
     stage = 'json_parse';
     const parsed = JSON.parse(jsonMatch[0]) as InlineInteractionEnvelope;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return reject({ stage, message: 'Expected a JSON object.' });
     receivedKeys = Object.keys(parsed);
+    stage = 'delivery';
+    if (Object.hasOwn(parsed, 'delivery') && parsed.delivery !== 'send' && parsed.delivery !== 'no_send') {
+      return reject({ stage, field: 'delivery', message: 'Expected delivery=send|no_send, or a legacy reply with delivery omitted.' });
+    }
+    if (parsed.delivery === 'no_send') {
+      if (!options.allowNoSend) return reject({ stage, field: 'delivery', message: 'This generation requires a delivered reply; no_send is not permitted.' });
+      if (!Array.isArray(parsed.messages) || parsed.messages.length) return reject({ stage, field: 'messages', message: 'no_send requires messages=[].' });
+      const unexpectedField = receivedKeys.find((key) => key !== 'delivery' && key !== 'messages'
+        && parsed[key as keyof InlineInteractionEnvelope] != null
+        && !(key === 'intentionalRepeat' && parsed.intentionalRepeat === false));
+      if (unexpectedField) return reject({ stage, field: unexpectedField, message: 'no_send cannot include content, routing, tools or state updates. Omit this field or use null.' });
+      return { delivery: 'no_send', messages: [], content: '' };
+    }
+    stage = 'message_routing';
+    if (Array.isArray(parsed.messages)) {
+      for (const [index, part] of parsed.messages.entries()) {
+        if (!part || typeof part !== 'object') continue;
+        for (const field of ['addressedTargets', 'replyDebtTargets'] as const) {
+          if (!Object.hasOwn(part, field)) continue;
+          if (typeof part.content !== 'string' || !part.content.trim()) return reject({ stage,
+            field: `messages[${index}].content`, message: 'A routed send requires non-empty visible content.' });
+          if (part[field] === null) continue;
+          const routing = part[field];
+          const path = `messages[${index}].${field}`;
+          if (!routing || typeof routing !== 'object' || Array.isArray(routing)
+            || !Array.isArray(routing.targetIds)
+            || routing.targetIds.some((id) => typeof id !== 'string' || !id.trim())) return reject({
+            stage, field: path, message: 'Expected null or a routing object with targetIds containing non-empty member id strings.',
+          });
+          if (routing.primaryTargetId != null && (typeof routing.primaryTargetId !== 'string' || !routing.targetIds.includes(routing.primaryTargetId))) return reject({
+            stage, field: `${path}.primaryTargetId`, message: 'primaryTargetId must be null or a member of targetIds.',
+          });
+        }
+      }
+    }
     stage = 'visible_content';
     if (!parsed || !hasVisibleEnvelopeContent(parsed)) return reject({ stage,
       message: 'No non-empty visible content found in messages[].content or supported legacy/story fields.', field: 'messages' });

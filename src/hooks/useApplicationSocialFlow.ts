@@ -12,6 +12,21 @@ import { reportRecoverableError } from '../services/diagnostics';
 import { runDailyMomentFlow } from '../services/dailyMomentRuntime';
 import { getLocalDataUserId } from '../services/authStorageScope';
 import type { GroupChat } from '../types/chat';
+import { getUsablePreferredAIProfile } from '../types/settings';
+
+export function getDailyMomentImageErrorMessage(error: unknown) {
+  const diagnostic = error && typeof error === 'object' && 'diagnostic' in error
+    ? error.diagnostic as { status?: number; code?: string } | undefined : undefined;
+  const code = diagnostic?.code?.toLowerCase() || '';
+  if (diagnostic?.status === 429) return '朋友圈配图服务请求受限，本次发布文字动态。';
+  if (diagnostic?.status === 402 || /quota|insufficient|balance|points/.test(code)) {
+    return '朋友圈配图额度不足，本次发布文字动态。';
+  }
+  if (diagnostic?.status === 401 || diagnostic?.status === 403) {
+    return '朋友圈配图服务无权访问，本次发布文字动态。';
+  }
+  return '朋友圈配图生成失败，本次发布文字动态。';
+}
 
 export function createApplicationSocialScheduler() {
   const schedulers = new Map<string, ReturnType<typeof createChatAutoSocialScheduler>>();
@@ -73,17 +88,23 @@ export function useApplicationSocialFlow() {
       const loaded = await useChatStore.getState().loadChat(chat.id);
       if (!loaded || loaded.deletedAt != null || !isCurrentSource()) return;
       let dailyFailure: { error: unknown } | undefined;
+      let nextCheckAt: number | undefined;
       try {
-        await runDailyMomentFlow(chat.id, {
+        const dailyResult = await runDailyMomentFlow(chat.id, {
           isCurrentSource,
           getChats: () => useChatStore.getState().chats,
           getCharacters: () => useCharacterStore.getState().characters,
           getProfiles: () => useSettingsStore.getState().aiProfiles,
           loadCharacter: (id) => useCharacterStore.getState().loadCharacter(id),
           applyChatRuntimePatch: useChatStore.getState().applyChatRuntimePatch,
-          onImageError: (error) => reportRecoverableError({ location: 'daily-moment-image', error,
-            userMessage: '朋友圈配图生成失败，本次发布文字动态。' }),
+          onImageError: (error) => {
+            const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image');
+            reportRecoverableError({ location: 'daily-moment-image', error,
+              extra: { provider: profile?.provider, model: profile?.model },
+              userMessage: getDailyMomentImageErrorMessage(error) });
+          },
         });
+        nextCheckAt = dailyResult?.nextCheckAt;
       } catch (error) {
         dailyFailure = { error };
       }
@@ -97,7 +118,7 @@ export function useApplicationSocialFlow() {
         appendEventMessage,
       });
       if (dailyFailure) throw dailyFailure.error;
-      return result;
+      return nextCheckAt ? { nextCheckAt } : result;
     }, (error) => reportRecoverableError({ location: 'application-social-flow', error,
       userMessage: '自动社交活动未完成，将按重试策略处理。' }));
   }, [chats, characters, aiProfiles]);

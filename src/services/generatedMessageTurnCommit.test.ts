@@ -50,6 +50,22 @@ function baseParams() {
 }
 
 describe('commitGeneratedMessageTurn', () => {
+  it('does not submit later reply debt when cancelled after the first send', async () => {
+    let active = true;
+    runSessionCommitPipelineMock.mockImplementation(async (args: { message: Message }) => {
+      active = false;
+      return { persistedMessage: buildPersistedMessage(args.message.content, 1),
+        transition: { chatPatch: {}, characterPatches: [], runtimeEvents: [] }, nextChat: { id: 'chat-1' }, nextCharacters: [] };
+    });
+    await expect(commitGeneratedMessageTurn({ ...baseParams(), shouldContinue: () => active,
+      message: { chatId: 'chat-1', type: 'ai', senderId: 'char-1', senderName: '甲', content: '嗯。', emotion: 0,
+        messageParts: [{ content: '嗯。', replyDebtTargetIds: null },
+          { content: '乙，你几点来？', replyDebtTargetIds: ['b'], primaryReplyDebtTargetId: 'b' }] },
+    } as never)).rejects.toMatchObject({ name: 'GenerationCancelledError' });
+    expect(runSessionCommitPipelineMock).toHaveBeenCalledTimes(1);
+    expect(runSessionCommitPipelineMock.mock.calls[0][0].message.replyDebtTargetIds).toBeNull();
+  });
+
   it('preserves earlier committed bubbles and stops later sends after a segment fails', async () => {
     const committed: Message[] = [];
     const failure = new Error('second segment persistence failed');

@@ -86,6 +86,16 @@ describe('auto social scheduling lifecycle', () => {
     expect(run).toHaveBeenCalledTimes(3);
   });
 
+  it('honors an earlier daily moment check after chat cooldown', async () => {
+    const run = vi.fn(async () => ({ nextCheckAt: Date.now() + 18 * 60_000 }));
+    const chat = { ...chatWithRuntimeEvents([]), isActive: true, updatedAt: Date.now() };
+    scheduler.update({ chat, runAutoSocialEventFlow: run, onError: vi.fn() });
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(18 * 60_000);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
   it('continues world checks after an ineligible candidate produces no patch', async () => {
     const run = vi.fn(async () => ({ handledEventId: null }));
     scheduler.update({ chat: pendingChat(), runAutoSocialEventFlow: run, onError: vi.fn() });

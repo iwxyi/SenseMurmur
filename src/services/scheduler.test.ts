@@ -315,6 +315,29 @@ describe('scheduler speaker scoring', () => {
     });
   });
 
+  it('attributes new per-send reply debt to the actual bubble without counting sibling bubbles as missed turns', () => {
+    const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙'), buildCharacter('c', '丙')];
+    const first = { ...buildMessage({ id: 'm1', senderId: 'a', content: '乙，你几点来？', timestamp: 1 }),
+      replyDebtTargetIds: ['b'], primaryReplyDebtTargetId: 'b',
+      metadata: { turnSegment: { index: 0, count: 3 } } } as Message;
+    const second = { ...buildMessage({ id: 'm2', senderId: 'a', content: '我先去拿伞。', timestamp: 2 }),
+      replyDebtTargetIds: null, metadata: { turnSegment: { index: 1, count: 3 } } } as Message;
+    const third = { ...buildMessage({ id: 'm3', senderId: 'a', content: '丙，门口等你。', timestamp: 3 }),
+      addressedTargetIds: ['c'], replyDebtTargetIds: null,
+      metadata: { turnSegment: { index: 2, count: 3 } } } as Message;
+
+    expect(resolvePendingReplyContext(characters, [first, second, third])).toMatchObject({
+      sourceMessageId: 'm1', primaryTargetId: 'b', unmetTurns: 0,
+    });
+    expect(resolvePendingReplyContext(characters, [first, second])).toMatchObject({
+      sourceMessageId: 'm1', primaryTargetId: 'b', unmetTurns: 0,
+    });
+    expect(resolvePendingReplyContext(characters, [first, second, third,
+      buildMessage({ id: 'm4', senderId: 'c', content: '我等着。', timestamp: 4 })])).toMatchObject({
+      sourceMessageId: 'm1', primaryTargetId: 'b', unmetTurns: 1,
+    });
+  });
+
   it('does not turn a current addressee into reply debt when the new field is present', () => {
     const addressed = buildMessage({ id: 'reply-only', senderId: 'a', senderName: '甲', content: '乙，我听明白了。', timestamp: 1 }) as Message;
     addressed.addressedTargetIds = ['b'];
@@ -337,6 +360,21 @@ describe('scheduler speaker scoring', () => {
     delete legacy.replyDebtTargetIds;
     expect(resolvePendingReplyContext(characters, [legacy]))
       .toMatchObject({ targetIds: ['b'], primaryTargetId: 'b' });
+  });
+
+  it('does not turn an addressee or interaction into scheduling reply pressure after an explicit no-debt decision', () => {
+    const characters = [buildCharacter('b', '乙'), buildCharacter('c', '丙')];
+    const message: Message = {
+      ...buildMessage({ senderId: 'a', content: '乙，这份记录我看过了。' }),
+      addressedTargetIds: ['b'], primaryAddressedTargetId: 'b',
+      replyDebtTargetIds: null, primaryReplyDebtTargetId: null,
+      interactionHint: { kind: 'apologize', actorId: 'a', targetId: 'b', tone: 'warm',
+        confidence: 0.9, intensity: 0.5, evidenceText: '刚才误会你了。' },
+    };
+    const candidates = calculateWeights(characters, [message], {}, 1, 0, null, buildChat());
+    expect(candidates.some((item) => item.scoreBreakdown?.reasons.includes('direct_message_address'))).toBe(false);
+    const pending = calculateWeights(characters, [{ ...message, replyDebtTargetIds: ['b'] }], {}, 1, 0, null, buildChat());
+    expect(pending.find((item) => item.characterId === 'b')?.scoreBreakdown?.reasons).toContain('direct_message_address');
   });
 
   it('keeps an explicit reply debt open when another member interrupts', () => {

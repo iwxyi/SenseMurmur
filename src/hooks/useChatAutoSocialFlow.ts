@@ -109,11 +109,16 @@ export function createChatAutoSocialScheduler() {
     if (disposed || running || !current?.chat || !plan || plan.key === lastAttemptKey) return;
     running = true;
     try {
-      await current.runAutoSocialEventFlow(current.chat);
-      if (plan.mode === 'world') nextWorldAt = Date.now() + WORLD_SOCIAL_TICK_MIN_IDLE_MS;
+      const result = await current.runAutoSocialEventFlow(current.chat);
+      const hintedAt = result && typeof result === 'object' && 'nextCheckAt' in result
+        && typeof result.nextCheckAt === 'number' && Number.isFinite(result.nextCheckAt)
+        && result.nextCheckAt > Date.now() ? result.nextCheckAt : undefined;
+      if (plan.mode === 'world') nextWorldAt = Math.min(Date.now() + WORLD_SOCIAL_TICK_MIN_IDLE_MS,
+        hintedAt ?? Infinity);
       else {
         lastAttemptKey = plan.key;
-        nextWorldAt ??= Date.now() + WORLD_SOCIAL_TICK_MIN_IDLE_MS;
+        nextWorldAt = Math.min(nextWorldAt ?? Infinity, Date.now() + WORLD_SOCIAL_TICK_MIN_IDLE_MS,
+          hintedAt ?? Infinity);
       }
       failure = undefined;
     } catch (error) {

@@ -9,6 +9,7 @@ import { formatScenarioBoardKind, formatScenarioRoleLabel } from './scenarioPres
 import { buildPublicSafeRelationshipSemanticSummary } from './relationshipSemanticPrivacy';
 import { normalizeRelationshipLedgerEntry } from './relationshipLedger';
 import { isPendingConversationItem, usesConversationContinuity } from './conversationContinuity';
+import { resolveActiveDirectorIntervention, resolveLatestActiveUserGuidance } from './guidanceLifecycle';
 
 export type NarrativeLineType = 'conflict' | 'relationship' | 'topic' | 'goal' | 'mystery' | 'faction' | 'growth' | 'scenario';
 export type NarrativeLineStatus = 'latent' | 'active' | 'escalating' | 'cooling' | 'resolved' | 'abandoned';
@@ -256,6 +257,7 @@ function buildRoomLines(chat: GroupChat, now: number): NarrativeLineProjection[]
   }
   if (room.topicDrift > 62) {
     const drift = clamp01(room.topicDrift / 100);
+    const conversation = resolveSessionDefinition(chat).kind.family === 'conversation';
     lines.push({
       id: 'room:topic-drift',
       conversationId: chat.id,
@@ -265,13 +267,14 @@ function buildRoomLines(chat: GroupChat, now: number): NarrativeLineProjection[]
       participantIds: [],
       visibility: 'public',
       status: 'active',
+      contextKind: conversation ? 'background' : undefined,
       tension: drift * 0.35,
       momentum: drift,
       salience: clamp01(0.34 + drift * 0.4),
       sourceEventIds: [],
       lastTouchedAt: now,
-      openQuestions: ['是否需要有人收束或重新定义讨论焦点？'],
-      possibleNextBeats: [{
+      openQuestions: conversation ? [] : ['是否需要有人收束或重新定义讨论焦点？'],
+      possibleNextBeats: conversation ? [] : [{
         beatType: 'summarize',
         targetActorIds: [],
         pressure: clamp01(0.44 + drift * 0.28),
@@ -338,6 +341,7 @@ function buildTopicLine(chat: GroupChat, messages: Message[], now: number): Narr
     .filter((message) => !message.isDeleted && (message.type === 'ai' || message.type === 'user' || message.type === 'god') && !looksLikeSystemPayload(message.content || ''))
     .at(-1);
   if (!latest) return null;
+  const ambientConversationTopic = resolveSessionDefinition(chat).kind.family === 'conversation';
   const summary = latest.type === 'user'
     ? `用户刚刚提到：${clipText(latest.content, 72)}`
     : clipText(latest.content, 80) || '当前话题仍在延续。';
@@ -350,14 +354,15 @@ function buildTopicLine(chat: GroupChat, messages: Message[], now: number): Narr
     participantIds: latest.type === 'ai' ? [latest.senderId] : [],
     visibility: 'public',
     status: 'active',
+    contextKind: ambientConversationTopic ? 'background' : undefined,
     tension: 0.12,
     momentum: 0.36,
     salience: latest.type === 'user' ? 0.7 : 0.3,
     sourceEventIds: [],
     lastTouchedAt: latest.timestamp || now,
-    openQuestions: latest.type === 'user' ? ['用户刚刚改变了房间焦点，谁来接住？'] : [],
-    possibleNextBeats: [{
-      beatType: latest.type === 'user' ? 'invite' : 'invite',
+    openQuestions: latest.type === 'user' && !ambientConversationTopic ? ['用户刚刚改变了房间焦点，谁来接住？'] : [],
+    possibleNextBeats: ambientConversationTopic ? [] : [{
+      beatType: 'invite',
       targetActorIds: latest.type === 'ai' ? [latest.senderId] : [],
       pressure: latest.type === 'user' ? 0.5 : 0.34,
       reason: latest.type === 'user' ? '用户消息正在改变下一轮回应方向。' : '延续当前正在进行的话题。',
@@ -448,51 +453,46 @@ function buildGrowthLines(chat: GroupChat, characters: AICharacter[], now: numbe
     .slice(0, 2);
 }
 
-function buildGoalLines(chat: GroupChat, characters: AICharacter[], now: number): NarrativeLineProjection[] {
+function buildGoalLines(chat: GroupChat, characters: AICharacter[], messages: Message[], now: number): NarrativeLineProjection[] {
   const knownIds = new Set(characters.map((character) => character.id));
-  const lines: NarrativeLineProjection[] = [];
-  (chat.runtimeEventsV2 || [])
-    .filter((event) => event.kind === 'director_intervention')
-    .slice(-6)
-    .reverse()
-    .forEach((event) => {
-      const payload = event.payload as Record<string, unknown>;
-      const intent = typeof payload.intent === 'string' ? payload.intent : '';
-      const text = typeof payload.text === 'string' ? payload.text : event.summary;
-      if (!text || !['inject_event', 'summarize', 'redirect', 'force_reply'].includes(intent)) return;
-      const targetActorIds = Array.isArray(payload.targetActorIds)
-        ? payload.targetActorIds.filter((id, index, array): id is string => typeof id === 'string' && knownIds.has(id) && array.indexOf(id) === index)
-        : [];
-      const ageMinutes = Math.max(0, now - event.createdAt) / 60_000;
-      const recency = clamp01(1 - ageMinutes / 45);
-      const pressure = typeof payload.pressure === 'number' ? clamp01(payload.pressure) : 0.72;
-      const salience = clamp01(0.2 + pressure * 0.46 + recency * 0.26);
-      lines.push({
-        id: `goal:${event.id}`,
-        conversationId: chat.id,
-        type: 'goal',
-        title: intent === 'summarize' ? '收束目标' : intent === 'redirect' ? '转向目标' : intent === 'force_reply' ? '回应目标' : '推进目标',
-        summary: text,
-        participantIds: targetActorIds,
-        visibility: event.visibility === 'moderator_only' ? 'moderator_only' : 'derived_public',
-        status: salience > 0.52 ? 'active' : 'latent',
-        tension: intent === 'force_reply' ? 0.42 : 0.22,
-        momentum: recency,
-        salience,
-        sourceEventIds: [event.id],
-        lastTouchedAt: event.createdAt,
-        openQuestions: [],
-        possibleNextBeats: [{
-          beatType: intent === 'summarize' ? 'summarize' : intent === 'redirect' ? 'deflect' : intent === 'force_reply' ? 'answer' : 'invite',
-          targetActorIds,
-          pressure,
-          reason: text || '导演目标正在影响下一轮走向。',
-        }],
-      });
-    });
-  return lines
-    .filter((line) => line.salience >= 0.34)
-    .slice(0, 2);
+  const latestGuidance = resolveLatestActiveUserGuidance(characters, messages, now);
+  const active = resolveActiveDirectorIntervention(chat, characters, messages, now, latestGuidance.timestamp);
+  if (!active) return [];
+  const { event, intent: activeIntent } = active;
+  // A remaining restraint window controls who waits, not another answer from
+  // actors who have already completed the requested floor.
+  if (activeIntent.userGuidance?.actorIds.length && !activeIntent.targetActorIds.length) return [];
+  const payload = event.payload as Record<string, unknown>;
+  const intent = typeof payload.intent === 'string' ? payload.intent : '';
+  const text = typeof payload.text === 'string' ? payload.text : event.summary;
+  if (!text || !['inject_event', 'summarize', 'redirect', 'force_reply'].includes(intent)) return [];
+  const targetActorIds = activeIntent.targetActorIds.filter((id) => knownIds.has(id));
+  const ageMinutes = Math.max(0, now - event.createdAt) / 60_000;
+  const recency = clamp01(1 - ageMinutes / 45);
+  const pressure = typeof payload.pressure === 'number' ? clamp01(payload.pressure) : 0.72;
+  const salience = clamp01(0.2 + pressure * 0.46 + recency * 0.26);
+  return [{
+    id: `goal:${event.id}`,
+    conversationId: chat.id,
+    type: 'goal',
+    title: intent === 'summarize' ? '收束目标' : intent === 'redirect' ? '转向目标' : intent === 'force_reply' ? '回应目标' : '推进目标',
+    summary: text,
+    participantIds: targetActorIds,
+    visibility: event.visibility === 'moderator_only' ? 'moderator_only' : 'derived_public',
+    status: salience > 0.52 ? 'active' : 'latent',
+    tension: intent === 'force_reply' ? 0.42 : 0.22,
+    momentum: recency,
+    salience,
+    sourceEventIds: [event.id],
+    lastTouchedAt: event.createdAt,
+    openQuestions: [],
+    possibleNextBeats: [{
+      beatType: intent === 'summarize' ? 'summarize' : intent === 'redirect' ? 'deflect' : intent === 'force_reply' ? 'answer' : 'invite',
+      targetActorIds,
+      pressure,
+      reason: text || '导演目标正在影响下一轮走向。',
+    }],
+  }];
 }
 
 function buildMysteryLines(chat: GroupChat, now: number): NarrativeLineProjection[] {
@@ -597,7 +597,9 @@ export function projectNarrativeLines(params: {
       .map((item): NarrativeLineProjection => {
         const ageTurns = continuityAgeTurns(item.updatedAt, params.messages);
         const salience = continuitySalience(ageTurns);
-        const active = ageTurns <= 1;
+        // A condition records a constraint, not a request for another answer.
+        // Accepted commitments likewise remain background until new evidence.
+        const active = item.kind !== 'condition' && item.status === 'open' && ageTurns <= 1;
         return {
           id: `continuity:${item.key}`, conversationId: params.chat.id, type: 'goal',
           title: item.kind === 'condition' ? '尚未满足的条件' : item.kind === 'commitment' ? '尚待兑现的承诺' : '未决事项',
@@ -605,8 +607,8 @@ export function projectNarrativeLines(params: {
           contextKind: active ? 'unresolved' : 'background',
           tension: 0, momentum: active ? 0.5 : 0.18, salience,
           sourceEventIds: [], lastTouchedAt: item.updatedAt,
-          openQuestions: active ? [item.status === 'established' ? `已接受，尚未报告兑现：${item.summary}` : item.summary] : [],
-          possibleNextBeats: active ? [{ beatType: item.status === 'established' ? 'answer' : 'invite',
+          openQuestions: active ? [item.summary] : [],
+          possibleNextBeats: active ? [{ beatType: 'invite',
             targetActorIds: item.participantIds, pressure: 0.5, reason: item.summary }] : [],
         };
       }),
@@ -615,7 +617,7 @@ export function projectNarrativeLines(params: {
     ...buildRelationshipLines(params.chat, params.characters || [], now),
     ...buildFactionLines(params.chat, params.characters || [], now),
     ...buildGrowthLines(params.chat, params.characters || [], now),
-    ...buildGoalLines(params.chat, params.characters || [], now),
+    ...buildGoalLines(params.chat, params.characters || [], params.messages || [], now),
     ...buildMysteryLines(params.chat, now),
     ...(scenarioLine ? [scenarioLine] : []),
     ...(topicLine ? [topicLine] : []),

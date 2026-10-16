@@ -1,6 +1,7 @@
 import type { RuntimeEvolutionIntensity } from './chat';
 import type { ArtifactAppearanceSettings } from './artifactAppearance';
 import { DEFAULT_ARTIFACT_APPEARANCE_SETTINGS } from './artifactAppearance';
+import { DEFAULT_CHAT_REPLY_PREFERENCES, type ChatReplyPreferences } from './chatReplyPreferences';
 
 export type OfficialAIProvider = 'official' | `official-${string}`;
 export type BuiltInAIProvider = OfficialAIProvider | 'openai' | 'anthropic' | 'google' | 'xai' | 'deepseek' | 'alibaba' | 'zhipu' | 'moonshot' | 'minimax' | 'bytedance' | 'microsoft' | 'custom';
@@ -130,6 +131,7 @@ export function inferTextInputCapabilities(provider: AIProvider, model: string):
     || normalizedModel.includes('gpt-4o')
     || normalizedModel.includes('gpt-4.1')
     || normalizedModel.includes('gpt-5')
+    || /(?:^|:)gpt-6(?:[.-]|$)/.test(normalizedModel)
     || normalizedModel.includes('glm-4v')
     || normalizedModel.includes('glm-4.5v')
     || normalizedModel.includes('qwen-vl')
@@ -941,6 +943,7 @@ export interface AppSettings {
   aiGeneration: AIGenerationSettings;
   companionship: CompanionshipSettings;
   chatMemory: ChatMemorySettings;
+  chatReplyPreferences: ChatReplyPreferences;
   developerUI: DeveloperUIPrefs;
   chatDraftDefaults: ChatDraftDefaults;
   customBubbleStyles: BubbleStyleDefinition[];
@@ -1101,7 +1104,7 @@ export const DEFAULT_IMAGE_AI_PROFILE: AIModelProfile = {
   provider: 'official-acedata',
   apiKey: '',
   baseUrl: '/api/ai',
-  model: 'ace:image:nano-banana-pro',
+  model: 'nano-banana-pro',
   imageCapabilities: DEFAULT_IMAGE_CAPABILITIES,
   defaultImageSize: '1K',
 };
@@ -1197,6 +1200,7 @@ export const DEFAULT_SETTINGS: AppSettingsWithMemory = {
   aiGeneration: DEFAULT_AI_GENERATION_SETTINGS,
   companionship: DEFAULT_COMPANIONSHIP_SETTINGS,
   chatMemory: DEFAULT_CHAT_MEMORY_SETTINGS,
+  chatReplyPreferences: DEFAULT_CHAT_REPLY_PREFERENCES,
   developerUI: DEFAULT_DEVELOPER_UI_PREFS,
   chatDraftDefaults: DEFAULT_CHAT_DRAFT_DEFAULTS,
   customBubbleStyles: [],

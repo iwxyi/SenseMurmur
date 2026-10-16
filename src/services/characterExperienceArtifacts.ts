@@ -857,3 +857,23 @@ export async function generateCharacterDailyDiaryArtifact(params: {
     language: params.language || 'zh',
   });
 }
+
+/** Automatic diaries may be declined; a failed decision must never become a template entry. */
+export async function decideCharacterDailyDiaryArtifact(params: Parameters<typeof generateCharacterDailyDiaryArtifact>[0]): Promise<string | null> {
+  const context = buildCharacterDailyDiaryContext(params.character, params.relatedCharacters || [], params.dateKey, params.recentDiaryTexts || []);
+  const prompt = params.language === 'en'
+    ? 'Decide whether this date contains something this character would privately want to record: a concrete meaningful event, emotional change, unresolved concern, or new relationship insight. Ordinary chat, greetings, unchanged memories and a full calendar alone are insufficient. Silence is normal. Do not invent a reason to write. Return JSON only: {"write":false,"text":""} or {"write":true,"text":"first-person private diary"}. If writing, use specific grounded details and the character voice, avoid system fields and repetitive summaries. Optional seeds are suggestions, never evidence that something happened.'
+    : '先判断这一天是否有角色自己想私下记住的点：具体而有意义的经历、情绪转折、未解的牵挂或新的关系认识。普通闲聊、问候、重复旧记忆、日期过去了，都不足以写日记。没有值得记的点就不写，这是正常结果，不要为了完成任务硬找意义或编造经历。只返回 JSON：{"write":false,"text":""} 或 {"write":true,"text":"角色第一人称的私密日记正文"}。写时依据具体细节和角色语气，避免流水账、鸡汤、重复总结，不暴露系统字段。输入中的可选心理种子只是写作建议，不代表事情真实发生过。';
+  const raw = await generateResponse(params.config, prompt,
+    [{ role: 'user', content: JSON.stringify(context) }], undefined,
+    { responseFormat: 'json', aiUsage: { type: 'character_artifact', label: '判断是否值得写日记', scope: 'character' } });
+  const decision: unknown = JSON.parse(unwrapMarkdownFence(raw));
+  if (!decision || typeof decision !== 'object' || !('write' in decision) || typeof decision.write !== 'boolean') {
+    throw new Error('日记生成未返回有效的写作判断。');
+  }
+  if (!decision.write) return null;
+  if (!('text' in decision) || typeof decision.text !== 'string' || !decision.text.trim() || looksLikeRawArtifactContext(decision.text)) {
+    throw new Error('日记判断通过，但没有返回有效正文。');
+  }
+  return decision.text.trim();
+}
