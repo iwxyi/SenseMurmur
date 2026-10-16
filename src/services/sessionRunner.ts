@@ -21,15 +21,22 @@ import { getEffectiveCharacterPresence } from './characterPresence';
 // An autonomous group burst is scoped by external input. AI messages and the
 // runtime facts they write back belong to the burst itself; treating them as a
 // new context gives every member another turn after every send.
-export function buildNoSendContextKey(chat: GroupChat, messages: Message[]) {
+function latestExternalInput(messages: Message[], previous: Message | null = null) {
+  const visible = messages.filter((message) => !message.isDeleted && !message.isStreaming
+    && (message.type === 'user' || message.type === 'god'));
+  const latest = visible.at(-1) || null;
+  if (!latest) return previous;
+  if (previous && latest.id !== previous.id && latest.timestamp < previous.timestamp) return previous;
+  return latest;
+}
+
+export function buildNoSendContextKey(chat: GroupChat, messages: Message[], previousExternalInput: Message | null = null) {
   const branchName = chat.messageBranchState?.activeBranchName;
+  const input = latestExternalInput(messages, previousExternalInput);
   return JSON.stringify({
     branch: branchName,
-    messages: messages.filter((message) => !message.isDeleted && !message.isStreaming
-      && (message.type === 'user' || message.type === 'god')).map((message) => [
-      message.id, message.type, message.senderId, message.content,
-      message.addressedTargetIds, message.replyDebtTargetIds, message.metadata?.withdrawal,
-    ]),
+    input: input ? [input.id, input.type, input.senderId, input.content,
+      input.addressedTargetIds, input.replyDebtTargetIds, input.metadata?.withdrawal] : null,
     room: [chat.topic, chat.runtimeSeed],
   });
 }
@@ -332,6 +339,15 @@ export async function runSessionLoop(params: {
   const random = params.random || Math.random;
   let conversationRunStart: GroupChat | null = null;
   let noSendContextKey: string | null = null;
+  let externalInputAnchor: Message | null = null;
+  let anchorBranchName = params.chat.messageBranchState?.activeBranchName;
+  const getAutonomousContextKey = (chat: GroupChat, messages: Message[]) => {
+    const branchName = chat.messageBranchState?.activeBranchName;
+    if (branchName !== anchorBranchName) externalInputAnchor = null;
+    anchorBranchName = branchName;
+    externalInputAnchor = latestExternalInput(messages, externalInputAnchor);
+    return buildNoSendContextKey(chat, messages, externalInputAnchor);
+  };
   const consumedSpeakerIds = new Set<string>();
   const consumedReplyDebtSpeakerIds = new Set<string>();
   const presenceByMemberId = new Map<string, string>();
@@ -364,12 +380,12 @@ export async function runSessionLoop(params: {
         const waitingMessages = params.getCurrentMessages();
         if (isAutonomousConversation(waitingChat)) {
           refreshMemberOpportunityState(waitingChat, waitingCharacters, consumedSpeakerIds, consumedReplyDebtSpeakerIds, presenceByMemberId);
-          const pendingReply = resolvePendingReplyContext(waitingCharacters, waitingMessages, waitingChat);
+          const waitingMembers = waitingCharacters.filter((character) => waitingChat.memberIds.includes(character.id));
+          const pendingReply = resolvePendingReplyContext(waitingMembers, waitingMessages, waitingChat);
           const hasPendingReply = Boolean(pendingReply?.targetIds.some((id) => !consumedReplyDebtSpeakerIds.has(id)));
-          if (buildNoSendContextKey(waitingChat, waitingMessages) === noSendContextKey
+          if (getAutonomousContextKey(waitingChat, waitingMessages) === noSendContextKey
             && !hasPendingReply
-            && waitingCharacters.filter((character) => waitingChat.memberIds.includes(character.id))
-              .every((character) => getEffectiveCharacterPresence(character).status === 'away' || consumedSpeakerIds.has(character.id))) {
+            && waitingMembers.every((character) => getEffectiveCharacterPresence(character).status === 'away' || consumedSpeakerIds.has(character.id))) {
             markSessionLoop(params.loopId, { phase: 'waiting_context' });
             await sleep(250);
             continue;
@@ -428,7 +444,7 @@ export async function runSessionLoop(params: {
       }
 
       const effectiveCharacters = loopCharacters.length ? loopCharacters : currentCharacters;
-      const roundContextKey = buildNoSendContextKey(currentChat, currentMessages);
+      const roundContextKey = getAutonomousContextKey(currentChat, currentMessages);
       if (roundContextKey !== noSendContextKey) {
         consumedSpeakerIds.clear();
         consumedReplyDebtSpeakerIds.clear();
@@ -596,7 +612,7 @@ export async function runSessionLoop(params: {
           onNoSend: ({ speakerId }) => {
             if (!isActiveLoop(params) || params.signal?.aborted) return;
             const latestChat = params.getCurrentChat?.() || currentChat;
-            const latestKey = buildNoSendContextKey(latestChat, params.getCurrentMessages());
+            const latestKey = getAutonomousContextKey(latestChat, params.getCurrentMessages());
             if (latestKey === roundContextKey && isAutonomousConversation(latestChat)) consumedSpeakerIds.add(speakerId);
             if (latestKey === roundContextKey && isAutonomousConversation(latestChat)
               && pendingReplyTargetIdsForRound.has(speakerId)) consumedReplyDebtSpeakerIds.add(speakerId);
@@ -645,7 +661,7 @@ export async function runSessionLoop(params: {
                 shouldContinue: () => isActiveLoop(params),
               });
               const latestChat = params.getCurrentChat?.() || currentChat;
-              const latestKey = buildNoSendContextKey(latestChat, params.getCurrentMessages());
+              const latestKey = getAutonomousContextKey(latestChat, params.getCurrentMessages());
               if (latestKey === roundContextKey && isAutonomousConversation(latestChat)) {
                 consumedSpeakerIds.add(message.senderId);
                 if (pendingReplyTargetIdsForRound.has(message.senderId)) consumedReplyDebtSpeakerIds.add(message.senderId);

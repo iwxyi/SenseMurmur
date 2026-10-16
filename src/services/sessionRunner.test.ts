@@ -349,6 +349,71 @@ describe('runSessionLoop', () => {
     expect(buildNoSendContextKey({ ...chat, messageBranchState: { activeBranchName: 'other' } }, [])).not.toBe(key);
     expect(buildNoSendContextKey(chat, [{ id: 'new', type: 'user', content: '你好' } as Message])).not.toBe(key);
     expect(buildNoSendContextKey(chat, [{ id: 'director', type: 'god', content: '阿甲来说说。' } as Message])).not.toBe(key);
+    const previous = { id: 'user-old', type: 'user', content: '先聊鞋。', timestamp: 10 } as Message;
+    const anchoredKey = buildNoSendContextKey(chat, [previous], previous);
+    expect(buildNoSendContextKey(chat, [{ id: 'ai-new', type: 'ai', content: '我选平底鞋。', timestamp: 12 } as Message], previous)).toBe(anchoredKey);
+    expect(buildNoSendContextKey(chat, [{ id: 'older', type: 'user', content: '更早的话题', timestamp: 1 } as Message], previous)).toBe(anchoredKey);
+    expect(buildNoSendContextKey(chat, [{ id: 'user-new', type: 'user', content: '再聊外套。', timestamp: 13 } as Message], previous)).not.toBe(anchoredKey);
+  });
+
+  it('does not reopen consumed speakers when the last user message leaves the paging window', async () => {
+    const chat = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
+    const params = buildLoopParams(chat);
+    let messages: Message[] = [{ id: 'user', chatId: chat.id, type: 'user', content: '先聊鞋。', timestamp: 1 } as Message];
+    params.getCurrentMessages = () => messages;
+    const previousTimeout = globalThis.setTimeout;
+    let waited = false;
+    globalThis.setTimeout = ((fn: () => void, ms: number) => {
+      if (ms === 250 && runOneRoundMock.mock.calls.length === 2) {
+        waited = true;
+        params.pauseLoop();
+      }
+      fn();
+      return 0;
+    }) as unknown as typeof setTimeout;
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _snapshot, _api, hooks) => {
+      const round = runOneRoundMock.mock.calls.length;
+      hooks.onNoSend({ delivery: 'no_send', speakerId: round === 1 ? 'a' : 'b' });
+      messages = [{ id: `ai-${round}`, chatId: chat.id, type: 'ai', senderId: round === 1 ? 'a' : 'b',
+        content: '已加载的新窗口。', timestamp: round + 1 } as Message];
+    });
+    try {
+      await runSessionLoop(params as never);
+    } finally {
+      globalThis.setTimeout = previousTimeout;
+    }
+    expect(waited).toBe(true);
+    expect(runOneRoundMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores reply debt owed by a character who has left the room', async () => {
+    const chat = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
+    const params = buildLoopParams(chat);
+    params.characters = [...params.characters, { id: 'c', name: '丙' } as never];
+    const messages: Message[] = [{ id: 'request', chatId: chat.id, type: 'ai', senderId: 'a', senderName: '甲',
+      content: '丙，你说呢？', timestamp: 1, replyDebtTargetIds: ['c'] } as Message];
+    params.getCurrentMessages = () => messages;
+    const previousTimeout = globalThis.setTimeout;
+    let waited = false;
+    globalThis.setTimeout = ((fn: () => void, ms: number) => {
+      if (ms === 250 && runOneRoundMock.mock.calls.length === 2) {
+        waited = true;
+        params.pauseLoop();
+      }
+      fn();
+      return 0;
+    }) as unknown as typeof setTimeout;
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _snapshot, _api, hooks) => {
+      const round = runOneRoundMock.mock.calls.length;
+      hooks.onNoSend({ delivery: 'no_send', speakerId: round === 1 ? 'a' : 'b' });
+    });
+    try {
+      await runSessionLoop(params as never);
+    } finally {
+      globalThis.setTimeout = previousTimeout;
+    }
+    expect(waited).toBe(true);
+    expect(runOneRoundMock).toHaveBeenCalledTimes(2);
   });
 
   it('consumes successful speakers once, then grants another window for new user input', async () => {
