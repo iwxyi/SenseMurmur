@@ -9,7 +9,7 @@ import CheckIcon from '@mui/icons-material/Check';
 import type { GroupChat } from '../../types/chat';
 import type { AICharacter } from '../../types/character';
 import { formatRelativeTime } from '../../utils/format';
-import { buildInteractiveSurfaceSx, buildSelectionRailSx } from '../../styles/interaction';
+import { buildInteractiveSurfaceSx } from '../../styles/interaction';
 import { buildChatSubtitle } from './chatCardSubtitle';
 import { getChatGameplayShortLabel } from '../../services/chatGameplayPresentation';
 import { sanitizeChatLatestMessage } from '../../services/chatLatestMessage';
@@ -260,7 +260,7 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
         height: isList ? 'auto' : '100%',
         overflow: 'visible',
         ...buildCardAvatarHoverMotionSx('.chat-card-primary-avatar'),
-        '&::before, &::after': { borderRadius: 'inherit' },
+        '&::after': { borderRadius: 'inherit' },
         ...(isList ? {
           borderRadius: 1.25,
           borderWidth: 0,
@@ -282,10 +282,6 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
           backgroundSize: 'cover', backgroundPosition: 'center', opacity: isList ? (cardBackgroundUrl ? 0.5 : 0.34) : (cardBackgroundUrl ? 0.82 : 0.52),
           filter: cardBackgroundUrl ? 'saturate(0.68)' : 'blur(16px) saturate(1.15)', transform: cardAccentImageUrl ? 'scale(1.12)' : undefined,
         } : undefined,
-        '&::before': {
-          ...buildSelectionRailSx(selected || multiSelected || !isDirect, isDirect ? 2 : 3),
-          opacity: isList ? 0 : (selected || multiSelected ? 0.9 : isDirect ? 0.22 : 0.30),
-        },
       } as SxProps<Theme>}
     >
       <CardActionArea
