@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import type { Message } from '../../types/message';
 import { buildImageAttachmentHoverInfo } from '../../services/messageAttachmentHoverInfo';
-import { getAttachmentDisplayWidth, parseInlineAttachmentPlaceholders, shouldHideGeneratedMediaPlaceholderText } from './ChatMessageContent';
+import { getAttachmentDisplayWidth, MessageContent, parseInlineAttachmentPlaceholders, shouldHideGeneratedMediaPlaceholderText } from './ChatMessageContent';
 
 describe('ChatMessageContent media layout', () => {
   it('uses a fixed intrinsic media width so fit-content bubbles can shrink', () => {
@@ -29,6 +31,18 @@ describe('ChatMessageContent media layout', () => {
       maxWidth: 240,
       maxHeight: 240,
     })).toBe(240);
+  });
+
+  it('reserves sticker height before the ready image finishes loading', () => {
+    const message = {
+      id: 'sticker-message', chatId: 'chat-1', type: 'ai', senderId: 'a', senderName: '甲',
+      content: '', timestamp: 1, emotion: 0, isDeleted: false,
+      metadata: { attachments: [{ id: 'sticker-1', kind: 'sticker', status: 'ready', altText: '表情包',
+        url: 'data:image/png;base64,AAA', createdAt: 1, updatedAt: 1 }] },
+    } as Message;
+    const html = renderToStaticMarkup(createElement(MessageContent, { message }));
+    expect(html).toContain('aspect-ratio:1/1');
+    expect(html).toContain('height:100%');
   });
 
   it('hides generated image queue placeholder text when media attachments exist', () => {

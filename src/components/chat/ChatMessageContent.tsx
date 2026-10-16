@@ -72,7 +72,7 @@ export function PendingTypingDots() {
   );
 }
 
-function parseAttachmentRatio(attachment: Pick<MessageAttachment, 'width' | 'height' | 'aspectRatio'>) {
+function parseAttachmentRatio(attachment: Pick<MessageAttachment, 'kind' | 'width' | 'height' | 'aspectRatio'>) {
   const width = Number(attachment.width || 0);
   const height = Number(attachment.height || 0);
   if (width > 0 && height > 0) return width / height;
@@ -82,7 +82,7 @@ function parseAttachmentRatio(attachment: Pick<MessageAttachment, 'width' | 'hei
     const right = Number(ratioMatch[2]);
     if (left > 0 && right > 0) return left / right;
   }
-  return 4 / 3;
+  return attachment.kind === 'sticker' ? 1 : 4 / 3;
 }
 
 function getAttachmentMaxWidth(ratio: number, kind: MessageAttachment['kind'] = 'image') {
@@ -147,9 +147,9 @@ function MessageImageAttachment({
   const knownSize = getAttachmentKnownSize(attachment);
   const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(knownSize);
   const [viewportHeight, setViewportHeight] = useState(() => (typeof window === 'undefined' ? 900 : window.innerHeight));
-  const displaySize = naturalSize || knownSize;
-  const ratioValue = displaySize ? displaySize.width / displaySize.height : parseAttachmentRatio(attachment);
   const isSticker = attachment.kind === 'sticker';
+  const displaySize = isSticker ? knownSize : naturalSize || knownSize;
+  const ratioValue = displaySize ? displaySize.width / displaySize.height : parseAttachmentRatio(attachment);
   const maxWidth = getAttachmentMaxWidth(ratioValue, attachment.kind);
   const maxHeight = Math.min(viewportHeight * 0.56, isSticker ? 240 : 520);
   const width = getAttachmentDisplayWidth({ displaySize, ratioValue, maxWidth, maxHeight });
@@ -177,6 +177,7 @@ function MessageImageAttachment({
         sx={{
           minWidth: 0,
           maxWidth: '100%',
+          aspectRatio: `${ratioValue} / 1`,
           borderRadius: 1.5,
           overflow: 'hidden',
           bgcolor: 'action.hover',
@@ -190,7 +191,7 @@ function MessageImageAttachment({
             decoding="async"
             onLoad={(event) => {
               const image = event.currentTarget;
-              if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+              if (!isSticker && image.naturalWidth > 0 && image.naturalHeight > 0) {
                 setNaturalSize({ width: image.naturalWidth, height: image.naturalHeight });
               }
             }}
@@ -204,7 +205,7 @@ function MessageImageAttachment({
             sx={{
               width: '100%',
               boxSizing: 'border-box',
-              height: 'auto',
+              height: '100%',
               maxHeight: isSticker ? 'min(56vh, 240px)' : 'min(56vh, 520px)',
               objectFit: 'contain',
               display: 'block',

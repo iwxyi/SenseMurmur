@@ -235,6 +235,55 @@ function buildLoopParams(chat: GroupChat) {
 }
 
 describe('runSessionLoop', () => {
+  it('reports why visible streamed text is discarded after generation fails', async () => {
+    const error = Object.assign(new Error('结构化回复无效'), { protocolReason: 'missing_json_envelope' });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks) => {
+      hooks.onSpeakerSelected('a', { id: 'a', name: '甲' });
+      hooks.onMessageChunk('已经显示的回复');
+      hooks.onError(error);
+      params.pauseLoop();
+    });
+    try {
+      await runSessionLoop(params as never);
+      expect(warning).toHaveBeenCalledWith('[chat-run:stream-preview-discarded]', expect.objectContaining({
+        reason: 'generation_failed', previewContentLength: '已经显示的回复'.length,
+        protocolReason: 'missing_json_envelope',
+      }));
+      expect(params.onCommit).not.toHaveBeenCalled();
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it('reports a committed reply that disappears from the active message projection', async () => {
+    const preview = { id: 'preview', clientKey: 'preview', chatId: 'chat-1', type: 'ai', senderId: 'a',
+      senderName: '甲', content: '预览', timestamp: 1, isStreaming: true } as Message;
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    params.getCurrentMessages = () => [preview];
+    params.getStreamingMessage = () => preview;
+    runSessionCommitPipelineMock.mockImplementation(async (args) => {
+      const result = buildCommitPipelineResult(args);
+      return { ...result, persistedMessage: { ...result.persistedMessage,
+        id: 'saved-but-hidden', clientKey: 'saved-but-hidden' } };
+    });
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks) => {
+      hooks.onSpeakerSelected('a', { id: 'a', name: '甲' });
+      await hooks.onMessageComplete({ ...preview, content: '正式回复' });
+      params.pauseLoop();
+    });
+    try {
+      await runSessionLoop(params as never);
+      expect(errorLog).toHaveBeenCalledWith('[chat-run:committed-message-not-projected]', expect.objectContaining({
+        committedCount: 1, projectedCount: 1,
+      }));
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
   it('waits without starting busy work when all members decline and wakes for a new message', async () => {
     const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
     const start = vi.fn();

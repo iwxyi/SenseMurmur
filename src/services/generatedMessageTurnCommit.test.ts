@@ -69,6 +69,7 @@ describe('commitGeneratedMessageTurn', () => {
   it('preserves earlier committed bubbles and stops later sends after a segment fails', async () => {
     const committed: Message[] = [];
     const failure = new Error('second segment persistence failed');
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     runSessionCommitPipelineMock.mockImplementation(async (args: { message: Message }) => {
       if (committed.length === 1) throw failure;
       const persistedMessage = buildPersistedMessage(args.message.content, 1);
@@ -78,10 +79,18 @@ describe('commitGeneratedMessageTurn', () => {
         nextCharacters: [] };
     });
     const params = baseParams();
-    await expect(commitGeneratedMessageTurn({ ...params,
-      message: { chatId: 'chat-1', type: 'ai', senderId: 'char-1', senderName: '甲',
-        content: '先听你说。', extraMessages: ['这句未能保存。', '这句不应发送。'], emotion: 0 },
-    } as never)).rejects.toBe(failure);
+    try {
+      await expect(commitGeneratedMessageTurn({ ...params,
+        message: { chatId: 'chat-1', type: 'ai', senderId: 'char-1', senderName: '甲',
+          content: '先听你说。', extraMessages: ['这句未能保存。', '这句不应发送。'], emotion: 0 },
+      } as never)).rejects.toBe(failure);
+      expect(errorLog).toHaveBeenCalledWith('[chat-run:stream-preview-discarded]', expect.objectContaining({
+        reason: 'segment_commit_failed', segmentIndex: 1, committedSegmentCount: 1,
+        errorMessage: 'second segment persistence failed',
+      }));
+    } finally {
+      errorLog.mockRestore();
+    }
     expect(committed.map((message) => message.content)).toEqual(['先听你说。']);
     expect(runSessionCommitPipelineMock).toHaveBeenCalledTimes(2);
     expect(runSessionCommitPipelineMock.mock.calls[1][0]).toMatchObject({

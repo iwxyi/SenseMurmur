@@ -17,6 +17,7 @@ import { isAutoRunnableSessionAction } from './conversationCapabilities';
 import { applyAnalysisRunPolicy, buildAnalysisRunPolicyEvent, type SessionLoopDecision } from './analysisRunPolicy';
 import { resolvePendingReplyContext } from './scheduler';
 import { getEffectiveCharacterPresence } from './characterPresence';
+import { messagesShareIdentity } from './messageIdentity';
 
 // An autonomous group burst is scoped by external input. AI messages and the
 // runtime facts they write back belong to the burst itself; treating them as a
@@ -564,6 +565,21 @@ export async function runSessionLoop(params: {
           : []) || [],
       );
       let firstChunkLogged = false;
+      let previewContentLength = 0;
+      const reportDiscardedPreview = (reason: string, error?: Error) => {
+        if (!previewContentLength) return;
+        console.warn('[chat-run:stream-preview-discarded]', {
+          chatId: params.chatId,
+          loopId: params.loopId,
+          speakerId: roundStreamingMessage?.senderId || null,
+          previewContentLength,
+          reason,
+          errorName: error?.name || null,
+          errorMessage: error?.message || null,
+          protocolReason: error instanceof Error && 'protocolReason' in error ? error.protocolReason : null,
+        });
+        previewContentLength = 0;
+      };
       await runOneRound(
         currentChat,
         effectiveCharacters,
@@ -572,6 +588,7 @@ export async function runSessionLoop(params: {
         {
           onSpeakerSelected: (charId, speaker) => {
             if (!isActiveLoop(params)) return;
+            reportDiscardedPreview('speaker_reselected');
             logDeveloperDiagnostic('chat-run:speaker-selected', {
               chatId: params.chatId,
               loopId: params.loopId,
@@ -585,6 +602,7 @@ export async function runSessionLoop(params: {
           ensureSpeakerDetail: (charId) => params.ensureCharacterDetail?.(charId) || Promise.resolve(undefined),
           onMessageChunk: (content) => {
             if (!isActiveLoop(params)) return;
+            if (content.trim()) previewContentLength = content.length;
             if (!firstChunkLogged) {
               firstChunkLogged = true;
               logDeveloperDiagnostic('chat-run:first-chunk', {
@@ -603,14 +621,17 @@ export async function runSessionLoop(params: {
           },
           onIdle: (reason) => {
             if (!isActiveLoop(params)) return;
+            reportDiscardedPreview('idle_after_preview');
             params.onIdle?.(reason);
           },
           onQuiet: () => {
             if (!isActiveLoop(params)) return;
+            reportDiscardedPreview('quiet_after_preview');
             params.onQuiet?.();
           },
           onNoSend: ({ speakerId }) => {
             if (!isActiveLoop(params) || params.signal?.aborted) return;
+            reportDiscardedPreview('no_send_after_preview');
             const latestChat = params.getCurrentChat?.() || currentChat;
             const latestKey = getAutonomousContextKey(latestChat, params.getCurrentMessages());
             if (latestKey === roundContextKey && isAutonomousConversation(latestChat)) consumedSpeakerIds.add(speakerId);
@@ -637,8 +658,11 @@ export async function runSessionLoop(params: {
             params.onStreamingComplete?.();
             params.onCommitStarted?.();
             const commitStartedAt = nowMs();
+            const previewMessage = roundStreamingMessage;
+            const hadVisiblePreview = Boolean(previewMessage && params.getCurrentMessages()
+              .some((item) => messagesShareIdentity(item, previewMessage)));
             try {
-              await commitGeneratedMessageTurn({
+              const committedTurn = await commitGeneratedMessageTurn({
                 api: resolveCommitApiConfig(params.api),
                 chatId: params.chatId,
                 chat: currentChat,
@@ -660,6 +684,26 @@ export async function runSessionLoop(params: {
                 getCurrentCharacters: params.getCurrentCharacters,
                 shouldContinue: () => isActiveLoop(params),
               });
+              previewContentLength = 0;
+              if (hadVisiblePreview) {
+                const projected = params.getCurrentMessages();
+                const missing = committedTurn.results
+                  .map((result) => result.persistedMessage)
+                  .filter((item) => !item.isDeleted && !item.metadata?.withdrawal?.withdrawn
+                    && !projected.some((visible) => !visible.isDeleted && messagesShareIdentity(visible, item)));
+                if (missing.length) {
+                  const projectedChat = params.getCurrentChat?.() || currentChat;
+                  console.error('[chat-run:committed-message-not-projected]', {
+                    chatId: params.chatId,
+                    loopId: params.loopId,
+                    missingMessageIds: missing.map((item) => item.id),
+                    committedCount: committedTurn.results.length,
+                    projectedCount: projected.length,
+                    activeBranchName: projectedChat.messageBranchState?.activeBranchName || null,
+                    activeLeafNodeId: projectedChat.messageBranchState?.activeLeafNodeId || null,
+                  });
+                }
+              }
               const latestChat = params.getCurrentChat?.() || currentChat;
               const latestKey = getAutonomousContextKey(latestChat, params.getCurrentMessages());
               if (latestKey === roundContextKey && isAutonomousConversation(latestChat)) {
@@ -695,6 +739,7 @@ export async function runSessionLoop(params: {
           },
           onError: (error) => {
             if (!isActiveLoop(params)) return;
+            reportDiscardedPreview('generation_failed', error);
             params.onEngineError(error);
           },
           signal: params.signal,

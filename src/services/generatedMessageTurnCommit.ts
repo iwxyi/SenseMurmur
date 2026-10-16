@@ -105,7 +105,22 @@ export async function commitGeneratedMessageTurn(params: {
     } catch (error) {
       // Runtime work can fail after the bubble has been saved. Only remove
       // the uncommitted preview, leaving saved history intact.
-      if (!locallyCommitted) params.upsertMessage({ ...streamingMessage, isDeleted: true, isStreaming: true });
+      if (!locallyCommitted) {
+        const cancelled = error instanceof GenerationCancelledError;
+        const report = cancelled ? console.info : console.error;
+        report('[chat-run:stream-preview-discarded]', {
+          chatId: params.chatId,
+          speakerId: segmentMessage.senderId,
+          reason: cancelled ? 'segment_cancelled' : 'segment_commit_failed',
+          segmentIndex: index,
+          committedSegmentCount: results.length,
+          previewContentLength: streamingMessage.content.length,
+          generatedContentLength: segmentMessage.content.length,
+          errorName: error instanceof Error ? error.name : null,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+        params.upsertMessage({ ...streamingMessage, isDeleted: true, isStreaming: true });
+      }
       throw error;
     }
   }
