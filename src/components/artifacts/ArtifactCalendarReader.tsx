@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { TouchEvent } from 'react';
-import { Box, Button, Card, CardContent, Chip, CircularProgress, IconButton, Typography } from '@mui/material';
+import { Box, Button, Card, CardContent, Chip, CircularProgress, IconButton, Popper, Typography } from '@mui/material';
 import type { Theme } from '@mui/material/styles';
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
@@ -55,13 +55,8 @@ function toDateKey(date: Date) {
   return `${date.getFullYear()}-${`${date.getMonth() + 1}`.padStart(2, '0')}-${`${date.getDate()}`.padStart(2, '0')}`;
 }
 
-function buildFloatingNavButtonSx(side: 'left' | 'right') {
+function buildFloatingNavButtonSx() {
   return {
-    position: 'absolute',
-    [side]: 2,
-    top: '50%',
-    transform: 'translateY(-50%)',
-    zIndex: 1200,
     width: { xs: 34, sm: 40 },
     height: { xs: 34, sm: 40 },
     color: 'text.primary',
@@ -70,7 +65,7 @@ function buildFloatingNavButtonSx(side: 'left' | 'right') {
     borderColor: 'divider',
     backdropFilter: 'blur(8px)',
     WebkitBackdropFilter: 'blur(8px)',
-    boxShadow: '0 2px 6px rgba(0,0,0,0.12)',
+    boxShadow: '0 2px 4px rgba(0,0,0,0.12)',
     opacity: 0.88,
     transition: transition(['opacity', 'background-color', 'box-shadow', 'border-color', 'transform', 'backdrop-filter'], motion.durations.base, motion.gentleSpring),
     '&:hover, &:active, &:focus-visible': {
@@ -79,11 +74,11 @@ function buildFloatingNavButtonSx(side: 'left' | 'right') {
       borderColor: 'primary.main',
       backdropFilter: 'blur(12px)',
       WebkitBackdropFilter: 'blur(12px)',
-      boxShadow: (theme: Theme) => theme.palette.mode === 'light' ? '0 12px 30px rgba(15,23,42,0.13)' : '0 12px 32px rgba(0,0,0,0.34)',
-      transform: 'translateY(-50%) scale(1.03)',
+      boxShadow: (theme: Theme) => theme.palette.mode === 'light' ? '0 3px 6px rgba(15,23,42,0.16)' : '0 3px 6px rgba(0,0,0,0.34)',
+      transform: 'scale(1.03)',
     },
     '&:active': {
-      transform: 'translateY(-50%) scale(0.94)',
+      transform: 'scale(0.94)',
       transitionTimingFunction: motion.press,
       transitionDuration: `${motion.durations.instant}ms`,
     },
@@ -130,6 +125,7 @@ export default function ArtifactCalendarReader({
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
   const [loadingDetailId, setLoadingDetailId] = useState<string | null>(null);
   const swipeRef = useRef<ReaderSwipeState | null>(null);
+  const [readerAnchor, setReaderAnchor] = useState<HTMLDivElement | null>(null);
   const itemsByDate = useMemo(() => {
     const map = new Map<string, CharacterArtifactEntry[]>();
     chronologicalItems.forEach((item) => {
@@ -291,18 +287,19 @@ export default function ArtifactCalendarReader({
           </Box>
         ) : null}
       <Box
+        ref={setReaderAnchor}
         onTouchStart={handleReaderTouchStart}
         onTouchMove={handleReaderTouchMove}
         onTouchEnd={handleReaderTouchEnd}
         onTouchCancel={() => { swipeRef.current = null; }}
-        sx={{ position: 'relative', height: readerHeight, touchAction: 'pan-y pinch-zoom', minWidth: 0, px: selectedItem ? { xs: '20px', sm: '24px' } : 0 }}
+        sx={{ position: 'relative', height: readerHeight, touchAction: 'pan-y pinch-zoom', minWidth: 0 }}
       >
         <PaperSurface
           variant={paperVariant}
           minHeight={260}
           contentInset={false}
           sx={[
-            { height: readerHeight, minHeight: readerHeight, maxHeight: readerHeight, display: 'flex', flexDirection: 'column', overflow: 'hidden', px: { xs: 3, sm: 3.5 } },
+            { height: readerHeight, minHeight: readerHeight, maxHeight: readerHeight, display: 'flex', flexDirection: 'column', overflow: 'hidden', px: { xs: 2, sm: 2.75 } },
             selectedItem?.unread ? { outline: '1px solid rgba(244, 67, 54, 0.18)' } : {},
           ]}
         >
@@ -370,12 +367,30 @@ export default function ArtifactCalendarReader({
         </PaperSurface>
         {selectedItem ? (
           <>
-            <IconButton onClick={() => goToItem(-1)} disabled={selectedIndex <= 0} aria-label={isZh ? '更早一项' : 'Earlier entry'} sx={buildFloatingNavButtonSx('left')}>
-              <ChevronLeftIcon />
-            </IconButton>
-            <IconButton onClick={() => goToItem(1)} disabled={selectedIndex < 0 || selectedIndex >= chronologicalItems.length - 1} aria-label={isZh ? '更新一项' : 'Later entry'} sx={buildFloatingNavButtonSx('right')}>
-              <ChevronRightIcon />
-            </IconButton>
+            {(['left', 'right'] as const).map((side) => (
+              <Popper
+                key={side}
+                open={Boolean(readerAnchor)}
+                anchorEl={readerAnchor}
+                placement={side}
+                popperOptions={{ strategy: 'fixed' }}
+                modifiers={[
+                  { name: 'flip', enabled: false },
+                  { name: 'offset', options: { offset: [0, 4] } },
+                  { name: 'preventOverflow', options: { rootBoundary: 'viewport', boundary: 'clippingParents', altAxis: true, tether: false, padding: 2 } },
+                ]}
+                sx={{ zIndex: 1200, '&[data-popper-reference-hidden]': { visibility: 'hidden', pointerEvents: 'none' } }}
+              >
+                <IconButton
+                  onClick={() => goToItem(side === 'left' ? -1 : 1)}
+                  disabled={side === 'left' ? selectedIndex <= 0 : selectedIndex < 0 || selectedIndex >= chronologicalItems.length - 1}
+                  aria-label={side === 'left' ? (isZh ? '更早一项' : 'Earlier entry') : (isZh ? '更新一项' : 'Later entry')}
+                  sx={buildFloatingNavButtonSx()}
+                >
+                  {side === 'left' ? <ChevronLeftIcon /> : <ChevronRightIcon />}
+                </IconButton>
+              </Popper>
+            ))}
           </>
         ) : null}
       </Box>

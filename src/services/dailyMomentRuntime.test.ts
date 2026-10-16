@@ -7,7 +7,7 @@ import type { MemoryItem } from './memoryTypes';
 import { setAIGenerationRuntimeConfig } from './aiGenerationRuntimeConfig';
 import { generateImageWithAdapter, generateJsonWithAdapter } from './aiGenerationAdapter';
 import { persistGeneratedMomentMedia } from './momentMediaStorage';
-import { getDailyMomentMemories, runDailyMomentFlow } from './dailyMomentRuntime';
+import { DailyMomentFlowError, getDailyMomentMemories, runDailyMomentFlow } from './dailyMomentRuntime';
 import { projectWorldMoments } from './worldRuntimeProjection';
 import { hasPendingAutoSocialEventCandidate } from '../hooks/useChatAutoSocialFlow';
 import { retainRuntimeEvents } from './runtimeEventRetention';
@@ -85,7 +85,10 @@ describe('daily moments from character memories', () => {
 
   it('rejects malformed model decisions without publishing', async () => {
     vi.mocked(generateJsonWithAdapter).mockResolvedValue('{"publish":true,"text":""}');
-    await expect(runDailyMomentFlow('room-a', ops())).rejects.toThrow('每日朋友圈生成失败');
+    await expect(runDailyMomentFlow('room-a', ops())).rejects.toMatchObject({
+      message: '每日朋友圈生成失败（校验发布判断与正文）',
+      failures: [{ stage: '校验发布判断与正文', error: expect.objectContaining({ message: '朋友圈模型未返回有效正文' }) }],
+    });
     expect(projectWorldMoments(chats, [actor])).toEqual([]);
   });
 
@@ -170,8 +173,15 @@ describe('daily moments from character memories', () => {
   });
 
   it('keeps model failures retryable and never publishes template text', async () => {
-    vi.mocked(generateJsonWithAdapter).mockRejectedValueOnce(new Error('text unavailable'));
-    await expect(runDailyMomentFlow('room-a', ops())).rejects.toThrow('每日朋友圈生成失败');
+    const cause = Object.assign(new Error('text unavailable'), { diagnostic: { status: 429, code: 'rate_limit' } });
+    vi.mocked(generateJsonWithAdapter).mockRejectedValueOnce(cause);
+    const error = await runDailyMomentFlow('room-a', ops()).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(DailyMomentFlowError);
+    expect(error).toMatchObject({
+      message: '每日朋友圈生成失败（请求发布判断与正文：HTTP 429）',
+      errors: [cause],
+      failures: [{ stage: '请求发布判断与正文', error: cause, provider: profiles[0].provider, model: 'test-model' }],
+    });
     expect(projectWorldMoments(chats, [actor])).toEqual([]);
     await runDailyMomentFlow('room-a', ops());
     expect(projectWorldMoments(chats, [actor])).toHaveLength(1);

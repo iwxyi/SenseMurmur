@@ -15,6 +15,28 @@ import { characterPublicationOffset, MOMENT_SPREAD_WINDOW_MS } from './character
 const runningActors = new Set<string>();
 const CHAT_QUIET_PERIOD_MS = 18 * 60_000;
 
+interface DailyMomentFailure {
+  stage: string;
+  error: unknown;
+  provider?: string;
+  model?: string;
+}
+
+export class DailyMomentFlowError extends AggregateError {
+  readonly failures: DailyMomentFailure[];
+
+  constructor(failures: DailyMomentFailure[]) {
+    const summaries = failures.map(({ stage, error }) => {
+      const diagnostic = error && typeof error === 'object' && 'diagnostic' in error
+        ? error.diagnostic as { status?: number } | undefined : undefined;
+      return diagnostic?.status ? `${stage}：HTTP ${diagnostic.status}` : stage;
+    });
+    super(failures.map(({ error }) => error), `每日朋友圈生成失败（${summaries.join('；')}）`);
+    this.name = 'DailyMomentFlowError';
+    this.failures = failures;
+  }
+}
+
 function startOfDay(now: number) {
   const date = new Date(now);
   date.setHours(0, 0, 0, 0);
@@ -110,7 +132,7 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
   const chat = ops.getChats().find((item) => item.id === chatId);
   if (!chat || chat.deletedAt != null || chat.type !== 'group' || !chat.isActive) return;
   if (!getUsablePreferredAIProfile(ops.getProfiles(), 'text')) return;
-  const errors: unknown[] = [];
+  const failures: DailyMomentFailure[] = [];
   let nextCheckAt: number | undefined;
   for (const actorId of chat.memberIds) {
     if (actorId === 'user' || runningActors.has(actorId)) continue;
@@ -118,6 +140,7 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
       && item.deletedAt == null && item.memberIds.includes(actorId)).sort((a, b) => a.id.localeCompare(b.id))[0];
     if (ownerRoom?.id !== chatId || hasTodayMoment(ops.getChats(), actorId, Date.now())) continue;
     runningActors.add(actorId);
+    let stage = '加载角色';
     try {
       const actor = await ops.loadCharacter(actorId);
       if (!ops.isCurrentSource()) return;
@@ -144,6 +167,7 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
         appointmentAt = typeof readyAt === 'number' ? readyAt
           : now + characterPublicationOffset(`${actorId}:${startOfDay(now)}:moment`, MOMENT_SPREAD_WINDOW_MS);
         if (!schedule) {
+          stage = '保存发布预约';
           await ops.applyChatRuntimePatch(chatId, (latest) => {
             if (!ops.isCurrentSource() || latest.deletedAt != null) return null;
             const event: RuntimeEventV2 = { id: crypto.randomUUID(), conversationId: chatId,
@@ -173,6 +197,7 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
       if (!resolvePostMomentPublishGuard({ chat: guardChat, actor, payload, now }).allow) continue;
       const textProfile = getUsablePreferredAIProfile(ops.getProfiles(), 'text');
       if (!textProfile) continue;
+      stage = '请求发布判断与正文';
       const rawDecision = await generateJsonWithAdapter({
         profile: textProfile,
         systemPrompt: '判断角色今天是否真有值得主动分享到朋友圈的具体新鲜片段。普通聊天、喝茶吃饭等平常记录、重复经历、空泛心情都可以不发；不要为了每日任务凑动态。只根据提供的公开记忆判断，不编造事件或人物。返回 JSON 对象：{"publish":boolean,"text":string}。不发时 text 为空；要发时用角色自己的口吻写 100 字以内正文，不泄露私聊、秘密、用户资料或内部字段。',
@@ -187,8 +212,10 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
         aiUsage: { type: 'moment_generation', label: '生成每日朋友圈', scope: 'moment', resourceId: chatId },
       });
       if (!ops.isCurrentSource()) return;
+      stage = '校验发布判断与正文';
       const decision = parseMomentDecision(rawDecision);
       if (!decision.publish) {
+        stage = '保存不发布判断';
         await ops.applyChatRuntimePatch(chatId, (latest) => {
           if (!ops.isCurrentSource() || latest.deletedAt != null || hasSkippedMemories(ops.getChats(), actorId, signature, Date.now())) return null;
           const skip: RuntimeEventV2 = { id: crypto.randomUUID(), conversationId: chatId,
@@ -200,6 +227,7 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
       }
       payload.momentText = sanitizeUserFacingText(decision.text, members);
       if (!payload.momentText || /^[{[]/.test(payload.momentText)) throw new Error('朋友圈模型未返回有效正文');
+      stage = '创建朋友圈产物';
       const candidate: RuntimeEventV2 = {
         id: payload.dedupeKey!, conversationId: chatId, kind: 'event_candidate', createdAt: now,
         actorIds: [actorId], targetIds: [], visibility: 'derived_public', summary: `${actor.name} 想记录今天的片段`, payload,
@@ -229,6 +257,7 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
           ops.onImageError(error);
         }
       }
+      stage = '保存朋友圈';
       await ops.applyChatRuntimePatch(chatId, (latest) => {
         const latestActor = ops.getCharacters().find((item) => item.id === actorId);
         if (!ops.isCurrentSource() || !latest.isActive || latest.deletedAt != null || !latest.memberIds.includes(actorId)
@@ -255,11 +284,12 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
         ], 160) };
       });
     } catch (error) {
-      errors.push(error);
+      const profile = getUsablePreferredAIProfile(ops.getProfiles(), 'text');
+      failures.push({ stage, error, provider: profile?.provider, model: profile?.model });
     } finally {
       runningActors.delete(actorId);
     }
   }
-  if (errors.length) throw new AggregateError(errors, '每日朋友圈生成失败');
+  if (failures.length) throw new DailyMomentFlowError(failures);
   return { nextCheckAt };
 }
