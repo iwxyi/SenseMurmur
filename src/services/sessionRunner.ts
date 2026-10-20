@@ -311,6 +311,7 @@ export async function runSessionLoop(params: {
   onQuiet?: () => void;
   onMessageChunk: (content: string) => void;
   onStreamingComplete?: () => void;
+  onMessageDisplayAnomaly?: (message: string) => void;
   onDiscardStreamingMessage: () => void;
   onLocalInterception?: (event: LocalInterceptionEvent) => void | Promise<void>;
   onClearStreamingState: () => void;
@@ -566,7 +567,8 @@ export async function runSessionLoop(params: {
       );
       let firstChunkLogged = false;
       let previewContentLength = 0;
-      const reportDiscardedPreview = (reason: string, error?: Error) => {
+      const reportDiscardedPreview = (reason: 'output_retry' | 'speaker_reselected' | 'idle_after_preview'
+        | 'quiet_after_preview' | 'no_send_after_preview' | 'generation_failed', error?: Error, detail?: string) => {
         if (!previewContentLength) return;
         console.warn('[chat-run:stream-preview-discarded]', {
           chatId: params.chatId,
@@ -574,11 +576,23 @@ export async function runSessionLoop(params: {
           speakerId: roundStreamingMessage?.senderId || null,
           previewContentLength,
           reason,
+          detail: detail || null,
           errorName: error?.name || null,
           errorMessage: error?.message || null,
           protocolReason: error instanceof Error && 'protocolReason' in error ? error.protocolReason : null,
         });
         previewContentLength = 0;
+        // Terminal generation failures already notify through onEngineError.
+        if (reason !== 'generation_failed') {
+          const explanations = {
+            output_retry: '刚才显示的回复未通过格式检查，正在重新生成。',
+            speaker_reselected: '本轮重新选择了发言角色，上一段预览未发送。',
+            idle_after_preview: '房间已进入等待状态，但生成过程中出现了文字预览，这段文字未发送。',
+            quiet_after_preview: '本轮最终返回静默结果，与已显示的文字不一致，这段预览未发送。',
+            no_send_after_preview: '角色最终选择了不发言，与已显示的文字不一致，这段预览未发送。',
+          };
+          params.onMessageDisplayAnomaly?.(explanations[reason]);
+        }
       };
       await runOneRound(
         currentChat,
@@ -602,6 +616,7 @@ export async function runSessionLoop(params: {
           ensureSpeakerDetail: (charId) => params.ensureCharacterDetail?.(charId) || Promise.resolve(undefined),
           onMessageChunk: (content) => {
             if (!isActiveLoop(params)) return;
+            if (!content) reportDiscardedPreview('output_retry');
             if (content.trim()) previewContentLength = content.length;
             if (!firstChunkLogged) {
               firstChunkLogged = true;
@@ -621,7 +636,7 @@ export async function runSessionLoop(params: {
           },
           onIdle: (reason) => {
             if (!isActiveLoop(params)) return;
-            reportDiscardedPreview('idle_after_preview');
+            reportDiscardedPreview('idle_after_preview', undefined, reason);
             params.onIdle?.(reason);
           },
           onQuiet: () => {
@@ -702,6 +717,7 @@ export async function runSessionLoop(params: {
                     activeBranchName: projectedChat.messageBranchState?.activeBranchName || null,
                     activeLeafNodeId: projectedChat.messageBranchState?.activeLeafNodeId || null,
                   });
+                  params.onMessageDisplayAnomaly?.('回复已保存，但未能显示在当前对话中，请重新进入查看。');
                 }
               }
               const latestChat = params.getCurrentChat?.() || currentChat;

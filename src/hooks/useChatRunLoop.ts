@@ -284,6 +284,10 @@ export function useChatRunLoop(params: {
           setChatError(null);
         },
         onStreamingComplete: current.freezeStreamingDisplay,
+        onMessageDisplayAnomaly: (message) => {
+          if (current.loopTokenRef.current !== loopId || current.activeChatIdRef.current !== current.chatId) return;
+          current.showErrorToast(message);
+        },
         onDiscardStreamingMessage: () => {
           if (current.loopTokenRef.current !== loopId) return;
           current.discardStreamingMessage();
@@ -371,6 +375,7 @@ export function useChatRunLoop(params: {
           const message = error instanceof Error ? error.message : String(error);
           const safeMessage = message || current.t('common.error');
           setRunLoopError(safeMessage);
+          current.showErrorToast('回复处理失败，请稍后重试。');
           current.discardStreamingMessage();
           setThinkingId(null);
           current.setCurrentSpeaker(null);

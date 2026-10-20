@@ -239,6 +239,7 @@ describe('runSessionLoop', () => {
     const error = Object.assign(new Error('结构化回复无效'), { protocolReason: 'missing_json_envelope' });
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    const notify = vi.fn();
     runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks) => {
       hooks.onSpeakerSelected('a', { id: 'a', name: '甲' });
       hooks.onMessageChunk('已经显示的回复');
@@ -246,12 +247,77 @@ describe('runSessionLoop', () => {
       params.pauseLoop();
     });
     try {
-      await runSessionLoop(params as never);
+      await runSessionLoop({ ...params, onMessageDisplayAnomaly: notify } as never);
       expect(warning).toHaveBeenCalledWith('[chat-run:stream-preview-discarded]', expect.objectContaining({
         reason: 'generation_failed', previewContentLength: '已经显示的回复'.length,
         protocolReason: 'missing_json_envelope',
       }));
       expect(params.onCommit).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled();
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it('notifies when visible text is reset for an output retry even if the next attempt is quiet', async () => {
+    const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    const notify = vi.fn();
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks) => {
+      hooks.onSpeakerSelected('a', { id: 'a', name: '甲' });
+      hooks.onMessageChunk('');
+      hooks.onMessageChunk('已显示的无效回复');
+      hooks.onMessageChunk('');
+      hooks.onQuiet();
+      params.pauseLoop();
+    });
+    try {
+      await runSessionLoop({ ...params, onMessageDisplayAnomaly: notify } as never);
+      expect(notify).toHaveBeenCalledExactlyOnceWith('刚才显示的回复未通过格式检查，正在重新生成。');
+      expect(warning).toHaveBeenCalledWith('[chat-run:stream-preview-discarded]', expect.objectContaining({
+        reason: 'output_retry', previewContentLength: '已显示的无效回复'.length,
+      }));
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it('does not notify when a character declines without displaying text', async () => {
+    const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    const notify = vi.fn();
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks) => {
+      hooks.onSpeakerSelected('a', { id: 'a', name: '甲' });
+      hooks.onNoSend({ speakerId: 'a' });
+      params.pauseLoop();
+    });
+    await runSessionLoop({ ...params, onMessageDisplayAnomaly: notify } as never);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['speaker_reselected', '本轮重新选择了发言角色，上一段预览未发送。'],
+    ['idle_after_preview', '房间已进入等待状态，但生成过程中出现了文字预览，这段文字未发送。'],
+    ['quiet_after_preview', '本轮最终返回静默结果，与已显示的文字不一致，这段预览未发送。'],
+    ['no_send_after_preview', '角色最终选择了不发言，与已显示的文字不一致，这段预览未发送。'],
+  ])('explains the specific preview removal reason: %s', async (reason, explanation) => {
+    const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    const notify = vi.fn();
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks) => {
+      hooks.onSpeakerSelected('a', { id: 'a', name: '甲' });
+      hooks.onMessageChunk('已经显示的文字');
+      if (reason === 'speaker_reselected') hooks.onSpeakerSelected('b', { id: 'b', name: '乙' });
+      if (reason === 'idle_after_preview') hooks.onIdle('当前阶段没有可发言角色');
+      if (reason === 'quiet_after_preview') hooks.onQuiet();
+      if (reason === 'no_send_after_preview') hooks.onNoSend({ speakerId: 'a' });
+      params.pauseLoop();
+    });
+    try {
+      await runSessionLoop({ ...params, onMessageDisplayAnomaly: notify } as never);
+      expect(notify).toHaveBeenCalledExactlyOnceWith(explanation);
+      expect(warning).toHaveBeenCalledWith('[chat-run:stream-preview-discarded]', expect.objectContaining({
+        reason, detail: reason === 'idle_after_preview' ? '当前阶段没有可发言角色' : null,
+      }));
     } finally {
       warning.mockRestore();
     }
@@ -261,6 +327,7 @@ describe('runSessionLoop', () => {
     const preview = { id: 'preview', clientKey: 'preview', chatId: 'chat-1', type: 'ai', senderId: 'a',
       senderName: '甲', content: '预览', timestamp: 1, isStreaming: true } as Message;
     const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const notify = vi.fn();
     const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
     params.getCurrentMessages = () => [preview];
     params.getStreamingMessage = () => preview;
@@ -275,10 +342,11 @@ describe('runSessionLoop', () => {
       params.pauseLoop();
     });
     try {
-      await runSessionLoop(params as never);
+      await runSessionLoop({ ...params, onMessageDisplayAnomaly: notify } as never);
       expect(errorLog).toHaveBeenCalledWith('[chat-run:committed-message-not-projected]', expect.objectContaining({
         committedCount: 1, projectedCount: 1,
       }));
+      expect(notify).toHaveBeenCalledExactlyOnceWith('回复已保存，但未能显示在当前对话中，请重新进入查看。');
     } finally {
       errorLog.mockRestore();
     }
