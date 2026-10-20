@@ -90,7 +90,8 @@ interface MessageListProps {
   onExpressionFeedback?: (message: Message, kind: ExpressionFeedbackKind) => void;
   onRetryMedia?: (message: Message, attachmentId: string) => void | Promise<void>;
   onAddImagesToReference?: (message: Message, attachments: MessageAttachment[]) => void;
-  onCharacterAvatarClick?: (character: AICharacter, anchorEl: HTMLElement) => void;
+  onCharacterAvatarClick?: (character: import('../../services/markdownCharacterMentions').MentionCharacter, anchorEl: HTMLElement) => void;
+  onMentionCharacter?: (character: AICharacter) => void;
   onCreateRevision?: (message: Message, content: string) => void | Promise<void>;
   onRegenerate?: (message: Message) => void | Promise<void>;
   onSwitchRevision?: (message: Message, direction: -1 | 1) => void | Promise<void>;
@@ -384,7 +385,7 @@ const LightweightNarrativeBlock = memo(function LightweightNarrativeBlock({
   storyReaderFontSize: number;
   storyReaderLineHeight: number;
   customBubbleStyles: ReturnType<typeof useSettingsStore.getState>['customBubbleStyles'];
-  onCharacterAvatarClick?: (character: AICharacter, anchorEl: HTMLElement) => void;
+  onCharacterAvatarClick?: (character: import('../../services/markdownCharacterMentions').MentionCharacter, anchorEl: HTMLElement) => void;
 }) {
   if (block.displayMode === 'bubble') {
     const resolvedStyle = character
@@ -520,6 +521,7 @@ export default function MessageList({
   onRetryMedia,
   onAddImagesToReference,
   onCharacterAvatarClick,
+  onMentionCharacter,
   onCreateRevision,
   onRegenerate,
   onSwitchRevision,
@@ -793,6 +795,7 @@ export default function MessageList({
       onAddImagesToReference={item.pending || readOnly ? undefined : onAddImagesToReference}
       onOpenDiagram={item.pending ? undefined : openChatDiagram}
       onCharacterAvatarClick={item.pending ? undefined : onCharacterAvatarClick}
+      onMentionCharacter={item.pending || readOnly ? undefined : onMentionCharacter}
       onCreateRevision={item.pending || readOnly ? undefined : onCreateRevision}
       onRegenerate={item.pending || readOnly ? undefined : onRegenerate}
       onSwitchRevision={item.pending ? undefined : onSwitchRevision}
@@ -807,7 +810,7 @@ export default function MessageList({
       selfMemberId={selfMemberId}
       privateConversation={privateConversation}
     />
-  ), [branchVersionInfoByMessageId, characters, continuousAiMessageKeys, currentUser, onAddImagesToReference, onAnalyzeMessage, onCharacterAvatarClick, onConfirmWorkspaceMutationPlan, onCreateRevision, onDeleteMessage, onExpressionFeedback, onHtmlAutosave, onHtmlRepair, onHtmlSubmit, onOpenArtifact, onOpenHtmlFullscreen, onRegenerate, onRetryMedia, onSwitchRevision, onWithdrawMessage, openChatDiagram, openChatImage, privateConversation, readOnly, selfMemberId]);
+  ), [branchVersionInfoByMessageId, characters, continuousAiMessageKeys, currentUser, onAddImagesToReference, onAnalyzeMessage, onCharacterAvatarClick, onMentionCharacter, onConfirmWorkspaceMutationPlan, onCreateRevision, onDeleteMessage, onExpressionFeedback, onHtmlAutosave, onHtmlRepair, onHtmlSubmit, onOpenArtifact, onOpenHtmlFullscreen, onRegenerate, onRetryMedia, onSwitchRevision, onWithdrawMessage, openChatDiagram, openChatImage, privateConversation, readOnly, selfMemberId]);
 
   const renderMessageItem = useCallback((item: MessageListRenderItem) => {
     const anchorProps = {

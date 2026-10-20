@@ -111,6 +111,7 @@ export function useChatRunLoop(params: {
   const [thinkingId, setThinkingId] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
   const [runLoopError, setRunLoopError] = useState<string | null>(null);
+  const [isWaitingForInput, setIsWaitingForInput] = useState(false);
   const paramsRef = useRef(params);
   const activeRunLoopTokenRef = useRef<string | null>(null);
   const [workTracker] = useState(createTurnWorkTracker);
@@ -307,6 +308,10 @@ export function useChatRunLoop(params: {
           current.setCurrentSpeaker(null);
           setRunLoopError(null);
         },
+        onWaitingForInputChange: (waiting) => {
+          if (current.loopTokenRef.current !== loopId || current.activeChatIdRef.current !== current.chatId) return;
+          setIsWaitingForInput(waiting);
+        },
         onClearStreamingState: () => {
           if (current.loopTokenRef.current !== loopId) return;
           current.clearStreamingMessageRef();
@@ -468,6 +473,7 @@ export function useChatRunLoop(params: {
     const run = runLoopRef.current;
     if (!run) return null;
     current.resetAllCooldowns();
+    setIsWaitingForInput(false);
     const newLoopToken = `${conversationChat.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     if (options.ignoreReaderPositionOnce) ignoreReaderPositionLoopTokenRef.current = newLoopToken;
     pendingStartChatByLoopTokenRef.current.set(newLoopToken, conversationChat);
@@ -519,6 +525,7 @@ export function useChatRunLoop(params: {
   }, []);
 
   const cancelActiveConversationLoop = useCallback((reason = 'user_cancelled') => {
+    setIsWaitingForInput(false);
     const current = paramsRef.current;
     const loopToken = current.loopTokenRef.current;
     logDeveloperDiagnostic('chat-run:cancel', {
@@ -555,6 +562,7 @@ export function useChatRunLoop(params: {
   }, [workTracker]);
 
   const resetRunLoopUiState = useCallback(() => {
+    setIsWaitingForInput(false);
     activeAbortControllerRef.current?.abort();
     activeAbortControllerRef.current = null;
     activeRunLoopTokenRef.current = null;
@@ -571,6 +579,7 @@ export function useChatRunLoop(params: {
     thinkingId,
     chatError,
     runLoopError,
+    isWaitingForInput,
     hasPendingTurnWork,
     startConversationLoopIfNeeded,
     cancelActiveConversationLoop,

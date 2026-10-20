@@ -8,6 +8,8 @@ import EditIcon from '@mui/icons-material/Edit';
 import AddPhotoAlternateIcon from '@mui/icons-material/AddPhotoAlternate';
 import InsightsIcon from '@mui/icons-material/Insights';
 import TuneIcon from '@mui/icons-material/Tune';
+import AlternateEmailIcon from '@mui/icons-material/AlternateEmail';
+import PersonOutlineIcon from '@mui/icons-material/PersonOutlined';
 import RateReviewIcon from '@mui/icons-material/RateReview';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { Message, MessageAttachment } from '../../types/message';
@@ -48,7 +50,8 @@ interface MessageBubbleProps {
   onOpenImage?: (message: Message, attachment: MessageAttachment) => void;
   onAddImagesToReference?: (message: Message, attachments: MessageAttachment[]) => void;
   onOpenDiagram?: (message: Message, diagram: { source: string; svg: string; dataUrl: string }) => void;
-  onCharacterAvatarClick?: (character: AICharacter, anchorEl: HTMLElement) => void;
+  onCharacterAvatarClick?: (character: import('../../services/markdownCharacterMentions').MentionCharacter, anchorEl: HTMLElement) => void;
+  onMentionCharacter?: (character: AICharacter) => void;
   pending?: boolean;
   currentUser?: { nickname?: string; avatar?: string };
   selfMemberId?: string | null;
@@ -128,7 +131,20 @@ function buildWithdrawalDebugTitle(withdrawal: NonNullable<Message['metadata']>[
   );
 }
 
-function MessageBubble({ message, continuesPreviousSender = false, character, characters = [], onDelete, onWithdraw, onAnalyze, onExpressionFeedback, onRetryMedia, onOpenImage, onAddImagesToReference, onOpenDiagram, onCharacterAvatarClick, pending = false, currentUser, selfMemberId = null, privateConversation = false, branchVersionInfo, onCreateRevision, onRegenerate, onSwitchRevision, onOpenArtifact, onOpenHtmlFullscreen, onHtmlAutosave, onHtmlSubmit, onHtmlRepair, onConfirmWorkspaceMutationPlan }: MessageBubbleProps) {
+function MessageBubble({ message, continuesPreviousSender = false, character, characters = [], onDelete, onWithdraw, onAnalyze, onExpressionFeedback, onRetryMedia, onOpenImage, onAddImagesToReference, onOpenDiagram, onCharacterAvatarClick, onMentionCharacter, pending = false, currentUser, selfMemberId = null, privateConversation = false, branchVersionInfo, onCreateRevision, onRegenerate, onSwitchRevision, onOpenArtifact, onOpenHtmlFullscreen, onHtmlAutosave, onHtmlSubmit, onHtmlRepair, onConfirmWorkspaceMutationPlan }: MessageBubbleProps) {
+  const avatarPressRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; x: number; y: number; fired: boolean }>({ timer: null, x: 0, y: 0, fired: false });
+  const clearAvatarPress = () => {
+    if (avatarPressRef.current.timer) clearTimeout(avatarPressRef.current.timer);
+    avatarPressRef.current.timer = null;
+  };
+  useEffect(() => {
+    const cancel = () => {
+      if (avatarPressRef.current.timer) clearTimeout(avatarPressRef.current.timer);
+      avatarPressRef.current.timer = null;
+    };
+    window.addEventListener('scroll', cancel, true);
+    return () => { cancel(); window.removeEventListener('scroll', cancel, true); };
+  }, []);
   const customBubbleStyles = useSettingsStore((state) => state.customBubbleStyles);
   const userBubbleStyleId = useSettingsStore((state) => state.userBubbleStyleId);
   const userBubbleStyle = useSettingsStore((state) => state.userBubbleStyle);
@@ -145,6 +161,7 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
   const [parametersDialogOpen, setParametersDialogOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null);
+  const [avatarMenuPosition, setAvatarMenuPosition] = useState<MenuPosition | null>(null);
   const [suppressNativeTouchSelection, setSuppressNativeTouchSelection] = useState(false);
   const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
   const [copyStatus, setCopyStatus] = useState<'success' | 'error' | null>(null);
@@ -422,6 +439,11 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
   };
 
   const handleAvatarClick = (event: React.MouseEvent<HTMLElement>) => {
+    if (avatarPressRef.current.fired) {
+      avatarPressRef.current.fired = false;
+      event.preventDefault();
+      return;
+    }
     if (message.type === 'ai' && !pending) {
       if (onCharacterAvatarClick) {
         onCharacterAvatarClick(effectiveCharacter || ({
@@ -490,6 +512,32 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
     ? { borderRadius: '18px', background: '#ffffff', color: '#111827', border: '1px solid rgba(15, 23, 42, 0.08)', boxShadow: '0 8px 24px rgba(15, 23, 42, 0.08)' }
     : (resolvedStyle ? buildBubblePreview(resolvedStyle, isUser) : (resolvedUserStyle ? buildBubblePreview(resolvedUserStyle, true) : null));
   const avatar = effectiveCharacter?.avatar;
+  const roleAvatarHandlers = message.type === 'ai' && !pending ? {
+    onClick: handleAvatarClick,
+    onPointerDown: (event: React.PointerEvent<HTMLElement>) => {
+      clearAvatarPress();
+      avatarPressRef.current.fired = false;
+      if (event.button !== 0 || !effectiveCharacter || !onMentionCharacter) return;
+      avatarPressRef.current.x = event.clientX;
+      avatarPressRef.current.y = event.clientY;
+      avatarPressRef.current.timer = setTimeout(() => {
+        avatarPressRef.current.fired = true;
+        onMentionCharacter(effectiveCharacter);
+      }, 500);
+    },
+    onPointerMove: (event: React.PointerEvent<HTMLElement>) => {
+      if (Math.hypot(event.clientX - avatarPressRef.current.x, event.clientY - avatarPressRef.current.y) > 10) clearAvatarPress();
+    },
+    onPointerUp: clearAvatarPress,
+    onPointerCancel: clearAvatarPress,
+    onPointerLeave: clearAvatarPress,
+    onContextMenu: (event: React.MouseEvent<HTMLElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      clearAvatarPress();
+      if (!avatarPressRef.current.fired) setAvatarMenuPosition({ mouseX: event.clientX, mouseY: event.clientY });
+    },
+  } : {};
   const wrapperJustify = isUser ? 'flex-end' : 'flex-start';
   const normalizedCurrentUserAvatar = currentUser?.avatar?.trim() === '🍵' ? '' : currentUser?.avatar?.trim();
   const selfAvatarValue = isGuidanceBubble ? '' : (isPerspectiveSelf ? effectiveCharacter?.avatar?.trim() : (isManualSpeaker ? manualSpeaker?.avatar?.trim() : normalizedCurrentUserAvatar));
@@ -573,7 +621,8 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
     <Box sx={{ width: '100%', minWidth: 0, maxWidth: '100%' }}>
       <Box data-message-id={message.id} data-message-type={message.type} aria-label={continuesPreviousSender ? `${displaySenderName} 的连续消息` : undefined} sx={{ display: 'flex', width: '100%', minWidth: 0, maxWidth: '100%', justifyContent: wrapperJustify, px: hidePrivateChatIdentity ? { xs: 2, sm: 3 } : 2, py: continuesPreviousSender ? 0.2 : 0.75, gap: hidePrivateChatIdentity ? 0 : 1.25, alignItems: 'flex-start' }}>
         {!isUser && !hidePrivateChatIdentity ? (
-          <Box onClick={handleAvatarClick} sx={{ cursor: message.type === 'ai' && !pending ? 'pointer' : 'default', flexShrink: 0, width: 38, visibility: continuesPreviousSender ? 'hidden' : 'visible' }} aria-hidden={continuesPreviousSender}>
+          <Box {...roleAvatarHandlers}
+            sx={{ cursor: message.type === 'ai' && !pending ? 'pointer' : 'default', flexShrink: 0, width: 38, userSelect: 'none', WebkitTouchCallout: 'none', '& img': { WebkitUserDrag: 'none' }, visibility: continuesPreviousSender ? 'hidden' : 'visible' }} aria-hidden={continuesPreviousSender}>
             {avatar && isImageAvatar(avatar) ? (
               <Avatar src={resolveSafeAvatarSrc(avatar)} alt={message.senderName} slotProps={{ img: { loading: 'lazy', decoding: 'async', onError: () => rememberFailedAvatarUrl(avatar) } }} sx={{ width: 38, height: 38 }} />
             ) : (
@@ -639,6 +688,8 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
               bgcolor: isUser && !bubblePreview ? 'primary.main' : undefined,
               background: bubblePreview?.background || (isUser ? undefined : '#ffffff'),
               color: bubblePreview?.color || (isUser ? 'primary.contrastText' : (resolvedStyle?.textColor || '#1f2937')),
+              '--message-link-color': bubblePreview ? 'currentColor' : (isUser ? theme.palette.primary.contrastText : theme.palette.primary.main),
+              '--message-mention-color': isUser && !bubblePreview ? '#d2e1fa' : (theme.palette.mode === 'dark' && !useCompactBubble ? '#a8c4ed' : '#576b95'),
               border: bubblePreview?.border || '1px solid rgba(15, 23, 42, 0.08)',
               boxShadow: bubblePreview?.boxShadow || '0 8px 24px rgba(15, 23, 42, 0.08)',
               // Derive from the selected text so custom light and dark user
@@ -664,7 +715,7 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
                   </Box>
                 </Tooltip>
               ) : withdrawalNoticeNode
-            ) : <MessageContent message={visibleMessage} onRetryMedia={onRetryMedia} onOpenImage={onOpenImage} onOpenPrompt={openPromptMenu} onOpenDiagram={onOpenDiagram} compactMediaLayout={compactMediaBubble} />}
+            ) : <MessageContent message={visibleMessage} characters={characters} onCharacterMentionClick={onCharacterAvatarClick} onRetryMedia={onRetryMedia} onOpenImage={onOpenImage} onOpenPrompt={openPromptMenu} onOpenDiagram={onOpenDiagram} compactMediaLayout={compactMediaBubble} />}
           </Box>
           {workspacePlan?.status === 'pending' && onConfirmWorkspaceMutationPlan ? (
             <Box sx={{ mt: 0.75, p: 1, border: '1px solid', borderColor: 'warning.main', borderRadius: 1 }}>
@@ -715,7 +766,7 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
         </Box>
 
         {isUser && !hidePrivateChatIdentity ? (
-          <Box sx={{ flexShrink: 0 }}>
+          <Box {...roleAvatarHandlers} sx={{ flexShrink: 0, cursor: isPerspectiveSelf && !pending ? 'pointer' : undefined }}>
             {selfAvatarValue && isImageAvatar(selfAvatarValue) ? (
               <Avatar src={resolveSafeAvatarSrc(selfAvatarValue)} alt={selfAvatarAlt} slotProps={{ img: { loading: 'lazy', decoding: 'async', onError: () => rememberFailedAvatarUrl(selfAvatarValue) } }} sx={{ width: 38, height: 38 }} />
             ) : (
@@ -745,8 +796,30 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
 
       <Dialog open={viewerOpen} onClose={() => setViewerOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>{displaySenderName}</DialogTitle>
-        <DialogContent><MessageContent message={visibleMessage} onRetryMedia={onRetryMedia} onOpenImage={onOpenImage} onOpenPrompt={openPromptMenu} onOpenDiagram={onOpenDiagram} compactMediaLayout={compactMediaBubble} /></DialogContent>
+        <DialogContent><MessageContent message={visibleMessage} characters={characters} onCharacterMentionClick={onCharacterAvatarClick} onRetryMedia={onRetryMedia} onOpenImage={onOpenImage} onOpenPrompt={openPromptMenu} onOpenDiagram={onOpenDiagram} compactMediaLayout={compactMediaBubble} /></DialogContent>
       </Dialog>
+
+      <Menu
+        open={Boolean(avatarMenuPosition)}
+        onClose={() => setAvatarMenuPosition(null)}
+        anchorReference="anchorPosition"
+        anchorPosition={avatarMenuPosition ? { top: avatarMenuPosition.mouseY, left: avatarMenuPosition.mouseX } : undefined}
+      >
+        <MenuItem disabled={!effectiveCharacter || !onMentionCharacter} onClick={() => {
+          setAvatarMenuPosition(null);
+          if (effectiveCharacter) onMentionCharacter?.(effectiveCharacter);
+        }}>
+          <ListItemIcon><AlternateEmailIcon fontSize="small" /></ListItemIcon>
+          @TA
+        </MenuItem>
+        <MenuItem disabled={!effectiveCharacter} onClick={() => {
+          setAvatarMenuPosition(null);
+          navigate(`/characters/${message.senderId}/edit?returnTo=${encodeURIComponent(location.pathname + location.search)}`);
+        }}>
+          <ListItemIcon><PersonOutlineIcon fontSize="small" /></ListItemIcon>
+          查看资料
+        </MenuItem>
+      </Menu>
 
       <Menu
         open={Boolean(menuPosition)}
@@ -944,6 +1017,7 @@ function areMessageBubblePropsEqual(previous: MessageBubbleProps, next: MessageB
     && previous.onAddImagesToReference === next.onAddImagesToReference
     && previous.onOpenDiagram === next.onOpenDiagram
     && previous.onCharacterAvatarClick === next.onCharacterAvatarClick
+    && previous.onMentionCharacter === next.onMentionCharacter
     && previous.pending === next.pending
     && previous.currentUser === next.currentUser
     && previous.selfMemberId === next.selfMemberId

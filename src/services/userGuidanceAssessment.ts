@@ -3,6 +3,7 @@ import type { GroupChat } from '../types/chat';
 import type { Message } from '../types/message';
 import type { APIConfig } from '../types/settings';
 import { generateJsonResponse } from './aiClient';
+import { explicitUserMentionIds } from './characterMentions';
 import { reportRecoverableWarning } from './diagnostics';
 import { createUndirectedUserGuidance, normalizeUserGuidanceIntent, type UserGuidanceIntent } from './userGuidanceIntent';
 
@@ -28,7 +29,7 @@ export async function assessUserGuidance(params: {
   config?: APIConfig | null;
   chat: GroupChat;
   characters: AICharacter[];
-  message: Pick<Message, 'content' | 'type' | 'senderId'>;
+  message: Pick<Message, 'content' | 'type' | 'senderId' | 'metadata'>;
   recentMessages?: Message[];
 }): Promise<UserGuidanceIntent | null> {
   const fallback = createUndirectedUserGuidance(params.message.content);
@@ -37,6 +38,7 @@ export async function assessUserGuidance(params: {
   const systemPrompt = [
     '你是群聊用户意图分析器。理解语境与语用，只输出结构化决策，不生成聊天回复。',
     '不得靠字面关键词机械判断：区分点名回应、谈论某人、否定指令、转述、玩笑、图片理解与图片生成。',
+    'explicitMentions 是用户通过艾特选中的成员，只表达引起注意，不自动要求发言。结合原文判断是否要求回答；引述、代码里的名字不是召唤，也不要把每个艾特都填成 actorIds。',
     'actorIds 仅填写用户明确指定必须执行或优先发言的角色；mentionedActorIds 是被谈及但未必需要发言的角色。面向群体的开放邀请不是逐人作答任务，actorIds 留空；只有语义上明确要求每个人分别完成时才填写全体成员。',
     '只要 actorIds 非空，就表示这些角色拥有下一轮发言或执行的优先权，不因 kind 或 beatType 改成随机选人。',
     'suppressedActorIds 是明确不应插话或被否定为执行者的角色；deferredActorIds 是暂缓发言的角色。只能填写成员 id。',
@@ -53,6 +55,7 @@ export async function assessUserGuidance(params: {
     members,
     recentTranscript: recentTranscript(params.recentMessages || [], params.characters),
     userMessage: params.message.content,
+    explicitMentions: explicitUserMentionIds(params.message).filter((id) => members.some((member) => member.id === id)),
   };
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= 2; attempt += 1) {

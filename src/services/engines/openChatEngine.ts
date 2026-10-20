@@ -156,7 +156,7 @@ function createRuntimeEventV2(params: {
 
 async function resolveInteraction(params: {
   conversation: GroupChat;
-  message: Pick<Message, 'content' | 'type' | 'senderId'> & { interactionHint?: InteractionEventPayload | null; interactionHints?: InteractionEventPayload[] | null; socialEventHints?: SocialEventHintEnvelope[] | null; conflictFocus?: import('../../types/runtimeEvent').ConflictFocusPayload | null };
+  message: Pick<Message, 'content' | 'type' | 'senderId' | 'metadata'> & { interactionHint?: InteractionEventPayload | null; interactionHints?: InteractionEventPayload[] | null; socialEventHints?: SocialEventHintEnvelope[] | null; conflictFocus?: import('../../types/runtimeEvent').ConflictFocusPayload | null };
   characters: AICharacter[];
   recentMessages?: Message[];
   apiConfig?: APIConfig;

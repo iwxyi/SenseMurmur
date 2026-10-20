@@ -247,7 +247,15 @@ export interface StoryAssetMetadata {
   storySituation?: string;
 }
 
+export interface CharacterMention {
+  characterId: string;
+  name: string;
+  start: number;
+  end: number;
+}
+
 export interface MessageMetadata {
+  mentions?: CharacterMention[];
   conversationUpdate?: import('./conversationContinuity').ConversationUpdate;
   voice?: {
     url: string;

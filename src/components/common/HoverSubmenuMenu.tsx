@@ -19,7 +19,7 @@ interface HoverSubmenuMenuProps {
 const surfaceSx = {
   zIndex: 1400,
   minWidth: 150,
-  p: 0.5,
+  p: 0.25,
   border: '1px solid',
   borderColor: 'divider',
   borderRadius: 1,
@@ -28,8 +28,12 @@ const surfaceSx = {
   boxShadow: (theme: { palette: { menuShadow?: string } }) => theme.palette.menuShadow || '0 12px 34px rgba(15,23,42,0.16)',
   backdropFilter: 'blur(22px) saturate(1.18)',
   WebkitBackdropFilter: 'blur(22px) saturate(1.18)',
-  animation: 'menuSurfaceIn 180ms cubic-bezier(0.22, 1, 0.36, 1)',
+  animation: 'menuSurfaceIn 100ms cubic-bezier(0.22, 1, 0.36, 1)',
   '@keyframes menuSurfaceIn': { from: { opacity: 0, transform: 'scale(0.98)' }, to: { opacity: 1, transform: 'scale(1)' } },
+  '@media (min-width: 900px)': {
+    minWidth: 140,
+    p: 0.125,
+  },
 };
 
 /** 基于 Radix 的项目级悬浮级联菜单，统一处理焦点、键盘、碰撞定位和关闭行为。 */
@@ -60,7 +64,13 @@ export default function HoverSubmenuMenu({ anchorEl, open, onClose, items }: Hov
             {items.map((item) => (
               <DropdownMenu.Sub key={item.id}>
                 <DropdownMenu.SubTrigger asChild disabled={item.disabled}>
-                  <MenuItem sx={{ minWidth: 150, display: 'flex', alignItems: 'center' }}>
+                  <MenuItem sx={{
+                    minWidth: 150,
+                    display: 'flex',
+                    alignItems: 'center',
+                    py: 0.75,
+                    '@media (min-width: 900px)': { minWidth: 140, py: 0.5 },
+                  }}>
                     <Typography component="span" sx={{ flex: 1 }}>{item.label}</Typography>
                     <Box component="span" sx={{ ml: 2, color: 'text.disabled', lineHeight: 1 }}>›</Box>
                   </MenuItem>

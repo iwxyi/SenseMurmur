@@ -1,6 +1,7 @@
 import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
 import type { Message } from '../types/message';
+import { explicitUserMentionIds } from './characterMentions';
 import { isReplyWorthyInteractionKind } from '../types/runtimeEvent';
 import { extractKeywords, calculateTopicRelevance } from './topicExtractor';
 import { getRelationshipWeight } from './relationshipEngine';
@@ -375,6 +376,8 @@ export function calculateWeights(
   const postUserAiMessages = latestHumanIndex >= 0
     ? collapseGeneratedBubbleTurns(recentMessages.slice(latestHumanIndex + 1))
     : [];
+  const userMentionIds = latestHumanIndex >= 0 && postUserAiMessages.length === 0
+    ? explicitUserMentionIds(recentMessages[latestHumanIndex]) : [];
   const postUserSpeakCounts = postUserAiMessages.slice(-6).reduce<Record<string, number>>((acc, message) => {
     acc[message.senderId] = (acc[message.senderId] || 0) + 1;
     return acc;
@@ -487,6 +490,8 @@ export function calculateWeights(
         && directorIntent.targetActorIds.includes(char.id)
         ? 0.86
         : 0;
+      const userMentionBoost = userMentionIds.includes(char.id)
+        && !suppressedUserGuidanceActorIds.includes(char.id) && !deferredUserGuidanceActorIds.includes(char.id) ? 0.35 : 0;
       const guidanceFloorGuardianBias = directorIntent?.source === 'user_message'
         && !forcedUserGuidanceActorIds.length
         && Boolean(directorIntent.userGuidance?.actorIds.length)
@@ -542,6 +547,7 @@ export function calculateWeights(
         : 0;
       weight -= userPresenceRotationPenalty;
       weight += pendingReplyBoost;
+      weight += userMentionBoost;
       weight += conflictBias;
       weight += directorBias.bias;
       weight += guidanceFloorGuardianBias;
@@ -653,7 +659,7 @@ export function calculateWeights(
         idleStaySilent,
         scoreBreakdown: buildSpeakerScoreBreakdown({
           actorId: char.id,
-          addressed: Math.max(pendingReplyBoost, directCueBoost, directorAddressBoost),
+          addressed: Math.max(pendingReplyBoost, directCueBoost, directorAddressBoost, userMentionBoost),
           topicRelevance: relevance * 0.2 + contentLengthAdjustment + (directorAddressBoost ? 0.24 : 0),
           lineInvolvement: conflictBias + directorBias.bias,
           emotionalPressure: clamp(emotionalMomentum + directedAffectPressure, -0.18, 1),
@@ -668,6 +674,7 @@ export function calculateWeights(
           finalScore,
           reasons: [
             pendingReplyBoost ? 'pending_reply' : '',
+            userMentionBoost ? 'user_mention' : '',
             directorAddressBoost ? 'direct_user_address' : '',
             directCueBoost ? 'direct_message_address' : '',
             unspokenMemberBias ? 'unspoken_member' : '',

@@ -274,7 +274,22 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
             bgcolor: (theme) => theme.palette.mode === 'light' ? 'rgba(15,23,42,0.042)' : 'rgba(226,232,240,0.055)',
             boxShadow: 'none',
           },
-        } : {}),
+        } : {
+          borderColor: selected || multiSelected
+            ? 'primary.main'
+            : (theme) => theme.palette.mode === 'light' ? 'rgba(15,23,42,0.12)' : 'rgba(226,232,240,0.14)',
+          bgcolor: selected || multiSelected
+            ? (theme) => theme.palette.mode === 'light' ? 'rgba(49,90,156,0.085)' : 'rgba(120,156,220,0.12)'
+            : (theme) => theme.palette.mode === 'light' ? 'rgba(255,255,255,0.88)' : 'rgba(18,20,28,0.86)',
+          '&:hover': {
+            borderColor: 'primary.main',
+            bgcolor: (theme) => theme.palette.mode === 'light' ? 'rgba(255,255,255,0.96)' : 'rgba(24,27,38,0.94)',
+            boxShadow: (theme) => theme.palette.mode === 'light'
+              ? '0 8px 22px rgba(15,23,42,0.085)'
+              : '0 10px 26px rgba(0,0,0,0.30)',
+            transform: 'translateY(-1px)',
+          },
+        }),
         '&::after': (cardBackgroundUrl || cardAccentImageUrl) ? {
           content: '""', position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 0, borderRadius: 'inherit',
           backgroundImage: (theme) => { const veil = isList ? (theme.palette.mode === 'light' ? 'rgba(255,255,255,0.91)' : 'rgba(18,20,28,0.92)') : (theme.palette.mode === 'light' ? 'rgba(255,255,255,0.84)' : 'rgba(18,20,28,0.86)'); return `linear-gradient(${veil}, ${veil}), url("${(cardBackgroundUrl || cardAccentImageUrl).replace(/"/g, '%22')}")`; },

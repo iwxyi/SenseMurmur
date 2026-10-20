@@ -2,7 +2,7 @@ import { useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
-import type { Message, MessageAttachment } from '../types/message';
+import type { CharacterMention, Message, MessageAttachment } from '../types/message';
 import type { SessionActionSchema, SessionNormalizedIntentResult } from '../types/sessionEngine';
 import type { AIModelProfile } from '../types/settings';
 import { runAutoSocialEventFlowImpl, runSessionActionImpl, runSurfaceIntentImpl, type ChatSurfaceActionContext } from '../services/chatSurfaceActions';
@@ -32,9 +32,9 @@ interface UseChatSurfaceActionsParams {
   actionSchema: SessionActionSchema | null;
   aiProfiles?: AIModelProfile[];
   speakAsChar: AICharacter | null;
-  handleGuideSend: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
-  handleMemberSpeakSend: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
-  handleSpeakAs: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
+  handleGuideSend: (content: string, attachments?: MessageAttachment[], mentions?: CharacterMention[]) => Promise<void>;
+  handleMemberSpeakSend: (content: string, attachments?: MessageAttachment[], mentions?: CharacterMention[]) => Promise<void>;
+  handleSpeakAs: (content: string, attachments?: MessageAttachment[], mentions?: CharacterMention[]) => Promise<void>;
   setSnackbar: (value: { open: boolean; message: string; severity: 'error' | 'success' }) => void;
 }
 

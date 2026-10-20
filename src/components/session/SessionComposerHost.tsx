@@ -1,14 +1,20 @@
 import { Box, Button, MenuItem, Stack, TextField, Typography } from '@mui/material';
-import { useMemo, useState, type ReactNode } from 'react';
-import ChatInput from '../chat/ChatInput';
+import { useMemo, useState, type ReactNode, type Ref } from 'react';
+import ChatInput, { type ChatInputHandle } from '../chat/ChatInput';
 import type { SessionInputSurfaceDefinition } from '../../types/chat';
 import type { SessionBoardComposerSubmission, SessionFormComposerSubmission, SessionTextComposerSubmission } from '../../types/sessionEngine';
 import type { UserDraftActivity } from '../../services/userInputBuffer';
-import type { MessageAttachment } from '../../types/message';
+import type { CharacterMention, MessageAttachment } from '../../types/message';
+import type { AICharacter } from '../../types/character';
+import { composerDraftKey } from '../../services/composerDrafts';
 import type { AIModelInputCapabilities } from '../../types/settings';
 import type { ComposerState } from '../../types/composerState';
 
 interface SessionComposerHostProps {
+  inputHandleRef?: Ref<ChatInputHandle>;
+  mentionCharacters?: AICharacter[];
+  chatId?: string;
+  draftActorId?: string;
   surfaces: SessionInputSurfaceDefinition[];
   onSubmitText: (submission: SessionTextComposerSubmission, surface: SessionInputSurfaceDefinition) => void | Promise<void>;
   onSubmitForm?: (submission: SessionFormComposerSubmission, surface: SessionInputSurfaceDefinition) => void;
@@ -42,7 +48,7 @@ function buildInitialFieldState(surfaces: SessionInputSurfaceDefinition[]) {
   ) as Record<string, Record<string, string>>;
 }
 
-export default function SessionComposerHost({ surfaces, onSubmitText, onSubmitForm, onSubmitBoard, speakAsCharacterName, onCloseSpeakAs, sendingLabel, hideSpeakAsChip, onSendError, onOpenPanel, onDraftActivity, inputCapabilities, inputCapabilityWarning, autoFocus, topContent, injectedAttachments, onInjectedAttachmentsConsumed, isReplyPending, onStopReply, disabled = false, disabledReason, composerState }: SessionComposerHostProps) {
+export default function SessionComposerHost({ inputHandleRef, mentionCharacters, chatId, draftActorId, surfaces, onSubmitText, onSubmitForm, onSubmitBoard, speakAsCharacterName, onCloseSpeakAs, sendingLabel, hideSpeakAsChip, onSendError, onOpenPanel, onDraftActivity, inputCapabilities, inputCapabilityWarning, autoFocus, topContent, injectedAttachments, onInjectedAttachmentsConsumed, isReplyPending, onStopReply, disabled = false, disabledReason, composerState }: SessionComposerHostProps) {
   const primarySurface = surfaces.find((surface) => surface.type === 'text') || surfaces[0];
   const secondarySurfaces = surfaces.filter((surface) => surface !== primarySurface && (surface.type === 'board' || surface.type === 'form' || surface.type === 'hybrid'));
   const [fieldState, setFieldState] = useState<Record<string, Record<string, string>>>(() => buildInitialFieldState(surfaces));
@@ -149,9 +155,13 @@ export default function SessionComposerHost({ surfaces, onSubmitText, onSubmitFo
 
       {!primarySurface || primarySurface.type !== 'text' ? (
         <ChatInput
+          inputHandleRef={inputHandleRef}
+          key={composerDraftKey(chatId || '', `fallback:${draftActorId || ''}`)}
+          mentionCharacters={mentionCharacters}
+          draftKey={chatId ? composerDraftKey(chatId, `fallback:${draftActorId || ''}`) : undefined}
           mode={speakAsCharacterName ? 'speakAs' : 'memberSpeak'}
           characterName={speakAsCharacterName || undefined}
-          onSend={(content, attachments?: MessageAttachment[]) => onSubmitText({ content, attachments }, { key: 'fallback-text', type: 'text', mode: speakAsCharacterName ? 'speakAs' : 'memberSpeak' })}
+          onSend={(content, attachments?: MessageAttachment[], mentions?: CharacterMention[]) => onSubmitText({ content, attachments, mentions }, { key: 'fallback-text', type: 'text', mode: speakAsCharacterName ? 'speakAs' : 'memberSpeak' })}
           onClose={speakAsCharacterName ? onCloseSpeakAs : undefined}
           sendingLabel={sendingLabel}
           hideSpeakAsChip={hideSpeakAsChip}
@@ -183,10 +193,14 @@ export default function SessionComposerHost({ surfaces, onSubmitText, onSubmitFo
           );
         return (
           <ChatInput
+            inputHandleRef={inputHandleRef}
+            key={composerDraftKey(chatId || '', `${primarySurface.key}:${draftActorId || ''}`)}
+            mentionCharacters={mentionCharacters}
+            draftKey={chatId ? composerDraftKey(chatId, `${primarySurface.key}:${draftActorId || ''}`) : undefined}
             mode={mode}
             characterName={mode === 'speakAs' ? speakAsCharacterName : undefined}
             placeholderOverride={placeholderOverride}
-            onSend={(content, attachments?: MessageAttachment[]) => onSubmitText({ content, actorId: primarySurface.actorId, attachments }, primarySurface)}
+            onSend={(content, attachments?: MessageAttachment[], mentions?: CharacterMention[]) => onSubmitText({ content, actorId: primarySurface.actorId, attachments, mentions }, primarySurface)}
             onClose={mode === 'speakAs' ? onCloseSpeakAs : undefined}
             sendingLabel={sendingLabel}
             hideSpeakAsChip={hideSpeakAsChip}

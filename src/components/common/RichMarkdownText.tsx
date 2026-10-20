@@ -6,6 +6,8 @@ import MermaidDiagram from './MermaidDiagram';
 import AppSnackbar from './AppSnackbar';
 import { parseAppLink, isLikelyExternalLink } from '../../services/appLink';
 import { useAppLinkHandler } from '../../hooks/useAppLinkHandler';
+import type { AICharacter } from '../../types/character';
+import { characterMentionHref, remarkCharacterMentions } from '../../services/markdownCharacterMentions';
 
 type MarkdownAstNode = {
   type?: string;
@@ -76,6 +78,7 @@ function MermaidDiagramPlaceholder() {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function transformMarkdownUrl(url: string) {
   const trimmed = url.trim();
   if (!trimmed) return '';
@@ -88,11 +91,17 @@ function RichMarkdownText({
   softLineBreaks = true,
   deferDiagrams = false,
   onOpenDiagram,
+  mentionCharacters,
+  mentions,
+  onCharacterMentionClick,
 }: {
   text: string;
   softLineBreaks?: boolean;
   deferDiagrams?: boolean;
   onOpenDiagram?: (payload: { source: string; svg: string; dataUrl: string }) => void;
+  mentionCharacters?: AICharacter[];
+  mentions?: import('../../types/message').CharacterMention[];
+  onCharacterMentionClick?: (character: import('../../services/markdownCharacterMentions').MentionCharacter, anchorEl: HTMLElement) => void;
 }) {
   const appLink = useAppLinkHandler();
   return (
@@ -174,7 +183,12 @@ function RichMarkdownText({
             verticalAlign: 'top',
           },
           '& th': { fontWeight: 800, bgcolor: 'action.hover' },
-          '& a': { color: 'primary.main', textDecoration: 'none', '&:hover': { textDecoration: 'underline' } },
+          '& a': { color: (theme) => `var(--message-link-color, ${theme.palette.primary.main})`, textDecoration: 'none', '&:hover': { textDecoration: 'underline' } },
+          '& a[data-character-mention]': {
+            color: (theme) => `var(--message-mention-color, ${theme.palette.mode === 'dark' ? '#a8c4ed' : '#576b95'})`,
+            textDecoration: 'none',
+            '&:hover': { textDecoration: 'none' },
+          },
           '& img': {
             display: 'block',
             width: 'auto',
@@ -187,18 +201,35 @@ function RichMarkdownText({
         }}
       >
         <ReactMarkdown
-          remarkPlugins={softLineBreaks ? [remarkGfm, remarkSingleLineBreaks] : [remarkGfm]}
+          remarkPlugins={[
+            remarkGfm,
+            ...(softLineBreaks ? [remarkSingleLineBreaks] : []),
+            ...(mentionCharacters && onCharacterMentionClick ? [[remarkCharacterMentions, { characters: mentionCharacters, mentions, source: text }] as [typeof remarkCharacterMentions, Parameters<typeof remarkCharacterMentions>[0]]] : []),
+          ]}
           urlTransform={transformMarkdownUrl}
           components={{
             a: ({ href, children }) => {
+              const bound = mentions?.find((mention) => characterMentionHref(mention.characterId) === href);
+              const mentioned = bound ? { id: bound.characterId, name: bound.name } : mentionCharacters?.find((character) => characterMentionHref(character.id) === href);
               const internal = Boolean(parseAppLink(href));
               return (
                 <Box
                   component="a"
                   href={href}
+                  data-character-mention={mentioned ? true : undefined}
                   target={!internal && isLikelyExternalLink(href) ? '_blank' : undefined}
                   rel={!internal && isLikelyExternalLink(href) ? 'noreferrer' : undefined}
-                  onClick={(event) => appLink.handleAnchorClick(event, href)}
+                  onClick={(event) => {
+                    if (mentioned && onCharacterMentionClick) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      if (window.getSelection()?.toString()) return;
+                      onCharacterMentionClick(mentioned, event.currentTarget);
+                      return;
+                    }
+                    appLink.handleAnchorClick(event, href);
+                  }}
+                  onDoubleClick={mentioned ? (event) => event.stopPropagation() : undefined}
                 >
                   {children}
                 </Box>

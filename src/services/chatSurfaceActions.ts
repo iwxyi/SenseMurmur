@@ -1,6 +1,7 @@
 import type { AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
-import type { Message, MessageAttachment } from '../types/message';
+import type { CharacterMention, Message, MessageAttachment } from '../types/message';
+import { validMentions } from './characterMentions';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import type { SessionActionSchema, SessionNormalizedIntentResult } from '../types/sessionEngine';
 import type { AIModelProfile, APIConfig } from '../types/settings';
@@ -398,9 +399,9 @@ export async function runSurfaceIntentImpl(
   surfaceResult: SessionNormalizedIntentResult,
   handlers: {
     runSessionAction: (action: { type: string; actorId?: string }, payload: Record<string, unknown>) => Promise<unknown>;
-    handleGuideSend: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
-    handleMemberSpeakSend: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
-    handleSpeakAs: (content: string, attachments?: MessageAttachment[]) => Promise<void>;
+    handleGuideSend: (content: string, attachments?: MessageAttachment[], mentions?: CharacterMention[]) => Promise<void>;
+    handleMemberSpeakSend: (content: string, attachments?: MessageAttachment[], mentions?: CharacterMention[]) => Promise<void>;
+    handleSpeakAs: (content: string, attachments?: MessageAttachment[], mentions?: CharacterMention[]) => Promise<void>;
   },
 ) {
   const chat = context.chat;
@@ -411,16 +412,17 @@ export async function runSurfaceIntentImpl(
   if (intent.type === 'message_intent') {
     const content = typeof intent.payload.content === 'string' ? intent.payload.content : '';
     const attachments = Array.isArray(intent.payload.attachments) ? intent.payload.attachments as MessageAttachment[] : [];
+    const mentions = validMentions(content, Array.isArray(intent.payload.mentions) ? intent.payload.mentions as CharacterMention[] : []);
     if (!content && attachments.length === 0) return;
     if ((intent.payload.mode === 'speakAs' || context.speakAsChar) && context.speakAsChar) {
-      await handlers.handleSpeakAs(content, attachments);
+      await handlers.handleSpeakAs(content, attachments, mentions);
       return;
     }
     if (intent.payload.mode === 'memberSpeak' || chat.type === 'direct') {
-      await handlers.handleMemberSpeakSend(content, attachments);
+      await handlers.handleMemberSpeakSend(content, attachments, mentions);
       return;
     }
-    await handlers.handleGuideSend(content, attachments);
+    await handlers.handleGuideSend(content, attachments, mentions);
     return;
   }
 

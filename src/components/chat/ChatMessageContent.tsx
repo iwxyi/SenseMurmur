@@ -313,8 +313,10 @@ export function NarrativeParagraphContent({ blocks, characters = [], showDevelop
   );
 }
 
-export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPrompt, onOpenDiagram, compactMediaLayout = false }: {
+export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPrompt, onOpenDiagram, characters, onCharacterMentionClick, compactMediaLayout = false }: {
   message: Message;
+  characters?: AICharacter[];
+  onCharacterMentionClick?: (character: import('../../services/markdownCharacterMentions').MentionCharacter, anchorEl: HTMLElement) => void;
   onRetryMedia?: (message: Message, attachmentId: string) => void | Promise<void>;
   onOpenImage?: (message: Message, attachment: MessageAttachment) => void;
   onOpenPrompt?: (attachment: MessageAttachment, event: MouseEvent<HTMLElement>) => void;
@@ -351,7 +353,7 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
     };
   };
   const findAttachmentBySlotId = (slotId: string) => attachments.find((attachment) => attachment.slotId === slotId || attachment.id === slotId);
-  const visibleContentParts = shouldHideMediaPlaceholderText ? [] : parseInlineAttachmentPlaceholders(message.content);
+  const visibleContentParts = shouldHideMediaPlaceholderText ? [] : parseInlineAttachmentPlaceholders(message.content, true);
   const hasInlineAttachments = visibleContentParts.some((part) => part.kind === 'attachment');
   const usedAttachmentIds = new Set<string>();
   const renderAttachment = (attachment: MessageAttachment, captionOverride?: string) => {
@@ -436,6 +438,15 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
             <Box key={`text-${index}`} sx={{ typography: 'body2', minWidth: 0, maxWidth: '100%', overflow: 'hidden', overflowWrap: 'anywhere', wordBreak: 'break-word', userSelect: 'text', WebkitUserSelect: 'text', '& table': { width: '100%', borderCollapse: 'collapse' }, '& th, & td': { border: '1px solid', borderColor: 'divider', px: 0.75, py: 0.4 } }}>
               <MarkdownText
                 text={part.text}
+                mentionCharacters={characters}
+                mentions={message.metadata?.mentions?.filter((mention) => {
+                  const offset = part.sourceStart ?? 0;
+                  return mention.start >= offset && mention.end <= offset + part.text.length;
+                }).map((mention) => {
+                  const offset = part.sourceStart ?? 0;
+                  return { ...mention, start: mention.start - offset, end: mention.end - offset };
+                })}
+                onCharacterMentionClick={onCharacterMentionClick}
                 forceRich={message.metadata?.format === 'markdown'}
                 deferDiagrams={Boolean(message.isStreaming)}
                 onOpenDiagram={onOpenDiagram ? (diagram) => onOpenDiagram(message, diagram) : undefined}

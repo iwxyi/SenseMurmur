@@ -650,7 +650,7 @@ describe('chatSurfaceActions', () => {
       },
     } as SessionNormalizedIntentResult;
     await runSurfaceIntentImpl(context, intent, { runSessionAction, handleGuideSend, handleMemberSpeakSend, handleSpeakAs });
-    expect(handleGuideSend).toHaveBeenCalledWith('你好', []);
+    expect(handleGuideSend).toHaveBeenCalledWith('你好', [], []);
     expect(handleMemberSpeakSend).not.toHaveBeenCalled();
     expect(handleSpeakAs).not.toHaveBeenCalled();
     expect(runSessionAction).not.toHaveBeenCalled();
@@ -670,7 +670,7 @@ describe('chatSurfaceActions', () => {
       },
     } as SessionNormalizedIntentResult;
     await runSurfaceIntentImpl(context, intent, { runSessionAction, handleGuideSend, handleMemberSpeakSend, handleSpeakAs });
-    expect(handleMemberSpeakSend).toHaveBeenCalledWith('你在吗', []);
+    expect(handleMemberSpeakSend).toHaveBeenCalledWith('你在吗', [], []);
     expect(handleGuideSend).not.toHaveBeenCalled();
     expect(handleSpeakAs).not.toHaveBeenCalled();
     expect(runSessionAction).not.toHaveBeenCalled();
@@ -685,11 +685,11 @@ describe('chatSurfaceActions', () => {
     const intent = {
       intent: {
         type: 'message_intent',
-        payload: { content: '我是成员', mode: 'memberSpeak' },
+        payload: { content: '@曹操 看看', mode: 'memberSpeak', mentions: [{ characterId: 'cao', name: '曹操', start: 0, end: 3 }] },
       },
     } as SessionNormalizedIntentResult;
     await runSurfaceIntentImpl(context, intent, { runSessionAction, handleGuideSend, handleMemberSpeakSend, handleSpeakAs });
-    expect(handleMemberSpeakSend).toHaveBeenCalledWith('我是成员', []);
+    expect(handleMemberSpeakSend).toHaveBeenCalledWith('@曹操 看看', [], [{ characterId: 'cao', name: '曹操', start: 0, end: 3 }]);
     expect(handleGuideSend).not.toHaveBeenCalled();
     expect(handleSpeakAs).not.toHaveBeenCalled();
     expect(runSessionAction).not.toHaveBeenCalled();
@@ -708,7 +708,7 @@ describe('chatSurfaceActions', () => {
       },
     } as SessionNormalizedIntentResult;
     await runSurfaceIntentImpl(context, intent, { runSessionAction, handleGuideSend, handleMemberSpeakSend, handleSpeakAs });
-    expect(handleSpeakAs).toHaveBeenCalledWith('我来讲', []);
+    expect(handleSpeakAs).toHaveBeenCalledWith('我来讲', [], []);
     expect(handleGuideSend).not.toHaveBeenCalled();
     expect(handleMemberSpeakSend).not.toHaveBeenCalled();
   });

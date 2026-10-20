@@ -19,9 +19,8 @@ import { resolvePendingReplyContext } from './scheduler';
 import { getEffectiveCharacterPresence } from './characterPresence';
 import { messagesShareIdentity } from './messageIdentity';
 
-// An autonomous group burst is scoped by external input. AI messages and the
-// runtime facts they write back belong to the burst itself; treating them as a
-// new context gives every member another turn after every send.
+// Keep the external input anchor stable across paging and runtime writes.
+// Successful commits explicitly reopen silent members' opportunities below.
 function latestExternalInput(messages: Message[], previous: Message | null = null) {
   const visible = messages.filter((message) => !message.isDeleted && !message.isStreaming
     && (message.type === 'user' || message.type === 'god'));
@@ -309,6 +308,7 @@ export async function runSessionLoop(params: {
   onTurnWorkFinished?: () => void;
   onIdle?: (reason: string) => void;
   onQuiet?: () => void;
+  onWaitingForInputChange?: (waiting: boolean) => void;
   onMessageChunk: (content: string) => void;
   onStreamingComplete?: () => void;
   onMessageDisplayAnomaly?: (message: string) => void;
@@ -353,6 +353,13 @@ export async function runSessionLoop(params: {
   const consumedSpeakerIds = new Set<string>();
   const consumedReplyDebtSpeakerIds = new Set<string>();
   const presenceByMemberId = new Map<string, string>();
+  let waitingForInput = false;
+  const setWaitingForInput = (waiting: boolean) => {
+    if (waitingForInput === waiting) return;
+    waitingForInput = waiting;
+    params.onWaitingForInputChange?.(waiting);
+    if (waiting) console.info('[chat-run:waiting-input] 当前可发言角色均选择不发言，等待用户输入。');
+  };
   activeSessionLoops.set(params.loopId, {
     chatId: params.chatId,
     startedAt: Date.now(),
@@ -365,6 +372,7 @@ export async function runSessionLoop(params: {
       if (params.signal?.aborted) return;
       if (!isActiveLoop(params)) return;
       if (params.isPaused()) {
+        setWaitingForInput(false);
         conversationRunStart = null;
         markSessionLoop(params.loopId, { phase: 'paused' });
         await sleep(120);
@@ -389,12 +397,14 @@ export async function runSessionLoop(params: {
             && !hasPendingReply
             && waitingMembers.every((character) => getEffectiveCharacterPresence(character).status === 'away' || consumedSpeakerIds.has(character.id))) {
             markSessionLoop(params.loopId, { phase: 'waiting_context' });
+            setWaitingForInput(true);
             await sleep(250);
             continue;
           }
         }
       }
 
+      setWaitingForInput(false);
       try {
       const turnStartedAt = nowMs();
       let roundStreamingMessage: Message | null = null;
@@ -646,6 +656,8 @@ export async function runSessionLoop(params: {
           },
           onNoSend: ({ speakerId }) => {
             if (!isActiveLoop(params) || params.signal?.aborted) return;
+            const speakerName = effectiveCharacters.find((character) => character.id === speakerId)?.name || '未命名角色';
+            console.info('[chat-run:no-send]', { speakerName, delivery: 'no_send' });
             reportDiscardedPreview('no_send_after_preview');
             const latestChat = params.getCurrentChat?.() || currentChat;
             const latestKey = getAutonomousContextKey(latestChat, params.getCurrentMessages());
@@ -722,9 +734,12 @@ export async function runSessionLoop(params: {
               }
               const latestChat = params.getCurrentChat?.() || currentChat;
               const latestKey = getAutonomousContextKey(latestChat, params.getCurrentMessages());
-              if (latestKey === roundContextKey && isAutonomousConversation(latestChat)) {
-                consumedSpeakerIds.add(message.senderId);
-                if (pendingReplyTargetIdsForRound.has(message.senderId)) consumedReplyDebtSpeakerIds.add(message.senderId);
+              if (latestKey === roundContextKey && isAutonomousConversation(latestChat)
+                && committedTurn.results.length > 0) {
+                // A published turn gives everyone new dialogue to consider.
+                // Only no_send consumes an opportunity in unchanged dialogue.
+                consumedSpeakerIds.clear();
+                consumedReplyDebtSpeakerIds.clear();
               }
             } catch (error) {
               if (isGenerationCancelledError(error) || !isActiveLoop(params)) return;
@@ -854,6 +869,7 @@ export async function runSessionLoop(params: {
       }
     }
   } finally {
+    setWaitingForInput(false);
     activeSessionLoops.delete(params.loopId);
   }
 }

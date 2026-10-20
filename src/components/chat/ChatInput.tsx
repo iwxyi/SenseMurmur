@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactNode } from 'react';
-import { Box, TextField, IconButton, Chip, CircularProgress, Tooltip, Alert } from '@mui/material';
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type ChangeEvent, type DragEvent, type ReactNode, type Ref } from 'react';
+import { Box, IconButton, Chip, CircularProgress, Tooltip, Alert } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import StopRoundedIcon from '@mui/icons-material/StopRounded';
 import CloseIcon from '@mui/icons-material/Close';
@@ -9,7 +9,11 @@ import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import { useUIStore } from '../../stores/useUIStore';
 import type { UserDraftActivity } from '../../services/userInputBuffer';
-import type { MessageAttachment } from '../../types/message';
+import type { CharacterMention, MessageAttachment } from '../../types/message';
+import type { AICharacter } from '../../types/character';
+import MentionTextInput from './MentionTextInput';
+import { bindCompletedMentions, reconcileMentionEdit, replaceMentionText, trimMentionDraft } from '../../services/characterMentions';
+import { readComposerDraft, saveComposerDraft } from '../../services/composerDrafts';
 import type { AIModelInputCapabilities } from '../../types/settings';
 import { buildImageAttachmentHoverInfo } from '../../services/messageAttachmentHoverInfo';
 import { normalizeInputCapabilities } from '../../types/settings';
@@ -19,10 +23,18 @@ import { readUploadedChatFiles } from '../../services/chatFileTransfer';
 import VoiceInputButton from '../common/VoiceInputButton';
 import { useSpeechInput } from '../../hooks/useSpeechInput';
 
+export interface ChatInputHandle {
+  insertText: (value: string) => void;
+  insertMention: (character: AICharacter) => boolean;
+}
+
 interface ChatInputProps {
+  inputHandleRef?: Ref<ChatInputHandle>;
+  mentionCharacters?: AICharacter[];
+  draftKey?: string;
   mode: 'guide' | 'speakAs' | 'memberSpeak';
   characterName?: string;
-  onSend: (content: string, attachments?: MessageAttachment[]) => void | Promise<void>;
+  onSend: (content: string, attachments?: MessageAttachment[], mentions?: CharacterMention[]) => void | Promise<void>;
   onClose?: () => void;
   placeholderOverride?: string;
   sendingLabel?: string;
@@ -80,9 +92,12 @@ function buildAttachmentId() {
   return `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export default function ChatInput({ mode, characterName, onSend, onClose, placeholderOverride, sendingLabel, hideSpeakAsChip, onSendError, onOpenPanel, onDraftActivity, inputCapabilities, inputCapabilityWarning, autoFocus, topContent, injectedAttachments, onInjectedAttachmentsConsumed, isReplyPending = false, onStopReply, disabled = false, disabledReason, composerState }: ChatInputProps) {
-  const [text, setText] = useState('');
-  const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
+export default function ChatInput({ inputHandleRef, mentionCharacters = [], draftKey, mode, characterName, onSend, onClose, placeholderOverride, sendingLabel, hideSpeakAsChip, onSendError, onOpenPanel, onDraftActivity, inputCapabilities, inputCapabilityWarning, autoFocus, topContent, injectedAttachments, onInjectedAttachmentsConsumed, isReplyPending = false, onStopReply, disabled = false, disabledReason, composerState }: ChatInputProps) {
+  const [text, setText] = useState(() => readComposerDraft(draftKey).text);
+  const [mentions, setMentions] = useState<CharacterMention[]>(() => readComposerDraft(draftKey).mentions);
+  const [attachments, setAttachments] = useState<MessageAttachment[]>(() => readComposerDraft(draftKey).attachments);
+  const draftRef = useRef({ text, mentions, attachments });
+  useEffect(() => { draftRef.current = { text, mentions, attachments }; }, [text, mentions, attachments]);
   const [isSending, setIsSending] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [isImageDragActive, setIsImageDragActive] = useState(false);
@@ -103,6 +118,15 @@ export default function ChatInput({ mode, characterName, onSend, onClose, placeh
   });
   const panelHandleDragRef = useRef<{ startY: number; latestY: number; moved: boolean; lastDirection: 'up' | 'down' | null } | null>(null);
   const textInputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+  const pendingInsertionCaretRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const caret = pendingInsertionCaretRef.current;
+    if (caret === null) return;
+    pendingInsertionCaretRef.current = null;
+    textInputRef.current?.focus({ preventScroll: true });
+    textInputRef.current?.setSelectionRange(caret, caret);
+  });
+  useEffect(() => { saveComposerDraft(draftKey, { text, mentions, attachments }); }, [draftKey, text, mentions, attachments]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const panelGestureTimerRef = useRef<number | null>(null);
   const panelGestureRafRef = useRef<number | null>(null);
@@ -154,34 +178,74 @@ export default function ChatInput({ mode, characterName, onSend, onClose, placeh
     });
   }, [inputFocused, onDraftActivity]);
 
+  useImperativeHandle(inputHandleRef, () => ({
+    insertText: (value) => {
+      if (disabled || (effectiveDisabled && !composerState?.canDraft) || isSending) return;
+      const input = textInputRef.current;
+      const start = input?.selectionStart ?? text.length;
+      const end = input?.selectionEnd ?? start;
+      const prefix = start > 0 && !/\s/.test(text[start - 1]) ? ' ' : '';
+      const insertion = prefix + value;
+      const result = replaceMentionText(text, mentions, start, end, insertion);
+      pendingInsertionCaretRef.current = result.caret;
+      const nextText = result.text;
+      setText(nextText);
+      setMentions(bindCompletedMentions(nextText, result.mentions, mentionCharacters));
+      publishDraftActivity(nextText, true);
+    },
+    insertMention: (character) => {
+      if (disabled || (effectiveDisabled && !composerState?.canDraft) || isSending) return false;
+      const input = textInputRef.current;
+      let start = input?.selectionStart ?? text.length;
+      const end = input?.selectionEnd ?? start;
+      if (start === end && mentions.some((mention) => mention.characterId === character.id && mention.end <= start && !text.slice(mention.end, start).trim())) {
+        input?.focus({ preventScroll: true }); return true;
+      }
+      const prefix = start > 0 && !/\s/.test(text[start - 1]) ? ' ' : '';
+      let result = replaceMentionText(text, mentions, start, end, prefix);
+      start = result.caret;
+      result = replaceMentionText(result.text, result.mentions, start, start, `@${character.name} `, character);
+      pendingInsertionCaretRef.current = result.caret;
+      setText(result.text); setMentions(result.mentions); publishDraftActivity(result.text, true);
+      return true;
+    },
+  }), [disabled, effectiveDisabled, composerState?.canDraft, isSending, publishDraftActivity, text, mentions, mentionCharacters]);
+
   const speechInput = useSpeechInput({
     profile: sttModel,
     disabled: disabled || isSending,
     getBaseText: () => text,
     onTranscript: (nextText) => {
-      setText(nextText);
-      publishDraftActivity(nextText, inputFocused);
+      const result = reconcileMentionEdit(text, mentions, nextText);
+      setText(result.text);
+      setMentions(result.mentions);
+      publishDraftActivity(result.text, inputFocused);
     },
     onError: (message) => onSendError?.(message),
   });
 
   const handleSend = async () => {
-    const content = text.trim();
+    const { content, mentions: outgoingMentions } = trimMentionDraft(text, mentions);
     const outgoingAttachments = attachments;
     if (effectiveDisabled || (!content && outgoingAttachments.length === 0) || isSending || effectivePending) return;
     setIsSending(true);
     setText('');
+    setMentions([]);
     setAttachments([]);
+    draftRef.current = { text: '', mentions: [], attachments: [] };
     publishDraftActivity('', inputFocused);
     window.requestAnimationFrame(() => {
       textInputRef.current?.focus({ preventScroll: true });
     });
     try {
-      await onSend(content, outgoingAttachments.length ? outgoingAttachments : undefined);
+      await onSend(content, outgoingAttachments.length ? outgoingAttachments : undefined, outgoingMentions.length ? outgoingMentions : undefined);
     } catch (error) {
-      setText((current) => current || content);
+      if (!draftRef.current.text) {
+        draftRef.current = { ...draftRef.current, text: content, mentions: outgoingMentions };
+        setText(content); setMentions(outgoingMentions);
+      }
       setAttachments((current) => current.length ? current : outgoingAttachments);
-      publishDraftActivity(content, inputFocused);
+      publishDraftActivity(draftRef.current.text || content, inputFocused);
       const message = error instanceof Error ? error.message : String(error);
       onSendError?.(message || '发送失败，请稍后重试');
     } finally {
@@ -621,16 +685,15 @@ export default function ChatInput({ mode, characterName, onSend, onClose, placeh
           onStop={speechInput.stopRecording}
           sx={canAttachImages ? { ml: -0.75 } : undefined}
         />
-        <TextField
-          fullWidth
-          multiline
-          maxRows={4}
-          size="small"
+        <MentionTextInput
+          characters={mentionCharacters}
+          mentions={mentions}
           placeholder={placeholder}
           value={text}
-          onChange={(e) => {
-            setText(e.target.value);
-            publishDraftActivity(e.target.value, inputFocused);
+          onChange={(value, nextMentions) => {
+            setText(value);
+            setMentions(nextMentions);
+            publishDraftActivity(value, inputFocused);
           }}
           onKeyDown={handleKeyDown}
           onFocus={() => {
@@ -642,17 +705,7 @@ export default function ChatInput({ mode, characterName, onSend, onClose, placeh
             publishDraftActivity(text, false);
           }}
           inputRef={textInputRef}
-          disabled={effectiveDisabled && composerState?.canDraft !== true}
-          sx={{
-            '& .MuiOutlinedInput-root': {
-              borderRadius: 2.25,
-              bgcolor: (theme) => theme.palette.mode === 'light' ? 'rgba(248,250,252,0.74)' : 'rgba(255,255,255,0.065)',
-              alignItems: 'center',
-              '& fieldset': {
-                borderColor: (theme) => theme.palette.mode === 'light' ? 'rgba(15,23,42,0.09)' : 'rgba(226,232,240,0.11)',
-              },
-            },
-          }}
+          disabled={disabled || (effectiveDisabled && composerState?.canDraft !== true)}
         />
         <Tooltip title={showStopReply ? '停止当前处理' : effectivePending ? (composerState?.label || '处理中') : isSending ? (sendingLabel || '发送中') : ''} disableHoverListener={!showStopReply && !effectivePending && !isSending} arrow>
           <span>

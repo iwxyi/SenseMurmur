@@ -3,7 +3,7 @@ import type { Message } from '../../types/message';
 const INLINE_ATTACHMENT_PATTERN = /!\[([^\]\n]*)\]\(attachment:(?:\/\/)?([^)]+)\)/g;
 
 export type InlineAttachmentPart =
-  | { kind: 'text'; text: string }
+  | { kind: 'text'; text: string; sourceStart?: number }
   | { kind: 'attachment'; slotId: string; altText: string };
 
 function safeDecodeInlineSlotId(value: string) {
@@ -14,13 +14,13 @@ function safeDecodeInlineSlotId(value: string) {
   }
 }
 
-export function parseInlineAttachmentPlaceholders(text: string): InlineAttachmentPart[] {
+export function parseInlineAttachmentPlaceholders(text: string, includeOffsets = false): InlineAttachmentPart[] {
   const parts: InlineAttachmentPart[] = [];
   let lastIndex = 0;
   for (const match of text.matchAll(INLINE_ATTACHMENT_PATTERN)) {
     const start = match.index ?? 0;
     if (start > lastIndex) {
-      parts.push({ kind: 'text', text: text.slice(lastIndex, start) });
+      parts.push({ kind: 'text', text: text.slice(lastIndex, start), ...(includeOffsets ? { sourceStart: lastIndex } : {}) });
     }
     const rawSlotId = (match[2] || '').trim();
     const slotId = rawSlotId ? safeDecodeInlineSlotId(rawSlotId).replace(/[^\w.-]/g, '') : '';
@@ -30,9 +30,9 @@ export function parseInlineAttachmentPlaceholders(text: string): InlineAttachmen
     lastIndex = start + match[0].length;
   }
   if (lastIndex < text.length) {
-    parts.push({ kind: 'text', text: text.slice(lastIndex) });
+    parts.push({ kind: 'text', text: text.slice(lastIndex), ...(includeOffsets ? { sourceStart: lastIndex } : {}) });
   }
-  return parts.length ? parts : [{ kind: 'text', text }];
+  return parts.length ? parts : [{ kind: 'text', text, ...(includeOffsets ? { sourceStart: 0 } : {}) }];
 }
 
 export function getAttachmentDisplayWidth(params: {

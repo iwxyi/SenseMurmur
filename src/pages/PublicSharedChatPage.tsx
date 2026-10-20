@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Box, Button, IconButton, Stack, Typography } from '@mui/material';
+import { Alert, Box, Button, IconButton, Snackbar, Stack, Typography } from '@mui/material';
 import type { SxProps, Theme } from '@mui/material/styles';
 import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined';
 import RefreshOutlinedIcon from '@mui/icons-material/RefreshOutlined';
@@ -117,6 +117,7 @@ export default function PublicSharedChatPage() {
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState('');
+  const [previewError, setPreviewError] = useState('');
   const [profilePreview, setProfilePreview] = useState<PublicProfilePreviewState | null>(null);
 
   const loadLatest = useCallback(async (mode: 'replace' | 'merge' = 'replace') => {
@@ -180,9 +181,11 @@ export default function PublicSharedChatPage() {
     lastMessageAt: chatMeta.lastMessageAt,
   }), [chatMeta.lastMessageAt, chatMeta.updatedAt, members, title]);
 
-  const openCharacterPreview = useCallback((character: AICharacter, anchorEl: HTMLElement) => {
+  const openCharacterPreview = useCallback((mention: { id: string; name: string }, anchorEl: HTMLElement) => {
+    const character = members.find((member) => member.id === mention.id);
+    if (!character) { setPreviewError('这个角色已不存在'); return; }
     setProfilePreview({ kind: 'character', anchorRect: anchorEl.getBoundingClientRect(), anchorElement: anchorEl, character });
-  }, []);
+  }, [members]);
 
   const openChatPreview = useCallback((anchorEl: HTMLElement) => {
     setProfilePreview({ kind: 'chat', anchorRect: anchorEl.getBoundingClientRect(), anchorElement: anchorEl });
@@ -278,6 +281,7 @@ export default function PublicSharedChatPage() {
         members={members}
         onClose={() => setProfilePreview(null)}
       />
+      <Snackbar open={Boolean(previewError)} message={previewError} autoHideDuration={3500} onClose={() => setPreviewError('')} />
     </Box>
   );
 }

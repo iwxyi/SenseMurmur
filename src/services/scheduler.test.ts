@@ -88,6 +88,16 @@ function buildMessage(patch: Partial<Message>): Message {
 }
 
 describe('scheduler speaker scoring', () => {
+  it('gently boosts explicit mentions for one turn without forcing a candidate', () => {
+    const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙')];
+    const user: Message = { ...buildMessage({ type: 'user', senderId: 'user', content: '@乙 看看' }), metadata: { mentions: [{ characterId: 'b', name: '乙', start: 0, end: 2 }] } };
+    const candidates = calculateWeights(characters, [user], {}, 1, 0, null, buildChat());
+    expect(candidates).toHaveLength(2);
+    expect(candidates.find((candidate) => candidate.characterId === 'b')?.scoreBreakdown?.reasons).toContain('user_mention');
+    expect(candidates.find((candidate) => candidate.characterId === 'a')?.scoreBreakdown?.reasons).not.toContain('user_mention');
+    const afterReply = calculateWeights(characters, [user, buildMessage({ content: '嗯', senderId: 'a' })], {}, 1, 0, null, buildChat());
+    expect(afterReply.every((candidate) => !candidate.scoreBreakdown?.reasons.includes('user_mention'))).toBe(true);
+  });
   it('stops prioritizing participants after the primary conflict is resolved', () => {
     const base = buildChat();
     const conflict = {

@@ -27,14 +27,18 @@ import { type DriverMessageCommitResult, type GroupChat, type MessageBranchState
 import MessageList, { type MessageListScrollPosition, type MessageListScrollRequest } from '../components/chat/MessageList';
 import type { NarrativeStoryChoiceOption } from '../components/chat/messageBubblePresentation';
 import SessionComposerHost from '../components/session/SessionComposerHost';
+import type { ChatInputHandle } from '../components/chat/ChatInput';
 import RightPanel from '../components/layout/RightPanel';
 import GlassHeader from '../components/layout/GlassHeader';
 import { buildRuntimeEventMessageContent, normalizeRuntimeEvent } from '../services/runtimeEventFactory';
 import { persistLocalFirstMessage, persistLocalFirstMessages } from '../services/chatCommitMessage';
 import { buildPrivateSessionEvent } from '../services/directSessionHelpers';
 import { resolveCharacterOrDeleted } from '../utils/deletedEntity';
-import type { Message, MessageAttachment } from '../types/message';
+import type { CharacterMention, Message, MessageAttachment } from '../types/message';
+import { trimMentionDraft } from '../services/characterMentions';
 import type { AICharacter } from '../types/character';
+import { readChatNavigationPosition, saveChatNavigationPosition } from '../services/chatNavigationPosition';
+import { getLocalDataUserId } from '../services/authStorageScope';
 import { buildExpressionFeedbackPatch, getExpressionFeedbackLabel, type ExpressionFeedbackKind } from '../services/characterExpressionFeedback';
 import { useAuthStore } from '../stores/useAuthStore';
 import { runInterruptedManualInput, useManualInputQueue } from '../hooks/useManualInputQueue';
@@ -863,6 +867,11 @@ export default function ChatDetailPage() {
   const [detailBootstrapComplete, setDetailBootstrapComplete] = useState(false);
   const [sidebarMessagesReady, setSidebarMessagesReady] = useState(false);
   const [profilePreview, setProfilePreview] = useState<ProfilePreviewState | null>(null);
+  const composerInputRef = useRef<ChatInputHandle | null>(null);
+  const handleMentionCharacter = useCallback((character: AICharacter) => {
+    if (composerInputRef.current?.insertMention(character)) navigator.vibrate?.(15);
+    else setSnackbar({ open: true, message: '当前输入框不可用，暂时无法艾特', severity: 'info' });
+  }, []);
   const [aiDirectPerspectiveMemberId, setAiDirectPerspectiveMemberId] = useState<string | null>(null);
   const [guideTargetMemberId, setGuideTargetMemberId] = useState<string | null>(null);
   const [pendingStoryChoiceKey, setPendingStoryChoiceKey] = useState<string | null>(null);
@@ -911,6 +920,11 @@ export default function ChatDetailPage() {
   const readingPositionPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const openedChatWindowRef = useRef<{ chatId: string; requestKey: string; openedAt: number; restored: boolean; cloudMode: boolean } | null>(null);
   const storyEntryReadingPositionRef = useRef<{ chatId: string; key: string; position: MessageListScrollPosition } | null>(null);
+  const navigationAccountScope = getLocalDataUserId();
+  const initialChatNavigationPosition = useMemo(() => id ? readChatNavigationPosition(id, navigationAccountScope) : null, [id, navigationAccountScope]);
+  const handleChatNavigationPositionChange = useCallback((position: MessageListScrollPosition) => {
+    if (id) saveChatNavigationPosition(id, position);
+  }, [id]);
   const activeChatIdRef = useRef<string | null>(id ?? null);
   const isManualInputPendingRef = useRef<() => boolean>(() => false);
   const userDraftActivityRef = useRef<UserDraftActivity | null>(null);
@@ -1607,8 +1621,9 @@ export default function ChatDetailPage() {
     [characters, guideTargetMemberId]
   );
 
-  const openCharacterPreview = useCallback((character: AICharacter, anchorEl: HTMLElement) => {
-    if (character.deletedAt != null || !characters.some((item) => item.id === character.id && item.deletedAt == null)) {
+  const openCharacterPreview = useCallback((mention: { id: string; name: string }, anchorEl: HTMLElement) => {
+    const character = characters.find((item) => item.id === mention.id && item.deletedAt == null);
+    if (!character) {
       setSnackbar({ open: true, message: '这个角色已删除，仅可查看历史消息', severity: 'info' });
       return;
     }
@@ -1993,25 +2008,26 @@ export default function ChatDetailPage() {
 
   const handleStartDirectChat = useCallback(async (characterId: string) => {
     const character = characters.find((item) => item.id === characterId);
-    if (!character) return;
-    const existing = chats.find((item) => item.type === 'direct' && item.memberIds.length === 1 && item.memberIds[0] === characterId);
-    if (existing) {
-      navigate(`/chats/${existing.id}?fromTab=1`);
-      return;
+    if (!character) {
+      setSnackbar({ open: true, message: '角色已不存在，无法发消息', severity: 'error' });
+      return false;
     }
     try {
-      const { buildDirectChatDraft } = await import('../services/chatDraftBuilder');
-      const directChat = await useChatStore.getState().addChat(buildDirectChatDraft(character.id, character.name));
-      navigate(`/chats/${directChat.id}?fromTab=1`);
+      const { ensureCharacterDirectChat } = await import('../services/directChatCreation');
+      const directChatId = await ensureCharacterDirectChat(character.id);
+      navigate(`/chats/${directChatId}?fromTab=1`);
+      return true;
     } catch (error) {
       setSnackbar({ open: true, message: error instanceof Error ? error.message : t('common.error'), severity: 'error' });
+      return false;
     }
-  }, [characters, chats, navigate, t]);
+  }, [characters, navigate, t]);
 
   const {
     thinkingId,
     chatError,
     runLoopError,
+    isWaitingForInput,
     hasPendingTurnWork,
     startConversationLoopIfNeeded,
     cancelActiveConversationLoop,
@@ -2553,11 +2569,12 @@ export default function ChatDetailPage() {
         }, 'debug', 'chat-page');
         return;
       }
-      const aroundTimestamp = entryStoryReadingPosition && !entryStoryReadingPosition.pinned
-        ? entryStoryReadingPosition.sourceTimestamp
+      const restorePosition = isStoryRoom ? entryStoryReadingPosition : initialChatNavigationPosition;
+      const aroundTimestamp = restorePosition && !restorePosition.pinned
+        ? restorePosition.sourceTimestamp
         : undefined;
-      const requestKey = aroundTimestamp !== undefined && storyReadingRestoreKey
-        ? `restore:${storyReadingRestoreKey}`
+      const requestKey = aroundTimestamp !== undefined
+        ? `restore:${isStoryRoom ? storyReadingRestoreKey : restorePosition?.messageId}`
         : 'tail';
       const cloudMode = authMode === 'cloud' && isLoggedIn;
       const previousOpen = openedChatWindowRef.current;
@@ -2620,7 +2637,7 @@ export default function ChatDetailPage() {
         aroundTimestamp,
       });
     }
-  }, [authMode, chat, chats.length, chatsLoading, detailBootstrapComplete, entryStoryReadingPosition, id, isLoggedIn, isStoryRoom, openChatWindow, storyReadingRestoreKey, uiHydrated]);
+  }, [authMode, chat, chats.length, chatsLoading, detailBootstrapComplete, entryStoryReadingPosition, id, initialChatNavigationPosition, isLoggedIn, isStoryRoom, openChatWindow, storyReadingRestoreKey, uiHydrated]);
 
   useEffect(() => {
     userDraftActivityRef.current = null;
@@ -2869,7 +2886,7 @@ export default function ChatDetailPage() {
     regenerationResumeRef.current = null;
   }, [cancelReplyOperation]);
 
-  const handleMemberSpeakSend = useCallback(async (content: string, attachments: MessageAttachment[] = []) => {
+  const handleMemberSpeakSend = useCallback(async (content: string, attachments: MessageAttachment[] = [], mentions: CharacterMention[] = []) => {
     if (!chat || !id) return;
     if (chatInteractionDisabled) {
       setSnackbar({ open: true, message: chatReadOnlyReason || '当前会话不可继续', severity: 'info' });
@@ -2884,7 +2901,7 @@ export default function ChatDetailPage() {
         content,
         emotion: 0,
         timestamp: getNextMessageTimestamp(),
-        metadata: attachments.length ? { attachments } : undefined,
+        metadata: attachments.length || mentions.length ? { attachments, mentions } : undefined,
       });
       void updateChat(id, { lastMessageAt: userMessage.timestamp, latestMessage: userMessage });
       // Read both values after the optimistic user commit. The render
@@ -3082,7 +3099,7 @@ export default function ChatDetailPage() {
     void handleMemberSpeakSend(initialMessage);
   }, [agentEntitled, chat, handleMemberSpeakSend, id, location.hash, location.pathname, location.search, location.state, navigate, updateChat]);
 
-  const handleGuideSend = useCallback(async (content: string, attachments: MessageAttachment[] = []) => {
+  const handleGuideSend = useCallback(async (content: string, attachments: MessageAttachment[] = [], mentions: CharacterMention[] = []) => {
     if (!chat || !id) return;
     if (chatInteractionDisabled) {
       setSnackbar({ open: true, message: chatReadOnlyReason || '当前会话不可继续', severity: 'info' });
@@ -3098,7 +3115,7 @@ export default function ChatDetailPage() {
         content,
         emotion: 0,
         timestamp: getNextMessageTimestamp(),
-        metadata: attachments.length ? { attachments } : undefined,
+        metadata: attachments.length || mentions.length ? { attachments, mentions } : undefined,
       });
       void updateChat(id, { lastMessageAt: guidedMessage.timestamp, latestMessage: guidedMessage });
       const recentMessagesWithGuide = [...recentMessages.filter((message) => message.id !== guidedMessage.id), guidedMessage];
@@ -3107,7 +3124,7 @@ export default function ChatDetailPage() {
     });
   }, [addMessageStable, chat, chatInteractionDisabled, chatReadOnlyReason, commitPersistedManualRuntime, currentChatMessages, enqueueManualInput, getNextMessageTimestamp, id, setSnackbar, startConversationLoopIfNeeded, updateChat]);
 
-  const handleSpeakAs = useCallback(async (content: string, attachments: MessageAttachment[] = []) => {
+  const handleSpeakAs = useCallback(async (content: string, attachments: MessageAttachment[] = [], mentions: CharacterMention[] = []) => {
     if (!chat || !id || !effectiveSpeakAsChar) return;
     if (chatInteractionDisabled) {
       setSnackbar({ open: true, message: chatReadOnlyReason || '当前会话不可继续', severity: 'info' });
@@ -3131,6 +3148,7 @@ export default function ChatDetailPage() {
             actorName: char.name,
             avatar: char.avatar,
           },
+          ...(mentions.length ? { mentions } : {}),
           ...(attachments.length ? { attachments } : {}),
         },
       });
@@ -3329,10 +3347,13 @@ export default function ChatDetailPage() {
     }
   }, [addMessageStable, chat, currentUser?.nickname, getNextMessageTimestamp, id, runSessionAction, setSnackbar, startConversationLoopIfNeeded, storyBranchOptions, storyChoiceGate, storyChoiceSourceMessage?.id, updateChat]);
 
-  const handleStoryCustomDirectionSend = useCallback(async (content: string, attachments: MessageAttachment[] = []) => {
+  const handleStoryCustomDirectionSend = useCallback(async (content: string, attachments: MessageAttachment[] = [], mentions: CharacterMention[] = []) => {
     if (!chat || !id) return;
     const storyDirection = sanitizeStoryChoicePrompt(content);
     if (!storyDirection) return;
+    const trimmedDraft = trimMentionDraft(content, mentions);
+    const directionMentions = trimmedDraft.mentions.filter((mention) => mention.end <= storyDirection.length)
+      .map((mention) => ({ ...mention, start: mention.start + 4, end: mention.end + 4 }));
     if (attachments.length) {
       setSnackbar({ open: true, message: '故事房自定义走向暂不支持附件，请用文字描述你想推动的剧情。', severity: 'error' });
       return;
@@ -3358,6 +3379,7 @@ export default function ChatDetailPage() {
           emotion: 0,
           timestamp: getNextMessageTimestamp(),
           metadata: {
+            mentions: directionMentions,
             storyChoiceSelection: {
               branchId: '__custom_story_branch',
               sourceMessageId: storyChoiceSourceMessage?.id,
@@ -4270,13 +4292,20 @@ export default function ChatDetailPage() {
                 cursor: 'pointer',
                 font: 'inherit',
                 display: 'flex',
-                alignItems: 'center',
+                flexDirection: 'column',
+                alignItems: 'flex-start',
+                justifyContent: 'center',
                 minHeight: 40,
               }}
             >
-              <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.25, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              <Typography variant="subtitle1" sx={{ maxWidth: '100%', fontWeight: 700, lineHeight: 1.25, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {chat.name}
               </Typography>
+              {isWaitingForInput && isRunning && !isPaused ? (
+                <Typography component="span" variant="caption" role="status" sx={{ color: 'text.secondary', lineHeight: 1.25 }}>
+                  等待用户输入
+                </Typography>
+              ) : null}
             </Box>
           )}
           safeAreaTop={!isSplitDetailPane}
@@ -4339,6 +4368,7 @@ export default function ChatDetailPage() {
             onRetryMedia={handleRetryMedia}
             onAddImagesToReference={handleAddImagesToReference}
             onCharacterAvatarClick={openCharacterPreview}
+            onMentionCharacter={chatInteractionDisabled ? undefined : handleMentionCharacter}
             onOpenArtifact={isAssistantChat || isLearningProgressRoom ? handleOpenAssistantArtifact : undefined}
             onOpenHtmlFullscreen={chat && (isAssistantChat || hasRoomCapability(chat, 'html-interactive')) ? handleOpenAssistantHtmlFullscreen : undefined}
             onHtmlAutosave={(isAssistantChat || isLearningProgressRoom) && !chatInteractionDisabled ? handleHtmlAutosave : undefined}
@@ -4366,10 +4396,10 @@ export default function ChatDetailPage() {
             onChooseStoryChoice={!chatInteractionDisabled && isStoryWaitingForChoice ? handleChooseStoryBranch : undefined}
             onBottomPinnedChange={isStoryRoom ? handleMessageListBottomPinnedChange : undefined}
             onNearBottomChange={isStoryRoom ? handleMessageListNearBottomChange : undefined}
-            initialScrollPosition={isStoryRoom ? initialStoryReadingPosition : null}
+            initialScrollPosition={isStoryRoom ? initialStoryReadingPosition : initialChatNavigationPosition}
             scrollRequest={messageScrollRequest}
             onScrollRequestResolved={handleMessageScrollRequestResolved}
-            onScrollPositionChange={isStoryRoom ? handleStoryReadingPositionChange : undefined}
+            onScrollPositionChange={isStoryRoom ? handleStoryReadingPositionChange : handleChatNavigationPositionChange}
             narrativeRevealMessageKeys={narrativeRevealMessageKeys}
             onNarrativeRevealComplete={clearNarrativeRevealMessage}
             autoStickToBottom={sessionScrollCapabilities.autoStickToBottom}
@@ -4459,6 +4489,11 @@ export default function ChatDetailPage() {
             </Box>
           ) : null}
           <SessionComposerHost
+            key={chat.id}
+            chatId={chat.id}
+            draftActorId={effectiveSpeakAsChar?.id}
+            mentionCharacters={activeMembers}
+            inputHandleRef={composerInputRef}
             surfaces={effectiveComposerSurfaces}
             speakAsCharacterName={effectiveSpeakAsChar?.name}
             onCloseSpeakAs={effectiveSpeakAsChar && chat.type !== 'ai_direct' ? () => setSpeakAsCharacter(null) : undefined}
@@ -4496,12 +4531,13 @@ export default function ChatDetailPage() {
                 hasGuideTargetMember: Boolean(guideTargetMember),
                 content: submission.content,
               })) {
-                return handleStoryCustomDirectionSend(submission.content, submission.attachments || []);
+                return handleStoryCustomDirectionSend(submission.content, submission.attachments || [], submission.mentions || []);
               }
               if (!effectiveSpeakAsChar && guideTargetMember && surface.mode === 'guide') {
                 const guidedContent = `${guideTargetMember.name}，${submission.content}`;
                 setGuideTargetMemberId(null);
-                return normalizeAndRunSurfaceIntent(surface, { ...submission, content: guidedContent, actorId: guideTargetMember.id });
+                return normalizeAndRunSurfaceIntent(surface, { ...submission, content: guidedContent, actorId: guideTargetMember.id,
+                  mentions: submission.mentions?.map((mention) => ({ ...mention, start: mention.start + guideTargetMember.name.length + 1, end: mention.end + guideTargetMember.name.length + 1 })) });
               }
               const effectiveSurface = effectiveSpeakAsChar ? { ...surface, mode: 'speakAs' as const, actorId: effectiveSpeakAsChar.id } : surface;
               const effectiveSubmission = effectiveSpeakAsChar ? { ...submission, actorId: effectiveSpeakAsChar.id } : submission;
@@ -4731,9 +4767,12 @@ export default function ChatDetailPage() {
             character={profilePreview.kind === 'character' ? profilePreview.character : null}
             chat={chat}
             members={members}
-            chatStatusLabel={isRunning && !isPaused ? '运行中' : chat.isActive ? '已暂停' : '未运行'}
+            chatStatusLabel={isRunning && !isPaused ? isWaitingForInput ? '等待用户输入' : '运行中' : chat.isActive ? '已暂停' : '未运行'}
             actionLabel={profilePreview.kind === 'character' ? '角色详情' : '群聊详情'}
             actionTiming="immediate"
+            onSendMessage={profilePreview.kind === 'character' ? async () => {
+              if (await handleStartDirectChat(profilePreview.character.id)) setProfilePreview(null);
+            } : undefined}
             onAction={() => {
               if (profilePreview.kind === 'character') {
                 navigate(`/characters/${profilePreview.character.id}/edit?returnTo=${encodeURIComponent(location.pathname + location.search)}`);

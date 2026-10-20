@@ -1,4 +1,4 @@
-import { Avatar, Box, Button, Chip, Collapse, Divider, GlobalStyles, Portal, Stack, Typography } from '@mui/material';
+import { Avatar, Box, Button, Collapse, Divider, GlobalStyles, Portal, Stack, Typography } from '@mui/material';
 import type { SxProps, Theme } from '@mui/material/styles';
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import type { AICharacter } from '../../types/character';
@@ -19,6 +19,7 @@ interface ProfilePreviewOverlayProps {
   actionLabel?: string;
   actionTiming?: 'afterClose' | 'immediate';
   onAction?: () => void;
+  onSendMessage?: () => Promise<void>;
   onClose: () => void;
 }
 
@@ -56,12 +57,6 @@ const panelSx: SxProps<Theme> = {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
-}
-
-function compactText(value?: string | null, max = 92) {
-  const text = String(value || '').replace(/\s+/g, ' ').trim();
-  if (!text) return '';
-  return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
 const chatStyleLabels: Record<string, string> = {
@@ -368,9 +363,11 @@ export default function ProfilePreviewOverlay({
   actionLabel,
   actionTiming = 'afterClose',
   onAction,
+  onSendMessage,
   onClose,
 }: ProfilePreviewOverlayProps) {
   const [rendered, setRendered] = useState(open);
+  const [sendingMessage, setSendingMessage] = useState(false);
   const [closing, setClosing] = useState(false);
   const [motionVars, setMotionVars] = useState<CSSProperties | null>(null);
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(() => (
@@ -701,10 +698,20 @@ export default function ProfilePreviewOverlay({
           {canRenderCharacter ? <CharacterPreview character={character} /> : null}
           {canRenderChat ? <ChatPreview chat={chat} members={members} statusLabel={chatStatusLabel} /> : null}
           {actionLabel && onAction ? (
+            <Stack direction="row" spacing={1} sx={{ mt: 1.6 }}>
+              {canRenderCharacter && onSendMessage ? (
+                <Button fullWidth variant="outlined" loading={sendingMessage} onClick={async () => {
+                  setSendingMessage(true);
+                  try {
+                    await onSendMessage();
+                  } finally {
+                    setSendingMessage(false);
+                  }
+                }}>发消息</Button>
+              ) : null}
             <Button
               fullWidth
               variant="contained"
-              sx={{ mt: 1.6 }}
               onClick={() => {
                 if (actionTiming === 'immediate') {
                   onAction();
@@ -715,6 +722,7 @@ export default function ProfilePreviewOverlay({
             >
               {actionLabel}
             </Button>
+            </Stack>
           ) : null}
         </Box>
       </Box>

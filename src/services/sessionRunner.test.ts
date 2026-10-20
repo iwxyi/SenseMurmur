@@ -356,8 +356,11 @@ describe('runSessionLoop', () => {
     const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
     const start = vi.fn();
     const finish = vi.fn();
+    const waitingChanged = vi.fn();
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
     let messages: Message[] = [];
     let waited = false;
+    let waitCount = 0;
     params.getCurrentMessages = () => messages;
     const previousTimeout = globalThis.setTimeout;
     globalThis.setTimeout = ((fn: () => void, ms: number) => {
@@ -365,7 +368,9 @@ describe('runSessionLoop', () => {
         waited = true;
         expect(start).toHaveBeenCalledTimes(2);
         expect(finish).toHaveBeenCalledTimes(2);
-        messages = [{ id: 'wake', type: 'user', content: '等一下。' } as Message];
+        expect(waitingChanged.mock.calls).toEqual([[true]]);
+        waitCount += 1;
+        if (waitCount === 3) messages = [{ id: 'wake', type: 'user', content: '等一下。' } as Message];
       }
       fn();
       return 0;
@@ -379,11 +384,19 @@ describe('runSessionLoop', () => {
       }
     });
     try {
-      await runSessionLoop({ ...params, onTurnWorkStarted: start, onTurnWorkFinished: finish } as never);
+      await runSessionLoop({ ...params, onTurnWorkStarted: start, onTurnWorkFinished: finish,
+        onWaitingForInputChange: waitingChanged } as never);
       expect(waited).toBe(true);
       expect(runOneRoundMock).toHaveBeenCalledTimes(3);
+      expect(waitingChanged.mock.calls).toEqual([[true], [false]]);
+      expect(info.mock.calls.filter(([label]) => label === '[chat-run:no-send]')).toEqual([
+        ['[chat-run:no-send]', { speakerName: '甲', delivery: 'no_send' }],
+        ['[chat-run:no-send]', { speakerName: '乙', delivery: 'no_send' }],
+      ]);
+      expect(info.mock.calls.filter(([label]) => String(label).startsWith('[chat-run:waiting-input]'))).toHaveLength(1);
     } finally {
       globalThis.setTimeout = previousTimeout;
+      info.mockRestore();
     }
   });
 
@@ -533,7 +546,7 @@ describe('runSessionLoop', () => {
     expect(runOneRoundMock).toHaveBeenCalledTimes(2);
   });
 
-  it('consumes successful speakers once, then grants another window for new user input', async () => {
+  it('continues autonomous dialogue beyond one successful turn per member without user input', async () => {
     const chat = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
     const params = buildLoopParams(chat);
     const messages: Message[] = [];
@@ -545,12 +558,12 @@ describe('runSessionLoop', () => {
       return result;
     });
 
-    let wokeForInput = false;
+    let waitedForInput = false;
     const previousTimeout = globalThis.setTimeout;
     globalThis.setTimeout = ((fn: () => void, ms: number) => {
-      if (ms === 250 && runOneRoundMock.mock.calls.length === 2 && !wokeForInput) {
-        wokeForInput = true;
-        messages.push({ id: 'wake', type: 'user', content: '换个问题。' } as Message);
+      if (ms === 250) {
+        waitedForInput = true;
+        params.pauseLoop();
       }
       fn();
       return 0;
@@ -558,8 +571,9 @@ describe('runSessionLoop', () => {
 
     runOneRoundMock.mockImplementation(async (_chat, _characters, _snapshot, _api, hooks, _profiles, context) => {
       const round = runOneRoundMock.mock.calls.length;
-      if (round <= 2) {
-        const speakerId = round === 1 ? 'a' : 'b';
+      expect(context.consumedSpeakerIds.size).toBe(0);
+      if (round <= 6) {
+        const speakerId = round % 2 === 1 ? 'a' : 'b';
         await hooks.onMessageComplete({ id: `generated-${round}`, chatId: chat.id, type: 'ai', senderId: speakerId,
           senderName: speakerId === 'a' ? '甲' : '乙', content: '这轮说完了。', emotion: 0 } as never);
       } else {
@@ -573,15 +587,16 @@ describe('runSessionLoop', () => {
     } finally {
       globalThis.setTimeout = previousTimeout;
     }
-    expect(wokeForInput).toBe(true);
-    expect(runOneRoundMock).toHaveBeenCalledTimes(3);
-    expect(runSessionCommitPipelineMock).toHaveBeenCalledTimes(2);
+    expect(waitedForInput).toBe(false);
+    expect(runOneRoundMock).toHaveBeenCalledTimes(7);
+    expect(runSessionCommitPipelineMock).toHaveBeenCalledTimes(6);
   });
 
-  it('keeps an explicit reply debt runnable after every member used their ordinary opportunity', async () => {
+  it('reopens silent members and their reply opportunities after a successful published turn', async () => {
     const chat = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
     const params = buildLoopParams(chat);
-    const messages: Message[] = [];
+    const messages: Message[] = [{ id: 'request', chatId: chat.id, type: 'ai', senderId: 'a',
+      senderName: '甲', content: '乙，你说呢？', timestamp: 1, replyDebtTargetIds: ['b'] } as Message];
     params.getCurrentMessages = () => messages;
     runSessionCommitPipelineMock.mockImplementation(async (args: Parameters<typeof buildCommitPipelineResult>[0] & { upsertMessage: (message: Message) => void }) => {
       const result = buildCommitPipelineResult(args);
@@ -591,13 +606,18 @@ describe('runSessionLoop', () => {
     });
     runOneRoundMock.mockImplementation(async (_chat, _characters, _snapshot, _api, hooks, _profiles, context) => {
       const round = runOneRoundMock.mock.calls.length;
-      if (round === 1 || round === 2) {
-        const speakerId = round === 1 ? 'b' : 'a';
+      if (round === 1) {
+        hooks.onNoSend({ delivery: 'no_send', speakerId: 'b' });
+      } else if (round === 2) {
+        expect([...context.consumedSpeakerIds]).toEqual(['b']);
+        expect([...context.consumedReplyDebtSpeakerIds]).toEqual(['b']);
+        const speakerId = 'a';
         await hooks.onMessageComplete({ id: `generated-${round}`, chatId: chat.id, type: 'ai', senderId: speakerId,
-          senderName: speakerId === 'a' ? '甲' : '乙', content: '说完了。', emotion: 0,
-          replyDebtTargetIds: round === 2 ? ['b'] : [], primaryReplyDebtTargetId: round === 2 ? 'b' : null } as never);
+          senderName: '甲', content: '说完了。', emotion: 0,
+          replyDebtTargetIds: ['b'], primaryReplyDebtTargetId: 'b' } as never);
       } else {
-        expect([...context.consumedSpeakerIds].sort()).toEqual(['a', 'b']);
+        expect(context.consumedSpeakerIds.size).toBe(0);
+        expect(context.consumedReplyDebtSpeakerIds.size).toBe(0);
         params.pauseLoop();
       }
     });

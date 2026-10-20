@@ -751,9 +751,13 @@ const baseTheme: ThemeOptions = {
     },
     MuiMenu: {
       defaultProps: {
-        transitionDuration: { enter: 250, exit: 220 },
+        transitionDuration: { enter: 100, exit: 80 },
       },
       styleOverrides: {
+        list: {
+          paddingTop: 4,
+          paddingBottom: 4,
+        },
         paper: ({ theme }) => ({
           borderRadius: 8,
           border: '1px solid',
@@ -767,14 +771,25 @@ const baseTheme: ThemeOptions = {
     },
     MuiPopover: {
       defaultProps: {
-        transitionDuration: { enter: 250, exit: 220 },
+        transitionDuration: { enter: 100, exit: 80 },
       },
     },
     MuiMenuItem: {
       styleOverrides: {
         root: {
+          minHeight: 36,
+          padding: '6px 10px',
+          fontSize: '0.875rem',
+          lineHeight: 1.35,
           borderRadius: 6,
-          margin: 4,
+          margin: '2px 4px',
+          '@media (min-width: 900px)': {
+            minHeight: 32,
+            padding: '4px 8px',
+            fontSize: '0.8125rem',
+            lineHeight: 1.3,
+            margin: '1px 3px',
+          },
         },
       },
     },
