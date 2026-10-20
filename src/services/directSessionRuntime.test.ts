@@ -416,7 +416,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     }
   });
 
-  it('suppresses post moment publish during quiet hours for non-night-owl persona', async () => {
+  it('does not veto an existing post moment decision solely for late hours', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-06-01T23:40:00+08:00'));
     try {
@@ -440,11 +440,9 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
       const patch = (updateChat.mock.calls.at(0) as [string, { runtimeEventsV2?: RuntimeEventV2[] }] | undefined)?.[1];
       const suppression = (patch?.runtimeEventsV2 || []).find((event) => event.kind === 'artifact' && (event.payload as { eventType?: string; reasonType?: string }).eventType === 'event_candidate_suppressed');
       const decision = (patch?.runtimeEventsV2 || []).find((event) => event.kind === 'artifact' && (event.payload as { eventType?: string; decisionType?: string; reasonType?: string }).eventType === 'world_decision_v2');
-      expect((suppression?.payload as { reasonType?: string }).reasonType).toBe('world_attention_moment_quiet_hours');
-      expect((decision?.payload as { decisionType?: string; reasonType?: string }).decisionType).toBe('suppressed');
-      expect((decision?.payload as { reasonType?: string }).reasonType).toBe('world_attention_moment_quiet_hours');
-      expect((decision?.payload as { nextSuggestedAt?: number }).nextSuggestedAt).toBe((suppression?.payload as { nextSuggestedAt?: number }).nextSuggestedAt);
-      expect((patch?.runtimeEventsV2 || []).some((event) => event.kind === 'artifact' && (event.payload as { artifactType?: string }).artifactType === 'moment_text')).toBe(false);
+      expect(suppression).toBeUndefined();
+      expect((decision?.payload as { decisionType?: string } | undefined)?.decisionType).not.toBe('suppressed');
+      expect((patch?.runtimeEventsV2 || []).some((event) => event.kind === 'artifact' && (event.payload as { artifactType?: string }).artifactType === 'moment_text')).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -1923,7 +1921,7 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
     expect(decision || suppression).toBeTruthy();
   });
 
-  it('suppresses share_moment at late night for non-night-owl personas and records reason', async () => {
+  it('does not classify a daytime persona as unavailable for sharing at night', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-29T23:50:00+08:00'));
     try {
@@ -1966,7 +1964,8 @@ describe('directSessionRuntime pair-thread adjudication helpers', () => {
       const suppression = (patch?.runtimeEventsV2 || []).find((event) => event.kind === 'artifact'
         && (event.payload as { eventType?: string; reasonType?: string }).eventType === 'event_candidate_suppressed'
         && (event.payload as { reasonType?: string }).reasonType === 'world_attention_moment_quiet_hours');
-      expect(suppression).toBeTruthy();
+      expect(updateChat).toHaveBeenCalled();
+      expect(suppression).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }

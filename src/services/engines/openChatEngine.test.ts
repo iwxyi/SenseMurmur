@@ -3662,7 +3662,7 @@ describe('openChatEngine.onMessageCommitted', () => {
     expect(generateResponseMock).not.toHaveBeenCalled();
   });
 
-  it('does not publish hinted post moment immediately during quiet hours', async () => {
+  it('honors the model post moment hint even at late hours', async () => {
     vi.setSystemTime(new Date('2026-06-01T23:45:00+08:00'));
     const chat = buildChat();
     const characters = [buildCharacter('a', '甲'), buildCharacter('b', '乙')];
@@ -3695,15 +3695,12 @@ describe('openChatEngine.onMessageCommitted', () => {
     });
 
     const events = readRuntimeEvents(result);
-    expect(events.some((event) => event.kind === 'event_candidate' && (event.payload as { eventKind?: string }).eventKind === 'post_moment')).toBe(false);
-    expect(events.some((event) => event.kind === 'artifact' && (event.payload as { artifactType?: string }).artifactType === 'moment_text')).toBe(false);
+    expect(events.some((event) => event.kind === 'event_candidate' && (event.payload as { eventKind?: string }).eventKind === 'post_moment')).toBe(true);
+    expect(events.some((event) => event.kind === 'artifact' && (event.payload as { artifactType?: string }).artifactType === 'moment_text')).toBe(true);
     const suppression = events.find((event) => event.kind === 'action_resolution'
       && (event.payload as { eventType?: string; candidateEventKind?: string; reasonType?: string }).eventType === 'event_candidate_suppressed'
       && (event.payload as { candidateEventKind?: string }).candidateEventKind === 'post_moment');
-    expect(suppression?.payload).toMatchObject({
-      reasonType: 'world_attention_moment_quiet_hours',
-      nextSuggestedAt: expect.any(Number),
-    });
+    expect(suppression).toBeUndefined();
     expect(generateResponseMock).not.toHaveBeenCalled();
   });
 

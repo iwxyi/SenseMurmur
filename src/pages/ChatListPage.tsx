@@ -523,6 +523,8 @@ export default function ChatListPage() {
         ) : (
           <Box
             sx={{
+              // Leave room for the card's hover lift inside the tab animation clip.
+              pt: chatListStyle.displayMode === 'card' ? 0.5 : 0,
               ...(chatListStyle.displayMode === 'list'
                 ? { display: 'grid', gridTemplateColumns: '1fr', gap: 0, alignItems: 'stretch' }
                 : chatListStyle.autoColumns

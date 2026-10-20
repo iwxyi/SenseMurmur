@@ -9,11 +9,13 @@ import { sanitizeUserFacingText } from './displayTextSanitizer';
 import { resolveMemoryDisclosureMetadata } from './memoryDisclosure';
 import { persistGeneratedMomentMedia, type StoredMomentMedia } from './momentMediaStorage';
 import { resolvePostMomentPublishGuard } from './postMomentPublishPolicy';
+import { buildConversationTimeContext } from './conversationTimeContext';
 import { retainRuntimeEvents } from './runtimeEventRetention';
 import { characterPublicationOffset, MOMENT_SPREAD_WINDOW_MS } from './characterPublicationSchedule';
 
 const runningActors = new Set<string>();
 const CHAT_QUIET_PERIOD_MS = 18 * 60_000;
+const MOMENT_DECISION_POLICY_VERSION = 2;
 
 interface DailyMomentFailure {
   actorId: string;
@@ -73,9 +75,10 @@ function memorySignature(items: ReturnType<typeof getDailyMomentMemoryItems>) {
 
 function hasSkippedMemories(chats: GroupChat[], actorId: string, signature: string, now: number) {
   return chats.some((chat) => chat.deletedAt == null && (chat.runtimeEventsV2 || []).some((event) => {
-    const payload = event.payload as { artifactType?: string; memorySignature?: string };
+    const payload = event.payload as { artifactType?: string; memorySignature?: string; decisionPolicyVersion?: number };
     return event.kind === 'artifact' && event.actorIds?.[0] === actorId && event.createdAt >= startOfDay(now)
-      && payload.artifactType === 'daily_moment_skip' && payload.memorySignature === signature;
+      && payload.artifactType === 'daily_moment_skip' && payload.memorySignature === signature
+      && payload.decisionPolicyVersion === MOMENT_DECISION_POLICY_VERSION;
   }));
 }
 
@@ -215,14 +218,14 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
       stage = '请求发布判断与正文';
       const rawDecision = await generateJsonWithAdapter({
         profile: textProfile,
-        systemPrompt: '判断角色今天是否真有值得主动分享到朋友圈的具体新鲜片段。普通聊天、喝茶吃饭等平常记录、重复经历、空泛心情都可以不发；不要为了每日任务凑动态。只根据提供的公开记忆判断，不编造事件或人物。返回 JSON 对象：{"publish":boolean,"text":string}。不发时 text 为空；要发时用角色自己的口吻写 100 字以内正文，不泄露私聊、秘密、用户资料或内部字段。',
+        systemPrompt: '以角色本人的心情和分享习惯，决定此刻是否随手发一条朋友圈。朋友圈不需要重大事件、独特见解或新鲜感；普通聊天、吃喝小事、一句感想，甚至闲着想找人聊两句，都可以成为分享理由。结合人物和当前情境自行决定，允许不发，也不要让所有角色都像在交每日作业。经历只根据提供的公开记忆，不编造事件、人物或正在做的事；可以表达角色对这些日常的感受。返回 JSON 对象：{"publish":boolean,"text":string}。不发时 text 为空；要发时用角色自己的口吻写 100 字以内正文，可以只有短短一句，不泄露私聊、秘密、用户资料或内部字段。',
         messages: [{ role: 'user', content: [
           `角色：${sanitizeUserFacingText(actor.name, members)}`,
           `背景：${sanitizeUserFacingText(actor.background, members)}`,
           `说话风格：${sanitizeUserFacingText(actor.speakingStyle, members)}`,
-          `今天：${date.toLocaleDateString()}`,
+          buildConversationTimeContext([], now),
           `今天的公开记忆：\n${sourceText}`,
-          '只有角色真想分享且内容具体、有新意时才发布；拿不准就不发。',
+          '按这个角色此刻的分享意愿决定即可，不必先证明这件小事值得发表。',
         ].join('\n') }],
         aiUsage: { type: 'moment_generation', label: '生成每日朋友圈', scope: 'moment', resourceId: chatId },
       });
@@ -235,7 +238,7 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
           if (!ops.isCurrentSource() || latest.deletedAt != null || hasSkippedMemories(ops.getChats(), actorId, signature, Date.now())) return null;
           const skip: RuntimeEventV2 = { id: createRuntimeEventId(), conversationId: chatId,
             kind: 'artifact', createdAt: Date.now(), actorIds: [actorId], visibility: 'role_private',
-            summary: '今日暂无值得分享的新片段', payload: { artifactType: 'daily_moment_skip', memorySignature: signature } };
+            summary: '角色此刻选择不发动态', payload: { artifactType: 'daily_moment_skip', memorySignature: signature, decisionPolicyVersion: MOMENT_DECISION_POLICY_VERSION } };
           return { runtimeEventsV2: retainRuntimeEvents([...(latest.runtimeEventsV2 || []), skip], 160) };
         });
         continue;

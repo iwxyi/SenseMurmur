@@ -27,18 +27,6 @@ export function isPostMomentDelaySourceEventKind(eventKind: SocialEventKind | st
   return typeof eventKind === 'string' && postMomentDelaySourceEventKindSet.has(eventKind);
 }
 
-export function isNightOwlPersona(character: AICharacter | null | undefined) {
-  const personaText = `${character?.speakingStyle || ''} ${character?.background || ''} ${(character?.expertise || []).join(' ')}`.toLowerCase();
-  return /(夜猫|熬夜|夜班|主播|直播|vlog|夜生活|night|stream)/i.test(personaText);
-}
-
-function startOfNextDayAt(timestamp: number, hour: number, minute = 0) {
-  const next = new Date(timestamp);
-  next.setDate(next.getDate() + 1);
-  next.setHours(hour, minute, 0, 0);
-  return next.getTime();
-}
-
 export function resolvePostMomentPublishGuard(params: {
   chat: GroupChat;
   payload: SocialEventCandidatePayload;
@@ -57,26 +45,6 @@ export function resolvePostMomentPublishGuard(params: {
       reasonDetail: '该角色当前不允许自动发朋友圈，已取消本次动态发布。',
     };
   }
-  const actorNightOwl = isNightOwlPersona(params.actor);
-  const hour = new Date(now).getHours();
-  const isLateNight = hour >= 23 || hour < 7;
-  if (isLateNight && !actorNightOwl) {
-    const nextSuggestedAt = hour < 7
-      ? (() => {
-        const next = new Date(now);
-        next.setHours(7, 30, 0, 0);
-        return next.getTime();
-      })()
-      : startOfNextDayAt(now, 7, 30);
-    return {
-      allow: false,
-      reasonType: 'world_attention_moment_quiet_hours',
-      reasonLabel: '夜间发圈抑制',
-      reasonDetail: '当前处于夜间时段，且角色并非夜猫人设，延后发布动态。',
-      nextSuggestedAt,
-    };
-  }
-
   const recentPostMomentArtifacts = (params.chat.runtimeEventsV2 || [])
     .filter((event) => {
       if (event.kind !== 'artifact') return false;

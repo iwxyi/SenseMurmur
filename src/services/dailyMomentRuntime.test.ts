@@ -69,9 +69,27 @@ describe('daily moments from character memories', () => {
     expect(chats[0].lastMessageAt).toBe(1);
   });
 
-  it('asks the model to decide whether a memory deserves a post', async () => {
+  it('lets the model share ordinary daily life without requiring novelty', async () => {
     await runDailyMomentFlow('room-a', ops());
-    expect(vi.mocked(generateJsonWithAdapter).mock.calls[0][0].systemPrompt).toContain('不要为了每日任务凑动态');
+    const request = vi.mocked(generateJsonWithAdapter).mock.calls[0][0];
+    expect(request.systemPrompt).toContain('朋友圈不需要重大事件、独特见解或新鲜感');
+    expect(request.systemPrompt).toContain('闲着想找人聊两句');
+    expect(request.messages[0].content).not.toContain('拿不准就不发');
+    expect(projectWorldMoments(chats, [actor])).toHaveLength(1);
+  });
+
+  it('reconsiders a legacy strict skip once and respects the new decline', async () => {
+    vi.mocked(generateJsonWithAdapter).mockResolvedValue('{"publish":false,"text":""}');
+    await runDailyMomentFlow('room-a', ops());
+    chats[0] = { ...chats[0], runtimeEventsV2: chats[0].runtimeEventsV2!.map((event) => {
+      if ((event.payload as { artifactType?: string }).artifactType !== 'daily_moment_skip') return event;
+      return { ...event, payload: { ...event.payload, decisionPolicyVersion: undefined } };
+    }) };
+    await runDailyMomentFlow('room-a', ops());
+    expect(generateJsonWithAdapter).toHaveBeenCalledTimes(2);
+    await runDailyMomentFlow('room-a', ops());
+    expect(generateJsonWithAdapter).toHaveBeenCalledTimes(2);
+    expect(projectWorldMoments(chats, [actor])).toEqual([]);
   });
 
   it('does not publish or reconsider unchanged memories when the model declines', async () => {
@@ -240,13 +258,14 @@ describe('daily moments from character memories', () => {
     expect(projectWorldMoments(chats, [actor])).toHaveLength(1);
   });
 
-  it('waits through quiet hours and resumes at the next check', async () => {
+  it.each([true, false])('lets the model decide at night for a daytime worker: publish=%s', async (publish) => {
     vi.setSystemTime(new Date(2026, 9, 14, 6));
+    actor.background = '白天上班的普通职员';
     actor.layeredMemories = [memory()];
+    vi.mocked(generateJsonWithAdapter).mockResolvedValue(JSON.stringify({ publish, text: publish ? '今天的小惊喜。' : '' }));
     await runDailyMomentFlow('room-a', ops());
-    expect(generateJsonWithAdapter).not.toHaveBeenCalled();
-    vi.setSystemTime(new Date(2026, 9, 14, 8));
-    await runDailyMomentFlow('room-a', ops());
-    expect(projectWorldMoments(chats, [actor])).toHaveLength(1);
+    expect(generateJsonWithAdapter).toHaveBeenCalledOnce();
+    expect(vi.mocked(generateJsonWithAdapter).mock.calls[0][0].messages[0].content).toContain('Current device-local time:');
+    expect(projectWorldMoments(chats, [actor])).toHaveLength(publish ? 1 : 0);
   });
 });

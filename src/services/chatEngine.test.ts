@@ -341,6 +341,8 @@ describe('chatEngine reply preference injection', () => {
     await generateSpeakerMessage({ chat: buildChat(), speaker: character, characters: [character, buildCharacter('hui', '灰太狼')], messages: [], apiConfig: profiles });
     const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
     expect(generateResponseMock.mock.calls[0]?.[0]).toMatchObject({ model: 'character-model' });
+    expect(prompt).toContain('Current device-local time:');
+    expect(prompt).toContain('Late hours do not imply fatigue');
     if (mode === 'off') {
       expect(prompt).not.toContain('## Chat preferences');
     } else {
@@ -3386,14 +3388,11 @@ describe('chatEngine streaming preview', () => {
     const history = generateResponseMock.mock.calls[0]?.[2] as Array<{ role: string; content: string }>;
     expect(history).toHaveLength(2);
     expect(history.every(item => item.role === 'user')).toBe(true);
-    expect(history[0].content).toContain('earlier sends');
-    expect(history[1].content).toContain('most recent sends');
     expect(JSON.parse(history[0].content.split('\n').slice(1).join('\n'))).toEqual([
-      { speaker: '自己', content: '这件先别扔。' },
-    ]);
-    expect(JSON.parse(history[1].content.split('\n').slice(1).join('\n'))).toEqual([
+      { speaker: 'Lily', content: '这件先别扔。' },
       { speaker: '阿强', content: '袖口还能改。' },
     ]);
+    expect(history[1].content).toContain('Current turn: Lily');
     expect(onChunk).toHaveBeenCalled();
     expect(onChunk.mock.calls.every(([chunk]) => !String(chunk).includes('"messages"'))).toBe(true);
     expect(message.messageParts?.map((part) => part.content)).toEqual(['把袖口翻过来看看。', '阿强，这里还能改吗？']);
@@ -3424,7 +3423,7 @@ describe('chatEngine streaming preview', () => {
     });
     expect(generateResponseMock).toHaveBeenCalledTimes(1);
     expect(generateResponseMock.mock.calls[0]?.[1]).toContain('格式校验');
-    expect(generateResponseMock.mock.calls[0]?.[2]?.at(-1)?.content).toContain('我改主意了，一起去吧。');
+    expect(generateResponseMock.mock.calls[0]?.[2]?.some((item: { content: string }) => item.content.includes('我改主意了，一起去吧。'))).toBe(true);
     expect(generateResponseMock.mock.calls[0]?.[2]?.some((item: { content: string }) => item.content.includes('格式校验'))).toBe(false);
     expect(message.content).toBe('嗯？');
     expect(message.messageParts?.map((part) => part.content)).toEqual(['嗯？', '刚才不是还说不去吗。']);

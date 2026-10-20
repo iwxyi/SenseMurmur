@@ -19,7 +19,7 @@ function message(patch: Partial<Message>): Message {
 }
 
 describe('projectConversationForModel', () => {
-  it('separates earlier context from latest sends without losing history or making assistant demonstrations', () => {
+  it('keeps named history intact and separates the current generation task from recorded sends', () => {
     const projected = projectConversationForModel({
       messages: [
         message({ id: 'u', type: 'user', senderId: 'user', content: '大家随便聊聊' }),
@@ -33,22 +33,23 @@ describe('projectConversationForModel', () => {
     });
     expect(projected).toHaveLength(2);
     expect(projected.every(item => item.role === 'user')).toBe(true);
-    expect(projected[0].content).toContain('earlier sends');
-    expect(projected[1].content).toContain('most recent sends');
     expect(JSON.parse(projected[0].content.split('\n').slice(1).join('\n'))).toEqual([
       { speaker: '用户', content: '大家随便聊聊' },
-      { speaker: '自己', content: '先等一下' },
-      { speaker: '自己', content: '我去拿水' },
-    ]);
-    expect(JSON.parse(projected[1].content.split('\n').slice(1).join('\n'))).toEqual([
+      { speaker: '甲', content: '先等一下' },
+      { speaker: '甲', content: '我去拿水' },
       { speaker: '乙', content: '你们继续' },
       { speaker: '乙', content: '我先吃饭' },
     ]);
+    expect(projected[1].content).toContain('Current turn: 甲');
+    expect(projected[1].content).not.toContain('我先吃饭');
   });
 
-  it('handles an empty room record without inventing a send', () => {
-    expect(projectConversationForModel({ messages: [], characters: new Map(),
-      options: { historyFormat: 'room-record' } })).toEqual([]);
+  it('provides a generation task in an empty room without inventing historical sends', () => {
+    const projected = projectConversationForModel({ messages: [], characters: new Map(),
+      options: { historyFormat: 'room-record' } });
+    expect(projected).toHaveLength(1);
+    expect(projected[0].content).toContain('Current turn:');
+    expect(projected[0].content).not.toContain('Room transcript');
   });
 
   it('keeps topic guidance separate from subsequent human sends by the same sender', () => {
@@ -59,10 +60,13 @@ describe('projectConversationForModel', () => {
     });
     expect(projected).toHaveLength(2);
     expect(projected[0].content).toContain('话题引导');
-    expect(projected[1].content).toContain('先看这双鞋');
+    expect(JSON.parse(projected[0].content.split('\n').slice(1).join('\n'))).toEqual([
+      { speaker: '话题引导', content: '聊穿搭' },
+      { speaker: '用户', content: '先看这双鞋' },
+    ]);
   });
 
-  it('keeps each record image references local and applies latest-user policy across both records', () => {
+  it('keeps image references aligned across speakers and preserves the latest-user policy', () => {
     const inputMessages = ['user', 'char-b'].map((senderId, index) => message({
       id: `image-${index}`, senderId, type: index === 0 ? 'user' : 'ai',
       content: `图片${index}`, metadata: { attachments: [{
@@ -76,14 +80,17 @@ describe('projectConversationForModel', () => {
     });
     const all = project('all');
     expect(all).toHaveLength(2);
-    all.forEach((record, index) => {
-      expect(record.attachments).toEqual([{ url: `data:image/png;base64,${index}`, mimeType: undefined }]);
-      expect(JSON.parse(record.content.split('\n').slice(1).join('\n'))[0].imageNumbers).toEqual([1]);
-    });
+    expect(all[0].attachments).toEqual([
+      { url: 'data:image/png;base64,0', mimeType: undefined },
+      { url: 'data:image/png;base64,1', mimeType: undefined },
+    ]);
+    expect(JSON.parse(all[0].content.split('\n').slice(1).join('\n')).map((send: { imageNumbers: number[] }) => send.imageNumbers))
+      .toEqual([[1], [2]]);
+    expect(all[1].attachments).toBeUndefined();
     const latest = project('latest-user');
-    expect(latest[0].attachments).toEqual(all[0].attachments);
+    expect(latest[0].attachments).toEqual([{ url: 'data:image/png;base64,0', mimeType: undefined }]);
     expect(latest[1].attachments).toBeUndefined();
-    expect(JSON.parse(latest[1].content.split('\n').slice(1).join('\n'))[0].imageNumbers).toBeUndefined();
+    expect(JSON.parse(latest[0].content.split('\n').slice(1).join('\n'))[1].imageNumbers).toBeUndefined();
   });
 
   it.each(['group', 'direct', 'ai_direct', 'assistant'] as const)('projects only actual sends in %s without merging consecutive bubbles', (chatType) => {
@@ -266,7 +273,7 @@ describe('projectConversationForModel', () => {
     });
 
     if (historyFormat === 'room-record') {
-      expect(projected).toHaveLength(1);
+      expect(projected).toHaveLength(2);
       expect(projected[0]?.attachments).toEqual([{ url: 'data:image/png;base64,BBB', mimeType: undefined }]);
       expect(JSON.parse(projected[0].content.split('\n').slice(1).join('\n'))).toEqual([
         { speaker: '用户', content: '早先的图。\n[图片] 旧图' },

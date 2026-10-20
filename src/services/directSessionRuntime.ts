@@ -19,7 +19,7 @@ import { buildMomentPostText } from './momentTextBuilder';
 import { buildCompanionshipArtifactSeeds, buildCompanionshipStatusSignature, buildUserCompanionshipProjection, shouldBlockUserProactiveContactByCompanionshipPolicy } from './companionshipProjection';
 import { readDueCompanionshipCareTopicsFromEvents, readStaleCompanionshipCareTopicsFromEvents } from './directCompanionshipCare';
 import { buildCompanionshipPrivateThreadScheduleEvent, getCompanionshipPrivateThreadCooldownMs, getRecentCompanionshipPrivateThreadSchedule } from './companionshipPrivateThreadSchedule';
-import { isNightOwlPersona, resolvePostMomentPublishGuard } from './postMomentPublishPolicy';
+import { resolvePostMomentPublishGuard } from './postMomentPublishPolicy';
 
 function withFrameworkPatch(chat: GroupChat, patch: Partial<GroupChat>) {
   const engine = resolveSessionEngine(chat);
@@ -1047,11 +1047,6 @@ async function buildWorldDrivenCandidate(
     && passesWorldAttentionRestraintPolicy(chat, attention.actorId, 'user', now, 'status_update', reminderReasonType, actor, { attentionScore: attention.attentionScore });
   const canStatus = !hasRecentWorldArtifact(chat, attention.actorId, 'status_update', 90 * 60_000)
     && passesWorldAttentionRestraintPolicy(chat, attention.actorId, 'user', now, 'status_update', 'world_attention_followup', actor, { attentionScore: attention.attentionScore });
-  const isLateNight = (() => {
-    const hour = new Date(now).getHours();
-    return hour >= 23 || hour < 7;
-  })();
-  const actorNightOwl = isNightOwlPersona(actor);
   const lastSocialArtifactAt = (chat.runtimeEventsV2 || [])
     .filter((event) => event.kind === 'artifact' && ['social_outing', 'check_in', 'react_to_moment', 'status_update', 'gift_exchange'].includes((event.payload as { eventKind?: string }).eventKind || ''))
     .map((event) => event.createdAt)
@@ -1059,7 +1054,6 @@ async function buildWorldDrivenCandidate(
   const pendingDelayWindowUntil = readPendingMomentDelayWindow(chat, attention.actorId, now);
   const postMomentDelayBlocked = pendingDelayWindowUntil != null || (typeof lastSocialArtifactAt === 'number' && now - lastSocialArtifactAt < 18 * 60_000);
   const canPostMoment = isCharacterFeatureEnabled(actor, 'moments')
-    && !(isLateNight && !actorNightOwl)
     && !postMomentDelayBlocked
     && !hasRecentWorldArtifact(chat, attention.actorId, 'post_moment', 180 * 60_000);
   const minutesUntil = upcomingCalendarItem?.startAt ? Math.max(0, Math.round((upcomingCalendarItem.startAt - now) / 60_000)) : null;
@@ -1371,11 +1365,6 @@ async function evaluateWorldDrivenDecision(
   const reactIntentNextAt = readSocialArtifactNextSuggestedAt(chat, attention.actorId, 'react_to_moment', 120 * 60_000, now, 'intent');
   const inviteIntentNextAt = readSocialArtifactNextSuggestedAt(chat, attention.actorId, 'social_outing', 6 * 60 * 60_000, now, 'intent');
   const momentsEnabled = isCharacterFeatureEnabled(actor, 'moments');
-  const isLateNight = (() => {
-    const hour = new Date(now).getHours();
-    return hour >= 23 || hour < 7;
-  })();
-  const actorNightOwl = isNightOwlPersona(actor);
   const lastSocialArtifactAt = (chat.runtimeEventsV2 || [])
     .filter((event) => event.kind === 'artifact' && ['social_outing', 'check_in', 'react_to_moment', 'status_update', 'gift_exchange'].includes((event.payload as { eventKind?: string }).eventKind || ''))
     .map((event) => event.createdAt)
@@ -1439,17 +1428,6 @@ async function evaluateWorldDrivenDecision(
       reasonType: 'world_attention_moment_disabled',
       reasonLabel: '朋友圈功能关闭',
       reasonDetail: '该角色当前不允许自动发朋友圈，已改走其它世界驱动动作。',
-      candidateEventKind: 'post_moment',
-    }));
-  }
-  if (shareMomentSuggested && isLateNight && !actorNightOwl && !hasRecentWorldSuppressionEvent(chat, attention.actorId, 'world_attention_moment_quiet_hours', 20 * 60_000, now)) {
-    suppressionEvents.push(buildWorldSuppressionEvent({
-      chat,
-      actorId: attention.actorId,
-      actorName,
-      reasonType: 'world_attention_moment_quiet_hours',
-      reasonLabel: '夜间发圈抑制',
-      reasonDetail: '当前处于夜间时段，且角色并非夜猫人设，暂不触发朋友圈。',
       candidateEventKind: 'post_moment',
     }));
   }

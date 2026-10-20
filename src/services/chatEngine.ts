@@ -18,6 +18,7 @@ import { getStyleProfile, resolveChatStyleProfile, resolveDefaultStyleProfile, r
 import { getChannelSemantics } from './channelSemanticsRegistry';
 import { logDeveloperDiagnostic } from './developerDiagnostics';
 import { getCurrentRetentionLimits } from './retentionLimits';
+import { buildConversationTimeContext } from './conversationTimeContext';
 
 function getSessionEngine(chat: Pick<GroupChat, 'mode' | 'sessionKind'>) {
   return loadSessionEngine(chat);
@@ -4356,6 +4357,7 @@ export async function generateSpeakerMessage(params: GenerateSpeakerMessageParam
     { id: 'user_guidance', layer: 'task', priority: 20, content: buildUserGuidancePrompt(userGuidance, params.speaker, effectiveMembers, mediaCapabilities, priorGuidanceReplies) },
     { id: 'room_floor_state', layer: 'task', priority: 25, content: buildGuidanceFloorPrompt(guidanceFloorState) },
     { id: 'world_event_context', layer: 'scene', priority: 20, content: buildWorldEventContextPrompt({ chat: params.chat, speaker: params.speaker, members: effectiveMembers, knownConversations: params.generationContext?.knownConversations }) },
+    { id: 'conversation_time', layer: 'scene', priority: 15, content: resolveSessionFamilyKey(params.chat) === 'conversation' ? buildConversationTimeContext(activeMessages) : '' },
     { id: 'world_influence', layer: 'scene', priority: 30, content: worldInfluenceSnapshot.prompt },
     { id: 'current_intent', layer: 'task', priority: 30, content: usesUnifiedGroupTurn ? '' : buildCurrentIntentPrompt({ directorIntent: effectiveDirectorIntent, intent }) },
     { id: 'private_turn_priority', layer: 'task', priority: 35, content: buildPrivateTurnPriorityPrompt(params.chat) },
