@@ -973,7 +973,11 @@ export default function CharacterLibraryPage() {
         </Alert>
       ) : null}
       {(isLoading && characters.length === 0) || (view === 'card' && libraryLoading && libraryItems.length === 0) ? (
-        <ListSkeletonGrid sx={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: { xs: 1, sm: 1.5 } }} />
+        <ListSkeletonGrid sx={{
+          gridTemplateColumns: view === 'card' ? 'repeat(2, minmax(0, 1fr))' : { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' },
+          ...(view === 'card' ? { '@container (min-width: 640px)': { gridTemplateColumns: 'repeat(auto-fill, minmax(196px, 1fr))' } } : {}),
+          gap: { xs: 1, sm: 1.5 },
+        }} />
       ) : displayChars.length === 0 ? (
         <EmptyState
           variant="plain"
@@ -989,11 +993,10 @@ export default function CharacterLibraryPage() {
           sx={{
             ...(view === 'list' ? {
               ...buildListGridSx(),
-              gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
             } : {
               display: 'grid',
               gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-              '@container (min-width: 620px)': {
+              '@container (min-width: 640px)': {
                 gridTemplateColumns: 'repeat(auto-fill, minmax(196px, 1fr))',
               },
             }),

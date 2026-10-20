@@ -28,11 +28,6 @@ export default function CharacterCard({ character, onEdit, onDelete, onStartDire
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const { t, i18n } = useTranslation();
 
-  const topTraits = Object.entries(character.personality)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map(([key]) => t(`character.${key}`));
-
   const longPressTriggeredRef = useRef(false);
 
   const clearPressTimer = () => {
@@ -175,45 +170,52 @@ export default function CharacterCard({ character, onEdit, onDelete, onStartDire
         >
           <CardContent sx={{
             p: 2,
-            pr: (onEdit || onDelete) ? 6 : 2,
             height: '100%',
             '&:last-child': { pb: 2 },
             '@container (max-width: 175px)': {
               p: 1.25,
-              pr: (onEdit || onDelete) ? 4.75 : 1.25,
               '&:last-child': { pb: 1.25 },
             },
           }}>
-            <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.5, '@container (max-width: 175px)': { gap: 0.75 } }}>
+            <Box sx={{ display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', gridTemplateRows: 'auto auto', columnGap: 1, rowGap: 0.35, minWidth: 0, alignItems: 'center', '@container (max-width: 175px)': { columnGap: 0.75, rowGap: 0.25 } }}>
               <Avatar
                 className="character-card-avatar"
                 src={isImageAvatar(character.avatar) ? resolveSafeAvatarSrc(character.avatar) : undefined}
                 slotProps={{ img: { onError: () => rememberFailedAvatarUrl(character.avatar), loading: 'lazy', decoding: 'async' } }}
-                sx={{ width: 48, height: 48, fontSize: '1.5rem', bgcolor: 'primary.light', '@container (max-width: 175px)': { width: 40, height: 40, fontSize: '1.2rem' } }}>
+                sx={{ gridRow: '1 / span 2', width: 36, height: 36, fontSize: '1rem', bgcolor: 'primary.light', flexShrink: 0, '@container (max-width: 175px)': { width: 32, height: 32, fontSize: '0.9rem' } }}>
                 {isImageAvatar(character.avatar) ? undefined : character.avatar}
               </Avatar>
-              <Box sx={{ flex: 1, minWidth: 0 }}>
-                <Typography variant="subtitle1" noWrap sx={{ fontWeight: 600, '@container (max-width: 175px)': { fontSize: '0.9rem', lineHeight: 1.25 } }}>
-                  {character.name}
-                </Typography>
-                <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mt: 0.5, '@container (max-width: 175px)': { gap: 0.35, mt: 0.35, '& .MuiChip-root': { height: 20, maxWidth: '100%', fontSize: '0.68rem' }, '& .MuiChip-label': { px: 0.65, overflow: 'hidden', textOverflow: 'ellipsis' } } }}>
-                  {topTraits.map((trait) => (
-                    <Chip key={trait} label={trait} size="small" variant="outlined" />
-                  ))}
-                  {character.group ? (
-                    <Chip label={character.group} size="small" color="primary" variant="outlined" />
+              <Typography variant="subtitle1" noWrap sx={{ minWidth: 0, pr: (onEdit || onDelete) ? 4 : 0, fontWeight: 400, '@container (max-width: 175px)': { fontSize: '0.9rem', lineHeight: 1.25 } }}>
+                {character.name}
+              </Typography>
+              {character.group || character.isPreset || character.expertise.length > 0 ? (
+                <Box sx={{ gridColumn: 2, display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0, '@container (max-width: 175px)': { gap: 0.4 } }}>
+                  {character.group || character.isPreset ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.4, flexShrink: 0, minWidth: 0, maxWidth: '55%', overflow: 'hidden' }}>
+                      {character.group ? (
+                        <Chip label={character.group} size="small" color="primary" variant="outlined" sx={{ height: 22, minWidth: 0, maxWidth: '100%', '& .MuiChip-label': { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, '@container (max-width: 175px)': { height: 20, fontSize: '0.68rem', '& .MuiChip-label': { px: 0.65 } } }} />
+                      ) : null}
+                      {character.isPreset ? (
+                        <Chip label="Preset" size="small" color="secondary" variant="filled" sx={{ height: 22, '@container (max-width: 175px)': { height: 20, fontSize: '0.68rem' } }} />
+                      ) : null}
+                    </Box>
                   ) : null}
-                  {character.isPreset && (
-                    <Chip label="Preset" size="small" color="secondary" variant="filled" />
-                  )}
+                  {character.expertise.length > 0 ? (
+                    <Typography variant="caption" color="text.secondary" sx={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {formatExpertiseList(character.expertise, i18n.language).join(' / ')}
+                    </Typography>
+                  ) : null}
                 </Box>
-                {character.expertise.length > 0 && (
-                  <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }} noWrap>
-                    {formatExpertiseList(character.expertise, i18n.language).join(' / ')}
-                  </Typography>
-                )}
-              </Box>
+              ) : <Box sx={{ gridColumn: 2 }} />}
             </Box>
+            {character.background?.trim() ? (
+              <Typography
+                variant="body2"
+                sx={{ mt: 0.75, lineHeight: 1.4, color: 'text.secondary', opacity: 0.88, display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden', '@container (max-width: 175px)': { mt: 0.5, fontSize: '0.75rem' } }}
+              >
+                {character.background.trim()}
+              </Typography>
+            ) : null}
           </CardContent>
         </CardActionArea>
       </Box>
