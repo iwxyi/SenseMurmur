@@ -55,6 +55,20 @@ function toDateKey(date: Date) {
   return `${date.getFullYear()}-${`${date.getMonth() + 1}`.padStart(2, '0')}-${`${date.getDate()}`.padStart(2, '0')}`;
 }
 
+function getReaderHorizontalBounds(anchor: HTMLElement) {
+  let left = 0;
+  let right = anchor.ownerDocument.documentElement.clientWidth;
+  // Portals escape clipping, but must still avoid the original scroll containers' gutters.
+  for (let parent = anchor.parentElement; parent; parent = parent.parentElement) {
+    const style = getComputedStyle(parent);
+    if (!/(auto|scroll|overlay)/.test(`${style.overflowX} ${style.overflowY}`)) continue;
+    const rect = parent.getBoundingClientRect();
+    left = Math.max(left, rect.left + parent.clientLeft);
+    right = Math.min(right, rect.left + parent.clientLeft + parent.clientWidth);
+  }
+  return { left, right };
+}
+
 function buildFloatingNavButtonSx() {
   return {
     width: { xs: 34, sm: 40 },
@@ -126,6 +140,15 @@ export default function ArtifactCalendarReader({
   const [loadingDetailId, setLoadingDetailId] = useState<string | null>(null);
   const swipeRef = useRef<ReaderSwipeState | null>(null);
   const [readerAnchor, setReaderAnchor] = useState<HTMLDivElement | null>(null);
+  const navPoppers = useRef<Array<{ forceUpdate: () => void } | null>>([]);
+  useEffect(() => {
+    if (!readerAnchor) return;
+    const observer = new ResizeObserver(() => {
+      navPoppers.current.forEach((popper) => popper?.forceUpdate());
+    });
+    observer.observe(readerAnchor);
+    return () => observer.disconnect();
+  }, [readerAnchor]);
   const itemsByDate = useMemo(() => {
     const map = new Map<string, CharacterArtifactEntry[]>();
     chronologicalItems.forEach((item) => {
@@ -372,12 +395,29 @@ export default function ArtifactCalendarReader({
                 key={side}
                 open={Boolean(readerAnchor)}
                 anchorEl={readerAnchor}
+                popperRef={(instance) => { navPoppers.current[side === 'left' ? 0 : 1] = instance; }}
                 placement={side}
                 popperOptions={{ strategy: 'fixed' }}
                 modifiers={[
                   { name: 'flip', enabled: false },
                   { name: 'offset', options: { offset: [0, 4] } },
                   { name: 'preventOverflow', options: { rootBoundary: 'viewport', boundary: 'clippingParents', altAxis: true, tether: false, padding: 2 } },
+                  {
+                    name: 'symmetricReaderEdges',
+                    enabled: true,
+                    phase: 'main',
+                    requires: ['preventOverflow'],
+                    fn: ({ state }) => {
+                      if (!readerAnchor || !state.modifiersData.popperOffsets) return;
+                      const bounds = getReaderHorizontalBounds(readerAnchor);
+                      const paper = readerAnchor.getBoundingClientRect();
+                      const width = state.rects.popper.width;
+                      const reach = Math.min(width + 4, paper.left - bounds.left - 2, bounds.right - paper.right - 2);
+                      state.modifiersData.popperOffsets.x = side === 'left'
+                        ? paper.left - reach
+                        : paper.right + reach - width;
+                    },
+                  },
                 ]}
                 sx={{ zIndex: 1200, '&[data-popper-reference-hidden]': { visibility: 'hidden', pointerEvents: 'none' } }}
               >
