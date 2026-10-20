@@ -209,7 +209,7 @@ describe('processRichMessageMedia', () => {
     const upserts: Message[] = [];
 
     await processRichMessageMedia({
-      message: buildQueuedImageMessage(),
+      message: buildQueuedImageMessage({ serverId: 'server-message-image' }),
       character,
       aiProfiles: [imageProfile],
       upsertMessage: (message) => upserts.push(message),
@@ -250,7 +250,7 @@ describe('processRichMessageMedia', () => {
     const upserts: Message[] = [];
 
     await processRichMessageMedia({
-      message: buildQueuedImageMessage(),
+      message: buildQueuedImageMessage({ serverId: 'server-message-image' }),
       character,
       aiProfiles: [imageProfile],
       upsertMessage: (message) => upserts.push(message),
@@ -265,6 +265,23 @@ describe('processRichMessageMedia', () => {
       kind: 'image',
       title: '灰太狼证件照',
     });
+  });
+
+  it('waits for a server message id before processing or patching cloud media', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const upserts: Message[] = [];
+
+    await processRichMessageMedia({
+      message: buildQueuedImageMessage(),
+      character,
+      aiProfiles: [imageProfile],
+      upsertMessage: (message) => upserts.push(message),
+    });
+
+    expect(upserts).toEqual([]);
+    expect(generateImageWithAdapter).not.toHaveBeenCalled();
+    expect(api.updateMessageMetadata).not.toHaveBeenCalled();
   });
 
   it('uses referenced subject characters for image generation instead of the sending character', async () => {

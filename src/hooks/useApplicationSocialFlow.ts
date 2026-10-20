@@ -8,8 +8,8 @@ import { runAutoSocialEventFlowImpl, type AutoSocialEventFlowContext } from '../
 import { buildPrivateSessionEvent } from '../services/directSessionHelpers';
 import { buildRuntimeEventMessageContent, normalizeRuntimeEvent } from '../services/runtimeEventFactory';
 import { persistLocalFirstMessage } from '../services/chatCommitMessage';
-import { logRecoverableError, reportRecoverableError } from '../services/diagnostics';
-import { DailyMomentFlowError, runDailyMomentFlow } from '../services/dailyMomentRuntime';
+import { reportRecoverableError } from '../services/diagnostics';
+import { runDailyMomentFlow } from '../services/dailyMomentRuntime';
 import { getLocalDataUserId } from '../services/authStorageScope';
 import type { GroupChat } from '../types/chat';
 import { getUsablePreferredAIProfile } from '../types/settings';
@@ -106,11 +106,6 @@ export function useApplicationSocialFlow() {
         });
         nextCheckAt = dailyResult?.nextCheckAt;
       } catch (error) {
-        if (error instanceof DailyMomentFlowError) {
-          error.failures.forEach(({ error: cause, ...context }) => {
-            logRecoverableError({ location: 'daily-moment', error: cause, extra: context });
-          });
-        }
         dailyFailure = { error };
       }
       if (!isCurrentSource()) return;

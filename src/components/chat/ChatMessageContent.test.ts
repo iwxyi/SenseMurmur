@@ -3,7 +3,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Message } from '../../types/message';
 import { buildImageAttachmentHoverInfo } from '../../services/messageAttachmentHoverInfo';
-import { getAttachmentDisplayWidth, MessageContent, parseInlineAttachmentPlaceholders, shouldHideGeneratedMediaPlaceholderText } from './ChatMessageContent';
+import { MessageContent } from './ChatMessageContent';
+import { getAttachmentDisplayWidth, parseInlineAttachmentPlaceholders, shouldHideGeneratedMediaPlaceholderText } from './chatMessageContentUtils';
 
 describe('ChatMessageContent media layout', () => {
   it('uses a fixed intrinsic media width so fit-content bubbles can shrink', () => {
@@ -33,7 +34,20 @@ describe('ChatMessageContent media layout', () => {
     })).toBe(240);
   });
 
-  it('reserves sticker height before the ready image finishes loading', () => {
+  it('uses sticker metadata dimensions and shows a loading state until decoding finishes', () => {
+    const message = {
+      id: 'sticker-message', chatId: 'chat-1', type: 'ai', senderId: 'a', senderName: '甲',
+      content: '', timestamp: 1, emotion: 0, isDeleted: false,
+      metadata: { attachments: [{ id: 'sticker-1', kind: 'sticker', status: 'ready', altText: '表情包',
+        width: 320, height: 160, url: 'data:image/png;base64,AAA', createdAt: 1, updatedAt: 1 }] },
+    } as Message;
+    const html = renderToStaticMarkup(createElement(MessageContent, { message }));
+    expect(html).toContain('aspect-ratio:2/1');
+    expect(html).toContain('height:100%');
+    expect(html).toContain('aria-label="正在加载表情包"');
+  });
+
+  it('does not force a square ratio when sticker dimensions are not available', () => {
     const message = {
       id: 'sticker-message', chatId: 'chat-1', type: 'ai', senderId: 'a', senderName: '甲',
       content: '', timestamp: 1, emotion: 0, isDeleted: false,
@@ -41,8 +55,8 @@ describe('ChatMessageContent media layout', () => {
         url: 'data:image/png;base64,AAA', createdAt: 1, updatedAt: 1 }] },
     } as Message;
     const html = renderToStaticMarkup(createElement(MessageContent, { message }));
-    expect(html).toContain('aspect-ratio:1/1');
-    expect(html).toContain('height:100%');
+    expect(html).not.toContain('aspect-ratio:1/1');
+    expect(html).toContain('height:auto');
   });
 
   it('hides generated image queue placeholder text when media attachments exist', () => {

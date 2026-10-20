@@ -57,6 +57,7 @@ import { copyTextToClipboard } from '../utils/clipboard';
 import { getInputCapabilityWarning, getUsablePreferredAIProfile, resolveAIModelInputCapabilities } from '../types/settings';
 import { logDeveloperDiagnostic } from '../services/developerDiagnostics';
 import { isGenerationCancelledError } from '../services/generationCancellation';
+import { isCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { getStoryChoiceGateState, resolveStoryReaderRole, sanitizeStoryChoicePrompt } from '../services/storyChoices';
 import { resolveSessionScrollCapabilities } from '../services/sessionScrollCapabilities';
 import { buildStoryRoomOpeningPreview, type StoryRoomOpeningPreview } from '../services/storyRoomOpeningPreview';
@@ -1142,15 +1143,17 @@ export default function ChatDetailPage() {
       });
     });
   }, [api, chat, currentChatMessages, id, updateChat]);
+  const cloudRichMediaRequiresServerId = authMode === 'cloud' && isCloudSyncEnabled();
   const queuedRichMediaSignature = useMemo(() => currentChatMessages
     .flatMap((message) => (message.metadata?.attachments || [])
       .filter(isRecoverableRichMediaAttachment)
-      .map((attachment) => `${message.id}:${attachment.id}:${attachment.updatedAt || attachment.createdAt || 0}`))
+      .map((attachment) => `${message.id}:${message.serverId || 'pending'}:${attachment.id}:${attachment.updatedAt || attachment.createdAt || 0}`))
     .join('|'), [currentChatMessages]);
   useEffect(() => {
     if (!queuedRichMediaSignature || !aiProfiles.length) return undefined;
     const messagesWithQueuedMedia = currentChatMessages.filter((message) => (
-      message.metadata?.attachments?.some(isRecoverableRichMediaAttachment)
+      (!cloudRichMediaRequiresServerId || Boolean(message.serverId))
+      && message.metadata?.attachments?.some(isRecoverableRichMediaAttachment)
     ));
     if (!messagesWithQueuedMedia.length) return undefined;
     let cancelled = false;
@@ -1171,7 +1174,7 @@ export default function ChatDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [aiProfiles, characters, currentChatMessages, queuedRichMediaSignature, upsertMessage]);
+  }, [aiProfiles, characters, cloudRichMediaRequiresServerId, currentChatMessages, queuedRichMediaSignature, upsertMessage]);
   const messageWindowDebugSignatureRef = useRef('');
   const pageStateDebugSignatureRef = useRef('');
   useEffect(() => {

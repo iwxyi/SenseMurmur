@@ -1,5 +1,5 @@
 import { useEffect, useState, type MouseEvent } from 'react';
-import { Box, Button, LinearProgress, Typography, keyframes } from '@mui/material';
+import { Box, Button, CircularProgress, LinearProgress, Typography, keyframes } from '@mui/material';
 import type { Message, MessageAttachment, NarrativeBlock } from '../../types/message';
 import type { AICharacter } from '../../types/character';
 import { getAttachmentStatusDetail, getAttachmentStatusLabel } from '../../services/messageAttachmentDisplay';
@@ -10,46 +10,12 @@ import { useSettingsStore } from '../../stores/useSettingsStore';
 import { downloadChatFile } from '../../services/chatFileTransfer';
 import { reducedMotionSx } from '../../styles/motion';
 import { VoicePlaybackBar } from './VoicePlaybackBar';
+import { getAttachmentDisplayWidth, parseInlineAttachmentPlaceholders, shouldHideGeneratedMediaPlaceholderText } from './chatMessageContentUtils';
 
 const typingBounce = keyframes`
   0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
   30% { transform: translateY(-4px); opacity: 1; }
 `;
-
-const INLINE_ATTACHMENT_PATTERN = /!\[([^\]\n]*)\]\(attachment:(?:\/\/)?([^)]+)\)/g;
-
-type InlineAttachmentPart =
-  | { kind: 'text'; text: string }
-  | { kind: 'attachment'; slotId: string; altText: string };
-
-function safeDecodeInlineSlotId(value: string) {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-export function parseInlineAttachmentPlaceholders(text: string): InlineAttachmentPart[] {
-  const parts: InlineAttachmentPart[] = [];
-  let lastIndex = 0;
-  for (const match of text.matchAll(INLINE_ATTACHMENT_PATTERN)) {
-    const start = match.index ?? 0;
-    if (start > lastIndex) {
-      parts.push({ kind: 'text', text: text.slice(lastIndex, start) });
-    }
-    const rawSlotId = (match[2] || '').trim();
-    const slotId = rawSlotId ? safeDecodeInlineSlotId(rawSlotId).replace(/[^\w.-]/g, '') : '';
-    if (slotId) {
-      parts.push({ kind: 'attachment', slotId, altText: (match[1] || '').trim() });
-    }
-    lastIndex = start + match[0].length;
-  }
-  if (lastIndex < text.length) {
-    parts.push({ kind: 'text', text: text.slice(lastIndex) });
-  }
-  return parts.length ? parts : [{ kind: 'text', text }];
-}
 
 export function PendingTypingDots() {
   return (
@@ -82,7 +48,7 @@ function parseAttachmentRatio(attachment: Pick<MessageAttachment, 'kind' | 'widt
     const right = Number(ratioMatch[2]);
     if (left > 0 && right > 0) return left / right;
   }
-  return attachment.kind === 'sticker' ? 1 : 4 / 3;
+  return 4 / 3;
 }
 
 function getAttachmentMaxWidth(ratio: number, kind: MessageAttachment['kind'] = 'image') {
@@ -91,16 +57,6 @@ function getAttachmentMaxWidth(ratio: number, kind: MessageAttachment['kind'] = 
   if (ratio < 1.2) return 360;
   if (ratio < 1.7) return 440;
   return 520;
-}
-
-export function getAttachmentDisplayWidth(params: {
-  displaySize?: { width: number; height: number } | null;
-  ratioValue: number;
-  maxWidth: number;
-  maxHeight: number;
-}) {
-  const widthLimitByHeight = Math.max(180, params.maxHeight * params.ratioValue);
-  return Math.ceil(Math.min(params.displaySize?.width || params.maxWidth, params.maxWidth, widthLimitByHeight));
 }
 
 function getAttachmentKnownSize(attachment: Pick<MessageAttachment, 'width' | 'height'>) {
@@ -145,15 +101,24 @@ function MessageImageAttachment({
   caption?: string;
 }) {
   const knownSize = getAttachmentKnownSize(attachment);
-  const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(knownSize);
+  const imageSource = attachment.url?.startsWith('/') ? backendUrl(attachment.url) : attachment.url;
+  const [loadedImage, setLoadedImage] = useState<{
+    source?: string;
+    size: { width: number; height: number } | null;
+    status: 'loading' | 'ready' | 'failed';
+  }>(() => ({ source: imageSource, size: knownSize, status: 'loading' }));
+  const activeImage = loadedImage.source === imageSource
+    ? loadedImage
+    : { source: imageSource, size: knownSize, status: 'loading' as const };
   const [viewportHeight, setViewportHeight] = useState(() => (typeof window === 'undefined' ? 900 : window.innerHeight));
   const isSticker = attachment.kind === 'sticker';
-  const displaySize = isSticker ? knownSize : naturalSize || knownSize;
+  const displaySize = activeImage.size || knownSize;
+  const imageStatus = activeImage.status;
+  const hasDeclaredRatio = Boolean(displaySize || attachment.aspectRatio);
   const ratioValue = displaySize ? displaySize.width / displaySize.height : parseAttachmentRatio(attachment);
   const maxWidth = getAttachmentMaxWidth(ratioValue, attachment.kind);
   const maxHeight = Math.min(viewportHeight * 0.56, isSticker ? 240 : 520);
   const width = getAttachmentDisplayWidth({ displaySize, ratioValue, maxWidth, maxHeight });
-  const imageSource = attachment.url?.startsWith('/') ? backendUrl(attachment.url) : attachment.url;
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
     const updateViewportHeight = () => setViewportHeight(window.innerHeight);
@@ -167,7 +132,7 @@ function MessageImageAttachment({
         display: 'grid',
         gridTemplateColumns: 'minmax(0, 1fr)',
         gap: 0.45,
-        width,
+        width: isSticker && !hasDeclaredRatio ? 'fit-content' : width,
         minWidth: 0,
         maxWidth: '100%',
         justifySelf: 'start',
@@ -175,9 +140,12 @@ function MessageImageAttachment({
     >
       <Box
         sx={{
-          minWidth: 0,
+          position: 'relative',
+          minWidth: isSticker && !hasDeclaredRatio && imageStatus !== 'failed' ? 44 : 0,
           maxWidth: '100%',
-          aspectRatio: `${ratioValue} / 1`,
+          aspectRatio: isSticker && !hasDeclaredRatio ? undefined : `${ratioValue} / 1`,
+          minHeight: isSticker && !hasDeclaredRatio && imageStatus !== 'failed' ? 44 : 0,
+          width: isSticker && !hasDeclaredRatio ? 'fit-content' : undefined,
           borderRadius: 1.5,
           overflow: 'hidden',
           bgcolor: 'action.hover',
@@ -189,12 +157,27 @@ function MessageImageAttachment({
             alt={attachment.altText}
             loading="lazy"
             decoding="async"
-            onLoad={(event) => {
+            onLoad={async (event) => {
               const image = event.currentTarget;
-              if (!isSticker && image.naturalWidth > 0 && image.naturalHeight > 0) {
-                setNaturalSize({ width: image.naturalWidth, height: image.naturalHeight });
+              const size = image.naturalWidth > 0 && image.naturalHeight > 0
+                ? { width: image.naturalWidth, height: image.naturalHeight }
+                : knownSize;
+              setLoadedImage({ source: imageSource, size, status: 'loading' });
+              const source = image.currentSrc || image.src;
+              try {
+                await image.decode?.();
+                if ((image.currentSrc || image.src) === source) {
+                  setLoadedImage((current) => current.source === imageSource ? { ...current, status: 'ready' } : current);
+                }
+              } catch {
+                if ((image.currentSrc || image.src) === source) {
+                  setLoadedImage((current) => current.source === imageSource ? { ...current, status: 'failed' } : current);
+                }
               }
             }}
+            onError={() => setLoadedImage((current) => current.source === imageSource
+              ? { ...current, status: 'failed' }
+              : { source: imageSource, size: knownSize, status: 'failed' })}
             onClick={() => onOpenImage?.(message, attachment)}
             onContextMenu={(event) => {
               if (!attachment.promptText || !onOpenPrompt) return;
@@ -203,9 +186,12 @@ function MessageImageAttachment({
               onOpenPrompt(attachment, event);
             }}
             sx={{
-              width: '100%',
+              width: isSticker && !hasDeclaredRatio ? 'auto' : '100%',
               boxSizing: 'border-box',
-              height: '100%',
+              height: isSticker && !hasDeclaredRatio ? 'auto' : '100%',
+              opacity: imageStatus === 'ready' ? 1 : 0,
+              transition: 'opacity 120ms ease-out',
+              maxWidth: isSticker ? 'min(100%, 240px)' : '100%',
               maxHeight: isSticker ? 'min(56vh, 240px)' : 'min(56vh, 520px)',
               objectFit: 'contain',
               display: 'block',
@@ -216,6 +202,16 @@ function MessageImageAttachment({
               bgcolor: 'action.hover',
             }}
           />
+          {imageStatus === 'loading' ? (
+            <Box role="status" aria-label={isSticker ? '正在加载表情包' : '正在加载图片'} sx={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', pointerEvents: 'none' }}>
+              <CircularProgress size={22} thickness={4} sx={{ color: 'text.secondary' }} />
+            </Box>
+          ) : null}
+          {imageStatus === 'failed' ? (
+            <Box role="status" sx={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', p: 1 }}>
+              <Typography variant="caption" color="text.secondary">{isSticker ? '表情包加载失败' : '图片加载失败'}</Typography>
+            </Box>
+          ) : null}
       </Box>
       {caption ? (
         <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
@@ -463,15 +459,4 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
         .map((attachment) => renderAttachment(attachment))}
     </Box>
   );
-}
-
-export function shouldHideGeneratedMediaPlaceholderText(message: Pick<Message, 'content' | 'metadata'>) {
-  const attachments = message.metadata?.attachments || [];
-  const hasMediaAttachments = attachments.some((attachment) => attachment.kind === 'image' || attachment.kind === 'sticker' || attachment.kind === 'audio');
-  if (!hasMediaAttachments) return false;
-  return [
-    '正在生成图片，完成后会自动显示。',
-    '正在生成图片，完成后会自动显示',
-    '对方正在发送图片，稍等一下。',
-  ].includes(message.content.trim());
 }

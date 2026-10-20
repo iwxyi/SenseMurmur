@@ -251,16 +251,27 @@ function updateRichMediaMessage(params: {
   const nextMessage = { ...params.message, metadata: nextMetadata };
   rememberRichMediaMessage(nextMessage);
   params.upsertMessage(nextMessage);
-  if (!isLocalOnlyMediaMode()) {
-    void api.updateMessageMetadata(nextMessage.serverId || nextMessage.id, nextMetadata).catch((error) => {
-      logRecoverableError({
-        location: 'rich-message-media.persist-metadata',
-        error,
-        extra: { messageId: nextMessage.id, attachmentId: params.attachmentId },
-      });
-    });
-  }
+  persistRichMessageMetadata(nextMessage, nextMetadata, 'rich-message-media.persist-metadata', params.attachmentId);
   return nextMessage;
+}
+
+function persistRichMessageMetadata(message: Message, metadata: MessageMetadata, location: string, attachmentId?: string) {
+  if (isLocalOnlyMediaMode()) return;
+  if (!message.serverId) {
+    logRecoverableError({
+      location: `${location}.missing-server-id`,
+      error: new Error('云端消息尚未返回服务端 ID，未发送元数据更新。'),
+      extra: { messageId: message.id, attachmentId },
+    });
+    return;
+  }
+  void api.updateMessageMetadata(message.serverId, metadata).catch((error) => {
+    logRecoverableError({
+      location,
+      error,
+      extra: { messageId: message.id, serverId: message.serverId, attachmentId },
+    });
+  });
 }
 
 function retryAttachmentMetadata(metadata: MessageMetadata | undefined, attachmentId: string, generationJobId: string): MessageMetadata {
@@ -407,13 +418,21 @@ async function attachAssistantImageArtifact(params: {
   };
   const nextMessage = { ...params.message, metadata };
   params.upsertMessage(nextMessage);
-  if (!isLocalOnlyMediaMode()) void api.updateMessageMetadata(nextMessage.serverId || nextMessage.id, metadata).catch(() => undefined);
+  persistRichMessageMetadata(nextMessage, metadata, 'rich-message-media.persist-assistant-artifact');
   return nextMessage;
 }
 
 async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
   const messageId = entry.messageId;
   const currentMessage = getLatestRichMediaMessage(messageId, entry.message);
+  if (!isLocalOnlyMediaMode() && !currentMessage.serverId) {
+    logRecoverableError({
+      location: 'rich-message-media.queue.missing-server-id',
+      error: new Error('云端富媒体队列未等待服务端消息 ID。'),
+      extra: { messageId: currentMessage.id, attachmentId: entry.attachmentId },
+    });
+    return;
+  }
   const attachment = (currentMessage.metadata?.attachments || []).find((item): item is GenerativeAttachment => (
     item.id === entry.attachmentId && isRecoverableGenerativeAttachment(item)
   ));
@@ -679,6 +698,7 @@ export async function processRichMessageMedia(params: {
   attachmentIds?: string[];
   priority?: 'normal' | 'next';
 }) {
+  if (!isLocalOnlyMediaMode() && !params.message.serverId) return;
   rememberRichMediaMessage(params.message);
   const attachmentFilter = params.attachmentIds?.length ? new Set(params.attachmentIds) : null;
   const attachments = (params.message.metadata?.attachments || [])
@@ -737,15 +757,7 @@ export async function retryRichMessageMedia(params: {
   const retryMessage = { ...params.message, metadata: retryMetadata };
   rememberRichMediaMessage(retryMessage);
   params.upsertMessage(retryMessage);
-  if (!isLocalOnlyMediaMode()) {
-    void api.updateMessageMetadata(retryMessage.serverId || retryMessage.id, retryMetadata).catch((error) => {
-      logRecoverableError({
-        location: 'rich-message-media.retry-persist-metadata',
-        error,
-        extra: { messageId: retryMessage.id, attachmentId: params.attachmentId },
-      });
-    });
-  }
+  persistRichMessageMetadata(retryMessage, retryMetadata, 'rich-message-media.retry-persist-metadata', params.attachmentId);
   void processRichMessageMedia({
     message: retryMessage,
     character: params.character,

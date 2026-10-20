@@ -16,20 +16,35 @@ const runningActors = new Set<string>();
 const CHAT_QUIET_PERIOD_MS = 18 * 60_000;
 
 interface DailyMomentFailure {
+  actorId: string;
   stage: string;
   error: unknown;
   provider?: string;
   model?: string;
 }
 
+function createRuntimeEventId() {
+  const cryptoApi = globalThis.crypto as Crypto | undefined;
+  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    cryptoApi.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+  }
+  const suffix = Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  return `runtime-${Date.now().toString(36)}-${suffix}`;
+}
+
 export class DailyMomentFlowError extends AggregateError {
   readonly failures: DailyMomentFailure[];
 
   constructor(failures: DailyMomentFailure[]) {
-    const summaries = failures.map(({ stage, error }) => {
+    const summaries = failures.map(({ actorId, stage, error }) => {
       const diagnostic = error && typeof error === 'object' && 'diagnostic' in error
         ? error.diagnostic as { status?: number } | undefined : undefined;
-      return diagnostic?.status ? `${stage}：HTTP ${diagnostic.status}` : stage;
+      const location = `${actorId} / ${stage}`;
+      return diagnostic?.status ? `${location}：HTTP ${diagnostic.status}` : location;
     });
     super(failures.map(({ error }) => error), `每日朋友圈生成失败（${summaries.join('；')}）`);
     this.name = 'DailyMomentFlowError';
@@ -170,7 +185,7 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
           stage = '保存发布预约';
           await ops.applyChatRuntimePatch(chatId, (latest) => {
             if (!ops.isCurrentSource() || latest.deletedAt != null) return null;
-            const event: RuntimeEventV2 = { id: crypto.randomUUID(), conversationId: chatId,
+            const event: RuntimeEventV2 = { id: createRuntimeEventId(), conversationId: chatId,
               kind: 'artifact', createdAt: now, actorIds: [actorId], visibility: 'role_private',
               summary: '今日分享检查已预约', payload: { artifactType: 'daily_moment_schedule', memorySignature: signature, readyAt: appointmentAt } };
             return { runtimeEventsV2: retainRuntimeEvents([...(latest.runtimeEventsV2 || []), event], 160) };
@@ -218,7 +233,7 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
         stage = '保存不发布判断';
         await ops.applyChatRuntimePatch(chatId, (latest) => {
           if (!ops.isCurrentSource() || latest.deletedAt != null || hasSkippedMemories(ops.getChats(), actorId, signature, Date.now())) return null;
-          const skip: RuntimeEventV2 = { id: crypto.randomUUID(), conversationId: chatId,
+          const skip: RuntimeEventV2 = { id: createRuntimeEventId(), conversationId: chatId,
             kind: 'artifact', createdAt: Date.now(), actorIds: [actorId], visibility: 'role_private',
             summary: '今日暂无值得分享的新片段', payload: { artifactType: 'daily_moment_skip', memorySignature: signature } };
           return { runtimeEventsV2: retainRuntimeEvents([...(latest.runtimeEventsV2 || []), skip], 160) };
@@ -285,7 +300,7 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
       });
     } catch (error) {
       const profile = getUsablePreferredAIProfile(ops.getProfiles(), 'text');
-      failures.push({ stage, error, provider: profile?.provider, model: profile?.model });
+      failures.push({ actorId, stage, error, provider: profile?.provider, model: profile?.model });
     } finally {
       runningActors.delete(actorId);
     }

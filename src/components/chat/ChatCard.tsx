@@ -260,7 +260,6 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
         height: isList ? 'auto' : '100%',
         overflow: 'visible',
         ...buildCardAvatarHoverMotionSx('.chat-card-primary-avatar'),
-        '&::after': { borderRadius: 'inherit' },
         ...(isList ? {
           borderRadius: 1.25,
           borderWidth: 0,
@@ -277,11 +276,11 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
           },
         } : {}),
         '&::after': (cardBackgroundUrl || cardAccentImageUrl) ? {
-          content: '""', position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 0,
+          content: '""', position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 0, borderRadius: 'inherit',
           backgroundImage: (theme) => { const veil = isList ? (theme.palette.mode === 'light' ? 'rgba(255,255,255,0.91)' : 'rgba(18,20,28,0.92)') : (theme.palette.mode === 'light' ? 'rgba(255,255,255,0.84)' : 'rgba(18,20,28,0.86)'); return `linear-gradient(${veil}, ${veil}), url("${(cardBackgroundUrl || cardAccentImageUrl).replace(/"/g, '%22')}")`; },
           backgroundSize: 'cover', backgroundPosition: 'center', opacity: isList ? (cardBackgroundUrl ? 0.5 : 0.34) : (cardBackgroundUrl ? 0.82 : 0.52),
           filter: cardBackgroundUrl ? 'saturate(0.68)' : 'blur(16px) saturate(1.15)', transform: cardAccentImageUrl ? 'scale(1.12)' : undefined,
-        } : undefined,
+        } : { borderRadius: 'inherit' },
       } as SxProps<Theme>}
     >
       <CardActionArea

@@ -53,7 +53,10 @@ describe('daily moments from character memories', () => {
     vi.mocked(generateImageWithAdapter).mockResolvedValue([{ dataUrl: 'data:image/png;base64,AQID', mimeType: 'image/png' }]);
     vi.mocked(persistGeneratedMomentMedia).mockResolvedValue({ assetId: 'local-image', thumbnailAssetId: 'local-image', url: 'local-image', thumbnailUrl: 'local-thumb', fullUrl: 'local-image', mimeType: 'image/png', sizeBytes: 3, alt: undefined, storage: 'local_indexeddb' });
   });
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
 
   it('publishes actual generated text without user attention and does not replay its candidate', async () => {
     await runDailyMomentFlow('room-a', ops());
@@ -86,8 +89,8 @@ describe('daily moments from character memories', () => {
   it('rejects malformed model decisions without publishing', async () => {
     vi.mocked(generateJsonWithAdapter).mockResolvedValue('{"publish":true,"text":""}');
     await expect(runDailyMomentFlow('room-a', ops())).rejects.toMatchObject({
-      message: '每日朋友圈生成失败（校验发布判断与正文）',
-      failures: [{ stage: '校验发布判断与正文', error: expect.objectContaining({ message: '朋友圈模型未返回有效正文' }) }],
+      message: '每日朋友圈生成失败（a / 校验发布判断与正文）',
+      failures: [{ actorId: 'a', stage: '校验发布判断与正文', error: expect.objectContaining({ message: '朋友圈模型未返回有效正文' }) }],
     });
     expect(projectWorldMoments(chats, [actor])).toEqual([]);
   });
@@ -141,6 +144,27 @@ describe('daily moments from character memories', () => {
     expect(projectWorldMoments(chats, [actor, other])).toHaveLength(2);
   });
 
+  it('saves appointments when randomUUID is unavailable in an insecure browser context', async () => {
+    let byteSeed = 0;
+    const getRandomValues = vi.fn((bytes: Uint8Array) => {
+      for (let index = 0; index < bytes.length; index += 1) bytes[index] = byteSeed++;
+      return bytes;
+    });
+    vi.stubGlobal('crypto', { randomUUID: undefined, getRandomValues });
+    const other = { ...actor, id: 'b', name: '乙', layeredMemories: [memory({
+      id: 'memory-b', ownerId: 'b', subjectIds: ['b'],
+    })] } as AICharacter;
+    chats[0].memberIds = ['a', 'b'];
+    const sharedOps = { ...ops(), getCharacters: () => [actor, other],
+      loadCharacter: vi.fn(async (id: string) => id === 'a' ? actor : other) };
+
+    await expect(runDailyMomentFlow('room-a', sharedOps)).resolves.toMatchObject({ nextCheckAt: expect.any(Number) });
+    const schedules = chats[0].runtimeEventsV2!.filter((event) => (event.payload as Record<string, unknown>).artifactType === 'daily_moment_schedule');
+    expect(schedules).toHaveLength(2);
+    expect(new Set(schedules.map((event) => event.id)).size).toBe(2);
+    expect(getRandomValues).toHaveBeenCalledTimes(2);
+  });
+
   it('rechecks chat activity when the model returns', async () => {
     vi.mocked(generateJsonWithAdapter).mockImplementationOnce(async () => {
       chats[0].lastMessageAt = Date.now();
@@ -178,9 +202,9 @@ describe('daily moments from character memories', () => {
     const error = await runDailyMomentFlow('room-a', ops()).catch((failure: unknown) => failure);
     expect(error).toBeInstanceOf(DailyMomentFlowError);
     expect(error).toMatchObject({
-      message: '每日朋友圈生成失败（请求发布判断与正文：HTTP 429）',
+      message: '每日朋友圈生成失败（a / 请求发布判断与正文：HTTP 429）',
       errors: [cause],
-      failures: [{ stage: '请求发布判断与正文', error: cause, provider: profiles[0].provider, model: 'test-model' }],
+      failures: [{ actorId: 'a', stage: '请求发布判断与正文', error: cause, provider: profiles[0].provider, model: 'test-model' }],
     });
     expect(projectWorldMoments(chats, [actor])).toEqual([]);
     await runDailyMomentFlow('room-a', ops());
