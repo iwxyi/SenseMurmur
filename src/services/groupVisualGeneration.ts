@@ -114,7 +114,7 @@ export function enqueueGroupVisualGeneration(params: { chat: GroupChat; members:
         }
       } else warning = language === 'zh' ? '未配置文本 AI，已使用基础模板。' : 'No text AI configured; using the base template.';
       if (warning) notifyDiagnosticToast({ message: `${kind === 'avatar' ? '群头像' : '聊天背景'}视觉方案失败，已使用基础模板继续生成。原因：${warning}`, severity: 'warning', location: 'chat-visual:director' });
-      const taskId = avatarGenerationQueue.enqueue(imageProfile, plan.prompt, { targetKey: `chat-${kind}:${chat.id}`, characterId: null, negativePrompt: plan.negativePrompt, description: `${chat.name || '未命名聊天'} · ${kind === 'avatar' ? '群头像' : '聊天背景'}${plan.fallbackUsed ? '（基础模板）' : ''}` });
+      const taskId = avatarGenerationQueue.enqueue(imageProfile, plan.prompt, { targetKey: `chat-${kind}:${chat.id}`, characterId: null, errorReporting: 'caller', negativePrompt: plan.negativePrompt, description: `${chat.name || '未命名聊天'} · ${kind === 'avatar' ? '群头像' : '聊天背景'}${plan.fallbackUsed ? '（基础模板）' : ''}` });
       const result = await avatarGenerationQueue.waitForTask(taskId);
       if (!result.imageDataUrl) throw new Error(language === 'zh' ? '图片生成未返回内容' : 'Image generation returned no content.');
       const latest = useChatStore.getState().chats.find((item) => item.id === chat.id);

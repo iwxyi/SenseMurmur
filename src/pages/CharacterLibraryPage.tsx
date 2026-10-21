@@ -748,7 +748,7 @@ export default function CharacterLibraryPage() {
             if (fallbackWarning) {
               notifyDiagnosticToast({ message: fallbackWarning, severity: 'warning', location: 'character-library:visual-plan' });
             }
-            const taskId = avatarGenerationQueue.enqueue(imageProfile, visualPlan.prompt, { targetKey: `character-visual:${current.id}`, characterId: null, description: `${current.name.trim() || '未命名角色'} · 形象图${visualPlan.fallbackUsed ? '（基础模板）' : ''}`, negativePrompt: visualPlan.negativePrompt, seed: visualIdentity.seed });
+            const taskId = avatarGenerationQueue.enqueue(imageProfile, visualPlan.prompt, { targetKey: `character-visual:${current.id}`, characterId: null, errorReporting: 'caller', description: `${current.name.trim() || '未命名角色'} · 形象图${visualPlan.fallbackUsed ? '（基础模板）' : ''}`, negativePrompt: visualPlan.negativePrompt, seed: visualIdentity.seed });
             const state = await avatarGenerationQueue.waitForTask(taskId);
             if (!state.imageDataUrl) throw new Error('图片生成未返回图像');
             await api.createCharacterVisualAsset(current.id, { dataUrl: state.imageDataUrl, label: '形象图', source: 'generated', isPrimary: true });
@@ -760,7 +760,7 @@ export default function CharacterLibraryPage() {
           if (field === 'avatar') {
             const imageProfile = getPreferredAIProfile(aiProfiles, 'image');
             if (!isAIProfileUsable(imageProfile)) throw new Error('请先配置图片 AI 模型');
-            const taskId = await enqueueAvatarGenerationForCharacter({ id: character.id, name: character.name, background: character.background, speakingStyle: character.speakingStyle, expertise: character.expertise, group: character.group, personality: character.personality, speechProfile: character.speechProfile, coreProfile: character.coreProfile, visualIdentity: character.visualIdentity }, aiProfiles, i18n.language.startsWith('zh') ? 'zh' : 'en', avatarGeneration, { targetKey: `character:${character.id}`, characterId: character.id });
+            const taskId = await enqueueAvatarGenerationForCharacter({ id: character.id, name: character.name, background: character.background, speakingStyle: character.speakingStyle, expertise: character.expertise, group: character.group, personality: character.personality, speechProfile: character.speechProfile, coreProfile: character.coreProfile, visualIdentity: character.visualIdentity }, aiProfiles, i18n.language.startsWith('zh') ? 'zh' : 'en', avatarGeneration, { targetKey: `character:${character.id}`, characterId: character.id, errorReporting: 'caller' });
             await avatarGenerationQueue.waitForTask(taskId);
           }
         },

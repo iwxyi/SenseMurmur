@@ -204,7 +204,7 @@ export async function enqueueAvatarGenerationForCharacter(
   aiProfiles: AIModelProfile[],
   language: 'zh' | 'en',
   settings: AvatarGenerationSettings,
-  options?: { targetKey?: string; characterId?: string | null },
+  options?: { targetKey?: string; characterId?: string | null; errorReporting?: 'queue' | 'caller' },
 ): Promise<string> {
   const imageProfile = getPreferredAIProfile(aiProfiles, 'image');
   if (!isAIProfileUsable(imageProfile)) {
@@ -239,6 +239,7 @@ export async function enqueueAvatarGenerationForCharacter(
       characterId: options?.characterId ?? character.id,
       description: `${character.name.trim() || '未命名角色'} · 头像${plan.fallbackUsed ? '（基础模板）' : ''}`,
       negativePrompt: plan.negativePrompt,
+      errorReporting: options?.errorReporting,
     },
   );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ReactNode } from 'react';
-import { Alert, Avatar, Box, Typography, Button, ButtonBase, CardActionArea, IconButton, Chip, Dialog, DialogTitle, DialogContent } from '@mui/material';
+import { Alert, Avatar, Box, Typography, Button, ButtonBase, CardActionArea, IconButton, Chip, Dialog, DialogTitle, DialogContent, DialogActions } from '@mui/material';
 import type { Theme } from '@mui/material/styles';
 import AddIcon from '@mui/icons-material/Add';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
@@ -14,6 +14,7 @@ import PersonIcon from '@mui/icons-material/Person';
 import SettingsSuggestIcon from '@mui/icons-material/SettingsSuggest';
 import SyncProblemIcon from '@mui/icons-material/SyncProblem';
 import CloseIcon from '@mui/icons-material/Close';
+import DeleteSweepIcon from '@mui/icons-material/DeleteSweep';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
@@ -554,6 +555,14 @@ export default function HomePage() {
     else if (error.source === 'chat-completion') dismissChatCompletionError(error.id);
     else dismissRichMediaGenerationError(error.id);
     if (selectedGenerationError?.source === error.source && selectedGenerationError.id === error.id) setSelectedGenerationError(null);
+  };
+  const clearGenerationErrors = () => {
+    avatarGenerationQueue.dismissAllErrors();
+    dismissAllCharacterCompletionErrors();
+    dismissAllChatCompletionErrors();
+    dismissAllRichMediaGenerationErrors();
+    setSelectedGenerationError(null);
+    setGenerationErrorsDialogOpen(false);
   };
   useEffect(() => {
     const unsubscribe = subscribeCharacterCompletionQueue(setCharacterCompletionSummary);
@@ -1141,20 +1150,29 @@ export default function HomePage() {
         <Dialog open={Boolean(selectedGenerationError)} onClose={() => setSelectedGenerationError(null)} fullWidth maxWidth="sm">
           <DialogTitle sx={{ pr: 6 }}>{selectedGenerationError?.title || '生成错误'}<IconButton aria-label="关闭" onClick={() => setSelectedGenerationError(null)} sx={{ position: 'absolute', right: 12, top: 12 }}><CloseIcon /></IconButton></DialogTitle>
           <DialogContent dividers><Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{selectedGenerationError?.message}</Typography></DialogContent>
+          <DialogActions>
+            <Button startIcon={<DeleteSweepIcon />} onClick={() => { if (selectedGenerationError) dismissGenerationError(selectedGenerationError); }}>清除此条</Button>
+          </DialogActions>
         </Dialog>
 
         <Dialog open={generationErrorsDialogOpen} onClose={() => setGenerationErrorsDialogOpen(false)} fullWidth maxWidth="md">
           <DialogTitle>全部生成错误</DialogTitle>
-          <DialogContent dividers sx={{ display: 'grid', gap: 1 }}>
-            {generationErrors.map((error) => (
-              <SurfaceCard key={`${error.source}:${error.id}`} sx={{ borderColor: 'error.main', bgcolor: (theme) => theme.palette.mode === 'light' ? 'rgba(211,47,47,0.035)' : 'rgba(255,112,112,0.06)' }} contentSx={{ p: 1.35 }}>
-                <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1 }}>
-                  <Box sx={{ minWidth: 0, flex: 1 }}><Typography variant="subtitle2" color="error.main" sx={{ fontWeight: 760 }}>{error.title}</Typography><Typography variant="body2" sx={{ mt: 0.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{error.message}</Typography></Box>
-                  <IconButton size="small" aria-label="关闭此错误提示" onClick={() => dismissGenerationError(error)}><CloseIcon fontSize="small" /></IconButton>
-                </Box>
-              </SurfaceCard>
-            ))}
+          <DialogContent dividers sx={{ minHeight: 0, overflowY: 'auto' }}>
+            <Box sx={{ display: 'grid', gap: 1 }}>
+              {generationErrors.map((error) => (
+                <SurfaceCard key={`${error.source}:${error.id}`} sx={{ borderColor: 'error.main', bgcolor: (theme) => theme.palette.mode === 'light' ? 'rgba(211,47,47,0.035)' : 'rgba(255,112,112,0.06)' }} contentSx={{ p: 1.35 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1 }}>
+                    <Box sx={{ minWidth: 0, flex: 1 }}><Typography variant="subtitle2" color="error.main" sx={{ fontWeight: 760 }}>{error.title}</Typography><Typography variant="body2" sx={{ mt: 0.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{error.message}</Typography></Box>
+                    <IconButton size="small" aria-label="关闭此错误提示" onClick={() => dismissGenerationError(error)}><CloseIcon fontSize="small" /></IconButton>
+                  </Box>
+                </SurfaceCard>
+              ))}
+            </Box>
           </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setGenerationErrorsDialogOpen(false)}>关闭</Button>
+            <Button startIcon={<DeleteSweepIcon />} disabled={!generationErrors.length} onClick={clearGenerationErrors}>清除全部</Button>
+          </DialogActions>
         </Dialog>
 
         <HomeCommandLauncher />

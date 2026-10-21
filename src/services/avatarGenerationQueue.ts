@@ -23,6 +23,7 @@ export interface AvatarGenerationTaskState {
 }
 
 interface AvatarGenerationTask extends AvatarGenerationTaskState {
+  errorReporting?: 'queue' | 'caller';
   prompt: string;
   profile: AIModelProfile;
   negativePrompt?: string;
@@ -59,7 +60,7 @@ class AvatarGenerationQueueService {
   private dismissedErrorIds = new Set<string>();
   private runningTaskId: string | null = null;
 
-  enqueue(profile: AIModelProfile, prompt: string, options: { targetKey: string; characterId?: string | null; accountAvatar?: boolean; negativePrompt?: string; seed?: string | number | null; description?: string }) {
+  enqueue(profile: AIModelProfile, prompt: string, options: { targetKey: string; characterId?: string | null; accountAvatar?: boolean; negativePrompt?: string; seed?: string | number | null; description?: string; errorReporting?: 'queue' | 'caller' }) {
     const previous = this.getLatestTaskForTarget(options.targetKey);
     if (previous && (previous.status === 'queued' || previous.status === 'running')) {
       this.cancel(previous.id);
@@ -80,6 +81,7 @@ class AvatarGenerationQueueService {
       error: null,
       imageDataUrl: null,
       description: options.description,
+      errorReporting: options.errorReporting,
       controller: null,
     };
 
@@ -139,7 +141,7 @@ class AvatarGenerationQueueService {
       active: queued + running,
       current: this.runningTaskId ? this.tasks.get(this.runningTaskId)?.description : undefined,
       recentErrors: [...this.tasks.values()]
-        .filter((task) => task.status === 'failed' && task.error && !this.dismissedErrorIds.has(task.id))
+        .filter((task) => task.status === 'failed' && task.error && task.errorReporting !== 'caller' && !this.dismissedErrorIds.has(task.id))
         .map((task) => ({ id: task.id, title: task.description || '图片生成', message: task.error || '图片生成失败', createdAt: task.createdAt }))
         .sort((a, b) => b.createdAt - a.createdAt),
     };
