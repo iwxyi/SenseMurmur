@@ -1,11 +1,9 @@
 import { storageKey } from '../constants/brand';
+import { readAuthSnapshot } from './authSnapshot';
 
 export const AUTH_SESSION_EXPIRED_EVENT = 'pneumata:auth-session-expired';
 
 const LAST_CLOUD_PHONE_KEY = storageKey('last-cloud-phone');
-const AUTH_USER_KEY = storageKey('user');
-const AUTH_TOKEN_KEY = storageKey('token');
-const AUTH_MODE_KEY = storageKey('auth-mode');
 const AUTH_EXPIRED_DISPATCH_THROTTLE_MS = 1500;
 
 let lastAuthExpiredDispatchAt = 0;
@@ -21,7 +19,8 @@ export interface AuthSessionExpiredDetail {
 
 function hasActiveCloudSession() {
   if (typeof localStorage === 'undefined') return false;
-  return localStorage.getItem(AUTH_MODE_KEY) === 'cloud' && Boolean(localStorage.getItem(AUTH_TOKEN_KEY));
+  const session = readAuthSnapshot();
+  return session.mode === 'cloud' && Boolean(session.token);
 }
 
 export function rememberLastCloudPhone(phone?: string | null) {
@@ -34,13 +33,7 @@ export function getLastCloudPhone() {
   if (typeof localStorage === 'undefined') return '';
   const remembered = localStorage.getItem(LAST_CLOUD_PHONE_KEY) || '';
   if (remembered) return remembered;
-  try {
-    const raw = localStorage.getItem(AUTH_USER_KEY);
-    const phone = raw ? (JSON.parse(raw) as { phone?: unknown }).phone : null;
-    return typeof phone === 'string' ? phone : '';
-  } catch {
-    return '';
-  }
+  return readAuthSnapshot().user?.phone || '';
 }
 
 export function dispatchAuthSessionExpired(detail: AuthSessionExpiredDetail = {}) {

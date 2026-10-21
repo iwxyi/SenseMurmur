@@ -3,7 +3,8 @@ import { persist } from 'zustand/middleware';
 import type { AssistantAgentPatch, AssistantArtifactDataOperation, AssistantArtifactDataResult, AssistantArtifactDraft, AssistantArtifactItem, AssistantArtifactVersion, AssistantArtifactTextOperation, AssistantArtifactVersionOperation } from '../types/assistantArtifact';
 import { applyAssistantArtifactDataOperation } from '../services/assistantArtifactData';
 import type { Message, MessageAttachment } from '../types/message';
-import { scopedStorageKey, storageKey } from '../constants/brand';
+import { scopedStorageKey } from '../constants/brand';
+import { readAuthSnapshot } from '../services/authSnapshot';
 import { getLocalDataUserId } from '../services/authStorageScope';
 import { createScopedIndexedDbBufferedJsonStorage, flushBufferedPersistenceWrites } from './storePersistenceScope';
 import { api } from '../services/api';
@@ -76,7 +77,7 @@ const assistantArtifactSyncScopes = createSyncScopeMetadata(ASSISTANT_ARTIFACT_S
 
 function shouldSyncAssistantArtifactsToCloud() {
   if (typeof localStorage === 'undefined') return false;
-  return localStorage.getItem(storageKey('auth-mode')) === 'cloud'
+  return readAuthSnapshot().mode === 'cloud'
     && isCloudSyncEnabled()
     && isAssistantArtifactCloudSyncEnabled();
 }

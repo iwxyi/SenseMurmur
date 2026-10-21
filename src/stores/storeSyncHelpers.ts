@@ -2,6 +2,7 @@ import { useAuthStore } from './useAuthStore';
 import type { SyncPatchOperation } from '../services/syncProjector';
 import { isCloudSyncEnabled, isCloudSyncUserDisabled, setCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { isCloudSyncBootstrapLocked } from '../services/cloudSyncBootstrapLock';
+import { isWorkspaceActive } from '../services/workspaceLifecycle';
 
 export function isLocalOnlyMode() {
   return useAuthStore.getState().authMode === 'local';
@@ -50,7 +51,7 @@ function getCloudSyncGateState() {
 }
 
 export function shouldSkipCloudSync() {
-  return getCloudSyncGateState().skipCloudSync;
+  return !isWorkspaceActive() || getCloudSyncGateState().skipCloudSync;
 }
 
 export function getCloudSyncSkipDiagnostics() {

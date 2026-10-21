@@ -1,4 +1,5 @@
 import { Capacitor, CapacitorHttp } from '@capacitor/core';
+import { assertWorkspaceActive, getWorkspaceSignal, workspaceFetch as fetch } from './workspaceLifecycle';
 import { api, type NetworkResourceResponse } from './api';
 
 export type NetworkResourceMode = 'readable' | 'source' | 'download';
@@ -67,11 +68,13 @@ async function readBrowserResponse(response: Response, mode: NetworkResourceMode
 }
 
 async function fetchInBrowser(url: string, mode: NetworkResourceMode, timeoutMs: number) {
+  const workspaceSignal = getWorkspaceSignal();
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { signal: controller.signal, redirect: 'error', credentials: 'omit' });
     const result = await readBrowserResponse(response, mode);
+    assertWorkspaceActive(workspaceSignal);
     return { ...result, requestedUrl: url, finalUrl: response.url || url };
   } finally {
     window.clearTimeout(timer);
@@ -79,10 +82,13 @@ async function fetchInBrowser(url: string, mode: NetworkResourceMode, timeoutMs:
 }
 
 async function fetchInCapacitor(url: string, mode: NetworkResourceMode, timeoutMs: number): Promise<NetworkResourceResponse> {
+  const signal = getWorkspaceSignal();
+  assertWorkspaceActive(signal);
   let currentUrl = url;
   let response: Awaited<ReturnType<typeof CapacitorHttp.get>> | null = null;
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
     response = await CapacitorHttp.get({ url: currentUrl, connectTimeout: timeoutMs, readTimeout: timeoutMs, responseType: 'arraybuffer', disableRedirects: true });
+    assertWorkspaceActive(signal);
     if (![301, 302, 303, 307, 308].includes(response.status)) break;
     const headers = Object.fromEntries(Object.entries(response.headers || {}).map(([key, value]) => [key.toLowerCase(), String(value)]));
     const location = headers.location;

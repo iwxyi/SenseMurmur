@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { storageKey } from '../constants/brand';
 
 function createStorageMock() {
@@ -42,7 +42,13 @@ describe('useSettingsStore', () => {
     localStorage.setItem(storageKey('auth-mode'), 'cloud');
     apiMocks.getSyncChanges.mockReset();
     apiMocks.getSettings.mockReset();
-    apiMocks.updateSettings.mockReset();
+    apiMocks.updateSettings.mockReset().mockResolvedValue({});
+  });
+
+  afterEach(async () => {
+    const { stopWorkspace } = await import('../services/workspaceLifecycle');
+    stopWorkspace();
+    vi.unstubAllGlobals();
   });
 
   it('does not rewrite local settings when the remote scope is not modified', async () => {

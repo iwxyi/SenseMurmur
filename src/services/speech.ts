@@ -1,6 +1,6 @@
 import { api } from './api';
 import type { APIConfig, AIModelProfile } from '../types/settings';
-import { storageKey } from '../constants/brand';
+import { readAuthSnapshot } from './authSnapshot';
 import { getBackendOrigin } from './backendUrl';
 
 function realtimeEnvironment() {
@@ -8,7 +8,7 @@ function realtimeEnvironment() {
   return {
     protocol: target.protocol,
     host: target.host,
-    token: localStorage.getItem(storageKey('token')) || '',
+    token: readAuthSnapshot().token || '',
   };
 }
 

@@ -5,6 +5,7 @@ import { useAuthStore } from '../stores/useAuthStore';
 import { api } from './api';
 import { logRecoverableError } from './diagnostics';
 import { prepareAvatarUploadDataUrl } from '../utils/avatarUpload';
+import { assertWorkspaceActive, isWorkspaceActive, onWorkspaceShutdown } from './workspaceLifecycle';
 
 export type AvatarGenerationStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 
@@ -61,6 +62,7 @@ class AvatarGenerationQueueService {
   private runningTaskId: string | null = null;
 
   enqueue(profile: AIModelProfile, prompt: string, options: { targetKey: string; characterId?: string | null; accountAvatar?: boolean; negativePrompt?: string; seed?: string | number | null; description?: string; errorReporting?: 'queue' | 'caller' }) {
+    assertWorkspaceActive();
     const previous = this.getLatestTaskForTarget(options.targetKey);
     if (previous && (previous.status === 'queued' || previous.status === 'running')) {
       this.cancel(previous.id);
@@ -185,6 +187,23 @@ class AvatarGenerationQueueService {
     }
   }
 
+  stopForAccountBoundary() {
+    this.queue = [];
+    for (const task of this.tasks.values()) {
+      if (task.status === 'queued' || task.status === 'running') {
+        task.controller?.abort();
+        task.status = 'cancelled';
+        task.imageDataUrl = null;
+        task.error = null;
+        this.emit(task);
+      }
+    }
+    this.tasks.clear();
+    this.latestTaskIdByTarget.clear();
+    this.dismissedErrorIds.clear();
+    this.summaryListeners.forEach((listener) => listener(this.getSummary()));
+  }
+
   private subscribeInternal(
     bucketMap: Map<string, Set<TaskListener>>,
     key: string,
@@ -211,6 +230,7 @@ class AvatarGenerationQueueService {
   }
 
   private async processNext() {
+    if (!isWorkspaceActive()) return;
     if (this.runningTaskId) return;
     const nextTaskId = this.queue.shift();
     if (!nextTaskId) return;
@@ -239,11 +259,11 @@ class AvatarGenerationQueueService {
         signal: task.controller.signal,
       });
       const firstImage = images[0];
+      task.controller.signal.throwIfAborted();
       if (!firstImage?.dataUrl) {
         throw new Error('No image returned');
       }
 
-      task.status = 'succeeded';
       task.imageDataUrl = firstImage.dataUrl;
       task.error = null;
 
@@ -252,6 +272,7 @@ class AvatarGenerationQueueService {
         const stillExists = currentCharacters.some((character) => character.id === task.characterId);
         if (stillExists) {
           const avatarForUpload = await prepareAvatarUploadDataUrl(firstImage.dataUrl);
+          task.controller.signal.throwIfAborted();
           await api.updateCharacter(task.characterId, {
             avatar: avatarForUpload,
           });
@@ -263,9 +284,12 @@ class AvatarGenerationQueueService {
       }
       if (task.accountAvatar) {
         const avatarForUpload = await prepareAvatarUploadDataUrl(firstImage.dataUrl);
+        task.controller.signal.throwIfAborted();
         await useAuthStore.getState().updateProfile({ avatar: avatarForUpload });
       }
 
+      task.controller.signal.throwIfAborted();
+      task.status = 'succeeded';
       this.emit(task);
     } catch (error) {
       const aborted = error instanceof DOMException && error.name === 'AbortError';
@@ -289,7 +313,7 @@ class AvatarGenerationQueueService {
       this.emit(task);
     } finally {
       task.controller = null;
-      this.runningTaskId = null;
+      if (this.runningTaskId === task.id) this.runningTaskId = null;
       void this.processNext();
     }
   }
@@ -319,3 +343,4 @@ class AvatarGenerationQueueService {
 }
 
 export const avatarGenerationQueue = new AvatarGenerationQueueService();
+onWorkspaceShutdown(() => avatarGenerationQueue.stopForAccountBoundary());

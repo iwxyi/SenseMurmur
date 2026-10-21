@@ -1,3 +1,5 @@
+import { assertWorkspaceActive, getWorkspaceSignal, isWorkspaceActive, onWorkspaceShutdown } from './workspaceLifecycle';
+
 export type ChatCompletionKind = 'text' | 'image';
 export type ChatCompletionStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 
@@ -53,13 +55,16 @@ export function getChatCompletionSummary(): ChatCompletionSummary {
 function publish() { const summary = getChatCompletionSummary(); listeners.forEach((listener) => listener(summary)); }
 
 async function pump(kind: ChatCompletionKind) {
+  if (!isWorkspaceActive()) return;
   if (running[kind]) return;
   const entry = queues[kind].shift();
   if (!entry) return;
   running[kind] = true;
+  const signal = getWorkspaceSignal();
   entry.task.status = 'running'; publish();
   try {
     const result = await entry.run();
+    signal.throwIfAborted();
     if (result?.warning) entry.task.warning = result.warning;
     entry.task.status = 'succeeded';
   } catch (error) {
@@ -71,6 +76,7 @@ async function pump(kind: ChatCompletionKind) {
 }
 
 export function enqueueChatCompletionTask(input: Omit<ChatCompletionTask, 'id' | 'status'> & { run: Runner }) {
+  assertWorkspaceActive();
   const task: ChatCompletionTask = { ...input, id: `chat-completion-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, status: 'queued' };
   tasks.set(task.id, task); queues[task.kind].push({ task, run: input.run }); publish(); void pump(task.kind);
   return task.id;
@@ -82,3 +88,11 @@ export function getChatCompletionTaskStatus(chatId: string, field: string) {
 export function subscribeChatCompletionQueue(listener: (summary: ChatCompletionSummary) => void) { listeners.add(listener); listener(getChatCompletionSummary()); return () => listeners.delete(listener); }
 export function dismissChatCompletionError(id: string) { dismissed.add(id); publish(); }
 export function dismissAllChatCompletionErrors() { [...tasks.values()].filter((item) => item.status === 'failed').forEach((item) => dismissed.add(item.id)); publish(); }
+
+onWorkspaceShutdown(() => {
+  queues.text = [];
+  queues.image = [];
+  tasks.clear();
+  dismissed.clear();
+  publish();
+});

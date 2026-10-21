@@ -1,5 +1,6 @@
 import { isCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { isCloudSyncBootstrapLocked } from '../services/cloudSyncBootstrapLock';
+import { isWorkspaceActive, onWorkspaceShutdown } from '../services/workspaceLifecycle';
 
 type FlushTask = () => Promise<void>;
 
@@ -23,7 +24,7 @@ let lifecycleListenersRegistered = false;
 let anonymousWorkerCounter = 0;
 
 function shouldRunCloudSyncTask() {
-  return isCloudSyncEnabled() && !isCloudSyncBootstrapLocked();
+  return isWorkspaceActive() && isCloudSyncEnabled() && !isCloudSyncBootstrapLocked();
 }
 
 function sortWorkersByPriority() {
@@ -75,6 +76,8 @@ function cancelLifecycleTasks() {
     task.cancel();
   }
 }
+
+onWorkspaceShutdown(cancelLifecycleTasks);
 
 function ensureLifecycleListeners() {
   if (lifecycleListenersRegistered || typeof window === 'undefined' || typeof document === 'undefined') return;

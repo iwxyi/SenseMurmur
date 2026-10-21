@@ -11,7 +11,8 @@ import { useSettingsStore } from './useSettingsStore';
 import { useChatStore } from './useChatStore';
 import { isCharacterFeatureEnabled } from '../services/characterGenerationPolicy';
 import type { GroupChat } from '../types/chat';
-import { scopedStorageKey, storageKey } from '../constants/brand';
+import { scopedStorageKey } from '../constants/brand';
+import { readAuthSnapshot } from '../services/authSnapshot';
 import { api, type CharacterArtifactQuery, type CharacterArtifactSummaryEntry, type CharacterArtifactSyncEntry, type SyncChangeScope } from '../services/api';
 import { getLocalDataUserId } from '../services/authStorageScope';
 import { isCloudSyncEnabled } from '../services/cloudSyncPreference';
@@ -109,10 +110,11 @@ function getGuestArtifactStorageKey() {
 }
 
 function isCloudMode() {
+  const session = readAuthSnapshot();
   return isCloudSyncEnabled()
     && !isCloudSyncBootstrapLocked()
-    && Boolean(localStorage.getItem(storageKey('token')))
-    && localStorage.getItem(storageKey('auth-mode')) !== 'local';
+    && Boolean(session.token)
+    && session.mode !== 'local';
 }
 
 async function readPersistedItemsFromKey(key: string) {

@@ -2,8 +2,9 @@ import type { AICharacter } from '../types/character';
 import type { Message, MessageAttachment, MessageAttachmentKind, MessageMetadata } from '../types/message';
 import { isAIProfileUsable, type AIModelProfile } from '../types/settings';
 import { api } from './api';
+import { workspaceFetch as fetch } from './workspaceLifecycle';
 import { generateImageWithAdapter, synthesizeSpeechWithAdapter } from './aiGenerationAdapter';
-import { storageKey } from '../constants/brand';
+import { readAuthSnapshot } from './authSnapshot';
 import { logRecoverableError, reportRecoverableError } from './diagnostics';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
 import { synthesizeSpeech, usesManagedSpeechProfile } from './speech';
@@ -313,7 +314,7 @@ function retryAttachmentMetadata(metadata: MessageMetadata | undefined, attachme
 }
 
 export function isLocalOnlyMediaMode() {
-  return !isCloudSyncEnabled() || (typeof localStorage !== 'undefined' ? localStorage.getItem(storageKey('auth-mode')) : 'local') !== 'cloud';
+  return !isCloudSyncEnabled() || readAuthSnapshot().mode !== 'cloud';
 }
 
 function updateAttachment(metadata: MessageMetadata | undefined, attachmentId: string, patch: Partial<MessageAttachment>): MessageMetadata {

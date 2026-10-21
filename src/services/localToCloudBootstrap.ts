@@ -1,4 +1,5 @@
 import { api } from './api';
+import { assertWorkspaceActive, getWorkspaceSignal } from './workspaceLifecycle';
 import { buildApiErrorUserMessage } from './apiErrorMessage';
 import { reportRecoverableError } from './diagnostics';
 import { normalizeCharacter, type AICharacter } from '../types/character';
@@ -89,8 +90,10 @@ export function shouldUploadSettingsDuringBootstrap(settings: ReturnType<typeof 
   return stableJson(buildSettingsPayload(settings)) !== stableJson(buildSettingsPayload(DEFAULT_SETTINGS));
 }
 
-export async function captureLocalCloudBootstrapSnapshot(): Promise<LocalCloudBootstrapSnapshot> {
+export async function captureLocalCloudBootstrapSnapshot(signal = getWorkspaceSignal()): Promise<LocalCloudBootstrapSnapshot> {
+  assertWorkspaceActive(signal);
   await ensureLocalStoresHydrated();
+  assertWorkspaceActive(signal);
   const characterState = useCharacterStore.getState();
   const chatState = useChatStore.getState();
   const messageState = useMessageStore.getState();
@@ -262,24 +265,28 @@ function summaryEntriesFromChanges<T>(changes: Array<Record<string, unknown>> | 
   return entries;
 }
 
-async function fetchRemoteBootstrapSummary(): Promise<BootstrapRemoteSummary> {
+async function fetchRemoteBootstrapSummary(signal: AbortSignal): Promise<BootstrapRemoteSummary> {
+  assertWorkspaceActive(signal);
   const [characterChanges, chatChanges] = await Promise.allSettled([
     api.getSyncChanges({ scope: 'characters.summary' }),
     api.getSyncChanges({ scope: 'chats.summary' }),
   ]);
+  assertWorkspaceActive(signal);
 
   const characters = characterChanges.status === 'fulfilled'
     ? summaryEntriesFromChanges(characterChanges.value.changes, 'character_summary', (value) => normalizeCharacter(value as AICharacter))
     : (await api.getCharacters() as unknown as AICharacter[]).map((character) => normalizeCharacter(character));
+  assertWorkspaceActive(signal);
   const chats = chatChanges.status === 'fulfilled'
     ? summaryEntriesFromChanges(chatChanges.value.changes, 'chat_summary', (value) => normalizeConversation(value as GroupChat))
     : (await api.getChats() as unknown as GroupChat[]).map((chat) => normalizeConversation(chat));
 
+  assertWorkspaceActive(signal);
   return { characters, chats };
 }
 
-export async function buildBootstrapReconcilePlan(snapshot: LocalCloudBootstrapSnapshot) {
-  return createBootstrapReconcilePlan(snapshot, await fetchRemoteBootstrapSummary());
+export async function buildBootstrapReconcilePlan(snapshot: LocalCloudBootstrapSnapshot, signal = getWorkspaceSignal()) {
+  return createBootstrapReconcilePlan(snapshot, await fetchRemoteBootstrapSummary(signal));
 }
 
 function buildUniqueName(baseName: string, usedNames: Set<string>) {
@@ -304,7 +311,8 @@ function pendingCreateOperationIdByEntity(operations: BootstrapPendingEntityOper
     .map((operation) => [operation.entityId, operation.id]));
 }
 
-async function uploadCharacters(plan: BootstrapReconcilePlan) {
+async function uploadCharacters(plan: BootstrapReconcilePlan, signal: AbortSignal) {
+  assertWorkspaceActive(signal);
   const usedNames = new Set(
     plan.remote.characters
       .filter((character) => !character.isPreset && character.deletedAt == null)
@@ -318,6 +326,7 @@ async function uploadCharacters(plan: BootstrapReconcilePlan) {
   const pendingOperationIds = pendingCreateOperationIdByEntity(plan.pendingCharacterCreates);
 
   for (const character of plan.charactersToCreate) {
+    assertWorkspaceActive(signal);
     const name = buildUniqueName(character.name, usedNames);
     const created = normalizeCharacter(await api.createCharacter({
       id: character.id,
@@ -347,6 +356,7 @@ async function uploadCharacters(plan: BootstrapReconcilePlan) {
       bubbleStyle: character.bubbleStyle,
       bubbleStyleId: character.bubbleStyleId,
     } as Parameters<typeof api.createCharacter>[0]) as unknown as AICharacter);
+    assertWorkspaceActive(signal);
     idMap.set(character.id, created.id);
   }
 
@@ -430,7 +440,8 @@ function hasRuntimeWorldPatchData(patch: ReturnType<typeof mergeRuntimeWorldPatc
   );
 }
 
-async function uploadChats(plan: BootstrapReconcilePlan, characterIdMap: Map<string, string>) {
+async function uploadChats(plan: BootstrapReconcilePlan, characterIdMap: Map<string, string>, signal: AbortSignal) {
+  assertWorkspaceActive(signal);
   const chatIdMap = new Map<string, string>();
   const remoteChatsByName = activeRemoteNameMap(plan.remote.chats);
   for (const chat of plan.chatsAlreadyRemote) {
@@ -442,6 +453,7 @@ async function uploadChats(plan: BootstrapReconcilePlan, characterIdMap: Map<str
   const pendingOperationIds = pendingCreateOperationIdByEntity(plan.pendingChatCreates);
 
   for (const chat of plan.chatsToCreate) {
+    assertWorkspaceActive(signal);
     const created = normalizeConversation(await api.createChat({
       id: chat.id,
       operationId: pendingOperationIds.get(chat.id),
@@ -471,13 +483,16 @@ async function uploadChats(plan: BootstrapReconcilePlan, characterIdMap: Map<str
       worldState: mapJsonReferences(chat.worldState, characterIdMap),
       directorControls: mapJsonReferences(chat.directorControls, characterIdMap),
     } as Parameters<typeof api.createChat>[0]) as unknown as GroupChat);
+    assertWorkspaceActive(signal);
     chatIdMap.set(chat.id, created.id);
   }
 
   for (const chat of plan.chatsToPatchRuntime) {
+    assertWorkspaceActive(signal);
     const remoteId = chatIdMap.get(chat.id);
     if (!remoteId) continue;
     const remoteChat = normalizeConversation(await api.getChat(remoteId) as unknown as GroupChat);
+    assertWorkspaceActive(signal);
     const patch = mergeRuntimeWorldPatch(chat, remoteChat, characterIdMap, chatIdMap);
     if (!hasRuntimeWorldPatchData(patch)) continue;
     await api.syncChatPatch(remoteId, {
@@ -485,6 +500,7 @@ async function uploadChats(plan: BootstrapReconcilePlan, characterIdMap: Map<str
       clientTimestamp: Date.now(),
       patch,
     });
+    assertWorkspaceActive(signal);
   }
 
   return chatIdMap;
@@ -532,9 +548,12 @@ async function uploadMessages(
   chatIdMap: Map<string, string>,
   characterIdMap: Map<string, string>,
   plan: BootstrapReconcilePlan,
+  signal: AbortSignal,
 ) {
+  assertWorkspaceActive(signal);
   const messages = collectMessagesForUpload(snapshot, chatIdMap, plan);
   for (const message of messages) {
+    assertWorkspaceActive(signal);
     const cloudChatId = chatIdMap.get(message.chatId);
     if (!cloudChatId) continue;
     const senderId = isUserLikeSender(message.senderId) ? message.senderId : mapCharacterId(message.senderId, characterIdMap);
@@ -555,10 +574,12 @@ async function uploadMessages(
       emotion: message.emotion,
       timestamp: message.timestamp,
     });
+    assertWorkspaceActive(signal);
   }
 }
 
-export async function bootstrapLocalDataToCloud(snapshot: LocalCloudBootstrapSnapshot) {
+export async function bootstrapLocalDataToCloud(snapshot: LocalCloudBootstrapSnapshot, signal = getWorkspaceSignal()) {
+  assertWorkspaceActive(signal);
   if (!hasBootstrapData(snapshot)) return;
   console.info('[cloud-sync] bootstrap local data to cloud started', {
     characters: snapshot.characters.length,
@@ -567,8 +588,9 @@ export async function bootstrapLocalDataToCloud(snapshot: LocalCloudBootstrapSna
   });
   try {
     const plan = hasBootstrapEntityData(snapshot)
-      ? await buildBootstrapReconcilePlan(snapshot)
+      ? await buildBootstrapReconcilePlan(snapshot, signal)
       : createBootstrapReconcilePlan(snapshot, { characters: [], chats: [] });
+    assertWorkspaceActive(signal);
     writeCloudSyncBootstrapStatus(buildBootstrapStatus('planned', plan));
     console.info('[cloud-sync] bootstrap reconcile plan prepared', {
       charactersToCreate: plan.charactersToCreate.length,
@@ -583,10 +605,12 @@ export async function bootstrapLocalDataToCloud(snapshot: LocalCloudBootstrapSna
     writeCloudSyncBootstrapStatus(buildBootstrapStatus('running', plan));
     if (plan.settingsShouldUpload) {
       await uploadSettings();
+      assertWorkspaceActive(signal);
     }
-    const characterIdMap = await uploadCharacters(plan);
-    const chatIdMap = await uploadChats(plan, characterIdMap);
-    await uploadMessages(snapshot, chatIdMap, characterIdMap, plan);
+    const characterIdMap = await uploadCharacters(plan, signal);
+    const chatIdMap = await uploadChats(plan, characterIdMap, signal);
+    await uploadMessages(snapshot, chatIdMap, characterIdMap, plan, signal);
+    assertWorkspaceActive(signal);
     confirmBootstrapCreateOperations(plan, characterIdMap, chatIdMap);
     writeCloudSyncBootstrapStatus(buildBootstrapStatus('succeeded', plan));
     console.info('[cloud-sync] bootstrap local data to cloud finished', {
@@ -594,6 +618,7 @@ export async function bootstrapLocalDataToCloud(snapshot: LocalCloudBootstrapSna
       chatsUploaded: chatIdMap.size,
     });
   } catch (error) {
+    assertWorkspaceActive(signal);
     writeCloudSyncBootstrapStatus(failedBootstrapStatusFromPrevious(error));
     reportRecoverableError({
       location: 'cloud-sync:bootstrap-local-data',

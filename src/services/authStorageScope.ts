@@ -1,8 +1,7 @@
 import { storageKey } from '../constants/brand';
+import { getWorkspaceDataUserId } from './workspaceLifecycle';
+import { readAuthSnapshot } from './authSnapshot';
 
-const AUTH_TOKEN_KEY = storageKey('token');
-const AUTH_USER_KEY = storageKey('user');
-const AUTH_MODE_KEY = storageKey('auth-mode');
 const LAST_CLOUD_USER_ID_KEY = storageKey('last-cloud-user-id');
 
 export function rememberCloudUserId(user: { id?: string | null } | null | undefined) {
@@ -11,22 +10,18 @@ export function rememberCloudUserId(user: { id?: string | null } | null | undefi
 }
 
 export function getStoredAuthUserId() {
-  if (typeof localStorage === 'undefined') return null;
-  try {
-    const raw = localStorage.getItem(AUTH_USER_KEY);
-    const id = raw ? (JSON.parse(raw) as { id?: unknown }).id : null;
-    return typeof id === 'string' && id ? id : null;
-  } catch {
-    return null;
-  }
+  return readAuthSnapshot().user?.id || null;
 }
 
 export function getLocalDataUserId() {
+  const workspaceUserId = getWorkspaceDataUserId();
+  if (workspaceUserId !== undefined) return workspaceUserId;
   if (typeof localStorage === 'undefined') return 'guest';
-  const currentUserId = getStoredAuthUserId();
+  const session = readAuthSnapshot();
+  const currentUserId = session.user?.id;
   if (currentUserId) return currentUserId;
-  const authMode = localStorage.getItem(AUTH_MODE_KEY);
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+  const authMode = session.mode;
+  const token = session.token;
   const lastCloudUserId = localStorage.getItem(LAST_CLOUD_USER_ID_KEY);
   if ((token || authMode === 'cloud') && lastCloudUserId) return lastCloudUserId;
   return 'guest';

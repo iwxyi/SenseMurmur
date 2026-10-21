@@ -319,12 +319,7 @@ export default function AccountPage() {
   };
 
   const handleLogout = () => {
-    logout();
-    setSnackbar({
-      open: true,
-      message: i18n.language.startsWith('zh') ? '已退出登录，当前为离线本地模式' : 'Logged out. You are now in local-only mode.',
-      severity: 'success',
-    });
+    void logout();
   };
 
   const handleAvatarFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {

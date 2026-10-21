@@ -67,6 +67,27 @@ function snapshot(overrides: Partial<LocalCloudBootstrapSnapshot> = {}): LocalCl
 }
 
 describe('localToCloudBootstrap', () => {
+  it('does not start fallback requests or write bootstrap status after its session ends', async () => {
+    const { api } = await import('./api');
+    const controller = new AbortController();
+    let rejectSummary!: (error: Error) => void;
+    const deferred = new Promise<Awaited<ReturnType<typeof api.getSyncChanges>>>((_resolve, reject) => { rejectSummary = reject; });
+    const summary = vi.spyOn(api, 'getSyncChanges').mockReturnValue(deferred);
+    const characters = vi.spyOn(api, 'getCharacters');
+    const chats = vi.spyOn(api, 'getChats');
+    localStore.clear();
+    const pending = bootstrap.bootstrapLocalDataToCloud(snapshot({ characters: [character('local-a', 'A')] }), controller.signal);
+    const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    rejectSummary(new Error('Old summary failed'));
+    await rejected;
+    expect(characters).not.toHaveBeenCalled();
+    expect(chats).not.toHaveBeenCalled();
+    expect(localStore.size).toBe(0);
+    summary.mockRestore();
+    characters.mockRestore();
+    chats.mockRestore();
+  });
   it('does not upload default settings during local bootstrap', () => {
     expect(bootstrap.shouldUploadSettingsDuringBootstrap(DEFAULT_SETTINGS as ReturnType<typeof import('../stores/useSettingsStore').useSettingsStore.getState>)).toBe(false);
     expect(bootstrap.shouldUploadSettingsDuringBootstrap({

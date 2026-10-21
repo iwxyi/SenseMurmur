@@ -1,5 +1,6 @@
 import type { PersistStorage, StateStorage, StorageValue } from 'zustand/middleware';
 import { recordPersistenceFailure } from '../services/persistenceHealth';
+import { isWorkspaceActive } from '../services/workspaceLifecycle';
 
 interface ScopedStorageParams {
   getScopedKey: () => string;
@@ -341,6 +342,7 @@ export function createScopedStorage(params: ScopedStorageParams): StateStorage {
       return localStorage.getItem(scopedName);
     },
     setItem: (name: string, value: string) => {
+      if (!isWorkspaceActive()) return;
       if (typeof localStorage === 'undefined') return;
       const scopedName = params.getScopedKey();
       const storageName = params.storageName;
@@ -351,6 +353,7 @@ export function createScopedStorage(params: ScopedStorageParams): StateStorage {
       localStorage.setItem(scopedName, value);
     },
     removeItem: (name: string) => {
+      if (!isWorkspaceActive()) return;
       if (typeof localStorage === 'undefined') return;
       const scopedName = params.getScopedKey();
       const storageName = params.storageName;
@@ -384,6 +387,7 @@ export function createScopedIndexedDbStorage(params: ScopedStorageParams): State
       return null;
     },
     setItem: async (name: string, value: string) => {
+      if (!isWorkspaceActive()) return;
       const scopedName = params.getScopedKey();
       const storageName = params.storageName;
       if (name !== storageName) {
@@ -395,6 +399,7 @@ export function createScopedIndexedDbStorage(params: ScopedStorageParams): State
       if (storageBackend === 'indexedDb' && typeof localStorage !== 'undefined') localStorage.removeItem(scopedName);
     },
     removeItem: async (name: string) => {
+      if (!isWorkspaceActive()) return;
       const scopedName = params.getScopedKey();
       const storageName = params.storageName;
       if (name !== storageName) {
@@ -483,6 +488,7 @@ export function createBufferedJsonStorage<T>(
       return parsePersistedValue<T>(raw, options.reviver);
     },
     setItem: (name: string, value: StorageValue<T>) => {
+      if (!isWorkspaceActive()) return;
       const target = resolveStorageTarget(name);
       const key = target.key;
       const pending = pendingWrites.get(key);
@@ -494,6 +500,7 @@ export function createBufferedJsonStorage<T>(
       });
     },
     removeItem: (name: string) => {
+      if (!isWorkspaceActive()) return;
       const target = resolveStorageTarget(name);
       const key = target.key;
       const pending = pendingWrites.get(key);

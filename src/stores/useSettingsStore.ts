@@ -1,5 +1,7 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { createJSONStorage, persist } from 'zustand/middleware';
+import { createSettingsStorage, getSettingsStorageKey, SETTINGS_STORAGE_NAME } from './settingsStorage';
+import { onWorkspaceShutdown } from '../services/workspaceLifecycle';
 import type { AppSettingsWithMemory, ThemeMode, ThemePresetId, Language, APIConfig, AIModelProfile, ChatDraftDefaults, DeveloperUIPrefs, AvatarGenerationSettings, AIGenerationSettings, CompanionshipSettings, ChatMemorySettings, UsageStats, ChatAppearanceSettings } from '../types/settings';
 import type { ArtifactAppearanceSettings } from '../types/artifactAppearance';
 
@@ -88,6 +90,13 @@ const settingsSyncScopes = createSyncScopeMetadata(30_000, {
   getStorageKey: () => scopedStorageKey(`settings-sync-scopes-${getLocalDataUserId()}`),
 });
 const settingsScopeSyncScheduler = createSyncScheduler('settings.scope-refresh', { priority: 10 });
+onWorkspaceShutdown(() => {
+  if (syncTimer) clearTimeout(syncTimer);
+  if (savedStateTimer) clearTimeout(savedStateTimer);
+  if (usageStatsSyncTimer) clearTimeout(usageStatsSyncTimer);
+  syncTimer = savedStateTimer = usageStatsSyncTimer = null;
+  pendingSettingsSyncData = null;
+});
 let settingsScopeRequested = false;
 let settingsScopeLifecycleRegistered = false;
 const DISABLED_DEVELOPER_UI_PREFS: DeveloperUIPrefs = {
@@ -999,7 +1008,8 @@ export const useSettingsStore = create<SettingsStore>()(
       },
     }),
     {
-      name: scopedStorageKey('settings'),
+      name: SETTINGS_STORAGE_NAME,
+      storage: createJSONStorage<Partial<SettingsStore>>(() => createSettingsStorage()),
       version: CLIENT_STORE_SCHEMA_VERSION,
       migrate: (persistedState) => migrateSettingsStoreState(persistedState as Partial<SettingsStore>) as SettingsStore,
       partialize: (state) => ({
@@ -1048,3 +1058,21 @@ export const useSettingsStore = create<SettingsStore>()(
 );
 
 ensureSettingsScopeLifecycle();
+
+export async function resetSettingsStoreForAccountBoundary() {
+  const key = getSettingsStorageKey();
+  const snapshot = localStorage.getItem(key);
+  settingsSyncScopes.clear();
+  useSettingsStore.setState({
+    ...syncState(DEFAULT_SETTINGS),
+    _loaded: false,
+    developerModeEntitled: false,
+    lastSyncedAt: 0,
+    syncStatus: 'idle',
+    syncError: null,
+    settingsDirty: false,
+  });
+  if (snapshot === null) localStorage.removeItem(key);
+  else localStorage.setItem(key, snapshot);
+  await useSettingsStore.persist.rehydrate();
+}

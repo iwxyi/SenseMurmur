@@ -3,6 +3,7 @@ import { normalizeAIModelAdvancedOptions, normalizeMaxOutputTokens, DEFAULT_MAX_
 import { api } from './api';
 import { backendUrl } from './backendUrl';
 import { redactAiDiagnosticText } from './aiDiagnosticText';
+import { assertWorkspaceActive, getResponseWorkspaceSignal, workspaceFetch as fetch } from './workspaceLifecycle';
 
 type ChatRole = 'user' | 'assistant' | 'system';
 export interface ChatMessageImageAttachment {
@@ -548,10 +549,14 @@ export async function parseSSEStream(
 }
 
 async function parseJsonResponse<T>(response: Response, fallbackPrefix: string): Promise<T> {
+  const signal = getResponseWorkspaceSignal(response);
+  assertWorkspaceActive(signal);
   if (!response.ok) {
     throw await createPublicAiRequestError(response, fallbackPrefix);
   }
-  return response.json() as Promise<T>;
+  const result = await response.json() as T;
+  assertWorkspaceActive(signal);
+  return result;
 }
 
 export interface AiRequestDiagnostic {

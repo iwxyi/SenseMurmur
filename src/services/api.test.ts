@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import 'fake-indexeddb/auto';
+import { readAuthSnapshot } from './authSnapshot';
 import { ApiError, api } from './api';
 import { AUTH_SESSION_EXPIRED_EVENT } from './authSession';
 
@@ -234,8 +236,9 @@ describe('api sync changes', () => {
 
     await expect(api.getMe()).resolves.toMatchObject({ id: 'user-1' });
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(localStorage.getItem('pneumata-token')).toBe('token-2');
-    expect(localStorage.getItem('pneumata-refresh-token')).toBe('refresh-token-2');
+    expect(readAuthSnapshot()).toMatchObject({ token: 'token-2', refreshToken: 'refresh-token-2' });
+    expect(localStorage.getItem('pneumata-token')).toBeNull();
+    expect(localStorage.getItem('pneumata-refresh-token')).toBeNull();
     expect(new Headers(fetchMock.mock.calls[2]?.[1]?.headers).get('Authorization')).toBe('Bearer token-2');
   });
 

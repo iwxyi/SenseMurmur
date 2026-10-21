@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import 'fake-indexeddb/auto';
 import { api } from './api';
 import * as authSession from './authSession';
 import { generateImage, generateResponse, listAvailableModels } from './aiClient';
@@ -18,6 +19,7 @@ describe('shared backend session renewal', () => {
     vi.stubGlobal('localStorage', {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
     });
     vi.spyOn(authSession, 'dispatchAuthSessionExpired').mockImplementation(() => undefined);
   });
@@ -77,7 +79,10 @@ describe('shared backend session renewal', () => {
     await api.fetchWithAuth('/api/ai/images/edits', { method: 'POST', body, signal: controller.signal });
 
     expect(fetchMock.mock.calls[2][1].body).toBe(body);
-    expect(fetchMock.mock.calls[2][1].signal).toBe(controller.signal);
+    const requestSignal = fetchMock.mock.calls[2][1].signal as AbortSignal;
+    expect(requestSignal.aborted).toBe(false);
+    controller.abort();
+    expect(requestSignal.aborted).toBe(true);
     expect(new Headers(fetchMock.mock.calls[2][1].headers).has('Content-Type')).toBe(false);
   });
 

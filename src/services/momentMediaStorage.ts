@@ -1,4 +1,4 @@
-import { storageKey } from '../constants/brand';
+import { readAuthSnapshot } from './authSnapshot';
 import type { AICharacter } from '../types/character';
 import { prepareAvatarUploadDataUrl } from '../utils/avatarUpload';
 import { api } from './api';
@@ -36,7 +36,7 @@ interface LocalMomentMediaRecord {
 }
 
 function authMode() {
-  return typeof localStorage !== 'undefined' ? localStorage.getItem(storageKey('auth-mode')) : 'local';
+  return readAuthSnapshot().mode;
 }
 
 function isCloudMode() {

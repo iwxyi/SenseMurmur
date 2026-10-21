@@ -1,3 +1,5 @@
+import { assertWorkspaceActive, getWorkspaceSignal, isWorkspaceActive, onWorkspaceShutdown } from './workspaceLifecycle';
+
 export type CharacterCompletionKind = 'text' | 'image';
 export type CharacterCompletionStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 
@@ -88,14 +90,17 @@ function publish() {
 }
 
 async function pump(kind: CharacterCompletionKind) {
+  if (!isWorkspaceActive()) return;
   if (running[kind]) return;
   const entry = queues[kind].shift();
   if (!entry) return;
   running[kind] = true;
+  const signal = getWorkspaceSignal();
   entry.task.status = 'running';
   publish();
   try {
     const result = await entry.run();
+    signal.throwIfAborted();
     if (result?.warning) entry.task.warning = result.warning;
     entry.task.status = 'succeeded';
   } catch (error) {
@@ -109,6 +114,7 @@ async function pump(kind: CharacterCompletionKind) {
 }
 
 export function enqueueCharacterCompletionTask(input: Omit<CharacterCompletionTask, 'id' | 'status'> & { run: Runner }) {
+  assertWorkspaceActive();
   const task: CharacterCompletionTask = { ...input, id: `character-completion-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, status: 'queued' };
   allTasks.set(task.id, task);
   queues[task.kind].push({ task, run: input.run });
@@ -121,3 +127,11 @@ export function clearCompletedCharacterCompletionTasks() {
   [...allTasks.entries()].forEach(([id, task]) => { if (task.status === 'succeeded' || task.status === 'failed') allTasks.delete(id); });
   publish();
 }
+
+onWorkspaceShutdown(() => {
+  queues.text = [];
+  queues.image = [];
+  allTasks.clear();
+  dismissedErrorIds.clear();
+  publish();
+});

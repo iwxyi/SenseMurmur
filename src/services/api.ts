@@ -5,9 +5,10 @@ import type { AICharacter, CharacterVisualIdentity, CharacterVisualReferenceImag
 import type { ConversationMode } from '../types/chat';
 import type { Message } from '../types/message';
 import type { AssistantArtifactItem } from '../types/assistantArtifact';
-import { storageKey } from '../constants/brand';
 import { dispatchAuthSessionExpired } from './authSession';
 import { backendUrl } from './backendUrl';
+import { assertWorkspaceActive, getResponseWorkspaceSignal, getWorkspaceSignal, workspaceFetch as fetch } from './workspaceLifecycle';
+import { readAuthSnapshot, updateAuthSnapshot } from './authSnapshot';
 
 const API_BASE = '/api';
 const AI_BALANCE_CACHE_TTL_MS = 60_000;
@@ -594,7 +595,7 @@ class ApiClient {
   private authRefreshFailure: { reason: 'refresh_token_missing' | 'refresh_rejected' | 'refresh_network_error' | 'refresh_response_invalid'; status?: number; diagnostic?: string } | null = null;
 
   private getToken(): string | null {
-    return typeof localStorage === 'undefined' ? null : localStorage.getItem(storageKey('token'));
+    return readAuthSnapshot().token;
   }
 
   getAccessTokenExpiresAt(token = this.getToken()): number | null {
@@ -611,9 +612,13 @@ class ApiClient {
   }
 
   private async parseJsonResponse<T>(response: Response): Promise<T> {
+    const signal = getResponseWorkspaceSignal(response);
+    assertWorkspaceActive(signal);
     const contentType = response.headers.get('content-type') || '';
     if (contentType.includes('application/json')) {
-      return response.json() as Promise<T>;
+      const result = await response.json() as T;
+      assertWorkspaceActive(signal);
+      return result;
     }
     const text = await response.text().catch(() => '');
     const normalized = text.trimStart().toLowerCase();
@@ -625,8 +630,11 @@ class ApiClient {
   }
 
   private async refreshAuthSession(): Promise<boolean> {
+    const workspaceSignal = getWorkspaceSignal();
+    assertWorkspaceActive(workspaceSignal);
     if (this.authRefreshInFlight) return this.authRefreshInFlight;
-    const refreshToken = typeof localStorage === 'undefined' ? null : localStorage.getItem(storageKey('refresh-token'));
+    const expected = readAuthSnapshot();
+    const refreshToken = expected.refreshToken;
     this.authRefreshFailure = null;
     if (!refreshToken) {
       this.authRefreshFailure = { reason: 'refresh_token_missing', diagnostic: 'refresh token is not present in local storage' };
@@ -640,10 +648,11 @@ class ApiClient {
         if (!response.ok) {
           // Another tab may have rotated the token while this request was in flight.
           // Re-read storage before treating the session as expired.
-          const currentRefreshToken = localStorage.getItem(storageKey('refresh-token'));
+          const currentRefreshToken = readAuthSnapshot().refreshToken;
           const rotated = Boolean(currentRefreshToken && currentRefreshToken !== refreshToken && this.getToken());
           if (!rotated) {
             const payload = await response.json().catch(() => ({})) as { code?: unknown };
+            assertWorkspaceActive(workspaceSignal);
             const code = typeof payload.code === 'string' && AUTH_EXPIRED_CODES.has(payload.code.toUpperCase()) ? payload.code.toUpperCase() : '';
             this.authRefreshFailure = {
               reason: 'refresh_rejected',
@@ -654,16 +663,26 @@ class ApiClient {
           return rotated;
         }
         const result = await this.parseJsonResponse<{ token: string; refreshToken: string; user?: AuthUserResponse }>(response);
+        assertWorkspaceActive(workspaceSignal);
+        // Logout or another login can finish while the refresh body is read.
+        if (readAuthSnapshot().refreshToken !== refreshToken) return false;
         if (typeof result.token !== 'string' || !result.token || typeof result.refreshToken !== 'string' || !result.refreshToken) {
           this.authRefreshFailure = { reason: 'refresh_response_invalid', status: response.status, diagnostic: 'refresh response did not contain token fields' };
           return false;
         }
-        localStorage.setItem(storageKey('token'), result.token);
-        localStorage.setItem(storageKey('refresh-token'), result.refreshToken);
-        if (result.user) localStorage.setItem(storageKey('user'), JSON.stringify(result.user));
+        await updateAuthSnapshot(expected, (current) => {
+          assertWorkspaceActive(workspaceSignal);
+          if (current.refreshToken !== refreshToken) return current;
+          if (current.user && result.user && current.user.id !== result.user.id) {
+            throw new ApiError('续期返回的账号不匹配', { code: 'INVALID_API_RESPONSE', status: 502 });
+          }
+          return { ...current, token: result.token, refreshToken: result.refreshToken, user: result.user ?? current.user };
+        });
+        assertWorkspaceActive(workspaceSignal);
         return true;
       } catch (error) {
-        const currentRefreshToken = localStorage.getItem(storageKey('refresh-token'));
+        assertWorkspaceActive(workspaceSignal);
+        const currentRefreshToken = readAuthSnapshot().refreshToken;
         const rotated = Boolean(currentRefreshToken && currentRefreshToken !== refreshToken && this.getToken());
         if (!rotated) {
           this.authRefreshFailure = {
@@ -706,6 +725,8 @@ class ApiClient {
 
   /** Backend session requests, including streaming and multipart responses. */
   async fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
+    const workspaceSignal = getWorkspaceSignal();
+    assertWorkspaceActive(workspaceSignal);
     const send = () => {
       const token = this.getToken();
       const headers = new Headers(options.headers);
@@ -715,16 +736,21 @@ class ApiClient {
     };
     const initial = send();
     let response = await initial.response;
+    assertWorkspaceActive(workspaceSignal);
     if (!await this.isAuthRejection(response)) return response;
 
     // A late 401 can belong to an access token that another request has
     // already renewed. Retry with the current token without renewing again.
     const currentToken = this.getToken();
+    assertWorkspaceActive(workspaceSignal);
     const alreadyRefreshed = Boolean(currentToken && currentToken !== initial.token);
     const refreshed = alreadyRefreshed || await this.refreshAuthSession();
     if (refreshed) {
+      assertWorkspaceActive(workspaceSignal);
       response = await send().response;
-      if (!await this.isAuthRejection(response)) return response;
+      const rejected = await this.isAuthRejection(response);
+      assertWorkspaceActive(workspaceSignal);
+      if (!rejected) return response;
     }
 
     const failure = refreshed ? null : this.authRefreshFailure;
@@ -733,6 +759,7 @@ class ApiClient {
       console.warn('[auth] session refresh unavailable; retaining login', failure);
       throw new ApiError('登录续期暂时失败，请稍后重试', { code: 'AUTH_REFRESH_UNAVAILABLE', status: 503 });
     }
+    assertWorkspaceActive(workspaceSignal);
     dispatchAuthSessionExpired({
       status: response.status,
       path: url,
@@ -776,6 +803,18 @@ class ApiClient {
 
   async logout(refreshToken?: string) {
     return this.request<{ success: boolean }>('POST', '/auth/logout', { refreshToken });
+  }
+
+  /** Logout must survive workspace cancellation and the subsequent page navigation. */
+  async revokeAuthSession(token: string | null, refreshToken: string | null) {
+    const response = await globalThis.fetch(backendUrl(`${API_BASE}/auth/logout`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ refreshToken }),
+      keepalive: true,
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) throw new ApiError('退出会话撤销失败', { status: response.status });
   }
 
   async sendPasswordCode(captchaToken?: string) {

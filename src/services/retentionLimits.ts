@@ -58,13 +58,6 @@ export function takeRecentByLimit<T>(items: T[] | undefined, limit: number): T[]
 
 export function getCurrentRetentionLimits() {
   if (typeof localStorage === 'undefined') return DEFAULT_BASIC_RETENTION_LIMITS;
-  try {
-    const raw = localStorage.getItem(storageKey('user'));
-    if (!raw) return DEFAULT_BASIC_RETENTION_LIMITS;
-    const user = JSON.parse(raw) as { retentionLimits?: unknown };
-    return normalizeRetentionLimits(user.retentionLimits);
-  } catch {
-    return DEFAULT_BASIC_RETENTION_LIMITS;
-  }
+  return normalizeRetentionLimits(readAuthSnapshot().user?.retentionLimits);
 }
-import { storageKey } from '../constants/brand';
+import { readAuthSnapshot } from './authSnapshot';

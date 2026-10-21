@@ -4,6 +4,8 @@ import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, LinearP
 import { createAppTheme } from './theme';
 import { useSettingsStore } from './stores/useSettingsStore';
 import { useAuthStore } from './stores/useAuthStore';
+import { readAuthSnapshot } from './services/authSnapshot';
+import { isWorkspaceActive } from './services/workspaceLifecycle';
 import AppLayout from './components/layout/AppLayout';
 import MasterDetailLayout from './components/layout/MasterDetailLayout';
 import AdminPermissionGate from './components/admin/AdminPermissionGate';
@@ -278,12 +280,17 @@ function AuthBootstrap() {
     let disposed = false;
     let timer: number | null = null;
     const refresh = async () => {
-      if (document.visibilityState === 'hidden' || !navigator.onLine) return;
-      const refreshed = await api.refreshAuthIfNeeded();
-      if (!disposed && refreshed) {
-        useAuthStore.setState({ token: localStorage.getItem('pneumata-token') });
+      if (disposed || !isWorkspaceActive() || document.visibilityState === 'hidden' || !navigator.onLine) return;
+      try {
+        const refreshed = await api.refreshAuthIfNeeded();
+        if (!disposed && isWorkspaceActive() && refreshed) {
+          useAuthStore.setState({ token: readAuthSnapshot().token });
+        }
+      } catch (error) {
+        if (!isWorkspaceActive()) return;
+        console.warn('[auth] scheduled refresh failed', { error });
       }
-      if (!disposed) schedule();
+      if (!disposed && isWorkspaceActive()) schedule();
     };
     const schedule = () => {
       if (timer !== null) window.clearTimeout(timer);

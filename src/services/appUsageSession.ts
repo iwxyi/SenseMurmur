@@ -1,5 +1,6 @@
-import { storageKey } from '../constants/brand';
+import { readAuthSnapshot } from './authSnapshot';
 import { backendUrl } from './backendUrl';
+import { assertWorkspaceActive, getWorkspaceSignal, onWorkspaceShutdown, workspaceFetch } from './workspaceLifecycle';
 
 const API_BASE = '/api';
 const ANONYMOUS_ID_KEY = 'pneumata.appUsage.anonymousId';
@@ -33,7 +34,7 @@ export function getAppUsageAnonymousId() {
 function getAuthHeaders() {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   try {
-    const token = localStorage.getItem(storageKey('token'));
+    const token = readAuthSnapshot().token;
     if (token) headers.Authorization = `Bearer ${token}`;
   } catch {
     return headers;
@@ -64,14 +65,17 @@ export function currentUsagePath() {
 }
 
 async function postJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
-  const response = await fetch(backendUrl(`${API_BASE}${path}`), {
+  const signal = getWorkspaceSignal();
+  const response = await workspaceFetch(backendUrl(`${API_BASE}${path}`), {
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify(body),
     keepalive: true,
   });
   if (!response.ok) throw new Error(`Usage session request failed: ${response.status}`);
-  return response.json() as Promise<T>;
+  const result = await response.json() as T;
+  assertWorkspaceActive(signal);
+  return result;
 }
 
 export class AppUsageSessionClient {
@@ -80,9 +84,12 @@ export class AppUsageSessionClient {
   private heartbeatIntervalMs = HEARTBEAT_INTERVAL_MS;
   private lastHeartbeatPath = '';
   private stopped = false;
+  private unsubscribeShutdown: (() => void) | null = null;
 
   async start(path = currentUsagePath()) {
     this.stopped = false;
+    this.unsubscribeShutdown?.();
+    this.unsubscribeShutdown = onWorkspaceShutdown(() => this.end(path));
     const result = await postJson<UsageSessionStartResponse>('/usage/sessions/start', {
       anonymousId: getAppUsageAnonymousId(),
       path,
@@ -104,10 +111,12 @@ export class AppUsageSessionClient {
   }
 
   end(path = currentUsagePath()) {
-    if (!this.sessionId) return;
+    this.unsubscribeShutdown?.();
+    this.unsubscribeShutdown = null;
     this.stopped = true;
     if (this.heartbeatTimer) window.clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
+    if (!this.sessionId) return;
     const sessionId = this.sessionId;
     this.sessionId = null;
     const body = JSON.stringify({ anonymousId: getAppUsageAnonymousId(), path });

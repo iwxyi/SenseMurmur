@@ -1,14 +1,17 @@
 import { create } from 'zustand';
 import { ApiError, api } from '../services/api';
 import { buildApiErrorUserMessage } from '../services/apiErrorMessage';
-import { useSettingsStore } from './useSettingsStore';
-import { storageKey } from '../constants/brand';
+import { resetSettingsStoreForAccountBoundary, useSettingsStore } from './useSettingsStore';
 import { reportRecoverableError } from '../services/diagnostics';
 import { rememberCloudUserId } from '../services/authStorageScope';
 import { rememberLastCloudPhone } from '../services/authSession';
 import { isCloudSyncBootstrapLocked, runWithCloudSyncBootstrapLock } from '../services/cloudSyncBootstrapLock';
 import { isCloudSyncEnabled, isCloudSyncUserDisabled, setCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { setAssistantArtifactCloudSyncEnabled } from '../services/assistantArtifactCloudSyncPreference';
+import { adoptWorkspaceSession, assertWorkspaceActive, getWorkspaceSignal, isWorkspaceActive, reloadWorkspaceAtLogin, stopWorkspace } from '../services/workspaceLifecycle';
+import { readAuthSnapshot, updateAuthSnapshot } from '../services/authSnapshot';
+import { flushBufferedPersistenceWrites } from './storePersistenceScope';
+import { generateId } from '../utils/id';
 
 interface User {
   id: string;
@@ -49,9 +52,9 @@ interface AuthStore {
   loginWithPassword: (phone: string, password: string) => Promise<void>;
   enterLocalMode: () => Promise<void>;
   logout: () => Promise<void>;
-  expireCloudSession: () => void;
+  expireCloudSession: () => Promise<void>;
   checkAuth: () => Promise<boolean>;
-  setUser: (user: User) => void;
+  setUser: (user: User) => Promise<void>;
   updateProfile: (updates: Partial<User>) => Promise<void>;
   sendChangePhoneCode: (phone: string, captchaToken?: string) => Promise<{ success: boolean; mock?: boolean; code?: string }>;
   changePhone: (phone: string, code: string) => Promise<void>;
@@ -59,12 +62,13 @@ interface AuthStore {
   changePassword: (data: { mode: 'old_password' | 'phone_code'; oldPassword?: string; code?: string; newPassword: string }) => Promise<void>;
 }
 
-async function loadWorkspaceStores() {
+async function loadWorkspaceStores(signal: AbortSignal) {
   const [chatStoreModule, characterStoreModule, messageStoreModule] = await Promise.all([
     import('./useChatStore'),
     import('./useCharacterStore'),
     import('./useMessageStore'),
   ]);
+  assertWorkspaceActive(signal);
   return {
     resetChatStoreForAccountBoundary: chatStoreModule.resetChatStoreForAccountBoundary,
     resetCharacterStoreForAccountBoundary: characterStoreModule.resetCharacterStoreForAccountBoundary,
@@ -78,22 +82,25 @@ function canRefreshRemoteAfterAuth(user: User | null) {
   return user?.cloudSyncEntitled !== false && isCloudSyncEnabled() && !isCloudSyncBootstrapLocked();
 }
 
-async function hydrateWorkspaceStoresFromCurrentScope() {
-  const { useChatStore, useCharacterStore } = await loadWorkspaceStores();
+async function hydrateWorkspaceStoresFromCurrentScope(signal: AbortSignal) {
+  const { useChatStore, useCharacterStore } = await loadWorkspaceStores(signal);
   const artifactStoreModule = await import('./useCharacterArtifactStore');
+  assertWorkspaceActive(signal);
   await Promise.allSettled([
     useChatStore.persist.rehydrate(),
     useCharacterStore.persist.rehydrate(),
     artifactStoreModule.useCharacterArtifactStore.persist.rehydrate(),
   ]);
+  assertWorkspaceActive(signal);
   return {
     useChatStore,
     useCharacterStore,
   };
 }
 
-async function refreshStoresAfterCloudAuth(user: User | null, options: { deferRemoteRefresh?: boolean } = {}) {
-  const { useChatStore, useCharacterStore } = await hydrateWorkspaceStoresFromCurrentScope();
+async function refreshStoresAfterCloudAuth(user: User | null, signal: AbortSignal, options: { deferRemoteRefresh?: boolean } = {}) {
+  const { useChatStore, useCharacterStore } = await hydrateWorkspaceStoresFromCurrentScope(signal);
+  assertWorkspaceActive(signal);
   const settingsStore = useSettingsStore.getState();
   const chatStore = useChatStore.getState();
   const characterStore = useCharacterStore.getState();
@@ -113,12 +120,13 @@ async function refreshStoresAfterCloudAuth(user: User | null, options: { deferRe
   void characterStore.prefetchCharacters();
 }
 
-async function refreshRemoteStoresAfterCloudAuth(user: User | null) {
+async function refreshRemoteStoresAfterCloudAuth(user: User | null, signal: AbortSignal) {
   const settingsStore = useSettingsStore.getState();
   const [{ useChatStore }, { useCharacterStore }] = await Promise.all([
     import('./useChatStore'),
     import('./useCharacterStore'),
   ]);
+  assertWorkspaceActive(signal);
   const chatStore = useChatStore.getState();
   const characterStore = useCharacterStore.getState();
   if (canRefreshRemoteAfterAuth(user)) {
@@ -134,59 +142,37 @@ async function refreshRemoteStoresAfterCloudAuth(user: User | null) {
   void characterStore.prefetchCharacters();
 }
 
-async function refreshStoresAfterLocalAuthMode() {
-  const { useChatStore, useCharacterStore } = await hydrateWorkspaceStoresFromCurrentScope();
-  const chatStore = useChatStore.getState();
-  const characterStore = useCharacterStore.getState();
-  chatStore.markChatsWarm();
-  characterStore.markCharactersWarm();
-  void useSettingsStore.getState().loadSettings();
-  void chatStore.prefetchChats();
-  void characterStore.prefetchCharacters();
-}
-
-async function resetLocalWorkspaceStoresForAccountBoundary() {
+async function resetLocalWorkspaceStoresForAccountBoundary(signal: AbortSignal) {
   const {
     resetChatStoreForAccountBoundary,
     resetCharacterStoreForAccountBoundary,
     resetMessageStoreForAccountBoundary,
-  } = await loadWorkspaceStores();
+  } = await loadWorkspaceStores(signal);
   const { resetCharacterArtifactStoreForAccountBoundary } = await import('./useCharacterArtifactStore');
+  assertWorkspaceActive(signal);
   await resetChatStoreForAccountBoundary();
+  assertWorkspaceActive(signal);
   await resetCharacterStoreForAccountBoundary();
+  assertWorkspaceActive(signal);
   await resetMessageStoreForAccountBoundary();
+  assertWorkspaceActive(signal);
   await resetCharacterArtifactStoreForAccountBoundary();
+  assertWorkspaceActive(signal);
 }
 
-const AUTH_TOKEN_KEY = storageKey('token');
-const AUTH_REFRESH_TOKEN_KEY = storageKey('refresh-token');
-const AUTH_USER_KEY = storageKey('user');
-const AUTH_MODE_KEY = storageKey('auth-mode');
-function getAuthToken() {
-  return typeof localStorage === 'undefined' ? null : localStorage.getItem(AUTH_TOKEN_KEY);
-}
-
-function getAuthUserRaw() {
-  return typeof localStorage === 'undefined' ? null : localStorage.getItem(AUTH_USER_KEY);
-}
-
-function getAuthModeRaw() {
-  return typeof localStorage === 'undefined' ? null : localStorage.getItem(AUTH_MODE_KEY);
-}
-
-function setAuthToken(token: string) {
-  if (typeof localStorage === 'undefined') return;
-  localStorage.setItem(AUTH_TOKEN_KEY, token);
-}
-
-function setAuthRefreshToken(token: string) {
-  if (typeof localStorage !== 'undefined') localStorage.setItem(AUTH_REFRESH_TOKEN_KEY, token);
-}
-
-function setAuthUser(user: User) {
-  if (typeof localStorage !== 'undefined') localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
+function rememberUser(user: User) {
   rememberCloudUserId(user);
   rememberLastCloudPhone(user.phone);
+}
+
+async function persistUser(user: User, signal: AbortSignal) {
+  const expected = readAuthSnapshot();
+  await updateAuthSnapshot(expected, (current) => {
+    assertWorkspaceActive(signal);
+    if (current.user && current.user.id !== user.id) throw new DOMException('账号已切换', 'AbortError');
+    return { ...current, user };
+  }, () => rememberUser(user));
+  assertWorkspaceActive(signal);
 }
 
 function applyCloudSyncEntitlement(user: User | null) {
@@ -215,32 +201,15 @@ function enableCloudSyncForLogin(user: User | null) {
   applyCloudSyncEntitlement(user);
 }
 
-function clearAuthTokenAndUser() {
-  if (typeof localStorage === 'undefined') return;
-  localStorage.removeItem(AUTH_TOKEN_KEY);
-  localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
-  localStorage.removeItem(AUTH_USER_KEY);
-}
-
-function setAuthMode(mode: AuthMode) {
-  if (typeof localStorage === 'undefined') return;
-  localStorage.setItem(AUTH_MODE_KEY, mode);
-}
+const initialAuthSession = readAuthSnapshot();
 
 export const useAuthStore = create<AuthStore>((set, get) => ({
-  token: getAuthToken(),
-  user: (() => {
-    try {
-      const stored = getAuthUserRaw();
-      return stored ? JSON.parse(stored) : null;
-    } catch {
-      return null;
-    }
-  })(),
-  isLoggedIn: !!getAuthToken(),
+  token: initialAuthSession.token,
+  user: initialAuthSession.user,
+  isLoggedIn: !!initialAuthSession.token,
   isLoading: false,
-  isWorkspaceReady: getAuthModeRaw() === 'local' || !getAuthToken(),
-  authMode: (getAuthModeRaw() as AuthMode | null) || (getAuthToken() ? 'cloud' : 'local'),
+  isWorkspaceReady: initialAuthSession.mode === 'local' || !initialAuthSession.token,
+  authMode: initialAuthSession.mode,
 
   sendCode: async (phone: string, purpose = 'login', captchaToken?: string) => {
     const result = await api.sendCode(phone, purpose, captchaToken);
@@ -256,18 +225,31 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     // Keep the login route mounted while the request is in flight. Setting the
     // workspace as unavailable here makes DataLoader replace the route tree,
     // which discards LoginPage's error state before it can render.
+    let signal = getWorkspaceSignal();
+    assertWorkspaceActive(signal);
+    const expected = readAuthSnapshot();
     set({ isLoading: true });
-    const shouldBootstrapLocalData = get().authMode === 'local' && isCloudSyncEnabled();
-    const bootstrapModule = shouldBootstrapLocalData ? await import('../services/localToCloudBootstrap') : null;
-    const localSnapshot = bootstrapModule ? await bootstrapModule.captureLocalCloudBootstrapSnapshot() : null;
     try {
+      const shouldBootstrapLocalData = get().authMode === 'local' && isCloudSyncEnabled();
+      const bootstrapModule = shouldBootstrapLocalData ? await import('../services/localToCloudBootstrap') : null;
+      assertWorkspaceActive(signal);
+      const localSnapshot = bootstrapModule ? await bootstrapModule.captureLocalCloudBootstrapSnapshot(signal) : null;
+      assertWorkspaceActive(signal);
       const result = await api.login(phone, code);
+      assertWorkspaceActive(signal);
       set({ isWorkspaceReady: false });
-      setAuthToken(result.token);
-      setAuthRefreshToken(result.refreshToken);
-      setAuthUser(result.user);
+      await updateAuthSnapshot(expected, () => {
+        assertWorkspaceActive(signal);
+        return { version: 1, generation: generateId(), token: result.token, refreshToken: result.refreshToken, user: result.user, mode: 'cloud' };
+      }, () => {
+        adoptWorkspaceSession();
+        signal = getWorkspaceSignal();
+        rememberUser(result.user);
+      });
+      assertWorkspaceActive(signal);
+      await resetSettingsStoreForAccountBoundary();
+      assertWorkspaceActive(signal);
       enableCloudSyncForLogin(result.user);
-      setAuthMode('cloud');
       set({
         token: result.token,
         user: result.user,
@@ -275,34 +257,32 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         isLoading: true,
         authMode: 'cloud',
       });
-      await resetLocalWorkspaceStoresForAccountBoundary();
+      await resetLocalWorkspaceStoresForAccountBoundary(signal);
       if (bootstrapModule && localSnapshot && bootstrapModule.hasBootstrapEntityData(localSnapshot) && result.user.cloudSyncEntitled !== false && isCloudSyncEnabled()) {
         try {
-          await runWithCloudSyncBootstrapLock(() => bootstrapModule.bootstrapLocalDataToCloud(localSnapshot));
+          await runWithCloudSyncBootstrapLock(() => bootstrapModule.bootstrapLocalDataToCloud(localSnapshot, signal));
+          assertWorkspaceActive(signal);
         } catch (error) {
-          await resetLocalWorkspaceStoresForAccountBoundary();
-          clearAuthTokenAndUser();
-          setAuthMode('local');
-          set({
-            token: null,
-            user: null,
-            isLoggedIn: false,
-            isLoading: false,
-            authMode: 'local',
-          });
+          assertWorkspaceActive(signal);
+          await resetLocalWorkspaceStoresForAccountBoundary(signal);
+          assertWorkspaceActive(signal);
+          await get().logout();
           throw error;
         }
       }
       const guestImportModule = await import('../services/guestDataImport');
+      assertWorkspaceActive(signal);
       const guestImportSnapshot = await guestImportModule.readGuestImportSnapshot();
+      assertWorkspaceActive(signal);
       const shouldDeferRemoteRefresh = Boolean(
         result.user?.id
         && guestImportModule.hasPendingGuestImportForUser(result.user.id, guestImportSnapshot),
       );
-      await refreshStoresAfterCloudAuth(result.user, { deferRemoteRefresh: shouldDeferRemoteRefresh });
+      await refreshStoresAfterCloudAuth(result.user, signal, { deferRemoteRefresh: shouldDeferRemoteRefresh });
+      assertWorkspaceActive(signal);
       set({ isLoading: false, isWorkspaceReady: true });
     } catch (error) {
-      set({ isLoading: false, isWorkspaceReady: true });
+      if (!signal.aborted && isWorkspaceActive()) set({ isLoading: false, isWorkspaceReady: true });
       throw error;
     }
   },
@@ -310,23 +290,47 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   loginWithPassword: async (phone, password) => {
     // See code-login above: request failures must leave LoginPage mounted so
     // its inline error alert remains visible.
+    let signal = getWorkspaceSignal();
+    assertWorkspaceActive(signal);
+    const expected = readAuthSnapshot();
     set({ isLoading: true });
     try {
       const result = await api.passwordLogin(phone, password);
+      assertWorkspaceActive(signal);
       set({ isWorkspaceReady: false });
-      setAuthToken(result.token); setAuthRefreshToken(result.refreshToken); setAuthUser(result.user); enableCloudSyncForLogin(result.user); setAuthMode('cloud');
+      await updateAuthSnapshot(expected, () => {
+        assertWorkspaceActive(signal);
+        return { version: 1, generation: generateId(), token: result.token, refreshToken: result.refreshToken, user: result.user, mode: 'cloud' };
+      }, () => {
+        adoptWorkspaceSession();
+        signal = getWorkspaceSignal();
+        rememberUser(result.user);
+      });
+      assertWorkspaceActive(signal);
+      await resetSettingsStoreForAccountBoundary();
+      assertWorkspaceActive(signal);
+      enableCloudSyncForLogin(result.user);
       set({ token: result.token, user: result.user, isLoggedIn: true, isLoading: true, isWorkspaceReady: false, authMode: 'cloud' });
-      await resetLocalWorkspaceStoresForAccountBoundary();
-      await refreshStoresAfterCloudAuth(result.user);
+      await resetLocalWorkspaceStoresForAccountBoundary(signal);
+      await refreshStoresAfterCloudAuth(result.user, signal);
+      assertWorkspaceActive(signal);
       set({ isLoading: false, isWorkspaceReady: true });
-    } catch (error) { set({ isLoading: false, isWorkspaceReady: true }); throw error; }
+    } catch (error) { if (!signal.aborted && isWorkspaceActive()) set({ isLoading: false, isWorkspaceReady: true }); throw error; }
   },
 
   enterLocalMode: async () => {
+    const signal = getWorkspaceSignal();
+    const expected = readAuthSnapshot();
+    assertWorkspaceActive(signal);
     set({ isLoading: true, isWorkspaceReady: false });
-    await resetLocalWorkspaceStoresForAccountBoundary();
-    clearAuthTokenAndUser();
-    setAuthMode('local');
+    flushBufferedPersistenceWrites();
+    stopWorkspace();
+    try {
+      await updateAuthSnapshot(expected, () => ({ version: 1, generation: generateId(), token: null, refreshToken: null, user: null, mode: 'local' }));
+    } catch (error) {
+      reloadWorkspaceAtLogin();
+      throw error;
+    }
     set({
       token: null,
       user: null,
@@ -335,17 +339,26 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       isWorkspaceReady: false,
       authMode: 'local',
     });
-    await refreshStoresAfterLocalAuthMode();
-    set({ isLoading: false, isWorkspaceReady: true });
+    reloadWorkspaceAtLogin('/');
   },
 
   logout: async () => {
+    const signal = getWorkspaceSignal();
+    const expected = readAuthSnapshot();
+    assertWorkspaceActive(signal);
     set({ isLoading: true, isWorkspaceReady: false });
-    const refreshToken = typeof localStorage !== 'undefined' ? localStorage.getItem(AUTH_REFRESH_TOKEN_KEY) : null;
-    await api.logout(refreshToken || undefined).catch(() => undefined);
-    await resetLocalWorkspaceStoresForAccountBoundary();
-    clearAuthTokenAndUser();
-    setAuthMode('local');
+    flushBufferedPersistenceWrites();
+    stopWorkspace();
+    let previous = expected;
+    try {
+      await updateAuthSnapshot(expected, (current) => {
+        previous = current;
+        return { version: 1, generation: generateId(), token: null, refreshToken: null, user: null, mode: 'local' };
+      });
+    } catch (error) {
+      reloadWorkspaceAtLogin();
+      throw error;
+    }
     set({
       token: null,
       user: null,
@@ -354,15 +367,26 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       isWorkspaceReady: false,
       authMode: 'local',
     });
-    await refreshStoresAfterLocalAuthMode();
-    set({ isLoading: false, isWorkspaceReady: true });
+    void api.revokeAuthSession(previous.token, previous.refreshToken).catch((error: unknown) => {
+      console.warn('[auth] server logout unavailable; local session cleared', { error });
+    });
+    reloadWorkspaceAtLogin();
   },
 
-  expireCloudSession: () => {
+  expireCloudSession: async () => {
+    if (!isWorkspaceActive()) return;
+    const expected = readAuthSnapshot();
+    if (!isWorkspaceActive()) return;
     const phone = get().user?.phone;
     if (phone) rememberLastCloudPhone(phone);
-    clearAuthTokenAndUser();
-    setAuthMode('cloud');
+    stopWorkspace();
+    try {
+      await updateAuthSnapshot(expected, () => ({ version: 1, generation: generateId(), token: null, refreshToken: null, user: null, mode: 'cloud' }));
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) console.error('[auth] session expiration failed', { error });
+      reloadWorkspaceAtLogin();
+      return;
+    }
     set({
       token: null,
       user: null,
@@ -371,28 +395,34 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       isWorkspaceReady: true,
       authMode: 'cloud',
     });
+    reloadWorkspaceAtLogin();
   },
 
   checkAuth: async () => {
+    const signal = getWorkspaceSignal();
+    if (!isWorkspaceActive()) return false;
     const token = get().token;
     if (!token) return false;
 
     set({ isLoading: true, isWorkspaceReady: false });
     try {
       const user = await api.getMe();
-      setAuthUser(user);
+      assertWorkspaceActive(signal);
+      await persistUser(user, signal);
       enableCloudSyncForLogin(user);
       // api may have refreshed an expired access token while loading /me.
       // Keep Zustand aligned with the persisted token so bootstrap and route
       // guards do not continue to reason about the expired token.
-      set({ token: getAuthToken(), user, isLoggedIn: true, authMode: 'cloud' });
-      await refreshStoresAfterCloudAuth(user, { deferRemoteRefresh: true });
-      if (!isCloudSyncUserDisabled()) await refreshRemoteStoresAfterCloudAuth(user);
+      set({ token: readAuthSnapshot().token, user, isLoggedIn: true, authMode: 'cloud' });
+      await refreshStoresAfterCloudAuth(user, signal, { deferRemoteRefresh: true });
+      if (!isCloudSyncUserDisabled()) await refreshRemoteStoresAfterCloudAuth(user, signal);
+      assertWorkspaceActive(signal);
       set({ isLoading: false, isWorkspaceReady: true });
       return true;
     } catch (error) {
+      if (signal.aborted || !isWorkspaceActive()) return false;
       if (error instanceof ApiError && error.status === 401) {
-        get().expireCloudSession();
+        await get().expireCloudSession();
         return false;
       }
       console.warn('[cloud-sync] auth check unavailable; keeping cloud-local cache active', { error });
@@ -401,16 +431,18 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  setUser: (user: User) => {
-    setAuthUser(user);
+  setUser: async (user: User) => {
+    const signal = getWorkspaceSignal();
+    await persistUser(user, signal);
     applyCloudSyncEntitlement(user);
     set({ user });
   },
 
   updateProfile: async (updates) => {
+    const signal = getWorkspaceSignal();
     try {
       const result = await api.updateMe({ nickname: updates.nickname, avatar: updates.avatar });
-      setAuthUser(result);
+      await persistUser(result, signal);
       applyCloudSyncEntitlement(result);
       set({ user: result });
     } catch (error) {
@@ -424,9 +456,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 
   changePhone: async (phone, code) => {
+    const signal = getWorkspaceSignal();
     try {
       const result = await api.changePhone(phone, code);
-      setAuthUser(result);
+      await persistUser(result, signal);
       applyCloudSyncEntitlement(result);
       set({ user: result });
     } catch (error) {

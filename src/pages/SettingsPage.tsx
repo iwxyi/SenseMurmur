@@ -2435,8 +2435,7 @@ export default function SettingsPage() {
           color="error"
           startIcon={<LogoutIcon />}
           onClick={() => {
-            useAuthStore.getState().logout();
-            window.location.href = '/login';
+            void useAuthStore.getState().logout();
           }}
           sx={{ mb: 1 }}
         >
