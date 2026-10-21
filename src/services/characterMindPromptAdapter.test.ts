@@ -52,6 +52,31 @@ function projection(overrides: Partial<CharacterMindProjection> = {}): Character
 }
 
 describe('characterMindPromptAdapter', () => {
+  it('preserves self experience before lifelong motives when the core budget is crowded', () => {
+    const value = projection();
+    value.continuity.selfMemories = Array.from({ length: 8 }, (_, index) => `个人经历${index + 1}`);
+    const output = adaptCharacterMindProjectionForPrompt(value, {
+      chatType: 'group', maxCoreLines: 6, visibleMemoryRecall: 'off',
+    });
+
+    expect(output.coreContinuityBlock).toContain('个人经历1');
+    expect(output.coreContinuityBlock).toContain('个人经历4');
+    expect(output.coreContinuityBlock).not.toContain('个人经历5');
+    expect(output.coreContinuityBlock).toContain('Recorded emotional state');
+    expect(output.coreContinuityBlock).toContain('Stance toward 阿远');
+    expect(output.trace.selectedSelfMemoryCount).toBe(8);
+    expect(output.trace.renderedSelfMemoryCount).toBe(4);
+  });
+
+  it('reports when the entire self continuity line is outside the core budget', () => {
+    const output = adaptCharacterMindProjectionForPrompt(projection(), {
+      chatType: 'group', maxCoreLines: 4, visibleMemoryRecall: 'off',
+    });
+    expect(output.trace.selectedSelfMemoryCount).toBe(1);
+    expect(output.trace.renderedSelfMemoryCount).toBe(0);
+    expect(output.coreContinuityBlock).not.toContain('Self continuity');
+  });
+
   it('reports only identity values that survive the rendered core budget', () => {
     const output = adaptCharacterMindProjectionForPrompt(projection(), {
       chatType: 'group',

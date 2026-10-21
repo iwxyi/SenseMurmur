@@ -2847,6 +2847,8 @@ function buildRuntimeDecisionMetadata(params: {
       omittedPrivateContinuity: params.characterMindTrace.omittedPrivateContinuity || undefined,
       omittedRawRoomLines: params.characterMindTrace.omittedRawRoomLines || undefined,
       coreLineCount: params.characterMindTrace.coreLineCount,
+      selectedSelfMemoryCount: params.characterMindTrace.selectedSelfMemoryCount,
+      renderedSelfMemoryCount: params.characterMindTrace.renderedSelfMemoryCount,
       roomLineCount: params.characterMindTrace.roomLineCount,
       recallCueCount: params.characterMindTrace.recallCueCount,
       hasUserContinuity: params.characterMindTrace.hasUserContinuity || undefined,

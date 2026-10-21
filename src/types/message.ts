@@ -467,6 +467,8 @@ export interface MessageMetadata {
       omittedPrivateContinuity?: boolean;
       omittedRawRoomLines?: boolean;
       coreLineCount?: number;
+      selectedSelfMemoryCount?: number;
+      renderedSelfMemoryCount?: number;
       roomLineCount?: number;
       recallCueCount?: number;
       hasUserContinuity?: boolean;

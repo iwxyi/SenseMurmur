@@ -6,6 +6,19 @@ import type {
   MemoryVisibility,
 } from './memoryTypes';
 
+/** Preserve known epistemic metadata when a memory becomes prompt prose. */
+export function formatMemoryPerspectiveText(item: Pick<MemoryItem, 'text' | 'summary' | 'sourceTag' | 'kind' | 'validity'>) {
+  const labels: string[] = [];
+  if (item.sourceTag === 'llm_memory_character_perspective' || item.kind === 'bias') {
+    labels.push('角色的主观理解，不代表他人真实动机');
+  } else if (item.sourceTag === 'llm_memory_relationship_imprint') {
+    labels.push('角色留下的关系印象，不代表对方的内心事实');
+  }
+  if (item.validity === 'uncertain') labels.push('尚未确认');
+  const text = item.summary || item.text;
+  return labels.length ? `【${labels.join('；')}】${text}` : text;
+}
+
 export interface MemoryDisclosureMetadata {
   subjectOwner: MemorySubjectOwner;
   privacyRisk: number;

@@ -74,6 +74,8 @@ export interface PromptCharacterMindTrace {
   hasRelationshipContinuity: boolean;
   hasSharedHistory: boolean;
   hasWorldContext: boolean;
+  selectedSelfMemoryCount: number;
+  renderedSelfMemoryCount: number;
 }
 
 export interface PromptAssemblyWithContext {
@@ -730,6 +732,8 @@ function buildPromptCharacterMindTraceFromOutput(
     hasRelationshipContinuity: projection.continuity.relationshipMemories.length > 0,
     hasSharedHistory: projection.continuity.sharedHistory.length > 0,
     hasWorldContext: projection.room.activeLines.length > 0 || projection.room.worldActivities.length > 0,
+    selectedSelfMemoryCount: adapter.trace.selectedSelfMemoryCount,
+    renderedSelfMemoryCount: adapter.trace.renderedSelfMemoryCount,
   };
 }
 

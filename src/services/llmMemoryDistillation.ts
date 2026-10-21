@@ -26,17 +26,41 @@ import { getCurrentRetentionLimits } from './retentionLimits';
 
 const SHARED_PHRASE_ANALYSIS_RULE = '\n\n如果证据形成了一句可复用的共同称呼、梗、约定、安慰语、表白语或暗号，请在对应 item 增加 sharedPhrase：{"text":"可复用原话","kind":"pet_name|inside_joke|promise_line|comfort_line|confession_line|secret_code|other","visibility":"private|between_actors|public_hint"}；否则省略。这个分类由模型完成，运行时不会根据正文关键词猜测。';
 
-function isEligibleItem(item: MemoryItem) {
+const LLM_CHARACTER_SELF_SOURCE_TAGS = new Set([
+  'self_expression',
+  'inner_life_repair',
+  'inner_life_attention',
+  'inner_life_face',
+  'inner_life_repression',
+  'core_profile',
+  'background',
+  'speaking_style',
+  'expertise',
+]);
+
+function isEligibleItem(item: MemoryItem, ownerType: 'chat' | 'character') {
+  const scopeAllowed = ownerType === 'character'
+    ? LLM_MEMORY_ANALYSIS_ALLOWED_SCOPES.has(item.scope)
+      || item.scope === 'character_self'
+    : LLM_MEMORY_ANALYSIS_ALLOWED_SCOPES.has(item.scope);
+  const kindAllowed = ownerType === 'character'
+    ? LLM_MEMORY_ANALYSIS_ALLOWED_KINDS.has(item.kind)
+      || item.kind === 'bias'
+      || item.kind === 'status_shift'
+      || item.kind === 'trait_evidence'
+    : LLM_MEMORY_ANALYSIS_ALLOWED_KINDS.has(item.kind);
+  const sourceTagAllowed = LLM_MEMORY_ANALYSIS_ALLOWED_SOURCE_TAGS.has(item.sourceTag || '')
+    || (ownerType === 'character' && item.scope === 'character_self' && LLM_CHARACTER_SELF_SOURCE_TAGS.has(item.sourceTag || ''));
   return !item.archivedAt
     && !isRuntimeEvidenceMemory(item)
     && LLM_MEMORY_ANALYSIS_ALLOWED_LAYERS.has(item.layer)
-    && LLM_MEMORY_ANALYSIS_ALLOWED_SCOPES.has(item.scope)
-    && LLM_MEMORY_ANALYSIS_ALLOWED_KINDS.has(item.kind)
-    && LLM_MEMORY_ANALYSIS_ALLOWED_SOURCE_TAGS.has(item.sourceTag || '');
+    && scopeAllowed
+    && kindAllowed
+    && sourceTagAllowed;
 }
 
-function eligibleItems(items: MemoryItem[]) {
-  return items.filter(isEligibleItem);
+function eligibleItems(items: MemoryItem[], ownerType: 'chat' | 'character') {
+  return items.filter((item) => isEligibleItem(item, ownerType));
 }
 
 function latestLlmDistilledItem(items: MemoryItem[]) {
@@ -87,14 +111,21 @@ function countNewEventEvidenceSince(items: MemoryItem[], seenEventIds: Set<strin
   ).size;
 }
 
-function buildRecentSource(items: MemoryItem[], latest: number, seenEventIds: Set<string>) {
-  const source = newItemsSince(eligibleItems(items), latest)
+function buildRecentSource(items: MemoryItem[], latest: number, seenEventIds: Set<string>, ownerType: 'chat' | 'character') {
+  const source = newItemsSince(eligibleItems(items, ownerType), latest)
     .filter((item) => !seenEventIds.size || hasNovelEventEvidence(item, seenEventIds));
   return source.slice(-LLM_MEMORY_ANALYSIS_MAX_SOURCE_ITEMS);
 }
 
 function hasEnoughSourceDiversity(items: MemoryItem[], ownerType: 'chat' | 'character') {
-  return countDistinctSubjects(items) >= LLM_MEMORY_ANALYSIS_LIMITS[ownerType].minNewSubjects;
+  const minimum = LLM_MEMORY_ANALYSIS_LIMITS[ownerType].minNewSubjects;
+  if (countDistinctSubjects(items) >= minimum) return true;
+  // Self memories describe one character by design. Their diversity is the
+  // number of independently evidenced experiences, not the number of people
+  // mentioned in those experiences.
+  return ownerType === 'character'
+    && items.some((item) => item.scope === 'character_self')
+    && countDistinctEventEvidence(items) >= minimum;
 }
 
 function hasEnoughSourceEvidence(items: MemoryItem[], ownerType: 'chat' | 'character') {
@@ -164,11 +195,11 @@ function buildDistillationSource(owner: { layeredMemories?: MemoryItem[] }, owne
   const items = owner.layeredMemories || [];
   const latest = latestLlmDistilledAt(items);
   const seenEventIds = latestLlmDistilledEventIds(items);
-  const source = buildRecentSource(items, latest, seenEventIds);
+  const source = buildRecentSource(items, latest, seenEventIds, ownerType);
   if (!hasEnoughSourceItems(source, ownerType)) return [];
   if (!hasEnoughSourceEvidence(source, ownerType)) return [];
   if (!hasEnoughSourceDiversity(source, ownerType)) return [];
-  if (!hasEnoughNewItems(eligibleItems(items), latest, ownerType)) return [];
+  if (!hasEnoughNewItems(eligibleItems(items, ownerType), latest, ownerType)) return [];
   if (!hasEnoughNewEventEvidence(source, seenEventIds, ownerType)) return [];
   return source;
 }
@@ -208,9 +239,9 @@ function toCandidate(ownerId: string, source: MemoryItem[], item: LlmAnalyzedMem
   };
 }
 
-export function buildLlmDistillationSource(owner: { layeredMemories?: MemoryItem[] }) {
+export function buildLlmDistillationSource(owner: { layeredMemories?: MemoryItem[] }, ownerType: 'chat' | 'character' = 'chat') {
   const recallLimit = Math.max(getCurrentRetentionLimits().chatLayeredMemories.recall, getCurrentRetentionLimits().characterLayeredMemories.recall);
-  return eligibleItems(owner.layeredMemories || []).slice(-Math.max(LLM_MEMORY_ANALYSIS_MAX_SOURCE_ITEMS, recallLimit));
+  return eligibleItems(owner.layeredMemories || [], ownerType).slice(-Math.max(LLM_MEMORY_ANALYSIS_MAX_SOURCE_ITEMS, recallLimit));
 }
 
 export function debugLlmChatDistillation(chat: GroupChat) {

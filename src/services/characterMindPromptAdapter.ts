@@ -30,6 +30,8 @@ export interface CharacterMindPromptAdapterOutput {
     visibleMemoryRecall: VisibleMemoryRecallSetting;
     omittedPrivateContinuity: boolean;
     omittedRawRoomLines: boolean;
+    selectedSelfMemoryCount: number;
+    renderedSelfMemoryCount: number;
     sourceIds: string[];
   };
 }
@@ -111,6 +113,7 @@ function buildCoreContinuityLines(
   );
   const rawSelfContinuity = projection.continuity.selfMemories;
   const selfContinuity = cleanValues(rawSelfContinuity, visibility, 4);
+  const selfContinuityLine = bullet('Self continuity', selfContinuity);
   const rawTargetStance = projection.relationship.stance;
   const targetStance = cleanValues(rawTargetStance, visibility, 3);
   const identityEntries = [
@@ -135,10 +138,10 @@ function buildCoreContinuityLines(
     ...identityLines,
     targetRelationshipLine,
     recordedStateLine,
+    selfContinuityLine,
   ].filter(Boolean);
   const continuityLines = [
     ...identityEntries.slice(2).map(({ label, values }) => bullet(label, values)),
-    bullet('Self continuity', selfContinuity),
     bullet('User continuity', userContinuity),
     !projection.relationship.targetName ? bullet('Relationship continuity', relationshipContinuity) : '',
     !projection.relationship.targetName ? bullet('Shared history', sharedHistory) : '',
@@ -149,6 +152,8 @@ function buildCoreContinuityLines(
     .slice(0, maxLines);
   return {
     lines,
+    selectedSelfMemoryCount: rawSelfContinuity.length,
+    renderedSelfMemoryCount: selfContinuityLine && lines.includes(selfContinuityLine) ? selfContinuity.length : 0,
     renderedIdentityValues: identityEntries
       .filter(({ label, values }) => values.length && lines.includes(bullet(label, values)))
       .flatMap(({ values }) => values),
@@ -258,6 +263,8 @@ export function adaptCharacterMindProjectionForPrompt(
     currentRoomBlock,
     visibleRecallInput,
     trace: {
+      selectedSelfMemoryCount: core.selectedSelfMemoryCount,
+      renderedSelfMemoryCount: core.renderedSelfMemoryCount,
       visibility,
       visibleMemoryRecall,
       omittedPrivateContinuity: visibility === 'public' && (

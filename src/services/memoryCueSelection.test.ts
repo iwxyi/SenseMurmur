@@ -39,6 +39,25 @@ function memory(overrides: Partial<MemoryItem>): MemoryItem {
 }
 
 describe('selectConstrainedMemoryCues', () => {
+  it.each([
+    ['llm_memory_character_perspective', '角色的主观理解，不代表他人真实动机'],
+    ['llm_memory_relationship_imprint', '角色留下的关系印象，不代表对方的内心事实'],
+  ])('preserves the perspective and uncertainty of %s in recall text', (sourceTag, label) => {
+    const cues = selectConstrainedMemoryCues([memory({
+      kind: 'bond', sourceTag, validity: 'uncertain',
+      text: '经理一直不回消息，是在针对自己。', summary: '经理不回消息就是针对自己。',
+    })], { targetActorIds: ['user'], visibleRecallMode: 'direct' });
+    expect(cues).toHaveLength(1);
+    expect(cues[0].text).toBe(`【${label}；尚未确认】经理不回消息就是针对自己。`);
+  });
+
+  it('keeps ordinary recorded facts free of inferred subjective labels', () => {
+    const cues = selectConstrainedMemoryCues([memory({
+      kind: 'decision', text: '昨晚等回复等到十一点。', validity: 'active',
+    })], { targetActorIds: ['user'] });
+    expect(cues[0].text).toBe('昨晚等回复等到十一点。');
+  });
+
   it('keeps only the most relevant 1-3 cues', () => {
     const cues = selectConstrainedMemoryCues([
       memory({ id: 'sweet', text: '用户不喜欢太甜的东西，喝了会腻。', salience: 0.9 }),

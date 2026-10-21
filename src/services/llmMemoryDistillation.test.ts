@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { AICharacter } from '../types/character';
 import { normalizeConversation, type GroupChat } from '../types/chat';
 import { DEFAULT_API_CONFIG } from '../types/settings';
 import type { MemoryItem } from './memoryTypes';
-import { buildLlmDistillationSource, distillChatMemoriesWithLlm, mergeCoreProfilePatch, shouldRunLlmChatDistillation } from './llmMemoryDistillation';
+import { buildLlmDistillationSource, distillChatMemoriesWithLlm, mergeCoreProfilePatch, shouldRunLlmCharacterDistillation, shouldRunLlmChatDistillation } from './llmMemoryDistillation';
 
 const generateJsonResponseMock = vi.fn();
 
@@ -160,6 +161,27 @@ describe('llmMemoryDistillation', () => {
         content: expect.stringContaining('原始证据'),
       }),
     ]));
+  });
+
+  it('keeps character self experience available to the character distillation path', () => {
+    const selfItems = buildRuntimeBatch({ prefix: 'self', eventStart: 500, count: 8, updatedAt: 600 })
+      .map((item) => ({ ...item, scope: 'character_self' as const, kind: 'trait_evidence' as const }));
+    expect(buildLlmDistillationSource({ layeredMemories: selfItems }, 'character')).toHaveLength(8);
+    expect(buildLlmDistillationSource({ layeredMemories: selfItems }, 'chat')).toEqual([]);
+  });
+
+  it('allows real character self sources through the character distillation thresholds', () => {
+    const selfItems = buildRuntimeBatch({ prefix: 'self-source', eventStart: 700, count: 8, updatedAt: 800, eventsPerItem: 2 })
+      .map((item) => ({
+        ...item,
+        ownerId: 'char-a',
+        scope: 'character_self' as const,
+        kind: 'trait_evidence' as const,
+        sourceTag: 'self_expression',
+        subjectIds: undefined,
+      }));
+    expect(shouldRunLlmCharacterDistillation({ id: 'char-a', layeredMemories: selfItems } as AICharacter, 0)).toBe(true);
+    expect(shouldRunLlmChatDistillation(buildChat(selfItems), 0)).toBe(false);
   });
 
   it('accepts multi-lens experience analysis results as memory candidates', async () => {

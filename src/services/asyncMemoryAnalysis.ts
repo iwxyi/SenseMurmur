@@ -45,8 +45,8 @@ function buildAnalysisOwnerKey(ownerType: 'chat' | 'character', ownerId: string)
   return `${ownerType}:${ownerId}`;
 }
 
-function buildMemoryAnalysisFingerprint(owner: { layeredMemories?: AICharacter['layeredMemories'] | GroupChat['layeredMemories'] }) {
-  const source = buildLlmDistillationSource(owner);
+function buildMemoryAnalysisFingerprint(owner: { layeredMemories?: AICharacter['layeredMemories'] | GroupChat['layeredMemories'] }, ownerType: 'chat' | 'character') {
+  const source = buildLlmDistillationSource(owner, ownerType);
   if (!source.length) return '';
   return source
     .map((item) => [
@@ -85,8 +85,7 @@ function scheduleDeferredMemoryAnalysis(ownerKey: string, runner: (state: Deferr
   state.rerunRequested = true;
   if (state.running) return;
   state.running = true;
-  let task!: Promise<void>;
-  task = (async () => {
+  const task = Promise.resolve().then(async () => {
     try {
       while (!state.cancelled && state.rerunRequested) {
         state.rerunRequested = false;
@@ -104,7 +103,7 @@ function scheduleDeferredMemoryAnalysis(ownerKey: string, runner: (state: Deferr
       state.rerunRequested = false;
       deferredMemoryAnalysisTasks.delete(task);
     }
-  })();
+  });
   deferredMemoryAnalysisTasks.add(task);
   void task;
 }
@@ -165,7 +164,7 @@ export async function scheduleAsyncMemoryAnalysis(params: {
       });
       return;
     }
-    const startFingerprint = buildMemoryAnalysisFingerprint(currentChat);
+    const startFingerprint = buildMemoryAnalysisFingerprint(currentChat, 'chat');
     if (!startFingerprint || state.lastSettledFingerprint === startFingerprint) {
       recordRuntimeMemoryIfEnabled('llm-distillation-chat:skip', {
         chatId: currentChat.id,
@@ -192,7 +191,7 @@ export async function scheduleAsyncMemoryAnalysis(params: {
       extra: { distilledCount: distilled.length },
     });
     const latestChat = getCurrentChat();
-    const latestFingerprint = buildMemoryAnalysisFingerprint(latestChat);
+    const latestFingerprint = buildMemoryAnalysisFingerprint(latestChat, 'chat');
     if (!latestFingerprint) {
       timer.finish({
         chat: latestChat,
@@ -239,7 +238,7 @@ export async function scheduleAsyncMemoryAnalysis(params: {
     });
 
     const llmDebug = debugLlmChatDistillation({ ...latestChat, layeredMemories } as GroupChat);
-    const llmSource = buildLlmDistillationSource({ layeredMemories });
+    const llmSource = buildLlmDistillationSource({ layeredMemories }, 'chat');
     const llmInfo = {
       ownerType: 'chat' as const,
       ownerId: latestChat.id,
@@ -287,7 +286,7 @@ export async function scheduleAsyncMemoryAnalysis(params: {
         });
         return;
       }
-      const startFingerprint = buildMemoryAnalysisFingerprint(currentCharacter);
+      const startFingerprint = buildMemoryAnalysisFingerprint(currentCharacter, 'character');
       if (!startFingerprint || state.lastSettledFingerprint === startFingerprint) {
         recordRuntimeMemoryIfEnabled('llm-distillation-character:skip', {
           chatId: params.chat.id,
@@ -316,7 +315,7 @@ export async function scheduleAsyncMemoryAnalysis(params: {
         extra: { distilledCount: distilled.length, coreProfileUpdated: Boolean(coreProfile) },
       });
       const latestCharacter = getCurrentCharacters().find((item) => item.id === characterId) || currentCharacter;
-      const latestFingerprint = buildMemoryAnalysisFingerprint(latestCharacter);
+      const latestFingerprint = buildMemoryAnalysisFingerprint(latestCharacter, 'character');
       if (!latestFingerprint) {
         timer.finish({
           characters: [latestCharacter],
@@ -354,7 +353,7 @@ export async function scheduleAsyncMemoryAnalysis(params: {
       });
 
       const llmDebug = debugLlmCharacterDistillation({ ...latestCharacter, layeredMemories } as AICharacter);
-      const llmSource = buildLlmDistillationSource({ layeredMemories });
+      const llmSource = buildLlmDistillationSource({ layeredMemories }, 'character');
       const llmInfo = {
         ownerType: 'character' as const,
         ownerId: latestCharacter.id,

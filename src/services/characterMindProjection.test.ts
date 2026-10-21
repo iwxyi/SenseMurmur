@@ -3,6 +3,7 @@ import { DEFAULT_CHARACTER_BEHAVIOR, DEFAULT_EMOTIONAL_STATE, type AICharacter }
 import { normalizeConversation } from '../types/chat';
 import type { Message } from '../types/message';
 import { buildCharacterMindProjection, buildCharacterMindProjectionPromptBlock } from './characterMindProjection';
+import { adaptCharacterMindProjectionForPrompt } from './characterMindPromptAdapter';
 import type { MemoryItem } from './memoryTypes';
 
 function character(overrides: Partial<AICharacter> = {}): AICharacter {
@@ -154,7 +155,7 @@ describe('characterMindProjection', () => {
     }
     expect(projection.expression.temperature).toContain('长期关系不是固定口吻');
     expect(projection.hidden.conflictReasons).not.toContain('想靠近与想防备同时存在。');
-    expect(projection.continuity.relationshipMemories).toContain('长期关系：彼此共事多年，刚为一件事意见不合。');
+    expect(projection.continuity.relationshipMemories).toContain('本人长期关系看法：彼此共事多年，刚为一件事意见不合。');
   });
 
   it('keeps persistent user continuity available without current-chat profile events', () => {
@@ -186,7 +187,7 @@ describe('characterMindProjection', () => {
     expect(projection.continuity.userProfile).toContain('用户不喜欢太甜的饮料。');
     expect(projection.hidden.memorySource).toBe('fallback_retrieval');
     expect(projection.relationship.targetName).toBe('用户');
-    expect(projection.relationship.stance.join('')).toContain('长期关系底色');
+    expect(projection.relationship.stance.join('')).toContain('本人对对方的关系感受与评价');
     expect(projection.identity.desires).toContain('希望被理解');
     expect(projection.currentState.activeNeeds).toEqual([]);
     expect(JSON.stringify(projection)).not.toContain('本地调度判断应该立即安慰');
@@ -260,6 +261,78 @@ describe('characterMindProjection', () => {
     expect(projection.hidden.privacyGuards).toContain('角色有未公开的自有内容，只能影响回避、克制或防御，不要主动揭露正文。');
   });
 
+  it.each([true, false])('keeps recalled self experience in the ordinary group prompt with a full authored history (recent summary: %s)', (hasSummary) => {
+    const speaker = character({
+      memory: {
+        shortTermSummary: hasSummary ? '今晚要接孩子，已经约好了时间。' : '',
+        longTerm: Array.from({ length: 10 }, (_, index) => `旧经历${index + 1}`),
+        secrets: ['未公开的秘密'],
+        obsessions: ['旧偏好'],
+        tabooTopics: [],
+        userMemories: [],
+      },
+    });
+    const recalled = ['今天已经答应替同事交一份稿。', '昨天加班错过了末班车。', '最近在攒搬家的钱。'];
+    const value = buildCharacterMindProjection({
+      chat: chat('group'), character: speaker, characters: [speaker],
+      messages: [message('今晚还能帮忙吗？', 'char-b')],
+      memoryCandidates: recalled.map((text, index) => memory({
+        id: `self-${index}`, scope: 'character_self', subjectIds: [speaker.id], text,
+      })),
+      target: null,
+      now: 2000,
+    });
+    const output = adaptCharacterMindProjectionForPrompt(value, {
+      chatType: 'group', maxCoreLines: 7, visibleMemoryRecall: 'off',
+    });
+
+    for (const text of recalled) expect(output.coreContinuityBlock).toContain(text);
+    if (hasSummary) expect(output.coreContinuityBlock).toContain('今晚要接孩子');
+    expect(value.continuity.selfMemories).toContain('长期经历：旧经历1');
+    expect(output.coreContinuityBlock).not.toContain('未公开的秘密');
+    expect(output.coreContinuityBlock).not.toContain('旧经历10');
+    expect(output.coreContinuityBlock.split('\n').filter((line) => line.startsWith('- ')).length).toBeLessThanOrEqual(7);
+  });
+
+  it.each(['assembly', 'fallback'] as const)('preserves self memory validity through the %s path', (path) => {
+    const memories = [
+      memory({ id: 'corrected', scope: 'character_self', text: '已被纠正的经历', validity: 'contradicted' }),
+      memory({ id: 'expired', scope: 'character_self', text: '已经失效的状态', validity: 'stale' }),
+      memory({ id: 'hidden', scope: 'character_self', text: '禁止显现的记忆正文', visibility: 'never_surface' }),
+      ...(['joke', 'test', 'temporary'] as const).map((sourceType) => memory({
+        id: sourceType, scope: 'character_self', text: `非稳定经历${sourceType}`, sourceType,
+      })),
+      memory({ id: 'uncertain', scope: 'character_self', text: '那天似乎答应过帮忙', validity: 'uncertain' }),
+      memory({ id: 'active', scope: 'character_self', text: '昨晚加班错过末班车', validity: 'active' }),
+    ];
+    const speaker = character({ layeredMemories: memories });
+    const projection = buildCharacterMindProjection({
+      chat: chat('group'), character: speaker, characters: [speaker], messages: [],
+      ...(path === 'assembly' ? { memoryCandidates: memories } : {}), now: 2000,
+    });
+    const output = adaptCharacterMindProjectionForPrompt(projection, { chatType: 'group', visibleMemoryRecall: 'off' });
+    expect(output.coreContinuityBlock).toContain('昨晚加班错过末班车');
+    expect(output.coreContinuityBlock).toContain('【尚未确认】那天似乎答应过帮忙');
+    expect(output.coreContinuityBlock).not.toContain('已被纠正');
+    expect(output.coreContinuityBlock).not.toContain('已经失效');
+    expect(output.coreContinuityBlock).not.toContain('非稳定经历');
+    expect(output.coreContinuityBlock).not.toContain('禁止显现的记忆正文');
+  });
+
+  it('keeps distilled subjective understanding distinct from established self experience in the final prompt', () => {
+    const speaker = character();
+    const projection = buildCharacterMindProjection({
+      chat: chat('group'), character: speaker, characters: [speaker], messages: [],
+      memoryCandidates: [
+        memory({ scope: 'character_self', kind: 'bias', sourceTag: 'llm_memory_character_perspective', text: '经理不回消息是在针对自己。' }),
+        memory({ id: 'experience', scope: 'character_self', kind: 'status_shift', text: '昨晚等回复等到十一点。' }),
+      ], now: 2000,
+    });
+    const output = adaptCharacterMindProjectionForPrompt(projection, { chatType: 'group', visibleMemoryRecall: 'off' });
+    expect(output.coreContinuityBlock).toContain('【角色的主观理解，不代表他人真实动机】经理不回消息是在针对自己。');
+    expect(projection.continuity.selfMemories).toContain('昨晚等回复等到十一点。');
+  });
+
   it('combines group pressure, target relationship, and active room lines', () => {
     const target = character({ id: 'char-b', name: '小铁' });
     const speaker = character({
@@ -322,8 +395,8 @@ describe('characterMindProjection', () => {
     expect(projection.relationship.stance.join('')).toContain('亲和 58');
     expect(projection.relationship.stance.join('')).toContain('信任 64');
     expect(projection.relationship.stance.join('')).not.toContain('威胁 48');
-    expect(projection.continuity.relationshipMemories).toContain('长期关系：长期愿意替小铁留余地。');
-    expect(projection.continuity.relationshipMemories).not.toContain('当前关系：紧张对峙：戒备');
+    expect(projection.continuity.relationshipMemories).toContain('本人长期关系看法：长期愿意替小铁留余地。');
+    expect(projection.continuity.relationshipMemories).not.toContain('本人当前关系印象：紧张对峙：戒备');
     expect(projection.expression.temperature).toContain('长期关系不是固定口吻');
   });
 
@@ -379,6 +452,40 @@ describe('characterMindProjection', () => {
     expect(projection.continuity.relationshipMemories).toEqual(expect.arrayContaining([
       '共同关系：二人同属夜班组',
     ]));
+  });
+
+  it.each(['authored', 'ledger'] as const)('preserves the subjective boundary of %s relationship context without exposing notes publicly', (source) => {
+    const impression = '觉得阿远没回消息是怕自己抢走晋升机会。';
+    const speaker = character({
+      relationships: source === 'authored'
+        ? [{ characterId: 'char-b', warmth: 0, competence: 0, trust: -10, threat: 10, note: impression }]
+        : [],
+    });
+    const target = character({ id: 'char-b', name: '阿远' });
+    const projection = buildCharacterMindProjection({
+      chat: {
+        ...chat('group'),
+        relationshipLedger: source === 'ledger' ? [{
+          pairKey: 'char-a->char-b', actorId: 'char-a', targetId: 'char-b',
+          current: { warmth: 0, competence: 0, trust: -10, threat: 10 },
+          derived: { semantic: { stage: '戒备', labels: [], summary: impression, intensity: 10 } },
+          trend: 'stable', recentEvents: [], lastUpdatedAt: 20,
+        }] : [],
+      },
+      character: speaker, characters: [speaker, target],
+      messages: [message('交接单在这儿。', target.id)], now: 2000,
+    });
+    const privatePrompt = adaptCharacterMindProjectionForPrompt(projection, {
+      chatType: 'group', visibility: 'private', visibleMemoryRecall: 'off',
+    }).promptBlock;
+    const publicPrompt = adaptCharacterMindProjectionForPrompt(projection, {
+      chatType: 'group', visibleMemoryRecall: 'off',
+    }).promptBlock;
+
+    expect(privatePrompt).toContain(`${source === 'authored' ? '本人长期关系看法' : '本人当前关系印象'}：${impression}`);
+    expect(privatePrompt).toContain('非对方的内心事实');
+    expect(publicPrompt).not.toContain(impression);
+    expect(publicPrompt).toContain('非对方的内心事实');
   });
 
   it('ranks relevant memories before older unrelated memories in the mind projection', () => {

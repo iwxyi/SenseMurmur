@@ -1,6 +1,6 @@
 import type { MemoryItem } from './memoryTypes';
 import type { MemoryVisibleRecallMode } from '../types/settings';
-import { resolveMemoryDisclosureMetadata } from './memoryDisclosure';
+import { formatMemoryPerspectiveText, resolveMemoryDisclosureMetadata } from './memoryDisclosure';
 
 export type MemoryCueMode = 'implicit_only' | 'light_reference' | 'explicit_reference' | 'corrective';
 
@@ -81,7 +81,7 @@ function inferPrivacyRisk(item: MemoryItem) {
   return resolveMemoryDisclosureMetadata(item).privacyRisk;
 }
 
-function isContradictedOrEphemeral(item: MemoryItem) {
+export function isContradictedOrEphemeral(item: MemoryItem) {
   const { validity } = resolveMemoryDisclosureMetadata(item);
   if (validity === 'contradicted' || validity === 'stale') return true;
   if (item.sourceType === 'joke' || item.sourceType === 'test' || item.sourceType === 'temporary') return true;
@@ -154,7 +154,7 @@ function cueText(item: MemoryItem, mode: MemoryCueMode, context: MemoryCueSelect
     const target = item.scope === 'relationship' ? 'the current relationship' : 'the current person';
     return `Private continuity about ${target} exists; use only as unspoken caution, familiarity, or bias.`;
   }
-  const source = normalize(item.summary || item.text)
+  const source = normalize(formatMemoryPerspectiveText(item))
     .replace(/\bstatus_shift\b/g, 'state shift');
   if (mode === 'implicit_only') return source.slice(0, 120);
   if (mode === 'corrective') return source.slice(0, 140);

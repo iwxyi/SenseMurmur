@@ -4,6 +4,8 @@ import type { Message } from '../types/message';
 import { buildPublicRoomUserCompanionshipLines, buildUserCompanionshipProjection } from './companionshipProjection';
 import { adaptCharacterMindProjectionForPrompt } from './characterMindPromptAdapter';
 import { retrieveRelevantMemories } from './memoryRetrieval';
+import { isContradictedOrEphemeral } from './memoryCueSelection';
+import { formatMemoryPerspectiveText, resolveMemoryDisclosureMetadata } from './memoryDisclosure';
 import type { MemoryItem } from './memoryTypes';
 import { projectNarrativeLines, type NarrativeLineProjection } from './narrativeProjection';
 import { normalizeRelationshipLedgerEntry, resolveEffectiveRelationshipAxes } from './relationshipLedger';
@@ -65,14 +67,15 @@ function uniqueText(items: Array<string | undefined | null>, max = 6) {
   return Array.from(new Set(items.map((item) => compactText(item)).filter(Boolean))).slice(0, max);
 }
 
-function authoredSelfContinuity(character: AICharacter) {
+function collectSelfContinuity(character: AICharacter, recalledMemories: string[]) {
   const memory = character.memory;
-  if (!memory) return [];
+  // Keep retrieved experience inside the prompt's smaller self-memory budget.
   return uniqueText([
-    memory.shortTermSummary ? `近期自我状态：${memory.shortTermSummary}` : '',
-    ...(memory.longTerm || []).map((item) => `长期经历：${item}`),
-    ...(memory.obsessions || []).map((item) => `注意力偏好：${item}`),
-    ...(memory.tabooTopics || []).map((item) => `敏感触发：${item}`),
+    memory?.shortTermSummary ? `近期自我状态：${memory.shortTermSummary}` : '',
+    ...recalledMemories,
+    ...(memory?.longTerm || []).map((item) => `长期经历：${item}`),
+    ...(memory?.obsessions || []).map((item) => `注意力偏好：${item}`),
+    ...(memory?.tabooTopics || []).map((item) => `敏感触发：${item}`),
   ], 10);
 }
 
@@ -188,7 +191,7 @@ function formatRelationshipStance(relationship: RelationshipProjectionSource | n
   if (!relationship) return [];
   // Preserve evidence rather than turning axis thresholds into mandatory behavior.
   return [
-    `长期关系底色（-100 至 100）：亲和 ${relationship.warmth}、能力 ${relationship.competence}、信任 ${relationship.trust}、威胁 ${relationship.threat}、在意 ${relationship.attachment ?? 0}、让位 ${relationship.deference ?? 0}。`,
+    `本人对对方的关系感受与评价（-100 至 100，非对方的内心事实）：亲和 ${relationship.warmth}、能力 ${relationship.competence}、信任 ${relationship.trust}、威胁 ${relationship.threat}、在意 ${relationship.attachment ?? 0}、让位 ${relationship.deference ?? 0}。`,
   ];
 }
 
@@ -222,8 +225,9 @@ function collectRelationshipContinuity(params: {
   if (!targetId) {
     return uniqueText([
       ...publicRelationshipFacts,
-      params.relationship.authored?.note,
-      params.relationship.ledger?.semanticSummary || params.relationship.ledger?.note,
+      params.relationship.authored?.note ? `本人长期关系看法：${params.relationship.authored.note}` : '',
+      params.relationship.ledger?.semanticSummary || params.relationship.ledger?.note
+        ? `本人当前关系印象：${params.relationship.ledger.semanticSummary || params.relationship.ledger.note}` : '',
     ], 3);
   }
   const semanticSummaries = (params.chat.relationshipLedger || [])
@@ -239,9 +243,9 @@ function collectRelationshipContinuity(params: {
     : [];
   return uniqueText([
     ...publicRelationshipFacts,
-    params.relationship.authored?.note ? `长期关系：${params.relationship.authored.note}` : '',
-    !params.relationship.authored && params.relationship.ledger?.semanticSummary ? `当前关系：${params.relationship.ledger.semanticSummary}` : '',
-    ...(!params.relationship.authored ? semanticSummaries.map((summary) => summary ? `当前关系：${summary}` : '') : []),
+    params.relationship.authored?.note ? `本人长期关系看法：${params.relationship.authored.note}` : '',
+    !params.relationship.authored && params.relationship.ledger?.semanticSummary ? `本人当前关系印象：${params.relationship.ledger.semanticSummary}` : '',
+    ...(!params.relationship.authored ? semanticSummaries.map((summary) => summary ? `本人当前关系印象：${summary}` : '') : []),
     ...groupRelationshipNotes,
   ], 4);
 }
@@ -282,17 +286,19 @@ function collectMemoryText(params: {
     ...memories
       .filter((item) => item.kind !== 'bond' && item.kind !== 'artifact')
       .filter((item) => item.subjectIds?.includes(USER_ACTOR_ID) || item.sourceTag?.includes('direct_user') || item.text.includes('用户'))
-      .map((item) => item.summary || item.text),
+      .map(formatMemoryPerspectiveText),
   ];
   const selfMemories = memories
     .filter((item) => item.scope === 'character_self')
-    .map((item) => item.summary || item.text);
+    .filter((item) => !isContradictedOrEphemeral(item))
+    .filter((item) => resolveMemoryDisclosureMetadata(item).visibility !== 'never_surface')
+    .map(formatMemoryPerspectiveText);
   const relationshipMemories = memories
     .filter((item) => item.scope === 'relationship' && (!params.targetId || item.subjectIds?.includes(params.targetId)))
-    .map((item) => item.summary || item.text);
+    .map(formatMemoryPerspectiveText);
   const sharedHistory = memories
     .filter((item) => item.scope === 'conversation' || item.scope === 'thread')
-    .map((item) => item.summary || item.text);
+    .map(formatMemoryPerspectiveText);
   return {
     userProfile: uniqueText(userProfile, 8),
     selfMemories: uniqueText(selfMemories, 6),
@@ -453,7 +459,7 @@ export function buildCharacterMindProjection(params: {
     now,
     memoryCandidates: params.memoryCandidates,
   });
-  const authoredContinuity = authoredSelfContinuity(params.character);
+  const selfContinuity = collectSelfContinuity(params.character, memories.selfMemories);
   const companionship = companionshipContinuity(params);
   const narrativeLines = projectNarrativeLines({
     chat: params.chat,
@@ -497,7 +503,7 @@ export function buildCharacterMindProjection(params: {
     },
     continuity: {
       userProfile: uniqueText([...memories.userProfile, ...companionship.userProfile], 10),
-      selfMemories: uniqueText([...authoredContinuity, ...memories.selfMemories], 10),
+      selfMemories: selfContinuity,
       relationshipMemories: uniqueText([
         ...relationshipContinuity,
         ...memories.relationshipMemories,

@@ -5480,6 +5480,8 @@ describe('chatEngine streaming preview', () => {
         omittedPrivateContinuity: true,
         omittedRawRoomLines: true,
         coreLineCount: 6,
+        selectedSelfMemoryCount: 8,
+        renderedSelfMemoryCount: 4,
         roomLineCount: 4,
         recallCueCount: 2,
         hasUserContinuity: true,
@@ -5494,6 +5496,8 @@ describe('chatEngine streaming preview', () => {
       memorySource: 'assembly_candidates',
       targetActorName: '灰太狼',
       coreLineCount: 6,
+      selectedSelfMemoryCount: 8,
+      renderedSelfMemoryCount: 4,
       omittedPrivateContinuity: true,
     });
     expect(JSON.stringify(runtimeDecision?.characterMind)).not.toContain('## Character Mind Projection');
