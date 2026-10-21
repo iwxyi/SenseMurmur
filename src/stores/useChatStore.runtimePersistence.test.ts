@@ -269,6 +269,26 @@ describe('chat runtime persistence', () => {
     localStorage.setItem(storageKey('token'), 'test-token');
   });
 
+  it('removes a deleted cloud chat from visible state before synchronization finishes', async () => {
+    const { useChatStore } = await import('./useChatStore');
+    const deleted = chat();
+    const remaining = chat({ id: 'chat-2', name: '保留的会话' });
+    useChatStore.setState({ chats: [deleted, remaining], currentChatId: deleted.id, pendingOperations: [] });
+
+    await useChatStore.getState().deleteChat(deleted.id);
+
+    const state = useChatStore.getState();
+    expect(state.chats).toEqual([remaining]);
+    expect(state.getChat(deleted.id)).toBeUndefined();
+    expect(state.currentChatId).toBeNull();
+    expect(state.pendingOperations).toEqual([
+      expect.objectContaining({
+        entityId: deleted.id,
+        patch: expect.objectContaining({ deletedAt: expect.any(Number), isActive: false }),
+      }),
+    ]);
+  });
+
   it('builds runtime patches synchronously from the latest state and queues the same merged state', async () => {
     const { useChatStore } = await import('./useChatStore');
     const base = chat({ runtimeEventsV2: [runtimeEvent(1)] });
@@ -498,11 +518,13 @@ describe('chat runtime persistence', () => {
       deletedAt: condition === 'deleted' ? 10 : undefined,
     });
     const before = useChatStore.getState().getChat(base.id);
+    const pendingBefore = useChatStore.getState().pendingOperations.find((operation) => operation.targetIds.includes(base.id));
+    if (condition === 'deleted') expect(before).toBeUndefined();
     releaseCreation();
     expect(await flow).toMatchObject({ handledEventId: null });
     expect(useChatStore.getState().getChat(base.id)).toBe(before);
     const pending = useChatStore.getState().pendingOperations.find((operation) => operation.targetIds.includes(base.id));
-    expect(pending?.patch.runtimeEventsV2).toEqual(before?.runtimeEventsV2);
+    expect(pending?.patch.runtimeEventsV2).toEqual(pendingBefore?.patch.runtimeEventsV2);
   });
 
   it('uses current candidates and pause state at the page action entry instead of its stale callback snapshot', async () => {

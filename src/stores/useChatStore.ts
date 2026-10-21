@@ -1725,7 +1725,7 @@ export const useChatStore = create<ChatStore>()(
               pendingOperations,
               chats: state.chats.map((chat) => chat.id === entityId
                 ? applyLocalChatUpdate(chat, patch as Partial<GroupChat>, operation?.clientTimestamp || Date.now())
-                : chat),
+                : chat).filter((chat) => chat.deletedAt == null),
               pendingEditSyncCount: pendingOperations.length,
               pendingEditSyncError: latestChatError(pendingOperations),
             };

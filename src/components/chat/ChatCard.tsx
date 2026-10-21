@@ -62,7 +62,7 @@ function ExpandableMemberAvatars({ members, onMemberClick }: { members: AICharac
           <Box
             className="chat-member-avatar"
             component="span"
-            onClick={(event) => { event.stopPropagation(); onMemberClick?.(member); }}
+            onClick={onMemberClick ? (event) => { event.stopPropagation(); onMemberClick(member); } : undefined}
             sx={{ display: 'inline-flex', flexShrink: 0, cursor: onMemberClick ? 'pointer' : 'default', borderRadius: '50%', '&:hover .MuiAvatar-root': { transform: 'translateY(-1px) scale(1.08) rotate(1deg)' } }}
           >
             <Avatar
@@ -82,7 +82,9 @@ function ExpandableMemberAvatars({ members, onMemberClick }: { members: AICharac
   );
 }
 
-function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, selectable = false, multiSelected = false, onToggleSelection, onMemberClick, onAvatarClick, onLongPress, displayMode = 'card', compactCard = false, cardThemeRendering = false, cardBackgroundRendering = false, showListDivider = false }: ChatCardProps) {
+function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, selectable = false, multiSelected = false, onToggleSelection, onMemberClick: onEditMember, onAvatarClick: onEditAvatar, onLongPress, displayMode = 'card', compactCard = false, cardThemeRendering = false, cardBackgroundRendering = false, showListDivider = false }: ChatCardProps) {
+  const onMemberClick = selectable ? undefined : onEditMember;
+  const onAvatarClick = selectable ? undefined : onEditAvatar;
   const longPressTimerRef = useRef<number | null>(null);
   const longPressTriggeredRef = useRef(false);
   const startLongPress = () => {
@@ -169,7 +171,7 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
               onAvatarClick(member.id);
             }
           }}
-          onClick={(event) => { event.stopPropagation(); onAvatarClick?.(member.id); }}
+          onClick={onAvatarClick ? (event) => { event.stopPropagation(); onAvatarClick(member.id); } : undefined}
           sx={{
             width: 46,
             height: 46,
@@ -201,7 +203,7 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
           onAvatarClick();
         }
       }}
-      onClick={(event) => { event.stopPropagation(); onAvatarClick?.(); }}
+      onClick={onAvatarClick ? (event) => { event.stopPropagation(); onAvatarClick(); } : undefined}
       sx={{
         position: 'relative',
         width: 46,
@@ -233,7 +235,7 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
   const [groupAvatarUnavailableUrl, setGroupAvatarUnavailableUrl] = useState('');
   const groupAvatarGenerating = avatarTask?.status === 'queued' || avatarTask?.status === 'running' || chatAvatarTaskStatus === 'queued' || chatAvatarTaskStatus === 'running';
   const groupAvatarNode = (
-    <Box className="chat-card-avatar-hit" role={onAvatarClick ? 'button' : undefined} tabIndex={onAvatarClick ? 0 : undefined} aria-label={onAvatarClick ? `编辑${chat.name}` : undefined} onKeyDown={(event) => { if (onAvatarClick && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onAvatarClick(); } }} onClick={(event) => { event.stopPropagation(); onAvatarClick?.(); }} sx={{ position: 'relative', width: 46, height: 46, flexShrink: 0, cursor: onAvatarClick ? 'pointer' : 'default', borderRadius: '50%', ...(onAvatarClick ? buildAvatarDirectHoverSx() : undefined) }}>
+    <Box className="chat-card-avatar-hit" role={onAvatarClick ? 'button' : undefined} tabIndex={onAvatarClick ? 0 : undefined} aria-label={onAvatarClick ? `编辑${chat.name}` : undefined} onKeyDown={(event) => { if (onAvatarClick && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onAvatarClick(); } }} onClick={onAvatarClick ? (event) => { event.stopPropagation(); onAvatarClick(); } : undefined} sx={{ position: 'relative', width: 46, height: 46, flexShrink: 0, cursor: onAvatarClick ? 'pointer' : 'default', borderRadius: '50%', ...(onAvatarClick ? buildAvatarDirectHoverSx() : undefined) }}>
       <Avatar
         src={groupAvatarUrl && groupAvatarUnavailableUrl !== groupAvatarUrl ? groupAvatarUrl : undefined}
         slotProps={{ img: { ...CHAT_CARD_AVATAR_IMG_PROPS, onError: () => setGroupAvatarUnavailableUrl(groupAvatarUrl || '') } }}
