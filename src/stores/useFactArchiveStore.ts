@@ -27,7 +27,8 @@ export const useFactArchiveStore = create<FactArchiveState>()(persist((set) => (
     for (const source of sources) {
       const previous = nodes[source.nodeId];
       const priorContent = previous?.content || recordedContent.get(source.id);
-      nodes[source.nodeId] = { ...source, content: previous?.content || '', audience: previous?.audience || source.audience,
+      nodes[source.nodeId] = { ...source, serverId: source.serverId || previous?.serverId,
+        content: previous?.content || '', audience: previous?.audience || source.audience,
         invalid: previous?.invalid || source.invalid || (priorContent !== undefined && priorContent !== source.content) };
     }
     return { chats: { ...state.chats, [chatId]: { ...current, nodes } } };

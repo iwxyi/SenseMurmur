@@ -43,11 +43,18 @@ describe('messageBubbleEventHelpers', () => {
     expect(buildEventDisplayText({ eventType: 'detailed_fact_recorded', summary })).toBe(summary);
   });
 
-  it('redacts private fact text without hiding other saved facts', () => {
+  it('preserves codewords in developer fact hints instead of classifying privacy by vocabulary', () => {
+    const summary = '新增 2 条详细事实：\n1. 刘备约定明日出发\n2. 暗号“风紧扯呼”表示有人查账时赶紧藏起账单';
     expect(buildEventDisplayText({
       eventType: 'detailed_fact_recorded',
-      summary: '新增 2 条详细事实：\n1. 刘备约定明日出发\n2. 秘密暗号是青梅煮酒',
-    })).toBe('新增 2 条详细事实：\n1. 刘备约定明日出发\n有一条私域内容已隐藏原文');
+      summary,
+    })).toBe(summary);
+  });
+
+  it('still replaces internal member IDs in fact hints', () => {
+    expect(buildEventDisplayText({
+      eventType: 'detailed_fact_recorded', summary: '新增 1 条详细事实：\n1. actor-1 确认暗号是风紧扯呼',
+    }, [{ id: 'actor-1', name: '张飞' }])).toBe('新增 1 条详细事实：\n1. 张飞 确认暗号是风紧扯呼');
   });
 
   it('builds localized memory distillation display text', () => {

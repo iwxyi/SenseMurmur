@@ -54,7 +54,7 @@ describe('detailed fact recording notifications', () => {
     await flushFactRecording();
     expect(appendEventMessage).toHaveBeenCalledExactlyOnceWith(chat.id, {
       eventType: 'detailed_fact_recorded', title: '详细事实已保存',
-      summary: '新增 1 条详细事实：\n1. 暗号定为青梅煮酒',
+      summary: '新增 1 条详细事实：\n1. 【新增】暗号定为青梅煮酒',
       visibilityScope: 'moderator_only',
     }, message.id);
     scheduleFactRecording(params);
@@ -89,18 +89,19 @@ describe('detailed fact recording notifications', () => {
 
   it('does not upload empty extraction checkpoints or unrelated context evidence', async () => {
     mocks.cloud = true;
-    mocks.request.mockResolvedValue({ saved: 1 });
+    mocks.request.mockResolvedValueOnce({ items: [] }).mockResolvedValue({ saved: 1 });
     const previous = { ...message, id: 'previous', content: '普通接话', timestamp: 99 };
     scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [previous], appendEventMessage: vi.fn() });
     await flushFactRecording();
-    expect(mocks.request).toHaveBeenCalledExactlyOnceWith('POST', '/chats/chat-1/fact-archive', {
+    expect(mocks.request).toHaveBeenNthCalledWith(2, 'POST', '/chats/chat-1/fact-archive', {
       messageId: message.id, facts, sources: [{ id: message.id, content: message.content }],
     });
     mocks.request.mockClear();
+    mocks.request.mockResolvedValueOnce({ items: [] });
     mocks.generate.mockResolvedValue(JSON.stringify({ facts: [] }));
     scheduleFactRecording({ api: {} as APIConfig, chat, message: { ...message, id: 'empty' }, messages: [], appendEventMessage: vi.fn() });
     await flushFactRecording();
-    expect(mocks.request).not.toHaveBeenCalled();
+    expect(mocks.request).toHaveBeenCalledExactlyOnceWith('POST', '/chats/chat-1/fact-maintenance-context', { messageId: 'empty' });
     expect(useFactArchiveStore.getState().chats[chat.id].entries.empty.synced).toBe(true);
   });
 
@@ -115,7 +116,7 @@ describe('detailed fact recording notifications', () => {
     scheduleFactRecording({ api: {} as APIConfig, chat, message: next, messages: [message], appendEventMessage });
     await flushFactRecording();
     expect(recallLocalFacts('actor-1', chat).map((fact) => fact.text)).toEqual([merged.text]);
-    expect(appendEventMessage.mock.calls[1][1].summary).toContain('合并更新');
+    expect(appendEventMessage.mock.calls[1][1].summary).toBe(`合并更新 1 条详细事实：\n1. 【合并更新】${merged.text}`);
     mocks.cloud = true;
     mocks.messages = [{ ...message, serverId: 'server-1' }, { ...next, serverId: 'server-2' }];
     mocks.request.mockResolvedValueOnce({ saved: 1 }).mockResolvedValueOnce({ saved: 1 })
@@ -126,6 +127,120 @@ describe('detailed fact recording notifications', () => {
       mergedFrom: [{ messageId: 'server-1', factIndex: 0 }] });
     useFactArchiveStore.getState().invalidate([next.id]);
     expect(recallLocalFacts('actor-1', chat).map((fact) => fact.text)).toEqual([facts[0].text]);
+  });
+
+  it('labels additions and merged updates separately when a message produces both', async () => {
+    const next = { ...message, id: 'message-mixed', content: '明早接头用青梅煮酒，我还欠张飞三两银子', timestamp: 101 };
+    const merged = { text: '明早接头暗号为青梅煮酒', status: 'agreed', sourceIds: [message.id, next.id], mergeWith: ['f0'] };
+    const added = { text: '说话人欠张飞三两银子', status: 'asserted', sourceIds: [next.id] };
+    mocks.generate.mockResolvedValueOnce(JSON.stringify({ facts }))
+      .mockResolvedValueOnce(JSON.stringify({ facts: [merged, added] }));
+    const appendEventMessage = vi.fn();
+    scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [], appendEventMessage });
+    scheduleFactRecording({ api: {} as APIConfig, chat, message: next, messages: [message], appendEventMessage });
+    await flushFactRecording();
+    expect(appendEventMessage.mock.calls[1][1].summary).toBe(
+      `新增 1 条，合并更新 1 条详细事实：\n1. 【合并更新】${merged.text}\n2. 【新增】${added.text}`,
+    );
+  });
+
+  it('maintains facts whose original messages are outside the recent context window', async () => {
+    mocks.chats = [chat];
+    const appendEventMessage = vi.fn();
+    scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [], appendEventMessage });
+    await flushFactRecording();
+    const next = { ...message, id: 'later', timestamp: 200, content: '这个暗号只在渡口使用' };
+    const merged = { text: '渡口接头暗号为青梅煮酒', status: 'agreed', sourceIds: [message.id, next.id], mergeWith: ['f0'] };
+    mocks.generate.mockResolvedValueOnce(JSON.stringify({ facts: [merged] }));
+    scheduleFactRecording({ api: {} as APIConfig, chat, message: next, messages: [], appendEventMessage });
+    await flushFactRecording();
+    const input = JSON.parse(mocks.generate.mock.calls[1][2][0].content);
+    expect(input.contextMessages).toEqual([]);
+    expect(input.existingFacts[0].text).toBe(facts[0].text);
+    expect(recallLocalFacts('actor-1').map((item) => item.text)).toEqual([merged.text]);
+    expect(mocks.report).not.toHaveBeenCalled();
+  });
+
+  it('stores one fact for multiple knowers without granting it to a later member', async () => {
+    const group = { ...chat, memberIds: ['actor-1', 'actor-2'] };
+    mocks.chats = [group];
+    scheduleFactRecording({ api: {} as APIConfig, chat: group, message, messages: [], appendEventMessage: vi.fn() });
+    await flushFactRecording();
+    expect(recallLocalFacts('actor-1')[0].id).toBe(recallLocalFacts('actor-2')[0].id);
+    expect(recallLocalFacts('actor-2')[0].knownByIds).toEqual(['user', 'actor-1', 'actor-2']);
+    mocks.chats = [{ ...group, memberIds: [...group.memberIds, 'actor-3'] }];
+    expect(recallLocalFacts('actor-3')).toEqual([]);
+    expect(Object.values(useFactArchiveStore.getState().chats[chat.id].entries)).toHaveLength(1);
+  });
+
+  it('retracts a mistaken record for those who heard the correction and restores it if that evidence is withdrawn', async () => {
+    mocks.chats = [chat];
+    const appendEventMessage = vi.fn();
+    scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [], appendEventMessage });
+    await flushFactRecording();
+    const next = { ...message, id: 'correction', timestamp: 200, content: '你记错了，刚才是演练台词，不是接头约定' };
+    mocks.generate.mockResolvedValueOnce(JSON.stringify({ facts: [{ text: '刚才暗号约定被误记，实际是演练台词',
+      status: 'agreed', sourceIds: [message.id, next.id], mergeWith: ['f0'], retracted: true }] }));
+    scheduleFactRecording({ api: {} as APIConfig, chat, message: next, messages: [], appendEventMessage });
+    await flushFactRecording();
+    expect(recallLocalFacts('actor-1')).toEqual([]);
+    expect(appendEventMessage.mock.calls[1][1].summary).toContain('作废 1 条详细事实');
+    mocks.cloud = true;
+    mocks.request.mockResolvedValueOnce({ saved: 1 }).mockResolvedValueOnce({ saved: 1 })
+      .mockResolvedValueOnce({ items: [{ id: `${message.id}:0`, chatId: chat.id, ...facts[0], timestamp: 100 }] });
+    expect(await listDetailedFacts('actor-1')).toEqual([]);
+    useFactArchiveStore.getState().invalidate([next.id]);
+    expect(recallLocalFacts('actor-1').map((item) => item.text)).toEqual([facts[0].text]);
+  });
+
+  it('uses cloud-only archived facts for maintenance without requiring original messages in the UI window', async () => {
+    mocks.cloud = true;
+    mocks.chats = [chat];
+    const oldSource = { id: 'old', nodeId: 'old', content: '约定暗号青梅煮酒', senderId: 'actor-1', senderName: '角色',
+      timestamp: 1, audience: ['user', 'actor-1'] };
+    mocks.request.mockResolvedValueOnce({ items: [{ messageId: 'old', factIndex: 0,
+      fact: { ...facts[0], sourceIds: ['old'] }, sources: [oldSource] }] }).mockResolvedValueOnce({ saved: 1 });
+    mocks.generate.mockResolvedValueOnce(JSON.stringify({ facts: [{ text: '渡口暗号为青梅煮酒', status: 'agreed',
+      sourceIds: ['old', message.id], mergeWith: ['f0'] }] }));
+    scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [], appendEventMessage: vi.fn() });
+    await flushFactRecording();
+    expect(JSON.parse(mocks.generate.mock.calls[0][2][0].content).existingFacts[0].text).toBe(facts[0].text);
+    expect(mocks.request.mock.calls[1][2].sources).toContainEqual({ id: oldSource.id, content: oldSource.content });
+    expect(mocks.report).not.toHaveBeenCalled();
+  });
+
+  it('reports maintenance read failure and does not extract against a silently empty archive', async () => {
+    mocks.cloud = true;
+    mocks.request.mockRejectedValueOnce(new Error('archive read failed'));
+    scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [], appendEventMessage: vi.fn() });
+    await flushFactRecording();
+    expect(mocks.generate).not.toHaveBeenCalled();
+    expect(mocks.report).toHaveBeenCalledWith(expect.objectContaining({ location: 'memory.fact-record' }));
+  });
+
+  it('retains server aliases from archived evidence so an unloaded local source cannot resurrect after retraction', async () => {
+    mocks.chats = [chat];
+    const local = { ...message, id: 'local-message-old' };
+    mocks.generate.mockResolvedValueOnce(JSON.stringify({ facts: [{ ...facts[0], sourceIds: [local.id] }] }));
+    scheduleFactRecording({ api: {} as APIConfig, chat, message: local, messages: [], appendEventMessage: vi.fn() });
+    await flushFactRecording();
+    const next = { ...message, id: 'server-next', content: '那是演练台词，记成真实约定是错的', timestamp: 200 };
+    mocks.cloud = true;
+    mocks.request.mockResolvedValueOnce({ items: [{ messageId: 'server-old', factIndex: 0,
+      fact: { ...facts[0], sourceIds: ['server-old'] }, sources: [{ id: 'server-old', nodeId: local.id,
+        senderId: local.senderId, senderName: local.senderName, content: local.content, timestamp: 100, audience: ['user', 'actor-1'] }] }] })
+      .mockResolvedValueOnce({ saved: 1 });
+    mocks.generate.mockResolvedValueOnce(JSON.stringify({ facts: [{ text: '原记录误提取演练台词，作废', status: 'agreed',
+      sourceIds: [local.id, next.id], mergeWith: ['f0'], retracted: true }] }));
+    scheduleFactRecording({ api: {} as APIConfig, chat, message: next, messages: [], appendEventMessage: vi.fn() });
+    await flushFactRecording();
+    expect(JSON.parse(mocks.generate.mock.calls[1][2][0].content).existingFacts).toHaveLength(1);
+    expect(mocks.request.mock.calls[1][2].facts[0].mergedFrom).toEqual([{ messageId: 'server-old', factIndex: 0 }]);
+    mocks.request.mockResolvedValueOnce({ saved: 1 }).mockResolvedValueOnce({ items: [
+      { id: 'server-old:0', chatId: chat.id, text: facts[0].text, status: 'agreed', timestamp: 100 },
+    ] });
+    expect(await listDetailedFacts('actor-1')).toEqual([]);
+    expect(mocks.report).not.toHaveBeenCalled();
   });
 
   it('uses validated local facts when cloud branch evidence is pending, while retaining the diagnostic', async () => {
@@ -142,7 +257,8 @@ describe('detailed fact recording notifications', () => {
 
   it('keeps incomplete cloud branch evidence pending and retries without a failure toast or duplicate fact', async () => {
     mocks.cloud = true;
-    mocks.request.mockRejectedValueOnce(new ApiError('来源未齐', { code: 'MEMORY_BRANCH_SOURCE_MISSING', status: 409 }));
+    mocks.request.mockResolvedValueOnce({ items: [] })
+      .mockRejectedValueOnce(new ApiError('来源未齐', { code: 'MEMORY_BRANCH_SOURCE_MISSING', status: 409 }));
     const appendEventMessage = vi.fn();
     scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [], appendEventMessage });
     await flushFactRecording();
@@ -244,7 +360,7 @@ describe('detailed fact recording notifications', () => {
 
   it('still notifies local save success if cloud synchronization fails', async () => {
     mocks.cloud = true;
-    mocks.request.mockRejectedValueOnce(new Error('network failure'));
+    mocks.request.mockResolvedValueOnce({ items: [] }).mockRejectedValueOnce(new Error('network failure'));
     const appendEventMessage = vi.fn().mockResolvedValue(undefined);
     scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [], appendEventMessage });
     await flushFactRecording();

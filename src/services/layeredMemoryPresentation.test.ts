@@ -6,6 +6,7 @@ import {
   filterVisibleLayeredMemories,
   getMemoryStrengthLabel,
   projectLayeredMemoryItem,
+  selectLayeredMemoryItems,
 } from './layeredMemoryPresentation';
 
 function memory(overrides: Partial<MemoryItem> = {}): MemoryItem {
@@ -28,6 +29,24 @@ function memory(overrides: Partial<MemoryItem> = {}): MemoryItem {
 }
 
 describe('layeredMemoryPresentation', () => {
+  it('combines layer, scope and anchor filters over the same records without creating copies', () => {
+    const anchor = memory({ id: 'anchor-self', scope: 'character_self', layer: 'long_term', salience: 0.9, confidence: 0.9 });
+    const relationship = memory({ id: 'episode-relationship', scope: 'relationship', layer: 'episodic' });
+    const thread = memory({ id: 'thread', scope: 'thread', layer: 'episodic' });
+    const archived = memory({ id: 'archived-self', scope: 'character_self', layer: 'long_term', archivedAt: 500 });
+    const items = [anchor, relationship, thread, archived];
+    const groups = buildLayeredMemoryGroups(items);
+
+    expect(selectLayeredMemoryItems(groups, 'longTerm', 'self', true)).toEqual([anchor]);
+    expect(selectLayeredMemoryItems(groups, 'longTerm', 'relationship')).toEqual([]);
+    expect(selectLayeredMemoryItems(groups, 'episodic', 'relationship')).toEqual([relationship]);
+    expect(selectLayeredMemoryItems(groups, 'episodic', 'conversation')).toEqual([thread]);
+    expect(selectLayeredMemoryItems(groups, 'archived', 'self')).toEqual([archived]);
+    expect(selectLayeredMemoryItems(groups, 'all')).toHaveLength(3);
+    expect(selectLayeredMemoryItems(groups, 'all', 'self')[0]).toBe(anchor);
+    expect(items).toHaveLength(4);
+  });
+
   it('filters runtime evidence out of normal memory projection but keeps it in debug mode', () => {
     const stableMemory = memory({ id: 'stable', sourceTag: 'memory_distillation', origin: 'distilled' });
     const roomShift = memory({ id: 'runtime', scope: 'system_runtime', layer: 'working', sourceTag: 'room_shift' });

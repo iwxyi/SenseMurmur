@@ -1,4 +1,6 @@
 import { useMemo, useState } from 'react';
+import { DetailedFactsPanel } from './DetailedFactsPanel';
+import { useDetailedFacts } from '../../hooks/useDetailedFacts';
 import { Box, Button, Chip, LinearProgress, Stack, TextField, Tooltip, Typography } from '@mui/material';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
@@ -3457,6 +3459,7 @@ interface RuntimeInsightsPanelProps {
 }
 
 export function CharacterMemoryInspector({ character }: RuntimeInsightsPanelProps) {
+  const factArchive = useDetailedFacts(character.id);
   const allLayeredMemories = useMemo(() => buildCharacterLayeredMemories(character), [character]);
   const characters = useCharacterStore((state) => state.characters);
   const developerMode = useSettingsStore((state) => state.developerMode);
@@ -3470,7 +3473,10 @@ export function CharacterMemoryInspector({ character }: RuntimeInsightsPanelProp
 
   return (
     <PageSection spacing={2}>
-      <LayeredMemoryPanel title="记忆沉淀" memories={allLayeredMemories} emptyText="暂无沉淀记忆" includeRuntimeEvidence={includeRuntimeEvidence} members={memoryMembers} hideFilterHints />
+      <LayeredMemoryPanel title="记忆沉淀" memories={allLayeredMemories} emptyText="暂无沉淀记忆" includeRuntimeEvidence={includeRuntimeEvidence} members={memoryMembers}
+        hideFilterHints
+        detailedFactsCount={factArchive.loading || factArchive.error ? undefined : factArchive.items.length}
+        detailedFacts={character.id ? <DetailedFactsPanel key={character.id} archive={factArchive} /> : undefined} />
     </PageSection>
   );
 }

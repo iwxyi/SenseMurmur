@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Box, Button, Dialog, DialogContent, DialogTitle, IconButton, Stack, Tab, Tabs, Tooltip, Typography } from '@mui/material';
+import { useMemo, useState, type ReactNode } from 'react';
+import { Box, Button, Checkbox, Chip, Dialog, DialogContent, DialogTitle, FormControlLabel, IconButton, Stack, Tab, Tabs, Tooltip, Typography } from '@mui/material';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import { useTranslation } from 'react-i18next';
@@ -15,7 +15,9 @@ import {
   filterVisibleLayeredMemories,
   localizeLayeredMemoryPanelText,
   projectLayeredMemoryItem,
-  type LayeredMemoryFilterKey,
+  selectLayeredMemoryItems,
+  type LayeredMemoryCategoryKey,
+  type LayeredMemoryScopeFilterKey,
 } from '../../services/layeredMemoryPresentation';
 
 function MemoryCard({
@@ -217,6 +219,8 @@ interface LayeredMemoryPanelProps {
   hideFilterHints?: boolean;
   formatMemoryText?: (text: string, item: MemoryItem) => string;
   members?: DisplayTextMember[];
+  detailedFacts?: ReactNode;
+  detailedFactsCount?: number;
 }
 
 export default function LayeredMemoryPanel({
@@ -232,10 +236,14 @@ export default function LayeredMemoryPanel({
   hideFilterHints = false,
   formatMemoryText,
   members = [],
+  detailedFacts,
+  detailedFactsCount,
 }: LayeredMemoryPanelProps) {
   const { i18n } = useTranslation();
   const [expanded, setExpanded] = useState(false);
-  const [activeFilter, setActiveFilter] = useState<LayeredMemoryFilterKey>('all');
+  const [activeFilter, setActiveFilter] = useState<LayeredMemoryCategoryKey | 'detailedFacts'>('all');
+  const [scopeFilter, setScopeFilter] = useState<LayeredMemoryScopeFilterKey>('all');
+  const [anchorsOnly, setAnchorsOnly] = useState(false);
   const language = i18n.language;
   const visibleSourceMemories = useMemo(
     () => filterVisibleLayeredMemories(memories, includeRuntimeEvidence),
@@ -243,11 +251,15 @@ export default function LayeredMemoryPanel({
   );
   const groups = useMemo(() => buildLayeredMemoryGroups(visibleSourceMemories), [visibleSourceMemories]);
   const filters = useMemo(() => buildLayeredMemoryFilters(groups, includeRuntimeEvidence, language), [groups, includeRuntimeEvidence, language]);
+  const categoryFilters = filters.filter((filter) => !['anchors', 'relationship', 'self', 'conversation'].includes(filter.key));
+  const scopeFilters = filters.filter((filter) => ['all', 'relationship', 'self', 'conversation'].includes(filter.key));
+  const selectedFilter = activeFilter === 'detailedFacts' && detailedFacts ? 'detailedFacts'
+    : categoryFilters.some((filter) => filter.key === activeFilter) ? activeFilter : 'all';
+  const category: LayeredMemoryCategoryKey = selectedFilter === 'detailedFacts' ? 'all' : selectedFilter;
   const filteredMemories = useMemo(() => {
-    const selected = filters.find((item) => item.key === activeFilter) || filters[0];
-    return selected ? selected.items : [];
-  }, [activeFilter, filters]);
-  const activeMeta = filters.find((item) => item.key === activeFilter) || filters[0];
+    return selectLayeredMemoryItems(groups, category, scopeFilter, anchorsOnly);
+  }, [groups, category, scopeFilter, anchorsOnly]);
+  const activeMeta = filters.find((item) => item.key === category);
   const visibleMemories = showAll ? filteredMemories : expanded ? filteredMemories.slice(0, expandedCount) : filteredMemories.slice(0, collapsedCount);
   const displayTitle = localizeLayeredMemoryPanelText(title, language);
   const displayEmptyText = localizeLayeredMemoryPanelText(emptyText, language);
@@ -256,10 +268,14 @@ export default function LayeredMemoryPanel({
     <SurfaceCard sx={{ width: '100%', maxWidth: '100%', minWidth: 0, overflow: 'hidden' }} contentSx={{ minWidth: 0, maxWidth: '100%' }}>
       <SectionHeader title={displayTitle} dense action={includeRuntimeEvidence && showDebugChip ? <DebugChip /> : undefined} />
       <Stack spacing={1.15} sx={{ minWidth: 0, maxWidth: '100%' }}>
-        {visibleSourceMemories.length ? (
+        {visibleSourceMemories.length || detailedFacts ? (
           <Tabs
-            value={activeFilter}
-            onChange={(_, value) => { setActiveFilter(value); setExpanded(false); }}
+            value={selectedFilter}
+            onChange={(_, value: LayeredMemoryCategoryKey | 'detailedFacts') => {
+              setActiveFilter(value);
+              setExpanded(false);
+              if (value !== 'all' && value !== 'longTerm') setAnchorsOnly(false);
+            }}
             variant="scrollable"
             scrollButtons="auto"
             allowScrollButtonsMobile
@@ -294,11 +310,32 @@ export default function LayeredMemoryPanel({
               },
             }}
           >
-            {filters.map((filter) => (
+            {categoryFilters.map((filter) => (
               <Tab key={filter.key} value={filter.key} label={`${filter.label} ${filter.items.length}`} />
             ))}
+            {detailedFacts ? <Tab value="detailedFacts" label={`${language.startsWith('zh') ? '详细事实' : 'Detailed facts'} ${detailedFactsCount ?? '…'}`} /> : null}
           </Tabs>
         ) : null}
+        {selectedFilter === 'detailedFacts' ? detailedFacts : <>
+        {visibleSourceMemories.length ? <Stack spacing={0.75}>
+          <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 0.75 }}>
+            <Typography variant="caption" color="text.secondary">{language.startsWith('zh') ? '内容范围' : 'Scope'}</Typography>
+            {scopeFilters.map((filter) => <Chip key={filter.key} size="small"
+              label={filter.key === 'all' ? (language.startsWith('zh') ? '不限' : 'Any') : filter.label}
+              color={scopeFilter === filter.key ? 'primary' : 'default'}
+              variant={scopeFilter === filter.key ? 'filled' : 'outlined'}
+              aria-pressed={scopeFilter === filter.key}
+              onClick={() => { setScopeFilter(filter.key as LayeredMemoryScopeFilterKey); setExpanded(false); }} />)}
+            {category === 'all' || category === 'longTerm' ? <FormControlLabel
+              label={language.startsWith('zh') ? '仅锚点候选' : 'Anchor candidates only'}
+              sx={{ m: 0, '& .MuiFormControlLabel-label': { fontSize: 13 } }}
+              control={<Checkbox size="small" checked={anchorsOnly}
+                onChange={(_, checked) => { setAnchorsOnly(checked); setExpanded(false); }} />} /> : null}
+          </Box>
+          {!hideFilterHints ? <Typography variant="caption" color="text.secondary">{language.startsWith('zh')
+            ? '层级与内容范围可组合筛选；锚点候选是长期记忆中的重要条目，并非另一份记录。'
+            : 'Layer and scope filters combine. Anchor candidates are important long-term items, not separate copies.'}</Typography> : null}
+        </Stack> : null}
         {!hideFilterHints && activeMeta ? <Typography variant="caption" color="text.secondary">{activeMeta.hint}</Typography> : null}
         {visibleMemories.length ? (
           <Stack spacing={1} sx={{ minWidth: 0 }}>
@@ -316,6 +353,7 @@ export default function LayeredMemoryPanel({
           </Stack>
         ) : <Typography variant="caption" color="text.secondary">{displayEmptyText}</Typography>}
         {!showAll && filteredMemories.length > collapsedCount ? <Button size="small" variant="text" onClick={() => setExpanded((prev) => !prev)}>{expanded ? (language.startsWith('zh') ? '收起' : 'Collapse') : `${language.startsWith('zh') ? '查看更多' : 'Show more'} ${filteredMemories.length}`}</Button> : null}
+        </>}
       </Stack>
     </SurfaceCard>
   );

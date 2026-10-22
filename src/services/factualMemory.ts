@@ -15,20 +15,86 @@ import { assertWorkspaceActive, getWorkspaceSignal } from './workspaceLifecycle'
 import { sanitizeUserFacingText } from './displayTextSanitizer';
 import { collapseMergedFacts, FactExtractionValidationError, parseDetailedFacts, type FactEvidence, type FactArchiveEntry, type FactMergeCandidate, type RecalledFact } from './factualMemoryTypes';
 
-export const FACT_EXTRACTION_PROMPT = `你负责从已发生的聊天记录保存少量值得再想起的具体事实，不负责概括每轮聊天。
-仅保留以后离开当前话题仍值得查回的新增信息：明确且有具体内容的约定、暗号、实际行动承诺、稳定偏好、个人生活细节、需要后续处理的具体事项。默认 facts=[]，不要为了每条消息都有记录而提取。
-保存前判断：以后忘记这条信息，会不会影响履行约定、理解某人、继续处理事情或回答一个具体问题？若不会，或只有“某人说了一句话”而无可用信息，返回 facts=[]。不为保存而逐字摘录，不记录无实际约束的口头保证和无后续用途的琐碎动作。宁可少记；但明确、可复用的暗号、日期、金额、限制、分工不能遗漏。
-不保留：附和、复述、催促、调侃、逞强、自我夸耀、泛泛道理、只用于接话的表态，以及同一事项的重复保证。“我记下了，先查账再论人”“不许改口”“我上阵都不怕，还怕念账？”都返回 facts=[]。确认已有约定不自动成为新事实；只有从未达成的提议首次明确被接受，或新增时间、数字、分工、条件、更正，才记录变化。
-existingFacts 是已存档且有当前上下文来源支持的记录，不是新证据。已有事实的同义改写、无信息增量的确认不得再保存，返回 facts=[]。同一事项新增有效条件时，输出一条简洁完整的合并事实，并用 mergeWith 引用被合并记录的 ref，sourceIds 必须保留这些记录的全部来源及新消息。仅在状态一致且不存在矛盾时合并；不同说法和更正须明确保留，不得以合并删除。不同事项不要强行合并，不按说话人或句子拆条。
+export const FACT_EXTRACTION_PROMPT = `你为角色保存少量以后值得想起的具体事实。先判断新信息的记忆价值，再决定提取什么；默认返回 {"facts":[]}。
+值得保存的信息应有上下文支持的后续用途：过后能据此更了解某个人、记住对他有意义的经历、履行在意的约定、跟进有实际后果的牵挂，或找回需要准确记住的内容。判断时在心中回答“谁以后会因为什么需要想起它，忘记会有什么具体损失”；用途应来自对话表达的在意、约束或后果，不替每句话编造一个将来可能用上的理由。
+例如：某人解释自己为何在意一件旧衣、一次失约使谁再也不肯托付、明确约好的接头暗号、尚待归还的借款及期限、以后相处需尊重的个人边界。类别只是例子，由你结合语境判断；一次表达也能值得记住，轻微但个人在意的生活细节同样可以有价值。
+具体、已确认、有日期或有分工只说明信息清楚，保存还需要上述记忆价值。将来仍有实际用途的短期约定也可以保存，不以时间远近代替价值判断。详细事实服务于以后回忆；当前场景如何继续由聊天上下文承载，原话改写成完整陈述本身不增加记忆价值。
+例如在普通对账闲聊中，“念错就重念，念到对上，刘备准了”“明早对完账就动身，今晚核路费”只交代眼前流程，未体现值得以后查回的在意或后果，返回 facts=[]。若说“上次失约让我在雨里等了一夜，这次请一定来”，可保存具体经历及此次约定；“下次接头用青梅煮酒”应保存准确暗号。依据实际上下文判断，不能将例子当作关键词规则。
+通过价值判断后才处理增量：已有信息首次达成约定，或时间、数字、分工、条件发生对后续用途有影响的变化时，记录必要变化；确认或换一种说法不增加信息。
+existingFacts 是当前分支上已保存、且本条消息受众均已知晓的有效记录，来源可以早于最近的上下文，不是新证据。已有事实的同义改写、无信息增量的确认不得再保存，返回 facts=[]。同一事项新增有效条件时，输出一条简洁完整的合并事实，并用 mergeWith 引用被合并记录的 ref，sourceIds 必须保留这些记录的全部来源及新消息。仅在状态一致且不存在矛盾时合并；不同说法和更正须明确保留，不得以合并删除。不同事项不要强行合并，不按说话人或句子拆条。
+若新消息明确指出已保存记录是误提取、误归属或误解，可用 retracted=true、mergeWith 引用错误记录，text 简述作废对象与依据，status 保持原记录状态，sourceIds 保留原来源及本条纠错消息。仅重复提及不作废；事情后来改变、提议被拒绝或有人持不同说法，均是新的经历，应记录变化或分歧，不能抹去曾发生的事。不要为猜测、模糊指代或缺少信息而删除记录。普通新增或合并省略 retracted。
 连续理解上下文：甲说“定个暗号吧”，乙说“青梅煮酒”，甲说“好，下次就用这个”，应记完整的暗号约定及逐字内容，引用三条来源。
 只提取 newMessage 对应的新消息的增量。contextMessages 仅用于理解指代和完整约定，不要提取其中的旧事实。新消息无值得保留的增量时返回 facts=[]。不要为了通过校验给旧事实补上新消息引用。提议尚未同意用 proposed；明确约定用 agreed；个人陈述用 asserted 并说明是谁说的，不能当作全知事实；冲突用 disputed 保留不同说法。
 更正写清旧内容、新内容和更正人。记录只作为角色所知，不替别人确认事实，不推测未公开的动机。不要把玩笑、假设、转述或角色扮演内事实升级为现实共识。
-重要原话逐字保留，不改写暗号、名字、数字。text 必须独立可读、非空且不超过1200个字符。每条事实的 sourceIds 为1至12个字符串，只能逐字复制 newMessage.id 或 contextMessages[].id，不能使用人名或自行编造标识，且每条事实必须含 newMessageId。
-例如已有“明日对账，礼数单列，口粮不动”，新话“好，我记下了”不保存；“改在上午九点对账”应保留更正；“账由关羽核、张飞报”可以合并为含原约定及新分工的一条，不把催促和玩笑一起抄入。
+重要原话逐字保留，不改写暗号、名字、数字。text 必须独立可读、非空且不超过1200个字符。每条事实的 sourceIds 为1至12个字符串，只能逐字复制 newMessage.id、contextMessages[].id 或被维护的 existingFacts[].sourceIds，不能使用人名或自行编造标识，且每条事实必须含 newMessageId。
+例如已有“下次接头暗号为青梅煮酒”，新话“好，我记下了”返回 facts=[]；“暗号改成白马渡江”保留更正；“只在渡口接头时使用”可合并补充适用条件。文本只写承载记忆价值的必要内容，来源引用保留完整证据。
 返回 {"facts":[{"text":"完整事实及知情局限","status":"asserted|agreed|proposed|disputed","sourceIds":["消息标识"],"mergeWith":["已有记录ref"]}]}，最多六条，通常零至一条。没有合并时 mergeWith=[]。`;
 
 function cloudMode() { return useAuthStore.getState().authMode !== 'local' && isCloudSyncEnabled(); }
 function idOf(message: Message) { return message.serverId || message.id; }
+
+function resolveServerId(id: string) {
+  const messages = [...useMessageStore.getState().messages,
+    ...Object.values(useMessageStore.getState().messageWindowsByChatId).flatMap((window) => window.messages)];
+  return messages.find((message) => message.id === id || message.clientKey === id || message.serverId === id)?.serverId
+    || Object.values(useFactArchiveStore.getState().chats).flatMap((archive) => Object.values(archive.nodes))
+      .find((source) => source.id === id || source.nodeId === id)?.serverId || id;
+}
+
+interface MaintenanceCandidate extends FactMergeCandidate { sources: FactEvidence[] }
+
+async function factMaintenanceContext(chat: GroupChat, anchor: FactEvidence, signal: AbortSignal): Promise<MaintenanceCandidate[]> {
+  const archive = useFactArchiveStore.getState().chats[chat.id];
+  const active = new Set<string>();
+  let node: string | null = anchor.nodeId;
+  while (node) {
+    if (active.has(node)) throw new Error('MEMORY_BRANCH_CYCLE');
+    active.add(node);
+    node = archive.nodes[node]?.parentNodeId || null;
+  }
+  const nodes = new Map(Object.values(archive.nodes).map((source) => [source.id, source]));
+  const local = Object.values(archive.entries).flatMap((entry) => entry.facts.flatMap((fact, factIndex) => {
+    const sources = fact.sourceIds.map((id) => nodes.get(id));
+    if (sources.some((source) => !source || source.invalid || source.timestamp > anchor.timestamp
+      || (anchor.parentNodeId !== undefined ? !active.has(source.nodeId) : Boolean(source.parentNodeId))
+      || anchor.audience.some((id) => !source.audience.includes(id))
+      || !entry.sources.some((recorded) => recorded.id === source.id && recorded.content === source.content))) return [];
+    return [{ id: `${entry.messageId}:${factIndex}`, chatId: chat.id, messageId: entry.messageId, factIndex, fact,
+      mergedFrom: fact.mergedFrom, retracted: fact.retracted, sources: sources as FactEvidence[] }];
+  }));
+  if (!cloudMode()) return collapseMergedFacts(local);
+  let cloud: { items: MaintenanceCandidate[] };
+  try {
+    cloud = await api.request('POST', `/chats/${encodeURIComponent(chat.id)}/fact-maintenance-context`, { messageId: resolveServerId(anchor.id) });
+  } catch (error) {
+    assertWorkspaceActive(signal);
+    if (!(error instanceof ApiError) || error.code !== 'MEMORY_BRANCH_SOURCE_MISSING') throw error;
+    reportRecoverableWarning({ location: 'memory.fact-maintenance-pending', error,
+      message: '云端来源尚未同步，本次使用已验证的本机存档维护事实。' });
+    return collapseMergedFacts(local);
+  }
+  assertWorkspaceActive(signal);
+  // Keep local identities stable when an uploaded source has acquired a server id.
+  const aliases = new Map(Object.values(archive.nodes).map((source) => [resolveServerId(source.id), source.id]));
+  for (const source of cloud.items.flatMap((item) => item.sources)) {
+    const captured = archive.nodes[source.nodeId];
+    if (captured) aliases.set(source.id, captured.id);
+  }
+  const localId = (id: string) => aliases.get(id) || id;
+  useFactArchiveStore.getState().capture(chat.id, cloud.items.flatMap((item) => item.sources)
+    .map((source) => ({ ...source, id: localId(source.id), serverId: source.id })));
+  const candidates = [...cloud.items.filter((item) => !item.sources.some((source) => {
+    const captured = archive.nodes[source.nodeId] || nodes.get(localId(source.id));
+    return captured?.invalid || (captured?.content && captured.content !== source.content);
+  })).map((item) => ({ ...item, messageId: localId(item.messageId),
+    fact: { ...item.fact, sourceIds: item.fact.sourceIds.map(localId),
+      mergedFrom: item.fact.mergedFrom?.map((ref) => ({ ...ref, messageId: localId(ref.messageId) })) },
+    sources: item.sources.map((source) => ({ ...source, id: localId(source.id), serverId: source.id })) })), ...local];
+  return collapseMergedFacts([...new Map(candidates.map((item) => {
+    const id = `${item.messageId}:${item.factIndex}`;
+    return [id, { ...item, id, chatId: chat.id, mergedFrom: item.fact.mergedFrom, retracted: item.fact.retracted }] as const;
+  })).values()]);
+}
 
 export function captureFactEvidence(chat: GroupChat, messages: Message[], newMessage: Message) {
   const publicAudience = [...new Set(['user', ...chat.memberIds])];
@@ -36,7 +102,7 @@ export function captureFactEvidence(chat: GroupChat, messages: Message[], newMes
     .filter((message) => !message.isDeleted && !message.isStreaming && !message.isOptimistic
       && !message.metadata?.withdrawal?.withdrawn && ['user', 'ai'].includes(message.type) && message.content.trim())
     .slice(-12).map((message) => ({
-      id: idOf(message), nodeId: message.metadata?.branching?.nodeId || message.clientKey || message.id,
+      id: idOf(message), serverId: message.serverId, nodeId: message.metadata?.branching?.nodeId || message.clientKey || message.id,
       parentNodeId: message.metadata?.branching?.parentNodeId,
       content: message.content, senderId: message.senderId, senderName: message.senderName, timestamp: message.timestamp,
       // Legacy context does not prove who heard it. Only new commits capture delivery.
@@ -72,13 +138,8 @@ export function scheduleFactRecording(params: { api: APIConfig; chat: GroupChat;
       await ensureArchiveHydrated();
       const sources = captureFactEvidence(params.chat, params.messages, params.message);
       if (!sources.some((source) => source.id === anchorId)) return;
-      const sourceById = new Map(sources.map((source) => [source.id, source]));
-      const existingFacts = collapseMergedFacts(Object.values(useFactArchiveStore.getState().chats[params.chat.id].entries)
-        .flatMap((entry) => entry.facts.flatMap((fact, factIndex) => fact.sourceIds.every((id) => {
-          const source = sourceById.get(id);
-          return source && !source.invalid && entry.sources.some((recorded) => recorded.id === id && recorded.content === source.content);
-        }) ? [{ id: `${entry.messageId}:${factIndex}`, chatId: params.chat.id,
-          messageId: entry.messageId, factIndex, fact, mergedFrom: fact.mergedFrom }] : [])));
+      const existingFacts = await factMaintenanceContext(params.chat, sources.find((source) => source.id === anchorId)!, signal);
+      const evidence = [...new Map([...existingFacts.flatMap((candidate) => candidate.sources), ...sources].map((source) => [source.id, source])).values()];
       const mergeCandidates = new Map<string, FactMergeCandidate>(existingFacts.map((candidate, index) => [`f${index}`, candidate]));
       const toInput = ({ id, senderName, content }: FactEvidence) => ({ id, speaker: senderName, content });
       const input = [{ role: 'user' as const, content: JSON.stringify({
@@ -90,7 +151,7 @@ export function scheduleFactRecording(params: { api: APIConfig; chat: GroupChat;
         { signal, maxTokens: 2000, aiUsage: { type: 'memory_refinement', label: '具体事实记录' } });
       let raw = await generate(FACT_EXTRACTION_PROMPT);
       assertWorkspaceActive(signal);
-      const allowedIds = new Set(sources.map((source) => source.id));
+      const allowedIds = new Set(evidence.map((source) => source.id));
       const parse = (response: string) => parseDetailedFacts(response, allowedIds, anchorId, (error) => {
         reportRecoverableWarning({ location: 'memory.fact-record-context-only', error,
           message: '已排除未引用新消息的旧事实，其余合法事实继续保存；未自动补充来源。' });
@@ -106,17 +167,24 @@ export function scheduleFactRecording(params: { api: APIConfig; chat: GroupChat;
         assertWorkspaceActive(signal);
         facts = parse(raw);
       }
-      facts = facts.filter((fact, index, all) => !existingFacts.some(({ fact: existing }) => existing.text === fact.text && existing.status === fact.status)
-        && !all.slice(0, index).some((other) => other.text === fact.text && other.status === fact.status));
-      const entry: FactArchiveEntry = { messageId: anchorId, facts, sources };
+      facts = facts.filter((fact, index, all) => (fact.retracted || !existingFacts.some(({ fact: existing }) => existing.text === fact.text && existing.status === fact.status))
+        && !all.slice(0, index).some((other) => other.text === fact.text && other.status === fact.status && other.retracted === fact.retracted));
+      // Cloud maintenance can supply evidence outside the loaded message window.
+      useFactArchiveStore.getState().capture(params.chat.id, evidence);
+      const entry: FactArchiveEntry = { messageId: anchorId, facts, sources: evidence };
       useFactArchiveStore.getState().save(params.chat.id, entry);
       await flushBufferedPersistenceWrites();
       assertWorkspaceActive(signal);
       if (facts.length) {
+        const retractedCount = facts.filter((fact) => fact.retracted).length;
+        const updatedCount = facts.filter((fact) => !fact.retracted && fact.mergedFrom?.length).length;
+        const addedCount = facts.length - updatedCount - retractedCount;
+        const changes = [addedCount ? `新增 ${addedCount} 条` : '', updatedCount ? `合并更新 ${updatedCount} 条` : '',
+          retractedCount ? `作废 ${retractedCount} 条` : ''].filter(Boolean).join('，');
         try {
           await params.appendEventMessage(params.chat.id, {
             eventType: 'detailed_fact_recorded', title: '详细事实已保存',
-            summary: `${facts.some((fact) => fact.mergedFrom?.length) ? '保存（含合并更新）' : '新增'} ${facts.length} 条详细事实：\n${facts.map((fact, index) => `${index + 1}. ${sanitizeUserFacingText(fact.text, [], { preserveLineBreaks: true })}`).join('\n')}`,
+            summary: `${changes}详细事实：\n${facts.map((fact, index) => `${index + 1}. 【${fact.retracted ? '作废' : fact.mergedFrom?.length ? '合并更新' : '新增'}】${sanitizeUserFacingText(fact.text, [], { preserveLineBreaks: true })}`).join('\n')}`,
             visibilityScope: 'moderator_only',
           }, params.message.id);
         } catch (error) {
@@ -149,11 +217,6 @@ async function syncEntry(chatId: string, entry: FactArchiveEntry) {
     useFactArchiveStore.getState().save(chatId, { ...entry, synced: true });
     return;
   }
-  const messages = [
-    ...useMessageStore.getState().messages,
-    ...Object.values(useMessageStore.getState().messageWindowsByChatId).flatMap((window) => window.messages),
-  ];
-  const resolveServerId = (id: string) => messages.find((message) => message.id === id || message.clientKey === id || message.serverId === id)?.serverId || id;
   const serverAnchorId = resolveServerId(entry.messageId);
   // The local-first outbox may not have created the server source row yet.
   if (entry.messageId.startsWith('local-message-') && serverAnchorId === entry.messageId) return;
@@ -201,6 +264,8 @@ export function recallLocalFacts(actorId: string, destination?: GroupChat, inclu
         || !source.audience.includes(actorId) || audience.some((id) => !source.audience.includes(id))
         || recordedSources.get(source.id) !== source.content)) return [];
       return [{ id: `${entry.messageId}:${index}`, text: fact.text, status: fact.status, timestamp: entry.sources.at(-1)?.timestamp || 0, chatId: chat.id,
+        knownByIds: sources.reduce<string[]>((ids, source) => ids.filter((id) => source!.audience.includes(id)), sources[0]!.audience),
+        ...(fact.retracted ? { retracted: true } : {}),
         ...(fact.mergedFrom ? { mergedFrom: fact.mergedFrom } : {}) }];
     }));
     return includeMerged ? eligible : collapseMergedFacts(eligible);
@@ -244,13 +309,10 @@ export async function listDetailedFacts(actorId: string, destination?: GroupChat
   }
   assertWorkspaceActive(signal);
   const localItems = recallLocalFacts(actorId, destination, true);
-  const loadedMessages = [...useMessageStore.getState().messages,
-    ...Object.values(useMessageStore.getState().messageWindowsByChatId).flatMap((window) => window.messages)];
-  const serverId = (id: string) => loadedMessages.find((message) => message.id === id || message.clientKey === id || message.serverId === id)?.serverId || id;
   const canonical = (item: RecalledFact): RecalledFact => {
     const separator = item.id.lastIndexOf(':');
-    return { ...item, id: separator < 0 ? item.id : `${serverId(item.id.slice(0, separator))}${item.id.slice(separator)}`,
-      ...(item.mergedFrom ? { mergedFrom: item.mergedFrom.map((ref) => ({ ...ref, messageId: serverId(ref.messageId) })) } : {}) };
+    return { ...item, id: separator < 0 ? item.id : `${resolveServerId(item.id.slice(0, separator))}${item.id.slice(separator)}`,
+      ...(item.mergedFrom ? { mergedFrom: item.mergedFrom.map((ref) => ({ ...ref, messageId: resolveServerId(ref.messageId) })) } : {}) };
   };
   return [...new Map(collapseMergedFacts([...response.items, ...localItems].map(canonical)).map((item) => [item.text, item])).values()];
 }

@@ -6,6 +6,8 @@ import { isMemoryAnchorCandidate } from './memoryLifecycle';
 import { safeRuntimePrivateText } from './runtimePrivateTextPrivacy';
 
 export type LayeredMemoryFilterKey = 'all' | 'anchors' | 'longTerm' | 'episodic' | 'working' | 'relationship' | 'self' | 'conversation' | 'expressionFeedback' | 'archived';
+export type LayeredMemoryScopeFilterKey = 'all' | 'relationship' | 'self' | 'conversation';
+export type LayeredMemoryCategoryKey = Exclude<LayeredMemoryFilterKey, 'anchors' | 'relationship' | 'self' | 'conversation'>;
 
 export interface LayeredMemoryFilter {
   key: LayeredMemoryFilterKey;
@@ -143,6 +145,16 @@ export function buildLayeredMemoryFilters(groups: ReturnType<typeof buildLayered
 
 export function filterVisibleLayeredMemories(items: MemoryItem[], includeRuntimeEvidence: boolean) {
   return items.filter((item) => includeRuntimeEvidence ? true : !isRuntimeEvidenceMemory(item));
+}
+
+export function selectLayeredMemoryItems(groups: ReturnType<typeof buildLayeredMemoryGroups>, category: LayeredMemoryCategoryKey,
+  scope: LayeredMemoryScopeFilterKey = 'all', anchorsOnly = false) {
+  return groups[category].filter((item) => {
+    const matchesScope = scope === 'all' || (scope === 'self' ? item.scope === 'character_self'
+      : scope === 'relationship' ? item.scope === 'relationship'
+        : item.scope === 'conversation' || item.scope === 'thread');
+    return matchesScope && (!anchorsOnly || isMemoryAnchorCandidate(item));
+  });
 }
 
 export function localizeLayeredMemoryPanelText(text: string, language: string) {

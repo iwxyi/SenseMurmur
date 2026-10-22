@@ -3,6 +3,7 @@ export interface DetailedFact {
   status: 'asserted' | 'agreed' | 'proposed' | 'disputed';
   sourceIds: string[];
   mergedFrom?: FactReference[];
+  retracted?: boolean;
 }
 
 export interface FactReference {
@@ -16,6 +17,7 @@ export interface FactMergeCandidate extends FactReference {
 
 export interface FactEvidence {
   id: string;
+  serverId?: string;
   nodeId: string;
   parentNodeId?: string | null;
   content: string;
@@ -40,12 +42,14 @@ export interface RecalledFact {
   timestamp: number;
   chatId: string;
   mergedFrom?: FactReference[];
+  retracted?: boolean;
+  knownByIds?: string[];
 }
 
-export function collapseMergedFacts<T extends { id: string; chatId: string; mergedFrom?: FactReference[] }>(items: T[]): T[] {
+export function collapseMergedFacts<T extends { id: string; chatId: string; mergedFrom?: FactReference[]; retracted?: boolean }>(items: T[]): T[] {
   const replaced = new Set(items.flatMap((item) => (item.mergedFrom || [])
     .map((ref) => JSON.stringify([item.chatId, `${ref.messageId}:${ref.factIndex}`]))));
-  return items.filter((item) => !replaced.has(JSON.stringify([item.chatId, item.id])));
+  return items.filter((item) => !replaced.has(JSON.stringify([item.chatId, item.id])) && !item.retracted);
 }
 
 export class FactExtractionValidationError extends Error {
@@ -76,6 +80,9 @@ export function parseDetailedFacts(raw: string, allowedIds: Set<string>, anchorI
     const path = `facts[${index}]`;
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new FactExtractionValidationError(path, 'expected a fact object');
     const fact = item as Record<string, unknown>;
+    if (fact.retracted !== undefined && typeof fact.retracted !== 'boolean') {
+      throw new FactExtractionValidationError(`${path}.retracted`, 'expected a boolean');
+    }
     if (typeof fact.text !== 'string' || !fact.text.trim() || fact.text.length > 1200) {
       throw new FactExtractionValidationError(`${path}.text`, 'expected non-empty text of at most 1200 characters');
     }
@@ -102,14 +109,17 @@ export function parseDetailedFacts(raw: string, allowedIds: Set<string>, anchorI
       }
       for (const key of new Set(fact.mergeWith)) {
         const candidate = typeof key === 'string' ? mergeCandidates.get(key) : undefined;
-        if (!candidate || candidate.fact.status !== fact.status
+        if (!candidate || candidate.fact.retracted || candidate.fact.status !== fact.status
           || !candidate.fact.sourceIds.every((id) => (fact.sourceIds as unknown[]).includes(id))) {
           throw new FactExtractionValidationError(`${path}.mergeWith`, 'merge must reference a supplied fact with the same status and retain all its evidence');
         }
         mergedFrom.push({ messageId: candidate.messageId, factIndex: candidate.factIndex });
       }
     }
+    if (fact.retracted === true && !mergedFrom.length) {
+      throw new FactExtractionValidationError(`${path}.mergeWith`, 'retraction must reference an existing fact');
+    }
     return [{ text: fact.text.trim(), status: fact.status as DetailedFact['status'], sourceIds: [...new Set(fact.sourceIds)] as string[],
-      ...(mergedFrom.length ? { mergedFrom } : {}) }];
+      ...(mergedFrom.length ? { mergedFrom } : {}), ...(fact.retracted === true ? { retracted: true } : {}) }];
   });
 }

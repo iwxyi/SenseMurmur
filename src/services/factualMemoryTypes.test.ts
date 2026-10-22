@@ -45,4 +45,17 @@ describe('parseDetailedFacts', () => {
     ];
     expect(collapseMergedFacts(items).map((item) => [item.chatId, item.id])).toEqual([['b', 'm1:0'], ['a', 'm3:0']]);
   });
+
+  it('requires a real target and evidence for retractions and suppresses their replaced records', () => {
+    const candidates = new Map<string, FactMergeCandidate>([['f0', { messageId: 'm1', factIndex: 0,
+      fact: { text: '误记的约定', status: 'agreed', sourceIds: ['m1'] } }]]);
+    const fact = { text: '原话只是演练台词，原记录作废', status: 'agreed', sourceIds: ['m1', 'm2'], mergeWith: ['f0'], retracted: true };
+    const parse = (value: unknown) => parseDetailedFacts(JSON.stringify({ facts: [value] }), new Set(['m1', 'm2']), 'm2', undefined, candidates);
+    expect(parse(fact)[0].retracted).toBe(true);
+    expect(() => parse({ ...fact, mergeWith: [] })).toThrow('mergeWith');
+    expect(() => parse({ ...fact, sourceIds: ['m2'] })).toThrow('mergeWith');
+    expect(() => parse({ ...fact, retracted: 'yes' })).toThrow('retracted');
+    expect(collapseMergedFacts([{ id: 'm1:0', chatId: 'a' },
+      { id: 'm2:0', chatId: 'a', retracted: true, mergedFrom: [{ messageId: 'm1', factIndex: 0 }] }])).toEqual([]);
+  });
 });
