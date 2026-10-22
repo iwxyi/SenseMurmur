@@ -15,6 +15,7 @@ import { getLocalDataUserId } from '../services/authStorageScope';
 import { isCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { useChatStore } from './useChatStore';
 import { useCharacterStore } from './useCharacterStore';
+import { useFactArchiveStore } from './useFactArchiveStore';
 import { createSyncScopeMetadata, type SyncScopeSnapshot } from './syncScopeMetadata';
 import { completeLocalOutboxWorkerOperation, markLocalOutboxWorkerOperation, mirrorLocalOutboxWorkerQueue, removeLocalOutboxWorkerOperation } from '../services/localOutboxWorkerBridge';
 import { useSettingsStore } from './useSettingsStore';
@@ -1557,6 +1558,7 @@ export const useMessageStore = create<MessageStore>()(
       }),
 
       clearChatMessagesLocal: (chatId) => {
+        useFactArchiveStore.getState().clearChat(chatId);
         setClearBarrier(chatId, Date.now());
         set((state) => {
           const nextWindows = { ...state.messageWindowsByChatId };
@@ -1580,6 +1582,7 @@ export const useMessageStore = create<MessageStore>()(
       deleteMessage: async (id) => {
         if (shouldSkipCloudSync()) {
           set((state) => localMessageDeletionResult(state, id));
+          useFactArchiveStore.getState().invalidate([id]);
           return;
         }
         const targetMessage = get().messages.find((message) => message.id === id)
@@ -1592,9 +1595,11 @@ export const useMessageStore = create<MessageStore>()(
             ...localMessageDeletionResult(state, id),
             pendingOperations: state.pendingOperations.filter((operation) => operation.localMessageId !== id),
           }));
+          useFactArchiveStore.getState().invalidate([id, targetMessage.clientKey || '']);
           return;
         }
         await api.deleteMessage(targetMessage?.serverId || targetMessage?.id || id);
+        useFactArchiveStore.getState().invalidate([id, targetMessage?.serverId || '', targetMessage?.clientKey || '']);
         set((state) => {
           const nextWindows = Object.fromEntries(
             Object.entries(state.messageWindowsByChatId).map(([chatId, window]) => {
@@ -1632,6 +1637,7 @@ export const useMessageStore = create<MessageStore>()(
             { ...window, messages: window.messages.map((message) => message.id === id ? nextMessage : message) },
           ])),
         }));
+        useFactArchiveStore.getState().invalidate([id, targetMessage.serverId || '', targetMessage.clientKey || '']);
         if (!shouldSkipCloudSync()) {
           await api.updateMessageMetadata(targetMessage.serverId || targetMessage.id, { withdrawal });
         }
@@ -1639,13 +1645,17 @@ export const useMessageStore = create<MessageStore>()(
 
       deleteLastNMessages: async (chatId, n) => {
         if (shouldSkipCloudSync()) {
+          const ids = get().messages.filter((message) => message.chatId === chatId && !message.isDeleted).slice(-n)
+            .flatMap((message) => [message.id, message.serverId || '', message.clientKey || '']);
           set((state) => localMessageDeleteBatchResult(state, chatId, n));
+          useFactArchiveStore.getState().invalidate(ids);
           return;
         }
         const msgs = get().messages.filter((m) => m.chatId === chatId && !m.isDeleted).slice(-n);
         for (const msg of msgs) {
           await api.deleteMessage(msg.serverId || msg.id);
         }
+        useFactArchiveStore.getState().invalidate(msgs.flatMap((message) => [message.id, message.serverId || '', message.clientKey || '']));
         set((state) => {
           const nextMessages = state.messages.map((m) => (
             msgs.find((dm) => dm.id === m.id) ? { ...m, isDeleted: true } : m

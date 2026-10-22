@@ -11,6 +11,8 @@ import { isReplyWorthyInteractionKind, normalizeInteractionHintCollection, norma
 import { generateResponse } from './aiClient';
 import { redactAiDiagnosticText } from './aiDiagnosticText';
 import { buildSystemPromptWithContext, buildPromptAssemblyWithContext, buildChatMessages, buildPromptMemoryTrace, buildPromptCharacterMindTrace, type PromptAssemblyWithContext, type PromptCharacterMindTrace, type PromptMemoryTrace } from './promptBuilder';
+import { buildDetailedFactPrompt } from './factualMemory';
+import { reportRecoverableError } from './diagnostics';
 import { buildEngineAwarePrompt } from './promptContextAssembler';
 import { resolveSessionDefinition } from '../types/sessionEngine';
 import { loadSessionEngine } from './sessionEngineLoader';
@@ -34,7 +36,7 @@ import { buildHumanizationPrompt, postProcessHumanChat } from './dialogueHumaniz
 import { buildInnerLifeMetadata, buildInnerLifePromptBlock, projectInnerLife, type InnerLifeProjection } from './innerLifeEngine';
 import { maybeAutoWithdrawMessage } from './messageWithdrawal';
 import { BASE_COOLDOWN_MS, MAX_HISTORY_FOR_PROMPT } from '../constants/defaults';
-import { buildInlineInteractionContract, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope, type InlineEnvelopeParseFailure, type InlineStoryAssets } from './inlineInteractionHint';
+import { buildInlineInteractionContract, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope, resolveConversationMemberReferences, type InlineEnvelopeParseFailure, type InlineStoryAssets } from './inlineInteractionHint';
 import { getExpressionFeedbackCategoryLabel, summarizeExpressionFeedbackInfluence } from './expressionFeedbackInfluence';
 import type { UserGuidanceIntent } from './userGuidanceIntent';
 import { collectGuidanceProgressAfterTimestamp, evaluateGuidanceGeneratedContent, type GuidanceExecutionReason, type GuidanceRejectionReason } from './guidanceExecution';
@@ -857,8 +859,11 @@ function logAiGenerationFailure(params: {
   attempt?: number;
   draft?: string;
   details?: Record<string, unknown>;
+  level?: 'debug' | 'warn';
 }) {
-  if (typeof console === 'undefined' || typeof console.warn !== 'function') return;
+  if (typeof console === 'undefined') return;
+  const log = params.level === 'debug' ? console.debug : console.warn;
+  if (typeof log !== 'function') return;
   const detailed = isDeveloperModeEnabled();
   const failureDetails = Object.fromEntries(Object.entries(params.details || {}).filter(([key]) => key !== 'rawResponse'));
   const payload = {
@@ -875,8 +880,8 @@ function logAiGenerationFailure(params: {
   };
   const diagnosticJson = JSON.stringify(payload, (_key, value: unknown) => typeof value === 'string'
     ? redactAiDiagnosticText(value, Infinity) : value, 2);
-  console.warn('[ai-generation-failure]', JSON.parse(diagnosticJson));
-  console.warn('[ai-generation-failure:json]', diagnosticJson);
+  log('[ai-generation-failure]', JSON.parse(diagnosticJson));
+  log('[ai-generation-failure:json]', diagnosticJson);
 }
 
 function buildRetryPrompt(basePrompt: string, priorAttempt: string) {
@@ -3280,7 +3285,7 @@ async function generateWithPrompt(params: {
   const isStoryReader = params.chat.sessionKind?.scenarioId === 'story-reader';
   const requiresConversationUpdate = requiresGroupEnvelope && Boolean(params.chat.worldState?.conversationContinuity?.items?.length);
   let parseFailure: InlineEnvelopeParseFailure | undefined;
-  const parsedEnvelope = parseInlineInteractionEnvelope(response, {
+  let parsedEnvelope = parseInlineInteractionEnvelope(response, {
     allowContentSalvage: !requiresGroupEnvelope,
     requireConversationUpdate: requiresConversationUpdate,
     validateActivityUpdate: requiresGroupEnvelope,
@@ -3312,9 +3317,23 @@ async function generateWithPrompt(params: {
   if (requiresGroupEnvelope && parsedEnvelope && hasInvalidStateEvidence(parsedEnvelope)) {
     return protocolFailure('invalid_state_evidence');
   }
+  let memberReferenceErrors: ReturnType<typeof resolveConversationMemberReferences>['errors'] = [];
+  if (parsedEnvelope) {
+    const resolution = resolveConversationMemberReferences(parsedEnvelope,
+      [...params.chat.memberIds, ...(params.chat.type === 'direct' ? ['user'] : [])], params.characters || [], params.speaker.id);
+    parsedEnvelope = resolution.envelope;
+    memberReferenceErrors = resolution.errors;
+    if (resolution.corrections.length) logAiGenerationFailure({
+      chat: params.chat, speaker: params.speaker, reason: 'member_reference_name_fallback',
+      level: 'debug',
+      message: 'AI 成员 ID 无效，已按唯一精确姓名转换；请检查输出协议。', attempt: params.attempt,
+      details: { corrections: resolution.corrections },
+    });
+  }
   if (parsedEnvelope && (requiresGroupEnvelope || parsedEnvelope.messages?.some((part) => Object.hasOwn(part, 'addressedTargets') || Object.hasOwn(part, 'replyDebtTargets')))
     && hasInvalidConversationMemberReferences(parsedEnvelope, [...params.chat.memberIds, ...(params.chat.type === 'direct' ? ['user'] : [])], params.speaker.id)) {
-    return protocolFailure('invalid_member_reference');
+    const failure = protocolFailure('invalid_member_reference');
+    return { ...failure, diagnostic: { ...failure.diagnostic, memberReferenceErrors } };
   }
   const narrativeRuntime = isStoryReader ? await loadNarrativeRuntime() : null;
   const rawStoryEvents = narrativeRuntime
@@ -3529,14 +3548,22 @@ async function generateNonDuplicateResponse(params: {
       if (attempt < 2) {
         const failure = unsupportedTool ? 'unsupported tool-call markup'
           : invalidStateEvidence ? 'a state update whose evidenceText was not an exact quote from one of this response\'s visible sends'
-            : invalidMemberReference ? 'a target or state update referencing an id outside the supplied member list or targeting the current speaker'
+            : invalidMemberReference ? 'a state update referencing an id outside the supplied member list, or outgoing routing referencing an unknown member or the current speaker'
               : invalidDelivery ? 'an invalid delivery state or fields that contradict it'
                 : invalidRouting ? 'invalid per-send routing fields; follow the supplied schema and field diagnostic'
             : 'no valid JSON envelope';
         const deliveryRule = params.allowNoSend
           ? 'You may still return exactly {"delivery":"no_send","messages":[]} when you have nothing to express; no other fields are needed then. For delivery=send, follow these rules.'
           : 'This turn requires delivery=send with visible character speech.';
+        const memberReferenceRule = invalidMemberReference
+          ? `\nMember reference correction: conversationUpdate.items[].participantIds and all room member references must contain exact member ids, never display names, nicknames or aliases. The current speaker is allowed in participantIds for their own commitment, but never in outgoing addressedTargets or replyDebtTargets. Use this name-to-id registry: ${JSON.stringify([
+            ...(params.characters || []).filter((character) => params.chat.memberIds.includes(character.id))
+              .map((character) => ({ name: character.name, id: character.id })),
+            { name: '用户/我', id: 'user' },
+          ])}. Do not remove a supported update merely to avoid correcting its ids.`
+          : '';
         prompt = `${params.systemPrompt}\n\nOutput protocol retry:\n- The previous attempt returned ${failure}. Return one valid JSON object using the supplied output contract. ${deliveryRule} Preserve the supported structured fields for this turn; use null when there is no supported update. If known public items exist, explicitly include top-level conversationUpdate after checking whether this turn changes them: null or an update object with items; never omit it. State evidenceText must be copied exactly from one visible send in this response, never from the earlier transcript or known records. Do not add spoken confirmations merely to manufacture evidence. Do not invent updates, emit tool-call markup or simulate unavailable tools. Do not repeat or continue the previous plain-text draft; discard it and write the visible content inside the new JSON envelope. The response must begin with the JSON object and contain no prose before or after it. Do not mention this retry to participants.`;
+        prompt += memberReferenceRule;
         continue;
       }
       throw new EmptyGeneratedResponseError(params.speaker.name, {
@@ -4347,9 +4374,19 @@ export async function generateSpeakerMessage(params: GenerateSpeakerMessageParam
     preferEnginePromptAdapter: resolveSessionFamilyKey(params.chat) === 'study' || !enginePromptContext,
     promptAssembly,
   });
+  let detailedFactPrompt = '';
+  if (resolveSessionFamilyKey(params.chat) === 'conversation') {
+    try {
+      detailedFactPrompt = await buildDetailedFactPrompt(resolveApiConfigForCharacter(params.speaker, params.apiConfig, params.profiles), params.chat, params.speaker.id, activeMessages);
+    } catch (error) {
+      reportRecoverableError({ location: 'memory.fact-recall', error,
+        userMessage: '具体记忆暂时无法查询，本轮仅使用当前聊天和已有概貌。' });
+    }
+  }
   const promptBlocks: PromptBlock[] = [
     { id: 'engine_prefix', layer: 'core', priority: -100, content: promptPrefix },
     { id: 'speaker_identity', layer: 'core', priority: 0, content: speakerSystemPrompt },
+    { id: 'detailed_fact_memory', layer: 'character', priority: 15, content: detailedFactPrompt },
     buildPromptPlayModeBlock(promptPlayMode),
     // Ordinary groups supply speech/state evidence here; compact turn context
     // supplies background. Dedicated modes keep their existing contracts.

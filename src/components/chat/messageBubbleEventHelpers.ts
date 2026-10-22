@@ -54,6 +54,10 @@ function formatMemoryDistillationMergeLabel(value: unknown, members: DisplayText
 }
 
 export function buildEventDisplayText(payload: { eventType?: string; title?: string; summary?: string; pair?: string[]; metrics?: unknown }, members: DisplayTextMember[] = []) {
+  if (payload.eventType === 'detailed_fact_recorded') {
+    const lines = (payload.summary || payload.title || '').split('\n').map((line) => safeRuntimePrivateText(line));
+    return sanitizeUserFacingText(lines.join('\n'), members, { preserveLineBreaks: true });
+  }
   if (payload.eventType === 'room_state_snapshot_v2') return dedupeDisplayText(payload.summary || '', members);
   if (payload.eventType === 'conflict_axis_shift') return dedupeDisplayText(payload.summary || '', members);
   if (payload.eventType === 'memory_reactivation') return dedupeDisplayText(payload.summary || payload.title || '旧记忆回温', members, '有一条私域记忆回温已隐藏原文');

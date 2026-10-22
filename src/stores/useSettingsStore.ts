@@ -107,6 +107,7 @@ const DISABLED_DEVELOPER_UI_PREFS: DeveloperUIPrefs = {
   showConflictEvents: false,
   showStateEvents: false,
   showMemoryDistillationEvents: false,
+  showDetailedFactHints: false,
   showCalendarEvents: false,
   showLocalInterceptionHints: false,
   showSpeechStyle: false,

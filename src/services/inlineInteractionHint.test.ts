@@ -4,9 +4,39 @@ import type { GroupChat } from '../types/chat';
 import { createTestChat } from '../test/fixtures';
 import { normalizeInteractionHintCollection } from '../types/runtimeEvent';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
-import { buildInlineInteractionContract, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope } from './inlineInteractionHint';
+import { buildInlineInteractionContract, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope, resolveConversationMemberReferences } from './inlineInteractionHint';
 
 describe('envelope rejection diagnostics', () => {
+  it('resolves exact names without mutating input and reports unknown, ambiguous and self targets', () => {
+    const envelope = parseInlineInteractionEnvelope(JSON.stringify({
+      messages: [{ content: '我来核账。', addressedTargets: { targetIds: ['重名', '不存在', '刘备'] } }],
+      conversationUpdate: { items: [{ key: 'ledger', kind: 'commitment', status: 'established',
+        summary: '核账', participantIds: ['刘备', 'guan-yu'], evidenceText: '我来核账。' }] },
+    }))!;
+    const result = resolveConversationMemberReferences(envelope, ['liu-bei', 'guan-yu', 'a', 'b'], [
+      { id: 'liu-bei', name: '刘备' }, { id: 'guan-yu', name: '关羽' },
+      { id: 'a', name: '重名' }, { id: 'b', name: '重名' },
+    ], 'liu-bei');
+    expect(result.envelope.conversationUpdate?.items[0].participantIds).toEqual(['liu-bei', 'guan-yu']);
+    expect(envelope.conversationUpdate?.items[0].participantIds[0]).toBe('刘备');
+    expect(result.corrections).toEqual([{ field: 'conversationUpdate.items[0].participantIds[0]', value: '刘备', resolvedId: 'liu-bei' }]);
+    expect(result.errors.map((error) => error.reason)).toEqual([
+      'ambiguous_member_name', 'unknown_member_id_or_name', 'outgoing_target_is_current_speaker',
+    ]);
+    expect(result.errors[0].field).toBe('messages[0].addressedTargets.targetIds[0]');
+  });
+
+  it('requires exact ids even when continuity context presents participant names', () => {
+    const speaker = { id: 'liu-bei', name: '刘备' } as AICharacter;
+    const contract = buildInlineInteractionContract({
+      chat: createTestChat({ memberIds: ['liu-bei'] }),
+      speaker, characters: [speaker], recentMessages: [],
+    });
+    expect(contract).toContain('Every participantIds entry must be an exact id');
+    expect(contract).toContain('never a display name, nickname or alias');
+    expect(contract).toContain('id=liu-bei; name=刘备');
+  });
+
   it('preserves per-send nulls, distinct targets and routed sends beyond the legacy text cap', () => {
     const messages = Array.from({ length: 10 }, (_, index) => ({ content: `第${index}条`,
       addressedTargets: index ? { targetIds: ['b'], primaryTargetId: 'b' } : null,

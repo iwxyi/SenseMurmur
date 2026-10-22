@@ -566,6 +566,7 @@ export interface DeveloperUIPrefs {
   showConflictEvents: boolean;
   showStateEvents: boolean;
   showMemoryDistillationEvents: boolean;
+  showDetailedFactHints: boolean;
   showCalendarEvents: boolean;
   showLocalInterceptionHints: boolean;
   showSpeechStyle: boolean;
@@ -602,6 +603,7 @@ export function normalizeDeveloperUiPrefs(input?: Partial<DeveloperUIPrefs> | nu
     showConflictEvents: Boolean(input?.showConflictEvents),
     showStateEvents: Boolean(input?.showStateEvents),
     showMemoryDistillationEvents: Boolean(input?.showMemoryDistillationEvents),
+    showDetailedFactHints: Boolean(input?.showDetailedFactHints),
     showCalendarEvents: Boolean(input?.showCalendarEvents),
     showLocalInterceptionHints: Boolean(input?.showLocalInterceptionHints),
     showSpeechStyle: Boolean(input?.showSpeechStyle),
@@ -634,7 +636,7 @@ export function getDeveloperUiVisibility(input: Partial<DeveloperUIPrefs> | null
 }
 
 export function getDeveloperUiToggleKeys() {
-  return ['showMemoryDebug', 'showRelationshipEvents', 'showAffectEvents', 'showConflictEvents', 'showStateEvents', 'showMemoryDistillationEvents', 'showCalendarEvents', 'showLocalInterceptionHints', 'showSpeechStyle', 'showAdvancedRuntimePanels', 'showDeliberationDebug', 'showPresenceDebug', 'showCompanionshipDebug', 'showMomentDebug', 'showWithdrawnMessageContent', 'enableHumanAppraisal', 'dramaBoost'] as const;
+  return ['showMemoryDebug', 'showRelationshipEvents', 'showAffectEvents', 'showConflictEvents', 'showStateEvents', 'showMemoryDistillationEvents', 'showDetailedFactHints', 'showCalendarEvents', 'showLocalInterceptionHints', 'showSpeechStyle', 'showAdvancedRuntimePanels', 'showDeliberationDebug', 'showPresenceDebug', 'showCompanionshipDebug', 'showMomentDebug', 'showWithdrawnMessageContent', 'enableHumanAppraisal', 'dramaBoost'] as const;
 }
 
 export function getDeveloperUiAffectKey() {
@@ -962,6 +964,7 @@ export const DEFAULT_DEVELOPER_UI_PREFS: DeveloperUIPrefs = {
   showConflictEvents: false,
   showStateEvents: false,
   showMemoryDistillationEvents: false,
+  showDetailedFactHints: false,
   showCalendarEvents: false,
   showLocalInterceptionHints: false,
   showSpeechStyle: false,

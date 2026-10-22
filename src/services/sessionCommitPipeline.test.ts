@@ -27,9 +27,14 @@ const distillCharacterCoreProfileWithLlmMock = vi.fn();
 const debugLlmChatDistillationMock = vi.fn();
 const debugLlmCharacterDistillationMock = vi.fn();
 const buildLlmDistillationSourceMock = vi.fn();
+const scheduleFactRecordingMock = vi.fn();
 
 vi.mock('./chatCommitPipeline', () => ({
   runChatCommitPipeline: (...args: unknown[]) => runChatCommitPipelineMock(...args),
+}));
+
+vi.mock('./factualMemory', () => ({
+  scheduleFactRecording: (...args: unknown[]) => scheduleFactRecordingMock(...args),
 }));
 
 vi.mock('./llmMemoryDistillation', () => ({
@@ -46,6 +51,7 @@ vi.mock('./llmMemoryDistillation', () => ({
 beforeEach(() => {
   __resetDeferredCalendarAutoPatchStateForTests();
   __resetDeferredLlmDistillationStateForTests();
+  scheduleFactRecordingMock.mockReset();
   runChatCommitPipelineMock.mockReset();
   shouldRunLlmChatDistillationMock.mockReset();
   shouldRunLlmCharacterDistillationMock.mockReset();
@@ -178,6 +184,11 @@ describe('runSessionCommitPipeline', () => {
     expect(updateCharacter).toHaveBeenCalledWith('char-a', expect.objectContaining({ presence: expect.objectContaining({ status: 'away' }) }));
     expect(result.nextChat.runtimeEventsV2).toHaveLength(1);
     expect(result.nextCharacters[0].presence?.status).toBe('away');
+    expect(scheduleFactRecordingMock).toHaveBeenCalledWith(expect.objectContaining({
+      chat: result.nextChat,
+      message: expect.objectContaining({ id: 'departure' }),
+      messages: [],
+    }));
     await __flushDeferredCalendarAutoPatchForTests();
   });
   it('persists memory reactivation events after old memories are used in a generated reply', async () => {

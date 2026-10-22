@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { DetailedFactsPanel } from './DetailedFactsPanel';
 import {
   Box,
   TextField,
@@ -1873,6 +1874,7 @@ export default function CharacterForm({ initial, existingNames = [], saveError =
         {configTab === 3 ? (
           <Box sx={{ display: 'grid', gap: 2 }}>
             <CharacterMemoryInspector character={runtimeCharacter} />
+            {initial?.id ? <DetailedFactsPanel characterId={initial.id} /> : null}
             <Card variant="outlined">
               <CardContent sx={{ display: 'grid', gap: 1.5 }}>
                 <Box>

@@ -347,6 +347,67 @@ export function hasInvalidStateEvidence(envelope: InlineInteractionEnvelope) {
  * Unknown member ids are a protocol error so the same speaker can retry with
  * the member registry that was supplied in the prompt.
  */
+export function resolveConversationMemberReferences(
+  envelope: InlineInteractionEnvelope,
+  memberIds: Iterable<string>,
+  characters: Pick<AICharacter, 'id' | 'name'>[],
+  speakerId?: string,
+) {
+  const members = new Set(memberIds);
+  const names = new Map<string, Set<string>>();
+  for (const character of characters) {
+    if (!members.has(character.id)) continue;
+    const ids = names.get(character.name) || new Set<string>();
+    ids.add(character.id);
+    names.set(character.name, ids);
+  }
+  const resolved = structuredClone(envelope);
+  const corrections: Array<{ field: string; value: string; resolvedId: string }> = [];
+  const errors: Array<{ field: string; value: string; reason: string }> = [];
+  const resolve = (value: string, field: string, outgoing = false, allowUser = false) => {
+    let id = value;
+    if (!members.has(id) && !(allowUser && id === 'user')) {
+      const candidates = names.get(value);
+      if (candidates?.size === 1) {
+        id = [...candidates][0];
+      } else {
+        errors.push({ field, value, reason: candidates?.size ? 'ambiguous_member_name' : 'unknown_member_id_or_name' });
+        return value;
+      }
+    }
+    if (outgoing && id === speakerId) {
+      errors.push({ field, value, reason: 'outgoing_target_is_current_speaker' });
+      return value;
+    }
+    if (id !== value) corrections.push({ field, value, resolvedId: id });
+    return id;
+  };
+  resolved.messages?.forEach((part, index) => {
+    for (const key of ['addressedTargets', 'replyDebtTargets'] as const) {
+      const routing = part[key];
+      if (!routing) continue;
+      const path = `messages[${index}].${key}`;
+      if (routing.targetIds) routing.targetIds = routing.targetIds.map((id, i) => resolve(id, `${path}.targetIds[${i}]`, true));
+      if (routing.primaryTargetId) routing.primaryTargetId = resolve(routing.primaryTargetId, `${path}.primaryTargetId`, true);
+    }
+  });
+  resolved.conversationUpdate?.items.forEach((item, index) => {
+    item.participantIds = item.participantIds.map((id, i) => resolve(id, `conversationUpdate.items[${index}].participantIds[${i}]`, false, true));
+  });
+  const room = resolved.conversationUpdate?.room;
+  if (room) {
+    for (const key of ['addAlliances', 'removeAlliances', 'addConflictPairs', 'removeConflictPairs'] as const) {
+      room[key]?.forEach((pair, index) => {
+        pair[0] = resolve(pair[0], `conversationUpdate.room.${key}[${index}][0]`, false, true);
+        pair[1] = resolve(pair[1], `conversationUpdate.room.${key}[${index}][1]`, false, true);
+      });
+    }
+    if (room.pileOnTarget) room.pileOnTarget = resolve(room.pileOnTarget, 'conversationUpdate.room.pileOnTarget', false, true);
+    if (room.silencedActors) room.silencedActors = room.silencedActors.map((id, index) => resolve(id, `conversationUpdate.room.silencedActors[${index}]`, false, true));
+  }
+  return { envelope: resolved, corrections, errors };
+}
+
 export function hasInvalidConversationMemberReferences(
   envelope: InlineInteractionEnvelope,
   memberIds: Iterable<string>,
@@ -633,7 +694,7 @@ ${transcriptScope}${recentSocialEvents ? `\n\nRecent social events to avoid dupl
   const continuityContext = continuityEnabled ? buildConversationContinuityContext(params.chat, params.characters) : '';
   const continuityRule = continuityEnabled ? `\nconversationUpdate reports durable changes in this speaker's visible sends. With known items, this top-level field is required: check them, then return null for no change or {"items":[{"key":"short-stable-key","kind":"issue|commitment|decision|condition","status":"open|established|resolved|retracted","summary":"the actual issue, promise, decision or condition","participantIds":[],"evidenceText":"short exact quote from this turn"}],"room":null,"settled":null}. Omission is not a no-change judgement.
 Reuse the known key when updating an item. Omitted items remain unchanged. Record an issue or unmet condition as open; an explicitly accepted decision or promise as established. Resolve only the actual issue addressed, retract only a visibly withdrawn promise or decision. A role assignment is not permission to start a battle; agreement about one part does not settle unspoken prerequisites. Do not invent obstacles, deadlines, motives or conflict. Extract what is said, including a concrete unanswered point or commitment, without requiring one every turn. Empty participantIds means a roomwide issue. Never use hidden/private material as public evidence.
-Keep each item atomic: its exact quote must support the whole summary, not just one part. participantIds identifies the people responsible for or directly involved in that item; include the speaker for their own promise. Assigning a task to someone else is an open proposal until that person accepts it; the assignment alone cannot establish their commitment. A speaker's own explicit promise can be established immediately. Track a new concrete promise even if the same turn also confirms an older decision; reuse a key only for the same obligation. An open proposal may become an established decision under the same key, with an explicit kind/status update. A partial acceptance must preserve who has not yet accepted; it cannot establish everyone's commitment.
+Keep each item atomic: its exact quote must support the whole summary, not just one part. participantIds identifies the people responsible for or directly involved in that item; include the speaker for their own promise. Every participantIds entry must be an exact id from Valid member ids below, never a display name, nickname or alias. This also applies when known continuity context labels participants by name. Assigning a task to someone else is an open proposal until that person accepts it; the assignment alone cannot establish their commitment. A speaker's own explicit promise can be established immediately. Track a new concrete promise even if the same turn also confirms an older decision; reuse a key only for the same obligation. An open proposal may become an established decision under the same key, with an explicit kind/status update. A partial acceptance must preserve who has not yet accepted; it cannot establish everyone's commitment.
 An established commitment means accepted, not completed. When this turn explicitly reports its fulfillment or confirms the actual result, update that same key to resolved with evidence supporting completion. Work in progress stays established; accepting a task or announcing a future action is not fulfillment. A withdrawn commitment is retracted. Keep any separate unanswered issue open; completing one obligation does not complete other obligations.
 room optionally reports explicit structural changes: {"addAlliances":[],"removeAlliances":[],"addConflictPairs":[],"removeConflictPairs":[],"pileOnTarget":null,"silencedActors":[],"evidenceText":"short exact quote from this turn"}. Pairs use two valid member ids. Omit unchanged fields; null pileOnTarget explicitly clears it. Agreement alone does not form an alliance; disagreement alone does not form a lasting opposition.
 settled is {"evidenceText":"short exact quote from this turn"} only when the visible exchange can pause here, with no immediate answer still requested. Unfinished matters may remain for later; do not repeatedly reconfirm a completed decision or invent a new issue to keep airtime. This pauses automatic chat, not the unresolved facts. These are internal protocol fields, never visible dialogue.

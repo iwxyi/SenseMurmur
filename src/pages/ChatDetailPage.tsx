@@ -4491,6 +4491,7 @@ export default function ChatDetailPage() {
           <SessionComposerHost
             key={chat.id}
             chatId={chat.id}
+            isStoryRoom={isStoryRoom}
             draftActorId={effectiveSpeakAsChar?.id}
             mentionCharacters={activeMembers}
             inputHandleRef={composerInputRef}

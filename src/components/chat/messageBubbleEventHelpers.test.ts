@@ -17,6 +17,7 @@ const baseEventFlags: EventRenderFlags = {
   showConflictEvents: false,
   showStateEvents: false,
   showMemoryDistillationEvents: false,
+  showDetailedFactHints: false,
   showCalendarEvents: false,
   showMemoryDebug: false,
   showLocalInterceptionHints: false,
@@ -37,6 +38,18 @@ function eventMessage(content: string): Message {
 }
 
 describe('messageBubbleEventHelpers', () => {
+  it('lists all saved facts with line breaks', () => {
+    const summary = '新增 3 条详细事实：\n1. 刘备约定明日出发\n2. 关羽负责粮草\n3. 张飞负责练兵';
+    expect(buildEventDisplayText({ eventType: 'detailed_fact_recorded', summary })).toBe(summary);
+  });
+
+  it('redacts private fact text without hiding other saved facts', () => {
+    expect(buildEventDisplayText({
+      eventType: 'detailed_fact_recorded',
+      summary: '新增 2 条详细事实：\n1. 刘备约定明日出发\n2. 秘密暗号是青梅煮酒',
+    })).toBe('新增 2 条详细事实：\n1. 刘备约定明日出发\n有一条私域内容已隐藏原文');
+  });
+
   it('builds localized memory distillation display text', () => {
     const text = buildEventDisplayText({
       eventType: 'memory_distillation',

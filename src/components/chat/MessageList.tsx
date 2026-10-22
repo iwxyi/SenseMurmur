@@ -571,6 +571,7 @@ export default function MessageList({
     showConflictEvents: developerUI.showConflictEvents,
     showStateEvents: developerUI.showStateEvents,
     showMemoryDistillationEvents: developerUI.showMemoryDistillationEvents,
+    showDetailedFactHints: developerUI.showDetailedFactHints,
     showCalendarEvents: developerUI.showCalendarEvents,
     showMemoryDebug: developerUI.showMemoryDebug,
     showLocalInterceptionHints: developerUI.showLocalInterceptionHints,
@@ -582,6 +583,7 @@ export default function MessageList({
     developerUI.showLocalInterceptionHints,
     developerUI.showMemoryDebug,
     developerUI.showMemoryDistillationEvents,
+    developerUI.showDetailedFactHints,
     developerUI.showRelationshipEvents,
     developerUI.showStateEvents,
   ]);
@@ -1142,7 +1144,7 @@ export default function MessageList({
         .sort((left, right) => Math.abs(left.timestamp - snapshot.sourceTimestamp!) - Math.abs(right.timestamp - snapshot.sourceTimestamp!))[0]?.node
       : null);
     if (!fallbackTarget) {
-      logDeveloperDiagnostic('故事阅读恢复：失败', {
+      logDeveloperDiagnostic('chat-scroll:anchor-restore-miss', {
         请求锚点: snapshot,
         scrollTop: Math.round(container.scrollTop),
         scrollHeight: Math.round(container.scrollHeight),
@@ -1169,7 +1171,7 @@ export default function MessageList({
       if (!didWrite) return false;
     }
     lastScrollTopRef.current = container.scrollTop;
-    logDeveloperDiagnostic('故事阅读恢复：执行', {
+    logDeveloperDiagnostic('chat-scroll:anchor-restored', {
       请求锚点: snapshot,
       匹配方式: target ? '精确匹配' : sourceTarget ? '源消息兜底' : '按时间兜底',
       实际锚点: {
@@ -1274,7 +1276,9 @@ export default function MessageList({
     latestScrollAnchorRef.current = snapshot;
     if (snapshot && options?.persist !== false) {
       if (onScrollPositionChange) {
-        logDeveloperDiagnostic('故事阅读保存：持久化', {
+        // This reports a shared viewport position. The caller decides whether
+        // to keep it in memory (chat navigation) or persist it (story reading).
+        logDeveloperDiagnostic('chat-scroll:position-reported', {
           reason: options?.reason || 'unknown',
           messageId: snapshot.messageId,
           offsetTop: Math.round(snapshot.offsetTop),
@@ -1282,14 +1286,14 @@ export default function MessageList({
           sourceTimestamp: snapshot.sourceTimestamp,
           userScrollIntent: hasUserScrollIntentRef.current,
           scrollTop: Math.round(containerRef.current?.scrollTop ?? 0),
-        }, 'info', 'chat-scroll');
+        }, 'debug', 'chat-scroll');
         onScrollPositionChange({
           ...snapshot,
           pinned: shouldStickToBottomRef.current,
         });
       }
     } else if (snapshot && onScrollPositionChange) {
-      logDeveloperDiagnostic('故事阅读保存：跳过持久化', {
+      logDeveloperDiagnostic('chat-scroll:position-report-skipped', {
         reason: options?.reason || 'unknown',
         messageId: snapshot.messageId,
         offsetTop: Math.round(snapshot.offsetTop),

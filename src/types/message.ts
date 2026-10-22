@@ -572,6 +572,7 @@ export interface MessageMetadata {
     count: number;
   };
   visibility?: string;
+  memoryAudience?: string[];
   cachePolicy?: Record<string, unknown>;
 }
 

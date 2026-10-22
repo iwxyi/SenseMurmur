@@ -15,6 +15,7 @@ import { applyCalendarAutoPatchForChat, buildCalendarAutoPatchRuntimeEventPayloa
 import { applyPresenceUpdateToTransition } from './characterPresence';
 import { buildBranchStateWithHead, isMessageBranchingEnabled } from './messageBranching';
 import { buildChatRuntimeDeltaPatch } from './chatRuntimeDelta';
+import { scheduleFactRecording } from './factualMemory';
 
 export const __resetDeferredLlmDistillationStateForTests = __resetDeferredMemoryAnalysisStateForTests;
 export const __flushDeferredLlmDistillationForTests = __flushDeferredMemoryAnalysisForTests;
@@ -84,8 +85,7 @@ function scheduleCalendarAutoPatch(params: {
   appendEventMessage: (chatId: string, payload: DriverMessageCommitResult['runtimeEvents'][number], sourceMessageId?: string) => Promise<void>;
   appendEventMessages?: (chatId: string, payloads: DriverMessageCommitResult['runtimeEvents'], sourceMessageId?: string) => Promise<void>;
 }) {
-  let task!: Promise<void>;
-  task = (async () => {
+  const task = (async () => {
     try {
       const autoPatch = await applyCalendarAutoPatchForChat({
         chat: params.chat,
@@ -108,10 +108,10 @@ function scheduleCalendarAutoPatch(params: {
         error,
         userMessage: '日历冲突自动修正失败，可在日历页手动应用草案。',
       });
-    } finally {
-      deferredCalendarAutoPatchTasks.delete(task);
     }
-  })();
+  })().finally(() => {
+    deferredCalendarAutoPatchTasks.delete(task);
+  });
   deferredCalendarAutoPatchTasks.add(task);
   void task;
 }
@@ -156,7 +156,9 @@ async function finishAppliedSessionTransition(params: {
     }
   }
   const nextCharacters = applyTransitionToCharacters(params.characters, transitionWithRecall);
-  let nextChat = applyTransitionToChat(params.chat, transitionWithRecall);
+  const nextChat = applyTransitionToChat(params.chat, transitionWithRecall);
+  scheduleFactRecording({ api: params.api, chat: params.getCurrentChat?.(params.chatId) || nextChat,
+    messages: params.currentMessages, message: params.persistedMessage, appendEventMessage: params.appendEventMessage });
   if (shouldRunCalendarAutoPatchForTransition(transitionWithRecall)) {
     scheduleCalendarAutoPatch({
       api: params.api,

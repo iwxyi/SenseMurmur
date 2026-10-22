@@ -51,7 +51,7 @@ describe('MessageList narrative reveal eligibility', () => {
         buildMessage('three', { senderId: 'char-2', timestamp: 3_000 }),
         buildMessage('four', { senderId: 'char-2', timestamp: 100_000 }),
       ],
-      eventRenderFlags: { developerMode: false, showStateEvents: false, showRelationshipEvents: false, showAffectEvents: false, showMemoryDebug: false, showMemoryDistillationEvents: false, showCalendarEvents: false, showLocalInterceptionHints: false, showConflictEvents: false },
+      eventRenderFlags: { developerMode: false, showStateEvents: false, showRelationshipEvents: false, showAffectEvents: false, showMemoryDebug: false, showMemoryDistillationEvents: false, showDetailedFactHints: false, showCalendarEvents: false, showLocalInterceptionHints: false, showConflictEvents: false },
       showDeveloperDetails: false,
     });
 
@@ -108,6 +108,7 @@ describe('MessageList narrative reveal eligibility', () => {
         showAffectEvents: false,
         showMemoryDebug: false,
         showMemoryDistillationEvents: false,
+        showDetailedFactHints: false,
         showCalendarEvents: false,
         showLocalInterceptionHints: false,
         showConflictEvents: false,

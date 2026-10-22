@@ -569,6 +569,35 @@ describe('chatEngine streaming preview', () => {
     expect(generateResponseMock.mock.calls[1]?.[2]).toEqual(generateResponseMock.mock.calls[0]?.[2]);
   });
 
+  it('accepts unique display names in continuity participantIds with a debug log and no retry', async () => {
+    generateResponseMock.mockReset();
+    const mei = buildCharacter('mei', '美羊羊');
+    const hui = buildCharacter('hui', '灰太狼');
+    const response = (participantIds: string[]) => JSON.stringify({
+      messages: [{ content: '今晚我来核对账目。', addressedTargets: { targetIds: ['hui'], primaryTargetId: 'hui' } }],
+      conversationUpdate: { items: [{ key: 'check-ledger', kind: 'commitment', status: 'established',
+        summary: '今晚核对账目', participantIds, evidenceText: '今晚我来核对账目。' }] },
+    });
+    generateResponseMock.mockResolvedValueOnce(response(['美羊羊']))
+      .mockResolvedValueOnce(response(['mei']));
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const message = await generateSpeakerMessage({ chat: buildChat(), speaker: mei,
+        characters: [mei, hui], messages: [], apiConfig: buildProfiles() });
+      expect(generateResponseMock).toHaveBeenCalledTimes(1);
+      expect(message.metadata?.conversationUpdate?.items[0].participantIds).toEqual(['mei']);
+      expect(debug).toHaveBeenCalledWith('[ai-generation-failure]', expect.objectContaining({
+        reason: 'member_reference_name_fallback',
+        details: { corrections: [{ field: 'conversationUpdate.items[0].participantIds[0]', value: '美羊羊', resolvedId: 'mei' }] },
+      }));
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      debug.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
   it('retries wrong state evidence and keeps the valid result on the same speaker', async () => {
     generateResponseMock.mockReset();
     const update = (evidenceText: string) => ({ items: [{ key: 'report', kind: 'commitment', status: 'resolved',

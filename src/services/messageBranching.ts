@@ -289,8 +289,15 @@ export function projectActiveBranchMessages(
     }
   }
   const oldestPathNode = path.at(-1);
+  // Opening messages and runtime events can be written outside the reply
+  // chain. They are timeline entries, not evidence of a severed branch.
+  const timelineIds = new Set(nodes.filter((node) => !isRecord(node.message.metadata?.branching)
+    && !excluded.has(node.nodeId)
+    && (node.message.type === 'event'
+      || (oldestPathNode && compareMessageOrder(node.message, oldestPathNode.message) < 0)))
+    .map((node) => node.nodeId));
   if (!failure && oldestPathNode && isRecord(oldestPathNode.message.metadata?.branching)
-    && nodes.some((node) => !pathIds.has(node.nodeId) && !excluded.has(node.nodeId)
+    && nodes.some((node) => !pathIds.has(node.nodeId) && !excluded.has(node.nodeId) && !timelineIds.has(node.nodeId)
       && compareMessageOrder(node.message, oldestPathNode.message) < 0)) failure = 'disconnected-history';
   if (failure) {
     const liveIds = new Set(messages.flatMap((message) => [message.id, stableMessageId(message), resolveMessageNodeId(message)]));
@@ -320,15 +327,9 @@ export function projectActiveBranchMessages(
     return fallback;
   }
   path.reverse();
-  const oldest = path[0];
-  // Legacy messages have a chronological timeline but no explicit edges.
-  // Preserve that prefix when new nodes attach to its last message.
-  if (oldest && !isRecord(oldest.message.metadata?.branching)) {
-    const prefix = visible.filter((message) => !isRecord(message.metadata?.branching)
-      && compareMessageOrder(message, oldest.message) < 0).sort(compareMessageOrder);
-    return [...prefix, ...path.map((node) => node.message)];
-  }
-  return path.map((node) => node.message);
+  if (!timelineIds.size) return path.map((node) => node.message);
+  return nodes.filter((node) => pathIds.has(node.nodeId) || timelineIds.has(node.nodeId))
+    .map((node) => node.message).sort(compareMessageOrder);
 }
 
 export function getActiveBranchTail(chat: BranchableChat | null | undefined, messages: Message[]) {

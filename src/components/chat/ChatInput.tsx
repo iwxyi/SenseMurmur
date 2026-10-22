@@ -37,6 +37,7 @@ interface ChatInputProps {
   onSend: (content: string, attachments?: MessageAttachment[], mentions?: CharacterMention[]) => void | Promise<void>;
   onClose?: () => void;
   placeholderOverride?: string;
+  isStoryRoom?: boolean;
   sendingLabel?: string;
   hideSpeakAsChip?: boolean;
   onSendError?: (message: string) => void;
@@ -92,7 +93,7 @@ function buildAttachmentId() {
   return `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export default function ChatInput({ inputHandleRef, mentionCharacters = [], draftKey, mode, characterName, onSend, onClose, placeholderOverride, sendingLabel, hideSpeakAsChip, onSendError, onOpenPanel, onDraftActivity, inputCapabilities, inputCapabilityWarning, autoFocus, topContent, injectedAttachments, onInjectedAttachmentsConsumed, isReplyPending = false, onStopReply, disabled = false, disabledReason, composerState }: ChatInputProps) {
+export default function ChatInput({ inputHandleRef, mentionCharacters = [], draftKey, mode, characterName, onSend, onClose, placeholderOverride, isStoryRoom = false, sendingLabel, hideSpeakAsChip, onSendError, onOpenPanel, onDraftActivity, inputCapabilities, inputCapabilityWarning, autoFocus, topContent, injectedAttachments, onInjectedAttachmentsConsumed, isReplyPending = false, onStopReply, disabled = false, disabledReason, composerState }: ChatInputProps) {
   const [text, setText] = useState(() => readComposerDraft(draftKey).text);
   const [mentions, setMentions] = useState<CharacterMention[]>(() => readComposerDraft(draftKey).mentions);
   const [attachments, setAttachments] = useState<MessageAttachment[]>(() => readComposerDraft(draftKey).attachments);
@@ -383,7 +384,7 @@ export default function ChatInput({ inputHandleRef, mentionCharacters = [], draf
       ? t('controls.speakAsPlaceholder', { name: characterName })
       : mode === 'memberSpeak'
         ? t('controls.memberSpeakPlaceholder')
-        : t('controls.topicGuidePlaceholder')
+        : isStoryRoom ? t('controls.topicGuidePlaceholder') : ''
   );
 
   const inputHasTextSelection = useCallback(() => {

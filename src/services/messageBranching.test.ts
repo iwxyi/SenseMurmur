@@ -37,6 +37,32 @@ function message(id: string, type: Message['type'], parentNodeId: string | null,
 }
 
 describe('messageBranching v2', () => {
+  it('keeps a linear group conversation with standalone events and an unbranched opening without reporting disconnected history', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const opening = { ...message('linear-opening', 'god', null, 1), metadata: undefined };
+      let current = chat({ messageBranchState: { enabled: true } });
+      const messages: Message[] = [opening];
+      const expectCompleteTimeline = () => {
+        expect(projectActiveBranchMessages(current, messages).map((item) => item.id)).toEqual(messages.map((item) => item.id));
+      };
+      expectCompleteTimeline();
+      let parent: string | null = null;
+      for (let turn = 0; turn < 16; turn += 1) {
+        const reply = message(`linear-reply-${turn}`, 'ai', parent, turn * 2 + 2);
+        messages.push(reply);
+        current = { ...current, messageBranchState: buildBranchStateWithHead(current.messageBranchState, reply.id) };
+        expectCompleteTimeline();
+        messages.push({ ...message(`linear-event-${turn}`, 'event', null, turn * 2 + 3), metadata: undefined });
+        expectCompleteTimeline();
+        parent = reply.id;
+      }
+      const reloaded = JSON.parse(JSON.stringify(messages)) as Message[];
+      expect(projectActiveBranchMessages(current, reloaded).map((item) => item.id)).toEqual(messages.map((item) => item.id));
+      expect(error).not.toHaveBeenCalled();
+    } finally { error.mockRestore(); }
+  });
+
   it('shows severed historical roots chronologically and reports the contraction without developer mode', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {

@@ -9,6 +9,7 @@ export interface EventRenderFlags {
   showConflictEvents: boolean;
   showStateEvents: boolean;
   showMemoryDistillationEvents: boolean;
+  showDetailedFactHints: boolean;
   showCalendarEvents: boolean;
   showMemoryDebug: boolean;
   showLocalInterceptionHints: boolean;
@@ -44,6 +45,7 @@ export function shouldRenderDeveloperEvent(payload: { eventType?: string }, flag
   if (['speaker_drift_shift', 'speaker_emotion_shift', 'target_emotion_shift'].includes(String(payload.eventType))) return flags.showAffectEvents;
   if (isConflictDeveloperEvent(payload.eventType)) return flags.showConflictEvents;
   if (isStateDeveloperEvent(payload.eventType)) return flags.showStateEvents;
+  if (payload.eventType === 'detailed_fact_recorded') return flags.showDetailedFactHints;
   if (payload.eventType === 'memory_distillation') return flags.showMemoryDistillationEvents || flags.showMemoryDebug;
   if (isCalendarDeveloperEvent(payload.eventType)) return flags.showCalendarEvents;
   if (payload.eventType === 'memory_reactivation') return flags.showMemoryDebug;

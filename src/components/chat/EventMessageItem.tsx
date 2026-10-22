@@ -36,6 +36,7 @@ function buildEventTypeChip(payload: { eventType?: string; metrics?: unknown }) 
     room_state_snapshot_v2: { label: '态势', color: 'primary' },
     analysis_run_policy: { label: '审议', color: 'info' },
     memory_distillation: { label: '蒸馏', color: 'info' },
+    detailed_fact_recorded: { label: '事实', color: 'info' },
     memory_reactivation: { label: '回温', color: 'warning' },
     calendar_item_patch: { label: '日历', color: 'info' },
     calendar_patch_apply_result: { label: '日历', color: 'info' },
@@ -100,11 +101,12 @@ export default function EventMessageItem({ message, members = [] }: { message: M
   const showAffectEvents = useSettingsStore((state) => state.developerUI.showAffectEvents);
   const showConflictEvents = useSettingsStore((state) => state.developerUI.showConflictEvents);
   const showStateEvents = useSettingsStore((state) => state.developerUI.showStateEvents);
+  const showDetailedFactHints = useSettingsStore((state) => state.developerUI.showDetailedFactHints);
   const showMemoryDistillationEvents = useSettingsStore((state) => state.developerUI.showMemoryDistillationEvents);
   const showCalendarEvents = useSettingsStore((state) => state.developerUI.showCalendarEvents);
   const showLocalInterceptionHints = useSettingsStore((state) => state.developerUI.showLocalInterceptionHints);
 
-  const flags = { developerMode, showRelationshipEvents, showAffectEvents, showConflictEvents, showStateEvents, showMemoryDistillationEvents, showCalendarEvents, showMemoryDebug, showLocalInterceptionHints };
+  const flags = { developerMode, showRelationshipEvents, showAffectEvents, showConflictEvents, showStateEvents, showMemoryDistillationEvents, showDetailedFactHints, showCalendarEvents, showMemoryDebug, showLocalInterceptionHints };
   if (!shouldRenderEventMessage(message, flags)) return null;
   const payload: { eventType?: string; title?: string; summary?: string; pair?: string[]; metrics?: unknown } = getRuntimeEventPayload(message);
 
