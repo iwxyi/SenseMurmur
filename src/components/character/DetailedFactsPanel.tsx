@@ -46,7 +46,8 @@ export function DetailedFactsPanel({ archive }: { archive: ReturnType<typeof use
       : items.length ? <Stack spacing={1} sx={{ minWidth: 0 }}>
         {(expanded ? items : items.slice(0, 3)).map((fact) => <Box key={fact.id} sx={{ p: { xs: 1, sm: 1.15 }, borderRadius: 2, bgcolor: 'action.hover', border: '1px solid', borderColor: 'rgba(148, 163, 184, 0.12)', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
           <Stack spacing={0.6} sx={{ minWidth: 0 }}>
-            <Typography variant="body2" sx={{ minWidth: 0, fontWeight: 700, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{sanitizeUserFacingText(fact.text, characters, { preserveLineBreaks: true })}</Typography>
+            {fact.title ? <Typography variant="subtitle2" sx={{ minWidth: 0, fontWeight: 700, overflowWrap: 'anywhere' }}>{sanitizeUserFacingText(fact.title, characters)}</Typography> : null}
+            <Typography variant="body2" sx={{ minWidth: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{sanitizeUserFacingText(fact.text, characters, { preserveLineBreaks: true })}</Typography>
             <Stack direction="row" sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 0.6 }}>
               <StatChipRow items={[
                 statusLabels[fact.status],

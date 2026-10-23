@@ -1,4 +1,5 @@
 export interface DetailedFact {
+  title?: string;
   userDeleted?: boolean;
   text: string;
   status: 'asserted' | 'agreed' | 'proposed' | 'disputed';
@@ -37,6 +38,7 @@ export interface FactArchiveEntry {
 }
 
 export interface RecalledFact {
+  title?: string;
   userDeleted?: boolean;
   id: string;
   text: string;
@@ -84,6 +86,9 @@ export function parseDetailedFacts(raw: string, allowedIds: Set<string>, anchorI
     const path = `facts[${index}]`;
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new FactExtractionValidationError(path, 'expected a fact object');
     const fact = item as Record<string, unknown>;
+    if (fact.title !== undefined && (typeof fact.title !== 'string' || !fact.title.trim() || fact.title.length > 80)) {
+      throw new FactExtractionValidationError(`${path}.title`, 'expected non-empty title of at most 80 characters');
+    }
     if (fact.retracted !== undefined && typeof fact.retracted !== 'boolean') {
       throw new FactExtractionValidationError(`${path}.retracted`, 'expected a boolean');
     }
@@ -123,7 +128,8 @@ export function parseDetailedFacts(raw: string, allowedIds: Set<string>, anchorI
     if (fact.retracted === true && !mergedFrom.length) {
       throw new FactExtractionValidationError(`${path}.mergeWith`, 'retraction must reference an existing fact');
     }
-    return [{ text: fact.text.trim(), status: fact.status as DetailedFact['status'], sourceIds: [...new Set(fact.sourceIds)] as string[],
+    return [{ ...(typeof fact.title === 'string' ? { title: fact.title.trim() } : {}),
+      text: fact.text.trim(), status: fact.status as DetailedFact['status'], sourceIds: [...new Set(fact.sourceIds)] as string[],
       ...(mergedFrom.length ? { mergedFrom } : {}), ...(fact.retracted === true ? { retracted: true } : {}) }];
   });
 }

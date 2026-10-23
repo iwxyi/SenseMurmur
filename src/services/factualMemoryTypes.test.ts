@@ -2,6 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { collapseMergedFacts, parseDetailedFacts, type FactMergeCandidate } from './factualMemoryTypes';
 
 describe('parseDetailedFacts', () => {
+  it('preserves a title and complete grouped details with their earlier evidence', () => {
+    const fact = { title: '关羽的支用与拜帖礼账目', text: '支用：盘缠十五贯、草料九贯、关隘打点四贯，共二十八贯；礼数：绢四匹、茶两担，折十二贯。分列核账。',
+      status: 'asserted', sourceIds: ['m1', 'm2'] };
+    expect(parseDetailedFacts(JSON.stringify({ facts: [fact] }), new Set(['m1', 'm2']), 'm2')).toEqual([fact]);
+    expect(() => parseDetailedFacts(JSON.stringify({ facts: [{ ...fact, title: '' }] }), new Set(['m1', 'm2']), 'm2')).toThrow('title');
+  });
   it('deleting a merged fact hides stale copies without resurrecting replaced versions', () => {
     expect(collapseMergedFacts([
       { id: 'm1:0', chatId: 'a' },

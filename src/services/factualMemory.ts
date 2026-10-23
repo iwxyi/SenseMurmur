@@ -21,14 +21,17 @@ export const FACT_EXTRACTION_PROMPT = `你为角色保存少量以后值得想�
 具体、已确认、有日期或有分工只说明信息清楚，保存还需要上述记忆价值。将来仍有实际用途的短期约定也可以保存，不以时间远近代替价值判断。详细事实服务于以后回忆；当前场景如何继续由聊天上下文承载，原话改写成完整陈述本身不增加记忆价值。
 例如在普通对账闲聊中，“念错就重念，念到对上，刘备准了”“明早对完账就动身，今晚核路费”只交代眼前流程，未体现值得以后查回的在意或后果，返回 facts=[]。若说“上次失约让我在雨里等了一夜，这次请一定来”，可保存具体经历及此次约定；“下次接头用青梅煮酒”应保存准确暗号。依据实际上下文判断，不能将例子当作关键词规则。
 通过价值判断后才处理增量：已有信息首次达成约定，或时间、数字、分工、条件发生对后续用途有影响的变化时，记录必要变化；确认或换一种说法不增加信息。
+以以后能独立查用的完整事项为保存单位。若一组清单、分类账目、步骤或条件共同服务于同一个后续用途，先判断整组是否值得记；决定保存后，保留该用途所需的各类明细、数字、单位、对应关系及适用条件，不因追求少量或简短只摘其中一项，也不把明细压成无法还原的总数。可以用一条事实完整记录相关分类；相互独立的用途可分条，不要求每次只记一条。与该用途无关的闲话不必收入。
+例如关羽交代路上要照着核账：“路上支用为盘缠十五贯、驿马草料九贯、两处关隘打点四贯，合二十八贯；拜帖礼为绢四匹、茶两担，折十二贯，礼数与盘缠分列”，若决定保存这份路上账目，应保留支用和礼数两类及其明细、分类小计和分列要求；不能只记十二贯礼数或只记总共四十贯。例子说明保存范围，不代表所有报数都值得记。已有事实只记录礼数，之后新消息补充或明确确认整份账目的支用与总额时，应结合所提供的原始上下文保留完整增量；不要因礼数已存就忽略同组其余新增信息，也不要虚构缺失项目。
 existingFacts 是当前分支上已保存、且本条消息受众均已知晓的有效记录，来源可以早于最近的上下文，不是新证据。已有事实的同义改写、无信息增量的确认不得再保存，返回 facts=[]。同一事项新增有效条件时，输出一条简洁完整的合并事实，并用 mergeWith 引用被合并记录的 ref，sourceIds 必须保留这些记录的全部来源及新消息。仅在状态一致且不存在矛盾时合并；不同说法和更正须明确保留，不得以合并删除。不同事项不要强行合并，不按说话人或句子拆条。
 若新消息明确指出已保存记录是误提取、误归属或误解，可用 retracted=true、mergeWith 引用错误记录，text 简述作废对象与依据，status 保持原记录状态，sourceIds 保留原来源及本条纠错消息。仅重复提及不作废；事情后来改变、提议被拒绝或有人持不同说法，均是新的经历，应记录变化或分歧，不能抹去曾发生的事。不要为猜测、模糊指代或缺少信息而删除记录。普通新增或合并省略 retracted。
 连续理解上下文：甲说“定个暗号吧”，乙说“青梅煮酒”，甲说“好，下次就用这个”，应记完整的暗号约定及逐字内容，引用三条来源。
-只提取 newMessage 对应的新消息的增量。contextMessages 仅用于理解指代和完整约定，不要提取其中的旧事实。新消息无值得保留的增量时返回 facts=[]。不要为了通过校验给旧事实补上新消息引用。提议尚未同意用 proposed；明确约定用 agreed；个人陈述用 asserted 并说明是谁说的，不能当作全知事实；冲突用 disputed 保留不同说法。
+以 newMessage 带来的有价值增量为触发点。contextMessages 可用于补全同一事项必需的关联内容，包括前文的分类明细、约定背景、对象和条件；新消息使该事项形成完整约定、获得后续查用价值或新增有效信息时，应将这些相关内容一起保存，并引用实际提供信息的各条消息。不要把“只提取增量”理解为正文只能写新消息中的半句话。与新消息无关的旧事实不另行提取；没有有价值增量的纯重复确认返回 facts=[]，不能仅给旧事实补上新消息引用来重复保存。提议尚未同意用 proposed；明确约定用 agreed；个人陈述用 asserted 并说明是谁说的，不能当作全知事实；冲突用 disputed 保留不同说法。
 更正写清旧内容、新内容和更正人。记录只作为角色所知，不替别人确认事实，不推测未公开的动机。不要把玩笑、假设、转述或角色扮演内事实升级为现实共识。
 重要原话逐字保留，不改写暗号、名字、数字。text 必须独立可读、非空且不超过1200个字符。每条事实的 sourceIds 为1至12个字符串，只能逐字复制 newMessage.id、contextMessages[].id 或被维护的 existingFacts[].sourceIds，不能使用人名或自行编造标识，且每条事实必须含 newMessageId。
 例如已有“下次接头暗号为青梅煮酒”，新话“好，我记下了”返回 facts=[]；“暗号改成白马渡江”保留更正；“只在渡口接头时使用”可合并补充适用条件。文本只写承载记忆价值的必要内容，来源引用保留完整证据。
-返回 {"facts":[{"text":"完整事实及知情局限","status":"asserted|agreed|proposed|disputed","sourceIds":["消息标识"],"mergeWith":["已有记录ref"]}]}，最多六条，通常零至一条。没有合并时 mergeWith=[]。`;
+每条事实包含 title 和 text。title 用简短具体的标题概括是谁的什么事项，最多80个字符，例如“关羽赴荆州的支用与拜帖礼账目”；避免“重要事实”“聊天记录”等空泛标题，不添加原文没有的结论。text 是可独立查用的完整正文，标题不能代替正文中的对象、数字、条件或知情局限。合并更新时标题随完整事项调整。
+返回 {"facts":[{"title":"具体事项标题","text":"完整事实及知情局限","status":"asserted|agreed|proposed|disputed","sourceIds":["消息标识"],"mergeWith":["已有记录ref"]}]}，无值得保存的信息时返回空数组；有则按完整事项组织，最多六条，不以减少条数为由漏记有价值的信息。没有合并时 mergeWith=[]。`;
 
 function cloudMode() { return useAuthStore.getState().authMode !== 'local' && isCloudSyncEnabled(); }
 function idOf(message: Message) { return message.serverId || message.id; }
@@ -191,7 +194,7 @@ export function scheduleFactRecording(params: { api: APIConfig; chat: GroupChat;
       const input = [{ role: 'user' as const, content: JSON.stringify({
         newMessageId: anchorId, newMessage: toInput(sources.find((source) => source.id === anchorId)!),
         contextMessages: sources.filter((source) => source.id !== anchorId).map(toInput),
-        existingFacts: [...mergeCandidates].map(([ref, { fact }]) => ({ ref, text: fact.text, status: fact.status, sourceIds: fact.sourceIds })),
+        existingFacts: [...mergeCandidates].map(([ref, { fact }]) => ({ ref, title: fact.title, text: fact.text, status: fact.status, sourceIds: fact.sourceIds })),
       }) }];
       const generate = (prompt: string) => generateJsonResponse(params.api, prompt, input,
         { signal, maxTokens: 2000, aiUsage: { type: 'memory_refinement', label: '具体事实记录' } });
@@ -230,7 +233,7 @@ export function scheduleFactRecording(params: { api: APIConfig; chat: GroupChat;
         try {
           await params.appendEventMessage(params.chat.id, {
             eventType: 'detailed_fact_recorded', title: '详细事实已保存',
-            summary: `${changes}详细事实：\n${facts.map((fact, index) => `${index + 1}. ${fact.retracted ? '【作废】' : fact.mergedFrom?.length ? '【合并更新】' : ''}${sanitizeUserFacingText(fact.text, [], { preserveLineBreaks: true })}`).join('\n')}`,
+            summary: `${changes}详细事实：\n${facts.map((fact, index) => `${index + 1}. ${fact.retracted ? '【作废】' : fact.mergedFrom?.length ? '【合并更新】' : ''}${fact.title ? `${sanitizeUserFacingText(fact.title)}\n` : ''}${sanitizeUserFacingText(fact.text, [], { preserveLineBreaks: true })}`).join('\n')}`,
             visibilityScope: 'moderator_only',
           }, params.message.id);
         } catch (error) {
@@ -308,7 +311,7 @@ export function recallLocalFacts(actorId?: string, destination?: GroupChat, incl
       if (sources.some((source) => !source || source.invalid || (head ? !active.has(source.nodeId) : Boolean(source.parentNodeId))
         || (actorId !== undefined && !source.audience.includes(actorId)) || audience.some((id) => !source.audience.includes(id))
         || recordedSources.get(source.id) !== source.content)) return [];
-      return [{ id: `${entry.messageId}:${index}`, text: fact.text, status: fact.status, timestamp: entry.sources.at(-1)?.timestamp || 0, chatId: chat.id,
+      return [{ id: `${entry.messageId}:${index}`, ...(fact.title ? { title: fact.title } : {}), text: fact.text, status: fact.status, timestamp: entry.sources.at(-1)?.timestamp || 0, chatId: chat.id,
         userDeleted: localDeletion(chat.id, `${entry.messageId}:${index}`)?.deleted,
         knownByIds: sources.reduce<string[]>((ids, source) => ids.filter((id) => source!.audience.includes(id)), sources[0]!.audience),
         ...(fact.retracted ? { retracted: true } : {}),
@@ -416,5 +419,5 @@ export async function buildDetailedFactPrompt(apiConfig: APIConfig, chat: GroupC
   }
   if (!selected.length) return '';
   return '\n你亲历或听说过的具体记忆（个人陈述不等于真相，提议不等于已约定；留意更正与时间，不必逐条回应）：\n'
-    + selected.map((fact) => `- ${new Date(fact.timestamp).toISOString()} [${fact.status}] ${sanitizeUserFacingText(fact.text)}`).join('\n');
+    + selected.map((fact) => `- ${new Date(fact.timestamp).toISOString()} [${fact.status}] ${fact.title ? `${sanitizeUserFacingText(fact.title)}：` : ''}${sanitizeUserFacingText(fact.text)}`).join('\n');
 }

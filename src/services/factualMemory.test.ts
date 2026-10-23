@@ -70,6 +70,21 @@ describe('detailed fact recording notifications', () => {
     expect(appendEventMessage).not.toHaveBeenCalled();
   });
 
+  it('stores titles and related earlier details together with their evidence and debug hint', async () => {
+    mocks.chats = [chat];
+    const earlier = { ...message, id: 'earlier', content: '盘缠十五贯、草料九贯、打点四贯，合二十八贯。', timestamp: 99 };
+    const fact = { title: '关羽的支用与礼数账目', text: '路上支用二十八贯，其中盘缠十五贯、草料九贯、打点四贯；礼数十二贯，分列核账。',
+      status: 'asserted', sourceIds: [earlier.id, message.id] };
+    mocks.generate.mockResolvedValue(JSON.stringify({ facts: [fact] }));
+    const appendEventMessage = vi.fn();
+    scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [earlier], appendEventMessage });
+    await flushFactRecording();
+    expect(useFactArchiveStore.getState().chats[chat.id].entries[message.id].facts).toEqual([fact]);
+    expect(await listConversationDetailedFacts(chat.id)).toMatchObject([{ title: fact.title, text: fact.text }]);
+    expect(appendEventMessage.mock.calls[0][1].summary).toContain(`${fact.title}\n${fact.text}`);
+    expect(JSON.parse(mocks.generate.mock.calls[0][2][0].content).contextMessages).toMatchObject([{ id: earlier.id, content: earlier.content }]);
+  });
+
   it('persists deletion and undo without removing the shared fact or changing its index', async () => {
     mocks.chats = [chat];
     scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [], appendEventMessage: vi.fn() });
