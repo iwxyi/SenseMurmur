@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { collapseMergedFacts, parseDetailedFacts, type FactMergeCandidate } from './factualMemoryTypes';
 
 describe('parseDetailedFacts', () => {
+  it('deleting a merged fact hides stale copies without resurrecting replaced versions', () => {
+    expect(collapseMergedFacts([
+      { id: 'm1:0', chatId: 'a' },
+      { id: 'm2:0', chatId: 'a', mergedFrom: [{ messageId: 'm1', factIndex: 0 }] },
+      { id: 'm2:0', chatId: 'a', userDeleted: true, mergedFrom: [{ messageId: 'm1', factIndex: 0 }] },
+    ])).toEqual([]);
+  });
   it.each([
     [{ text: '', status: 'agreed', sourceIds: ['m1'] }, 'facts[0].text'],
     [{ text: '事实', status: 'established', sourceIds: ['m1'] }, 'facts[0].status'],

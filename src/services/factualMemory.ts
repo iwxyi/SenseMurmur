@@ -41,6 +41,47 @@ function resolveServerId(id: string) {
       .find((source) => source.id === id || source.nodeId === id)?.serverId || id;
 }
 
+function localDeletion(chatId: string, factId: string) {
+  const canonical = canonicalFactId(factId);
+  return Object.entries(useFactArchiveStore.getState().chats[chatId]?.deletions || {})
+    .find(([id]) => canonicalFactId(id) === canonical)?.[1];
+}
+
+function canonicalFactId(id: string) {
+  const split = id.lastIndexOf(':');
+  return `${resolveServerId(id.slice(0, split))}${id.slice(split)}`;
+}
+
+function saveDeletion(chatId: string, factId: string, deleted: boolean, synced: boolean) {
+  const canonical = canonicalFactId(factId);
+  const existingKey = Object.keys(useFactArchiveStore.getState().chats[chatId]?.deletions || {})
+    .find((id) => canonicalFactId(id) === canonical);
+  useFactArchiveStore.getState().setDeletion(chatId, existingKey || factId, deleted, synced);
+}
+
+async function syncFactDeletion(chatId: string, factId: string, deleted: boolean) {
+  const split = factId.lastIndexOf(':');
+  try {
+    await api.request('POST', `/chats/${encodeURIComponent(chatId)}/fact-archive/deletion`, {
+      messageId: resolveServerId(factId.slice(0, split)), factIndex: Number(factId.slice(split + 1)), deleted,
+    });
+    return true;
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'MEMORY_BRANCH_SOURCE_MISSING') return false;
+    throw error;
+  }
+}
+
+export async function setDetailedFactDeleted(fact: RecalledFact, deleted: boolean) {
+  const signal = getWorkspaceSignal();
+  await ensureArchiveHydrated();
+  assertWorkspaceActive(signal);
+  const synced = cloudMode() ? await syncFactDeletion(fact.chatId, fact.id, deleted) : false;
+  assertWorkspaceActive(signal);
+  saveDeletion(fact.chatId, fact.id, deleted, synced);
+  await flushBufferedPersistenceWrites();
+}
+
 interface MaintenanceCandidate extends FactMergeCandidate { sources: FactEvidence[] }
 
 async function factMaintenanceContext(chat: GroupChat, anchor: FactEvidence, signal: AbortSignal): Promise<MaintenanceCandidate[]> {
@@ -60,7 +101,8 @@ async function factMaintenanceContext(chat: GroupChat, anchor: FactEvidence, sig
       || anchor.audience.some((id) => !source.audience.includes(id))
       || !entry.sources.some((recorded) => recorded.id === source.id && recorded.content === source.content))) return [];
     return [{ id: `${entry.messageId}:${factIndex}`, chatId: chat.id, messageId: entry.messageId, factIndex, fact,
-      mergedFrom: fact.mergedFrom, retracted: fact.retracted, sources: sources as FactEvidence[] }];
+      mergedFrom: fact.mergedFrom, retracted: fact.retracted,
+      userDeleted: localDeletion(chat.id, `${entry.messageId}:${factIndex}`)?.deleted, sources: sources as FactEvidence[] }];
   }));
   if (!cloudMode()) return collapseMergedFacts(local);
   let cloud: { items: MaintenanceCandidate[] };
@@ -69,8 +111,7 @@ async function factMaintenanceContext(chat: GroupChat, anchor: FactEvidence, sig
   } catch (error) {
     assertWorkspaceActive(signal);
     if (!(error instanceof ApiError) || error.code !== 'MEMORY_BRANCH_SOURCE_MISSING') throw error;
-    reportRecoverableWarning({ location: 'memory.fact-maintenance-pending', error,
-      message: '云端来源尚未同步，本次使用已验证的本机存档维护事实。' });
+    // Local-first source delivery is expected to lag; keep validated local context.
     return collapseMergedFacts(local);
   }
   assertWorkspaceActive(signal);
@@ -83,16 +124,21 @@ async function factMaintenanceContext(chat: GroupChat, anchor: FactEvidence, sig
   const localId = (id: string) => aliases.get(id) || id;
   useFactArchiveStore.getState().capture(chat.id, cloud.items.flatMap((item) => item.sources)
     .map((source) => ({ ...source, id: localId(source.id), serverId: source.id })));
-  const candidates = [...cloud.items.filter((item) => !item.sources.some((source) => {
+  const candidates = [...local, ...cloud.items.filter((item) => !item.sources.some((source) => {
     const captured = archive.nodes[source.nodeId] || nodes.get(localId(source.id));
     return captured?.invalid || (captured?.content && captured.content !== source.content);
   })).map((item) => ({ ...item, messageId: localId(item.messageId),
     fact: { ...item.fact, sourceIds: item.fact.sourceIds.map(localId),
       mergedFrom: item.fact.mergedFrom?.map((ref) => ({ ...ref, messageId: localId(ref.messageId) })) },
-    sources: item.sources.map((source) => ({ ...source, id: localId(source.id), serverId: source.id })) })), ...local];
+    sources: item.sources.map((source) => ({ ...source, id: localId(source.id), serverId: source.id })) }))];
   return collapseMergedFacts([...new Map(candidates.map((item) => {
     const id = `${item.messageId}:${item.factIndex}`;
-    return [id, { ...item, id, chatId: chat.id, mergedFrom: item.fact.mergedFrom, retracted: item.fact.retracted }] as const;
+    const deletion = localDeletion(chat.id, id);
+    if (item.fact.userDeleted !== undefined && (!deletion || deletion.synced) && (item.fact.userDeleted || deletion)) {
+      saveDeletion(chat.id, id, item.fact.userDeleted, true);
+    }
+    return [id, { ...item, id, chatId: chat.id, mergedFrom: item.fact.mergedFrom, retracted: item.fact.retracted,
+      userDeleted: deletion && !deletion.synced ? deletion.deleted : item.fact.userDeleted ?? ('userDeleted' in item ? item.userDeleted : false) }] as const;
   })).values()]);
 }
 
@@ -184,7 +230,7 @@ export function scheduleFactRecording(params: { api: APIConfig; chat: GroupChat;
         try {
           await params.appendEventMessage(params.chat.id, {
             eventType: 'detailed_fact_recorded', title: '详细事实已保存',
-            summary: `${changes}详细事实：\n${facts.map((fact, index) => `${index + 1}. 【${fact.retracted ? '作废' : fact.mergedFrom?.length ? '合并更新' : '新增'}】${sanitizeUserFacingText(fact.text, [], { preserveLineBreaks: true })}`).join('\n')}`,
+            summary: `${changes}详细事实：\n${facts.map((fact, index) => `${index + 1}. ${fact.retracted ? '【作废】' : fact.mergedFrom?.length ? '【合并更新】' : ''}${sanitizeUserFacingText(fact.text, [], { preserveLineBreaks: true })}`).join('\n')}`,
             visibilityScope: 'moderator_only',
           }, params.message.id);
         } catch (error) {
@@ -230,8 +276,7 @@ async function syncEntry(chatId: string, entry: FactArchiveEntry) {
     });
   } catch (error) {
     if (!(error instanceof ApiError) || !['MEMORY_BRANCH_SOURCE_MISSING', 'MEMORY_MERGE_SOURCE_PENDING'].includes(error.code || '')) throw error;
-    reportRecoverableWarning({ location: 'memory.fact-sync-pending', error,
-      message: '云端分支来源或被合并事实尚不完整，保留本机事实等待后续同步；未跳过证据校验。' });
+    // Leave the entry unsynced until its evidence and merge targets arrive.
     return;
   }
   useFactArchiveStore.getState().save(chatId, { ...entry, synced: true });
@@ -239,11 +284,11 @@ async function syncEntry(chatId: string, entry: FactArchiveEntry) {
 
 export async function flushFactRecording() { await Promise.all([...tasks.values()]); }
 
-export function recallLocalFacts(actorId: string, destination?: GroupChat, includeMerged = false): RecalledFact[] {
+export function recallLocalFacts(actorId?: string, destination?: GroupChat, includeMerged = false, sourceChatId?: string): RecalledFact[] {
   const chats = useChatStore.getState().chats;
   const archives = useFactArchiveStore.getState().chats;
-  const audience = destination ? ['user', ...destination.memberIds] : [actorId];
-  return chats.filter((chat) => !chat.deletedAt).flatMap((chat) => {
+  const audience = destination ? ['user', ...destination.memberIds] : actorId ? [actorId] : [];
+  return chats.filter((chat) => !chat.deletedAt && (!sourceChatId || chat.id === sourceChatId)).flatMap((chat) => {
     const archive = archives[chat.id];
     if (!archive) return [];
     const state = chat.messageBranchState;
@@ -261,9 +306,10 @@ export function recallLocalFacts(actorId: string, destination?: GroupChat, inclu
       const sources = fact.sourceIds.map((id) => Object.values(archive.nodes).find((source) => source.id === id));
       const recordedSources = new Map(entry.sources.map((source) => [source.id, source.content]));
       if (sources.some((source) => !source || source.invalid || (head ? !active.has(source.nodeId) : Boolean(source.parentNodeId))
-        || !source.audience.includes(actorId) || audience.some((id) => !source.audience.includes(id))
+        || (actorId !== undefined && !source.audience.includes(actorId)) || audience.some((id) => !source.audience.includes(id))
         || recordedSources.get(source.id) !== source.content)) return [];
       return [{ id: `${entry.messageId}:${index}`, text: fact.text, status: fact.status, timestamp: entry.sources.at(-1)?.timestamp || 0, chatId: chat.id,
+        userDeleted: localDeletion(chat.id, `${entry.messageId}:${index}`)?.deleted,
         knownByIds: sources.reduce<string[]>((ids, source) => ids.filter((id) => source!.audience.includes(id)), sources[0]!.audience),
         ...(fact.retracted ? { retracted: true } : {}),
         ...(fact.mergedFrom ? { mergedFrom: fact.mergedFrom } : {}) }];
@@ -277,13 +323,23 @@ async function ensureArchiveHydrated() {
 }
 
 export async function listDetailedFacts(actorId: string, destination?: GroupChat): Promise<RecalledFact[]> {
+  return readDetailedFacts({ actorId, destination });
+}
+
+export async function listConversationDetailedFacts(chatId: string): Promise<RecalledFact[]> {
+  return readDetailedFacts({ sourceChatId: chatId });
+}
+
+async function readDetailedFacts({ actorId, destination, sourceChatId }: { actorId: string; destination?: GroupChat; sourceChatId?: never } | { actorId?: never; destination?: never; sourceChatId: string }): Promise<RecalledFact[]> {
   const signal = getWorkspaceSignal();
   await ensureArchiveHydrated();
   await flushFactRecording();
   assertWorkspaceActive(signal);
-  if (!cloudMode()) return recallLocalFacts(actorId, destination);
+  const localFacts = (includeMerged = false) => recallLocalFacts(actorId, destination, includeMerged, sourceChatId);
+  if (!cloudMode()) return localFacts();
   // A failed save stays retryable. Never mark a checkpoint before durable storage.
   for (const [chatId, archive] of Object.entries(useFactArchiveStore.getState().chats)) {
+    if (sourceChatId && sourceChatId !== chatId) continue;
     for (const entry of Object.values(archive.entries)) {
       if (entry.synced) continue;
       try {
@@ -294,27 +350,46 @@ export async function listDetailedFacts(actorId: string, destination?: GroupChat
           userMessage: '部分详细事实尚未同步，继续查询已保存的事实；未同步记录保留以便重试。' });
       }
     }
+    for (const [id, deletion] of Object.entries(archive.deletions || {})) {
+      if (deletion.synced) continue;
+      const synced = await syncFactDeletion(chatId, id, deletion.deleted);
+      assertWorkspaceActive(signal);
+      if (synced) useFactArchiveStore.getState().setDeletion(chatId, id, deletion.deleted, true);
+    }
   }
   let response: { items: RecalledFact[] };
   try {
-    response = destination
+    response = sourceChatId
+      ? await api.request<{ items: RecalledFact[] }>('POST', `/chats/${encodeURIComponent(sourceChatId)}/fact-archive/list`, {})
+      : destination
       ? await api.request<{ items: RecalledFact[] }>('POST', `/chats/${encodeURIComponent(destination.id)}/fact-recall`, { actorId })
-      : await api.request<{ items: RecalledFact[] }>('POST', `/characters/${encodeURIComponent(actorId)}/fact-archive`, {});
+      : await api.request<{ items: RecalledFact[] }>('POST', `/characters/${encodeURIComponent(actorId!)}/fact-archive`, {});
   } catch (error) {
     assertWorkspaceActive(signal);
     if (!(error instanceof ApiError) || error.code !== 'MEMORY_BRANCH_SOURCE_MISSING') throw error;
-    reportRecoverableWarning({ location: 'memory.fact-recall-pending', error,
-      message: '云端分支来源尚不完整，本轮使用已校验的本机事实，后续读取时重新查询。' });
-    return recallLocalFacts(actorId, destination);
+    // Normal outbox ordering can temporarily leave cloud ancestry incomplete.
+    return localFacts();
   }
   assertWorkspaceActive(signal);
-  const localItems = recallLocalFacts(actorId, destination, true);
+  const localItems = localFacts(true);
   const canonical = (item: RecalledFact): RecalledFact => {
     const separator = item.id.lastIndexOf(':');
     return { ...item, id: separator < 0 ? item.id : `${resolveServerId(item.id.slice(0, separator))}${item.id.slice(separator)}`,
       ...(item.mergedFrom ? { mergedFrom: item.mergedFrom.map((ref) => ({ ...ref, messageId: resolveServerId(ref.messageId) })) } : {}) };
   };
-  return [...new Map(collapseMergedFacts([...response.items, ...localItems].map(canonical)).map((item) => [item.text, item])).values()];
+  const cloudItems = new Map(response.items.map(canonical).map((item) => [JSON.stringify([item.chatId, item.id]), item]));
+  for (const item of cloudItems.values()) {
+    const deletion = localDeletion(item.chatId, item.id);
+    if (item.userDeleted !== undefined && (!deletion || deletion.synced) && (item.userDeleted || deletion)) {
+      saveDeletion(item.chatId, item.id, item.userDeleted, true);
+    }
+  }
+  const combined = [...localItems.map(canonical), ...cloudItems.values()].map((item) => {
+    const deletion = localDeletion(item.chatId, item.id);
+    const cloud = cloudItems.get(JSON.stringify([item.chatId, item.id]));
+    return { ...item, userDeleted: deletion && !deletion.synced ? deletion.deleted : cloud?.userDeleted ?? item.userDeleted };
+  });
+  return [...new Map(collapseMergedFacts(combined).map((item) => [item.text, item])).values()];
 }
 
 export async function buildDetailedFactPrompt(apiConfig: APIConfig, chat: GroupChat, actorId: string, messages: Message[]) {

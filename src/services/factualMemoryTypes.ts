@@ -1,4 +1,5 @@
 export interface DetailedFact {
+  userDeleted?: boolean;
   text: string;
   status: 'asserted' | 'agreed' | 'proposed' | 'disputed';
   sourceIds: string[];
@@ -36,6 +37,7 @@ export interface FactArchiveEntry {
 }
 
 export interface RecalledFact {
+  userDeleted?: boolean;
   id: string;
   text: string;
   status: DetailedFact['status'];
@@ -46,10 +48,12 @@ export interface RecalledFact {
   knownByIds?: string[];
 }
 
-export function collapseMergedFacts<T extends { id: string; chatId: string; mergedFrom?: FactReference[]; retracted?: boolean }>(items: T[]): T[] {
+export function collapseMergedFacts<T extends { id: string; chatId: string; mergedFrom?: FactReference[]; retracted?: boolean; userDeleted?: boolean }>(items: T[]): T[] {
   const replaced = new Set(items.flatMap((item) => (item.mergedFrom || [])
     .map((ref) => JSON.stringify([item.chatId, `${ref.messageId}:${ref.factIndex}`]))));
-  return items.filter((item) => !replaced.has(JSON.stringify([item.chatId, item.id])) && !item.retracted);
+  const deleted = new Set(items.filter((item) => item.userDeleted).map((item) => JSON.stringify([item.chatId, item.id])));
+  return items.filter((item) => !replaced.has(JSON.stringify([item.chatId, item.id])) && !item.retracted
+    && !deleted.has(JSON.stringify([item.chatId, item.id])));
 }
 
 export class FactExtractionValidationError extends Error {

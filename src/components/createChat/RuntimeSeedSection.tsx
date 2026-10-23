@@ -7,6 +7,8 @@ import { sanitizeUserFacingText } from '../../services/displayTextSanitizer';
 import { buildSessionMemorySourcePresentation, type SessionMemoryConflictFilter } from '../../services/sessionMemorySourcePresentation';
 import LayeredMemoryPanel from '../memory/LayeredMemoryPanel';
 import DebugChip from '../common/DebugChip';
+import { useDetailedFacts } from '../../hooks/useDetailedFacts';
+import { DetailedFactsPanel } from '../character/DetailedFactsPanel';
 
 interface RuntimeSeedSectionProps {
   editingChatId?: string;
@@ -64,6 +66,7 @@ function tooltipText(text: string, title: string) {
 
 
 export default function RuntimeSeedSection(props: RuntimeSeedSectionProps) {
+  const factArchive = useDetailedFacts(undefined, props.editingChatId);
   const [conflictRelationFilter, setConflictRelationFilter] = useState<SessionMemoryConflictFilter>('all');
   const developerMode = useSettingsStore((state) => state.developerMode);
   const showRuntimeDebug = useSettingsStore((state) => state.developerUI.showMemoryDebug || state.developerUI.showAdvancedRuntimePanels);
@@ -105,8 +108,11 @@ export default function RuntimeSeedSection(props: RuntimeSeedSectionProps) {
         expandedCount={16}
         includeRuntimeEvidence={includeDebug}
         showDebugChip={false}
+        hideFilterHints
         formatMemoryText={(value) => cleanRuntimeText(value, props.selectedCharacters)}
         members={props.selectedCharacters}
+        detailedFactsCount={factArchive.loading || factArchive.error ? undefined : factArchive.items.length}
+        detailedFacts={props.editingChatId ? <DetailedFactsPanel key={props.editingChatId} archive={factArchive} /> : undefined}
       />
 
       <Card variant="outlined">

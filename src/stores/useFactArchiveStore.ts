@@ -5,6 +5,7 @@ import { createScopedIndexedDbBufferedJsonStorage } from './storePersistenceScop
 import type { FactArchiveEntry, FactEvidence } from '../services/factualMemoryTypes';
 
 interface ChatFactArchive {
+  deletions?: Record<string, { deleted: boolean; synced: boolean }>;
   nodes: Record<string, FactEvidence>;
   entries: Record<string, FactArchiveEntry>;
 }
@@ -15,10 +16,16 @@ interface FactArchiveState {
   save: (chatId: string, entry: FactArchiveEntry) => void;
   invalidate: (ids: string[]) => void;
   clearChat: (chatId: string) => void;
+  setDeletion: (chatId: string, factId: string, deleted: boolean, synced: boolean) => void;
 }
 
 export const useFactArchiveStore = create<FactArchiveState>()(persist((set) => ({
   chats: {},
+  setDeletion: (chatId, factId, deleted, synced) => set((state) => {
+    const current = state.chats[chatId] || { nodes: {}, entries: {} };
+    return { chats: { ...state.chats, [chatId]: { ...current,
+      deletions: { ...current.deletions, [factId]: { deleted, synced } } } } };
+  }),
   capture: (chatId, sources) => set((state) => {
     const current = state.chats[chatId] || { nodes: {}, entries: {} };
     const nodes = { ...current.nodes };
