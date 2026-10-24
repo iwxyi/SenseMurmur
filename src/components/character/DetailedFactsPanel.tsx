@@ -3,6 +3,8 @@ import { Alert, Avatar, Box, Button, Chip, CircularProgress, Dialog, DialogActio
 import { Link as RouterLink } from 'react-router-dom';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutlineOutlined';
+import ArchiveOutlinedIcon from '@mui/icons-material/ArchiveOutlined';
+import UnarchiveOutlinedIcon from '@mui/icons-material/UnarchiveOutlined';
 import AppSnackbar from '../common/AppSnackbar';
 import type { useDetailedFacts } from '../../hooks/useDetailedFacts';
 import type { RecalledFact } from '../../services/factualMemoryTypes';
@@ -21,10 +23,12 @@ const statusLabels: Record<RecalledFact['status'], string> = {
 
 export function DetailedFactsPanel({ archive }: { archive: ReturnType<typeof useDetailedFacts> }) {
   const [expanded, setExpanded] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
   const [selectedFactId, setSelectedFactId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ message: string; fact?: RecalledFact; error?: boolean; signal: AbortSignal } | null>(null);
   const { items, loading, error, refresh } = archive;
+  const visibleItems = items.filter((fact) => Boolean(fact.archived) === showArchived);
   const changeDeletion = async (fact: RecalledFact, deleted: boolean) => {
     if (!deleted && notice?.signal.aborted) { setNotice(null); return; }
     const signal = getWorkspaceSignal();
@@ -36,6 +40,15 @@ export function DetailedFactsPanel({ archive }: { archive: ReturnType<typeof use
       if (!signal.aborted) setNotice({ message: deleted ? '删除失败，原记录已保留' : '撤销失败，请重试', error: true, fact: deleted ? undefined : fact, signal });
     } finally { setBusy(false); }
   };
+  const changeArchive = async (fact: RecalledFact, archived: boolean) => {
+    setBusy(true);
+    try {
+      await archive.setArchived(fact, archived);
+      setNotice({ message: archived ? '已归档详细事实' : '已恢复详细事实', signal: getWorkspaceSignal() });
+    } catch {
+      setNotice({ message: archived ? '归档失败，原记录已保留' : '恢复失败，请重试', error: true, signal: getWorkspaceSignal() });
+    } finally { setBusy(false); }
+  };
   const chats = useChatStore((state) => state.chats);
   const characters = useCharacterStore((state) => state.characters);
   const selectedFact = items.find((fact) => fact.id === selectedFactId);
@@ -43,8 +56,13 @@ export function DetailedFactsPanel({ archive }: { archive: ReturnType<typeof use
   return <Box component="section" sx={{ minWidth: 0 }}>
     {loading ? <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}><CircularProgress size={18} /><Typography variant="body2" color="text.secondary">读取中</Typography></Stack>
       : error ? <Alert severity="error" action={<Button onClick={refresh} color="inherit">重试</Button>}>{error}</Alert>
-      : items.length ? <Stack spacing={1} sx={{ minWidth: 0 }}>
-        {(expanded ? items : items.slice(0, 3)).map((fact) => <Box key={fact.id} sx={{ p: { xs: 1, sm: 1.15 }, borderRadius: 2, bgcolor: 'action.hover', border: '1px solid', borderColor: 'rgba(148, 163, 184, 0.12)', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
+      : <>
+        <Stack direction="row" spacing={1} sx={{ mb: 1 }}>
+          <Button size="small" variant={!showArchived ? 'contained' : 'text'} onClick={() => { setShowArchived(false); setExpanded(false); }}>有效 {items.filter((fact) => !fact.archived).length}</Button>
+          <Button size="small" variant={showArchived ? 'contained' : 'text'} onClick={() => { setShowArchived(true); setExpanded(false); }}>已归档 {items.filter((fact) => fact.archived).length}</Button>
+        </Stack>
+        {visibleItems.length ? <Stack spacing={1} sx={{ minWidth: 0 }}>
+        {(expanded ? visibleItems : visibleItems.slice(0, 3)).map((fact) => <Box key={fact.id} sx={{ p: { xs: 1, sm: 1.15 }, borderRadius: 2, bgcolor: 'action.hover', border: '1px solid', borderColor: 'rgba(148, 163, 184, 0.12)', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
           <Stack spacing={0.6} sx={{ minWidth: 0 }}>
             {fact.title ? <Typography variant="subtitle2" sx={{ minWidth: 0, fontWeight: 700, overflowWrap: 'anywhere' }}>{sanitizeUserFacingText(fact.title, characters)}</Typography> : null}
             <Typography variant="body2" sx={{ minWidth: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{sanitizeUserFacingText(fact.text, characters, { preserveLineBreaks: true })}</Typography>
@@ -60,19 +78,22 @@ export function DetailedFactsPanel({ archive }: { archive: ReturnType<typeof use
                 onClick={() => setSelectedFactId(fact.id)} />
               <Stack direction="row" spacing={0.5} sx={{ ml: 'auto', alignItems: 'center' }}>
                 <Typography variant="caption" color="text.secondary">{new Date(fact.timestamp).toLocaleString()}</Typography>
+                <Tooltip title={fact.archived ? '恢复详细事实' : '归档详细事实'}><span><IconButton size="small" aria-label={fact.archived ? '恢复详细事实' : '归档详细事实'} disabled={busy}
+                  onClick={() => void changeArchive(fact, !fact.archived)}>{fact.archived ? <UnarchiveOutlinedIcon fontSize="small" /> : <ArchiveOutlinedIcon fontSize="small" />}</IconButton></span></Tooltip>
                 <Tooltip title="删除详细事实"><span><IconButton size="small" aria-label="删除详细事实" disabled={busy}
                   onClick={() => void changeDeletion(fact, true)}><DeleteOutlineIcon fontSize="small" /></IconButton></span></Tooltip>
               </Stack>
             </Stack>
           </Stack>
         </Box>)}
-      </Stack> : <Typography variant="caption" color="text.secondary">暂无详细事实</Typography>}
+      </Stack> : <Typography variant="caption" color="text.secondary">{showArchived ? '暂无已归档事实' : '暂无详细事实'}</Typography>}
     <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 1 }}>
-      {!loading && !error && items.length > 3 ? <Button size="small" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
-        {expanded ? '收起' : `查看更多 ${items.length}`}
+      {!loading && !error && visibleItems.length > 3 ? <Button size="small" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+        {expanded ? '收起' : `查看更多 ${visibleItems.length}`}
       </Button> : null}
       <Button size="small" startIcon={<RefreshIcon />} disabled={loading || busy} onClick={refresh}>刷新</Button>
     </Stack>
+      </>}
     <Dialog open={Boolean(selectedFact)} onClose={() => setSelectedFactId(null)} maxWidth="xs" fullWidth aria-labelledby="fact-knowers-title">
       <DialogTitle id="fact-knowers-title">知情角色（{selectedFact ? knowerIds(selectedFact).length : 0}人）</DialogTitle>
       <DialogContent dividers>

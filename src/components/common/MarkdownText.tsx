@@ -1,3 +1,4 @@
+import { Box, Typography } from '@mui/material';
 import { memo } from 'react';
 import RichMarkdownText from './RichMarkdownText';
 import type { AICharacter } from '../../types/character';
@@ -12,13 +13,15 @@ function normalizeStreamingMarkdown(text: string) {
 // eslint-disable-next-line react-refresh/only-export-components
 export function shouldUseRichMarkdown(text: string) {
   if (!text) return false;
-  return /(^|\n)\s{0,3}(#{1,6}\s|[-*+]\s+\S|\d+\.\s+\S|>\s|\|.*\|)|```|`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|!\[[^\]]*]\(|\[[^\]]+]\(|<\/?[a-z][\s\S]*>/i.test(text);
+  // Be conservative: ambiguous syntax still goes through the Markdown parser.
+  // This also preserves GFM autolinks, entities, escapes and character mentions.
+  return /[\\`*_~[\]<>|&@]|(^|\n)(?: {4}|\t|\s{0,3}(?:#{1,6}(?:\s|$)|[-+>](?:\s|$)|\d+[.)]\s|={2,}\s*$|-{2,}\s*$))|(?:https?:\/\/|www\.)/im.test(text);
 }
 
 function MarkdownText({
   text,
   softLineBreaks = true,
-  forceRich: _forceRich = false,
+  forceRich = false,
   deferDiagrams = false,
   onOpenDiagram,
   mentionCharacters,
@@ -34,11 +37,16 @@ function MarkdownText({
   mentions?: CharacterMention[];
   onCharacterMentionClick?: (character: MentionCharacter, anchorEl: HTMLElement) => void;
 }) {
-  void _forceRich;
+  if (!forceRich && softLineBreaks && !shouldUseRichMarkdown(text)) {
+    return (
+      <Box sx={{ fontSize: 'inherit', lineHeight: 1.95, minWidth: 0, maxWidth: '100%' }}>
+        <Typography component="p" variant="body2" sx={{ m: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+          {text}
+        </Typography>
+      </Box>
+    );
+  }
   const normalized = normalizeStreamingMarkdown(text);
-  // Keep one DOM shape throughout streaming and final commit. Switching from
-  // a plain paragraph to the lazy rich renderer changes paragraph margins and
-  // makes the bubble jump when the final text arrives.
   return <RichMarkdownText text={normalized} softLineBreaks={softLineBreaks} deferDiagrams={deferDiagrams} onOpenDiagram={onOpenDiagram} mentionCharacters={mentionCharacters} mentions={mentions} onCharacterMentionClick={onCharacterMentionClick} />;
 }
 

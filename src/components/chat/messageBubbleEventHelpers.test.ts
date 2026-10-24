@@ -38,6 +38,16 @@ function eventMessage(content: string): Message {
 }
 
 describe('messageBubbleEventHelpers', () => {
+  it('shows a brief automatic room pause notice with developer mode disabled', () => {
+    const message = eventMessage(buildRuntimeEvent({
+      eventType: 'conversation_paused', title: '群聊自动暂停',
+      summary: '群聊已自动暂停',
+      visibilityScope: 'public', channelId: 'public',
+    }));
+    expect(shouldRenderEventMessage(message, baseEventFlags)).toBe(true);
+    expect(shouldRenderEventMessage(message, { ...baseEventFlags, developerMode: true })).toBe(true);
+  });
+
   it('lists all saved facts with line breaks', () => {
     const summary = '新增 3 条详细事实：\n1. 刘备约定明日出发\n2. 关羽负责粮草\n3. 张飞负责练兵';
     expect(buildEventDisplayText({ eventType: 'detailed_fact_recorded', summary })).toBe(summary);

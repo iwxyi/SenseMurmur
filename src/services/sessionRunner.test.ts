@@ -352,50 +352,43 @@ describe('runSessionLoop', () => {
     }
   });
 
-  it('waits without starting busy work when all members decline and wakes for a new message', async () => {
-    const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+  it('stops when all members decline and starts a fresh loop for new input', async () => {
+    const chat = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
+    const params = buildLoopParams(chat);
     const start = vi.fn();
     const finish = vi.fn();
-    const waitingChanged = vi.fn();
+    const waiting = vi.fn();
     const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
-    let messages: Message[] = [];
-    let waited = false;
-    let waitCount = 0;
-    params.getCurrentMessages = () => messages;
-    const previousTimeout = globalThis.setTimeout;
-    globalThis.setTimeout = ((fn: () => void, ms: number) => {
-      if (ms === 250 && runOneRoundMock.mock.calls.length === 2) {
-        waited = true;
-        expect(start).toHaveBeenCalledTimes(2);
-        expect(finish).toHaveBeenCalledTimes(2);
-        expect(waitingChanged.mock.calls).toEqual([[true]]);
-        waitCount += 1;
-        if (waitCount === 3) messages = [{ id: 'wake', type: 'user', content: '等一下。' } as Message];
-      }
-      fn();
-      return 0;
-    }) as unknown as typeof setTimeout;
-    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks, _profiles, context) => {
-      const round = runOneRoundMock.mock.calls.length;
-      if (round <= 2) hooks.onNoSend({ delivery: 'no_send', speakerId: round === 1 ? 'a' : 'b' });
-      else {
-        expect(context.consumedSpeakerIds.size).toBe(0);
-        params.pauseLoop();
-      }
+    const timeout = vi.spyOn(globalThis, 'setTimeout');
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks) => {
+      hooks.onNoSend({ delivery: 'no_send', speakerId: runOneRoundMock.mock.calls.length === 1 ? 'a' : 'b' });
     });
     try {
       await runSessionLoop({ ...params, onTurnWorkStarted: start, onTurnWorkFinished: finish,
-        onWaitingForInputChange: waitingChanged } as never);
-      expect(waited).toBe(true);
-      expect(runOneRoundMock).toHaveBeenCalledTimes(3);
-      expect(waitingChanged.mock.calls).toEqual([[true], [false]]);
+        onWaitingForInput: waiting } as never);
+      expect(runOneRoundMock).toHaveBeenCalledTimes(2);
+      expect(start).toHaveBeenCalledTimes(2);
+      expect(finish).toHaveBeenCalledTimes(2);
+      expect(waiting).toHaveBeenCalledTimes(1);
+      expect(timeout.mock.calls.some(([, ms]) => ms === 250)).toBe(false);
       expect(info.mock.calls.filter(([label]) => label === '[chat-run:no-send]')).toEqual([
         ['[chat-run:no-send]', { speakerName: '甲', delivery: 'no_send' }],
         ['[chat-run:no-send]', { speakerName: '乙', delivery: 'no_send' }],
       ]);
       expect(info.mock.calls.filter(([label]) => String(label).startsWith('[chat-run:waiting-input]'))).toHaveLength(1);
+
+      const next = buildLoopParams(chat);
+      next.getCurrentMessages = () => [{ id: 'wake', type: 'user', content: '等一下。' } as Message];
+      runOneRoundMock.mockImplementation(async (_chat, _characters, messages, _api, _hooks, _profiles, context) => {
+        expect(messages).toEqual(next.getCurrentMessages());
+        expect(context.consumedSpeakerIds.size).toBe(0);
+        next.pauseLoop();
+      });
+      await runSessionLoop({ ...next, onWaitingForInput: waiting } as never);
+      expect(runOneRoundMock).toHaveBeenCalledTimes(3);
+      expect(waiting).toHaveBeenCalledTimes(1);
     } finally {
-      globalThis.setTimeout = previousTimeout;
+      timeout.mockRestore();
       info.mockRestore();
     }
   });
@@ -491,28 +484,15 @@ describe('runSessionLoop', () => {
     const params = buildLoopParams(chat);
     let messages: Message[] = [{ id: 'user', chatId: chat.id, type: 'user', content: '先聊鞋。', timestamp: 1 } as Message];
     params.getCurrentMessages = () => messages;
-    const previousTimeout = globalThis.setTimeout;
-    let waited = false;
-    globalThis.setTimeout = ((fn: () => void, ms: number) => {
-      if (ms === 250 && runOneRoundMock.mock.calls.length === 2) {
-        waited = true;
-        params.pauseLoop();
-      }
-      fn();
-      return 0;
-    }) as unknown as typeof setTimeout;
+    const waiting = vi.fn();
     runOneRoundMock.mockImplementation(async (_chat, _characters, _snapshot, _api, hooks) => {
       const round = runOneRoundMock.mock.calls.length;
       hooks.onNoSend({ delivery: 'no_send', speakerId: round === 1 ? 'a' : 'b' });
       messages = [{ id: `ai-${round}`, chatId: chat.id, type: 'ai', senderId: round === 1 ? 'a' : 'b',
         content: '已加载的新窗口。', timestamp: round + 1 } as Message];
     });
-    try {
-      await runSessionLoop(params as never);
-    } finally {
-      globalThis.setTimeout = previousTimeout;
-    }
-    expect(waited).toBe(true);
+    await runSessionLoop({ ...params, onWaitingForInput: waiting } as never);
+    expect(waiting).toHaveBeenCalledTimes(1);
     expect(runOneRoundMock).toHaveBeenCalledTimes(2);
   });
 
@@ -523,26 +503,13 @@ describe('runSessionLoop', () => {
     const messages: Message[] = [{ id: 'request', chatId: chat.id, type: 'ai', senderId: 'a', senderName: '甲',
       content: '丙，你说呢？', timestamp: 1, replyDebtTargetIds: ['c'] } as Message];
     params.getCurrentMessages = () => messages;
-    const previousTimeout = globalThis.setTimeout;
-    let waited = false;
-    globalThis.setTimeout = ((fn: () => void, ms: number) => {
-      if (ms === 250 && runOneRoundMock.mock.calls.length === 2) {
-        waited = true;
-        params.pauseLoop();
-      }
-      fn();
-      return 0;
-    }) as unknown as typeof setTimeout;
+    const waiting = vi.fn();
     runOneRoundMock.mockImplementation(async (_chat, _characters, _snapshot, _api, hooks) => {
       const round = runOneRoundMock.mock.calls.length;
       hooks.onNoSend({ delivery: 'no_send', speakerId: round === 1 ? 'a' : 'b' });
     });
-    try {
-      await runSessionLoop(params as never);
-    } finally {
-      globalThis.setTimeout = previousTimeout;
-    }
-    expect(waited).toBe(true);
+    await runSessionLoop({ ...params, onWaitingForInput: waiting } as never);
+    expect(waiting).toHaveBeenCalledTimes(1);
     expect(runOneRoundMock).toHaveBeenCalledTimes(2);
   });
 
@@ -638,7 +605,8 @@ describe('runSessionLoop', () => {
     runOneRoundMock.mockImplementation(async () => {
       const round = runOneRoundMock.mock.calls.length;
       if (round > 2) throw new Error('Unexpected generation after the final reply');
-      current = { ...start, worldState: { ...start.worldState, conversationContinuity: { items: [], settledAt: 10 } } };
+      current = { ...start, worldState: { ...start.worldState, conversationContinuity: { items: [], settledAt: 10,
+        settledScope: 'room', settledEvidenceText: '乙，你说完咱们就走。', settledSourceMessageId: 'reply-1' } } };
       messages.push({ id: `reply-${round}`, chatId: start.id, type: 'ai', senderId: round === 1 ? 'a' : 'b',
         senderName: round === 1 ? '甲' : '乙', content: round === 1 ? '乙，你说完咱们就走。' : '走吧。',
         timestamp: round, emotion: 0, isDeleted: false, addressedTargetIds: round === 1 ? ['b'] : [],
@@ -648,6 +616,9 @@ describe('runSessionLoop', () => {
     expect(runOneRoundMock).toHaveBeenCalledTimes(2);
     expect(pause).toHaveBeenCalledTimes(1);
     expect(params.onLoopError).not.toHaveBeenCalled();
+    expect(params.appendEventMessage).toHaveBeenCalledWith(start.id, expect.objectContaining({
+      eventType: 'conversation_paused', summary: '群聊已自动暂停',
+    }));
   });
 
   it('keeps quiet ticks running without pause, errors or commits and reads a later user turn', async () => {
@@ -681,7 +652,8 @@ describe('runSessionLoop', () => {
 
   it('does not pause a newly started run because of a retained old settled signal', async () => {
     const start = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' },
-      worldState: { ...buildChat().worldState, conversationContinuity: { items: [], settledAt: 10 } } });
+      worldState: { ...buildChat().worldState, conversationContinuity: { items: [], settledAt: 10,
+        settledScope: 'room', settledEvidenceText: '今天先到这。' } } });
     const params = buildLoopParams(start);
     params.getCurrentChat = () => start;
     const pause = vi.fn(params.pauseLoop);
@@ -710,7 +682,8 @@ describe('runSessionLoop', () => {
     const pause = vi.fn(() => { paused = true; });
     params.pauseLoop = pause;
     runOneRoundMock.mockImplementation(async () => {
-      current = { ...start, worldState: { ...start.worldState, conversationContinuity: { items: [], settledAt: 10 } } };
+      current = { ...start, worldState: { ...start.worldState, conversationContinuity: { items: [], settledAt: 10,
+        settledScope: 'room', settledEvidenceText: '今天先到这。' } } };
       if (runOneRoundMock.mock.calls.length === 2) running = false;
     });
     await runSessionLoop(params as never);
@@ -720,7 +693,8 @@ describe('runSessionLoop', () => {
 
   it('pauses a newly settled group only after pending replies are answered', () => {
     const before = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
-    const after = { ...before, worldState: { ...before.worldState, conversationContinuity: { items: [], settledAt: 10 } } };
+    const after: GroupChat = { ...before, worldState: { ...before.worldState, conversationContinuity: { items: [], settledAt: 10,
+      settledScope: 'room', settledEvidenceText: '今天先到这。' } } };
     const characters = buildLoopParams(before).characters;
     const request: Message = { id: 'request', chatId: before.id, type: 'ai', senderId: 'a', senderName: '甲',
       content: '乙，你说呢？', timestamp: 1, emotion: 0, isDeleted: false, addressedTargetIds: ['b'], primaryAddressedTargetId: 'b' };
@@ -730,6 +704,8 @@ describe('runSessionLoop', () => {
     ])).toBe(true);
     expect(shouldPauseSettledConversation(after, after, characters, [])).toBe(false);
     expect(shouldPauseSettledConversation(before, { ...after, type: 'direct' }, characters, [])).toBe(false);
+    expect(shouldPauseSettledConversation(before, { ...after, worldState: { ...after.worldState,
+      conversationContinuity: { items: [], settledAt: 10 } } }, characters, [])).toBe(false);
   });
   it.each(['direct', 'ai_direct'] as const)('pauses %s after committing every bubble from one generation', async (type) => {
     runSessionCommitPipelineMock.mockImplementation(async (args) => buildCommitPipelineResult(args));

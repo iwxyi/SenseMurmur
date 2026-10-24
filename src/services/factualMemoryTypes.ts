@@ -1,6 +1,7 @@
 export interface DetailedFact {
   title?: string;
   userDeleted?: boolean;
+  lifecycle?: 'ongoing' | 'temporary';
   text: string;
   status: 'asserted' | 'agreed' | 'proposed' | 'disputed';
   sourceIds: string[];
@@ -40,10 +41,13 @@ export interface FactArchiveEntry {
 export interface RecalledFact {
   title?: string;
   userDeleted?: boolean;
+  lifecycle?: 'ongoing' | 'temporary';
+  archived?: boolean;
   id: string;
   text: string;
   status: DetailedFact['status'];
   timestamp: number;
+  archivedAt?: number;
   chatId: string;
   mergedFrom?: FactReference[];
   retracted?: boolean;
@@ -92,6 +96,9 @@ export function parseDetailedFacts(raw: string, allowedIds: Set<string>, anchorI
     if (fact.retracted !== undefined && typeof fact.retracted !== 'boolean') {
       throw new FactExtractionValidationError(`${path}.retracted`, 'expected a boolean');
     }
+    if (fact.lifecycle !== undefined && !['ongoing', 'temporary'].includes(String(fact.lifecycle))) {
+      throw new FactExtractionValidationError(`${path}.lifecycle`, 'expected ongoing|temporary');
+    }
     if (typeof fact.text !== 'string' || !fact.text.trim() || fact.text.length > 1200) {
       throw new FactExtractionValidationError(`${path}.text`, 'expected non-empty text of at most 1200 characters');
     }
@@ -112,24 +119,48 @@ export function parseDetailedFacts(raw: string, allowedIds: Set<string>, anchorI
       return [];
     }
     const mergedFrom: FactReference[] = [];
+    let inheritedLifecycle: DetailedFact['lifecycle'];
+    const sourceIds = new Set(fact.sourceIds as string[]);
     if (fact.mergeWith !== undefined) {
       if (!Array.isArray(fact.mergeWith) || fact.mergeWith.length > 6) {
         throw new FactExtractionValidationError(`${path}.mergeWith`, 'expected at most 6 supplied fact references');
       }
-      for (const key of new Set(fact.mergeWith)) {
+      for (const [mergeIndex, key] of [...new Set(fact.mergeWith)].entries()) {
+        const mergePath = `${path}.mergeWith[${mergeIndex}]`;
         const candidate = typeof key === 'string' ? mergeCandidates.get(key) : undefined;
-        if (!candidate || candidate.fact.retracted || candidate.fact.status !== fact.status
-          || !candidate.fact.sourceIds.every((id) => (fact.sourceIds as unknown[]).includes(id))) {
-          throw new FactExtractionValidationError(`${path}.mergeWith`, 'merge must reference a supplied fact with the same status and retain all its evidence');
+        if (!candidate) {
+          throw new FactExtractionValidationError(mergePath,
+            `expected an exact existingFacts ref; available refs: ${[...mergeCandidates.keys()].join(', ') || '(none)'}`);
+        }
+        if (candidate.fact.retracted) {
+          throw new FactExtractionValidationError(mergePath, `referenced fact ${key} is retracted and cannot be merged`);
+        }
+        if (candidate.fact.status !== fact.status) {
+          throw new FactExtractionValidationError(mergePath,
+            `referenced fact ${key} has status ${candidate.fact.status}, received ${fact.status}; merge only matching statuses, otherwise record the change separately`);
+        }
+        inheritedLifecycle ||= candidate.fact.lifecycle;
+        // A valid reference already identifies its evidence. Inherit it rather
+        // than making the model recopy provenance, but never invent new evidence.
+        for (const id of candidate.fact.sourceIds) {
+          if (!allowedIds.has(id)) {
+            throw new FactExtractionValidationError(mergePath, `referenced fact ${key} has evidence outside the supplied messages`);
+          }
+          sourceIds.add(id);
         }
         mergedFrom.push({ messageId: candidate.messageId, factIndex: candidate.factIndex });
       }
+    }
+    if (sourceIds.size > 12) {
+      throw new FactExtractionValidationError(`${path}.sourceIds`,
+        `merged evidence contains ${sourceIds.size} messages, exceeding the limit of 12; do not merge these records or discard their evidence, record the new information separately`);
     }
     if (fact.retracted === true && !mergedFrom.length) {
       throw new FactExtractionValidationError(`${path}.mergeWith`, 'retraction must reference an existing fact');
     }
     return [{ ...(typeof fact.title === 'string' ? { title: fact.title.trim() } : {}),
-      text: fact.text.trim(), status: fact.status as DetailedFact['status'], sourceIds: [...new Set(fact.sourceIds)] as string[],
+      text: fact.text.trim(), status: fact.status as DetailedFact['status'], sourceIds: [...sourceIds],
+      ...(inheritedLifecycle ? { lifecycle: inheritedLifecycle } : fact.lifecycle ? { lifecycle: fact.lifecycle as DetailedFact['lifecycle'] } : {}),
       ...(mergedFrom.length ? { mergedFrom } : {}), ...(fact.retracted === true ? { retracted: true } : {}) }];
   });
 }

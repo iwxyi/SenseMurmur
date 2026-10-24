@@ -3232,8 +3232,14 @@ export default function ChatDetailPage() {
   const displayedStoryChoiceSubmittingValue = isStoryWaitingForChoice
     ? null
     : displayedStoryChoiceVisual?.selectedValue || null;
+  const isSingleSpeakableMemberStop = Boolean(runLoopError?.startsWith('群里已无多人在线'));
   const runLoopStatusContent = (chatError || runLoopError) ? (
-    <Alert severity="error" variant="outlined" sx={{ mx: { xs: 1.25, sm: 2 }, mt: 1, borderRadius: 3 }}>
+    <Alert
+      severity={chatError || !isSingleSpeakableMemberStop ? 'error' : 'warning'}
+      variant="outlined"
+      role="status"
+      sx={{ mx: { xs: 1.25, sm: 2 }, mt: 1, borderRadius: 2 }}
+    >
       {chatError || runLoopError}
     </Alert>
   ) : null;
@@ -3468,7 +3474,6 @@ export default function ChatDetailPage() {
     || storyTailStatus === 'generation_cancelled';
   const storyBranchSuggestionContent = hasStoryTailStatusContent ? (
     <>
-      {runLoopStatusContent}
       {storyTailStatus === 'submitting_choice' ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', px: { xs: 2, sm: 3 }, pt: 0.75, pb: 1.5 }}>
           <Chip
@@ -3587,8 +3592,14 @@ export default function ChatDetailPage() {
       {htmlRepairRetry?.message}
     </Alert>
   ) : null;
-  const composerTopContent = storyBranchSuggestionContent || visiblePendingAppCommand ? (
+  const composerTopContent = runLoopStatusContent || storyBranchSuggestionContent || visiblePendingAppCommand || isWaitingForInput ? (
     <Stack spacing={0.75}>
+      {isWaitingForInput ? (
+        <Alert severity="info" variant="outlined" role="status" sx={{ mx: { xs: 1.25, sm: 2 }, mt: 1, borderRadius: 2 }}>
+          等待用户输入
+        </Alert>
+      ) : null}
+      {runLoopStatusContent}
       <Collapse
         in={Boolean(storyBranchSuggestionContent)}
         timeout={prefersReducedMotion() ? 0 : motion.durations.slow}
@@ -4301,11 +4312,6 @@ export default function ChatDetailPage() {
               <Typography variant="subtitle1" sx={{ maxWidth: '100%', fontWeight: 700, lineHeight: 1.25, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {chat.name}
               </Typography>
-              {isWaitingForInput && isRunning && !isPaused ? (
-                <Typography component="span" variant="caption" role="status" sx={{ color: 'text.secondary', lineHeight: 1.25 }}>
-                  等待用户输入
-                </Typography>
-              ) : null}
             </Box>
           )}
           safeAreaTop={!isSplitDetailPane}
@@ -4768,7 +4774,7 @@ export default function ChatDetailPage() {
             character={profilePreview.kind === 'character' ? profilePreview.character : null}
             chat={chat}
             members={members}
-            chatStatusLabel={isRunning && !isPaused ? isWaitingForInput ? '等待用户输入' : '运行中' : chat.isActive ? '已暂停' : '未运行'}
+            chatStatusLabel={isRunning && !isPaused ? '运行中' : isWaitingForInput ? '已停止 · 等待用户输入' : chat.isActive ? '已暂停' : '未运行'}
             actionLabel={profilePreview.kind === 'character' ? '角色详情' : '群聊详情'}
             actionTiming="immediate"
             onSendMessage={profilePreview.kind === 'character' ? async () => {

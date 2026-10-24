@@ -28,10 +28,13 @@ export interface ConversationUpdate {
     silencedActors?: string[];
     evidenceText: string;
   };
-  settled?: { evidenceText: string };
+  settled?: { evidenceText: string; scope?: 'room' };
 }
 
 export interface ConversationContinuityState {
   items: ConversationItem[];
   settledAt?: number;
+  settledScope?: 'room';
+  settledEvidenceText?: string;
+  settledSourceMessageId?: string;
 }

@@ -587,21 +587,7 @@ function compactPendingMessageOperation(operation: PendingMessageOperation): Pen
   };
 }
 
-let lastPersistedMessageStateInput: {
-  messageWindowsByChatId: PersistedMessageState['messageWindowsByChatId'];
-  pendingOperations: PersistedMessageState['pendingOperations'];
-} | null = null;
-let lastPersistedMessageStateOutput: PersistedMessageState | null = null;
-
 function buildPersistedMessageState(state: PersistedMessageState): PersistedMessageState {
-  if (
-    lastPersistedMessageStateInput
-    && lastPersistedMessageStateOutput
-    && lastPersistedMessageStateInput.messageWindowsByChatId === state.messageWindowsByChatId
-    && lastPersistedMessageStateInput.pendingOperations === state.pendingOperations
-  ) {
-    return lastPersistedMessageStateOutput;
-  }
   const pendingOperations = recoverInterruptedOperations(state.pendingOperations || []).map(compactPendingMessageOperation);
   const compactedWindows = Object.fromEntries(Object.entries(state.messageWindowsByChatId || {}).map(([chatId, window]) => [chatId, {
     ...window,
@@ -611,11 +597,6 @@ function buildPersistedMessageState(state: PersistedMessageState): PersistedMess
     messageWindowsByChatId: trimCache(compactedWindows, pendingOperations),
     pendingOperations,
   };
-  lastPersistedMessageStateInput = {
-    messageWindowsByChatId: state.messageWindowsByChatId,
-    pendingOperations: state.pendingOperations,
-  };
-  lastPersistedMessageStateOutput = persisted;
   return persisted;
 }
 

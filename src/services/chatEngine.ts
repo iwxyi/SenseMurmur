@@ -3211,9 +3211,13 @@ async function generateWithPrompt(params: {
   const protocolReminder = shouldAddJsonProtocolReminder(params.chat, params.resolvedApi)
     ? buildJsonProtocolReminder(params.chat)
     : 'The response must be exactly one valid JSON object. Do not wrap it in markdown.';
-  const jsonPrompt = `${params.systemPrompt}\n\n${protocolReminder}`;
-  const useJsonResponseFormat = shouldUseJsonResponseFormat(params.chat, params.resolvedApi);
   const requiresGroupEnvelope = requiresOrdinaryGroupEnvelope(params.chat);
+  const requiresConversationUpdate = requiresGroupEnvelope && Boolean(params.chat.worldState?.conversationContinuity?.items?.length);
+  const continuityReminder = requiresConversationUpdate
+    ? '\n顶层必须包含 conversationUpdate：先判断本轮是否改变已知公共事项；没有变化写 null，有变化按协议写 items 对象，不可省略，也不要为了填字段制造承诺。'
+    : '';
+  const jsonPrompt = `${params.systemPrompt}\n\n${protocolReminder}${continuityReminder}`;
+  const useJsonResponseFormat = shouldUseJsonResponseFormat(params.chat, params.resolvedApi);
   const requestMessages = params.chatMessages;
   const requestStartedAt = nowMs();
   let firstRawChunkLogged = false;
@@ -3283,7 +3287,6 @@ async function generateWithPrompt(params: {
   }, 'info', 'chat-run');
   logRawAiResponse({ chat: params.chat, speaker: params.speaker, attempt: params.attempt, response });
   const isStoryReader = params.chat.sessionKind?.scenarioId === 'story-reader';
-  const requiresConversationUpdate = requiresGroupEnvelope && Boolean(params.chat.worldState?.conversationContinuity?.items?.length);
   let parseFailure: InlineEnvelopeParseFailure | undefined;
   let parsedEnvelope = parseInlineInteractionEnvelope(response, {
     allowContentSalvage: !requiresGroupEnvelope,
@@ -3311,6 +3314,8 @@ async function generateWithPrompt(params: {
   }
   if (parseFailure?.stage === 'delivery') return protocolFailure('invalid_delivery');
   if (parseFailure?.stage === 'message_routing') return protocolFailure('invalid_message_routing');
+  if (parseFailure?.stage === 'conversation_update') return protocolFailure('invalid_conversation_update');
+  if (parseFailure?.stage === 'activity_update') return protocolFailure('invalid_activity_update');
   if (requiresGroupEnvelope && !parsedEnvelope) {
     return protocolFailure('missing_json_envelope');
   }
@@ -3535,6 +3540,8 @@ async function generateNonDuplicateResponse(params: {
       const invalidMemberReference = generated.protocolError === 'invalid_member_reference';
       const invalidDelivery = generated.protocolError === 'invalid_delivery';
       const invalidRouting = generated.protocolError === 'invalid_message_routing';
+      const invalidConversationUpdate = generated.protocolError === 'invalid_conversation_update';
+      const invalidActivityUpdate = generated.protocolError === 'invalid_activity_update';
       logAiGenerationFailure({
         chat: params.chat, speaker: params.speaker, reason: generated.protocolError,
         details: generated.diagnostic,
@@ -3543,6 +3550,8 @@ async function generateNonDuplicateResponse(params: {
             : invalidMemberReference ? 'AI 输出引用了无效的成员对象，本次生成未提交。'
               : invalidDelivery ? 'AI 返回了不允许或相互矛盾的发送状态，本次生成未提交。'
                 : invalidRouting ? 'AI 逐条消息的回应对象字段无效，本次生成未提交。'
+                  : invalidConversationUpdate ? 'AI 回复缺少对已有公共事项的有效状态判断，本次生成未提交。'
+                    : invalidActivityUpdate ? 'AI 回复中的活动安排字段无效，本次生成未提交。'
             : 'AI 回复缺少有效的结构化输出，本次生成未提交。', attempt: attempt + 1,
       });
       if (attempt < 2) {
@@ -3551,6 +3560,8 @@ async function generateNonDuplicateResponse(params: {
             : invalidMemberReference ? 'a state update referencing an id outside the supplied member list, or outgoing routing referencing an unknown member or the current speaker'
               : invalidDelivery ? 'an invalid delivery state or fields that contradict it'
                 : invalidRouting ? 'invalid per-send routing fields; follow the supplied schema and field diagnostic'
+                  : invalidConversationUpdate ? 'a missing or invalid conversationUpdate field in the JSON object'
+                    : invalidActivityUpdate ? 'an invalid activityUpdate field in the JSON object'
             : 'no valid JSON envelope';
         const deliveryRule = params.allowNoSend
           ? 'You may still return exactly {"delivery":"no_send","messages":[]} when you have nothing to express; no other fields are needed then. For delivery=send, follow these rules.'
@@ -3564,6 +3575,10 @@ async function generateNonDuplicateResponse(params: {
           : '';
         prompt = `${params.systemPrompt}\n\nOutput protocol retry:\n- The previous attempt returned ${failure}. Return one valid JSON object using the supplied output contract. ${deliveryRule} Preserve the supported structured fields for this turn; use null when there is no supported update. If known public items exist, explicitly include top-level conversationUpdate after checking whether this turn changes them: null or an update object with items; never omit it. State evidenceText must be copied exactly from one visible send in this response, never from the earlier transcript or known records. Do not add spoken confirmations merely to manufacture evidence. Do not invent updates, emit tool-call markup or simulate unavailable tools. Do not repeat or continue the previous plain-text draft; discard it and write the visible content inside the new JSON envelope. The response must begin with the JSON object and contain no prose before or after it. Do not mention this retry to participants.`;
         prompt += memberReferenceRule;
+        const parseFailure = generated.diagnostic.parseFailure;
+        if (parseFailure) prompt += `\nExact output validation diagnostic: ${JSON.stringify({
+          stage: parseFailure.stage, field: parseFailure.field, message: parseFailure.message,
+        })}. Correct this field using the supplied contract; preserve the distinction between no change (null) and an actual update.`;
         continue;
       }
       throw new EmptyGeneratedResponseError(params.speaker.name, {

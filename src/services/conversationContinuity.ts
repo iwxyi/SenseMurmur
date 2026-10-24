@@ -53,7 +53,8 @@ export function normalizeConversationUpdate(value: unknown): ConversationUpdate 
   } : undefined;
   const settledEvidence = text(record(raw.settled)?.evidenceText, 240);
   return items.length || room || settledEvidence
-    ? { items, ...(room ? { room } : {}), ...(settledEvidence ? { settled: { evidenceText: settledEvidence } } : {}) } : null;
+    ? { items, ...(room ? { room } : {}), ...(settledEvidence ? { settled: { evidenceText: settledEvidence,
+      ...(record(raw.settled)?.scope === 'room' ? { scope: 'room' as const } : {}) } } : {}) } : null;
 }
 
 export function usesConversationContinuity(chat: GroupChat) {
@@ -113,7 +114,11 @@ export function applyConversationUpdate(chat: GroupChat, message: Pick<Message, 
   const continuity = { items: [
     ...allItems.filter(isPendingConversationItem),
     ...allItems.filter((item) => !isPendingConversationItem(item)).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 64),
-  ], ...(settled ? { settledAt: now } : !reopened && previous?.settledAt ? { settledAt: previous.settledAt } : {}) };
+  ], ...(settled ? { settledAt: now, settledScope: update.settled?.scope,
+    settledEvidenceText: update.settled?.evidenceText, settledSourceMessageId: message.id }
+    : !reopened && previous?.settledAt ? { settledAt: previous.settledAt,
+      settledScope: previous.settledScope, settledEvidenceText: previous.settledEvidenceText,
+      settledSourceMessageId: previous.settledSourceMessageId } : {}) };
   return { continuity, room: nextRoom, changedItems };
 }
 

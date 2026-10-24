@@ -212,20 +212,24 @@ describe('conversation continuity commit boundary', () => {
 
   it('clears a pause signal on new human input while retaining facts', () => {
     const initial = chat();
-    const first = applyConversationUpdate(initial, message({ items: [item], settled: { evidenceText: '暂不出兵' } }), null);
+    const first = applyConversationUpdate(initial, message({ items: [item], settled: { scope: 'room', evidenceText: '暂不出兵' } }), null);
     const existing = { ...initial, worldState: { ...initial.worldState, conversationContinuity: first.continuity } };
     const next = applyConversationUpdate(existing, message({ items: [] }, { type: 'user', senderId: 'user' }), null);
     expect(first.continuity?.settledAt).toBe(10);
+    expect(first.continuity?.settledScope).toBe('room');
+    expect(first.continuity?.settledEvidenceText).toBe('暂不出兵');
     expect(next.continuity?.settledAt).toBeUndefined();
     expect(next.continuity?.items).toEqual(first.continuity?.items);
   });
 
   it('preserves an earlier bubble pause signal when another bubble writes an item', () => {
     const initial = chat();
-    const first = applyConversationUpdate(initial, message({ items: [], settled: { evidenceText: '暂不出兵' } }), null);
+    const first = applyConversationUpdate(initial, message({ items: [], settled: { scope: 'room', evidenceText: '暂不出兵' } }), null);
     const existing = { ...initial, worldState: { ...initial.worldState, conversationContinuity: first.continuity } };
     const next = applyConversationUpdate(existing, message({ items: [item] }, { id: 'second-bubble', timestamp: 11 }), null);
     expect(next.continuity?.settledAt).toBe(10);
+    expect(next.continuity?.settledScope).toBe('room');
+    expect(next.continuity?.settledEvidenceText).toBe('暂不出兵');
     expect(next.continuity?.items[0].sourceMessageIds).toEqual(['second-bubble']);
   });
 

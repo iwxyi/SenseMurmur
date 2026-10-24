@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createStore } from 'zustand/vanilla';
+import { persist } from 'zustand/middleware';
 import {
   createBufferedJsonStorage,
   createScopedBufferedJsonStorage,
@@ -47,6 +49,146 @@ describe('storePersistenceScope', () => {
     vi.advanceTimersByTime(20);
 
     expect(rawStorage.getItem('scope-key')).toBe(JSON.stringify({ state: { value: 2 }, version: 2 }));
+  });
+
+  it('bounds slow async writes and persists the newest snapshot after commit', async () => {
+    const commits: Array<() => void> = [];
+    const saved: string[] = [];
+    const raw = {
+      getItem: () => null,
+      setItem: vi.fn((_name: string, value: string) => new Promise<void>((resolve) => {
+        commits.push(() => { saved.push(value); resolve(); });
+      })),
+      removeItem: vi.fn(),
+    };
+    const storage = createBufferedJsonStorage<{ value: number }>(raw, { flushDelayMs: 20 });
+    storage.setItem('slow', { state: { value: 0 } });
+    await vi.advanceTimersByTimeAsync(20);
+    for (let value = 1; value <= 100; value += 1) {
+      storage.setItem('slow', { state: { value } });
+      await vi.advanceTimersByTimeAsync(20);
+    }
+    expect(raw.setItem).toHaveBeenCalledTimes(1);
+    expect(storage.getItem('slow')).toEqual({ state: { value: 100 } });
+    commits.shift()!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(raw.setItem).toHaveBeenCalledTimes(2);
+    commits.shift()!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(saved.map((value) => JSON.parse(value).state.value)).toEqual([0, 100]);
+  });
+
+  it('preserves a newer delete while an async snapshot is being written', async () => {
+    let commit!: () => void;
+    const raw = { getItem: () => null, setItem: vi.fn(() => new Promise<void>((resolve) => { commit = resolve; })), removeItem: vi.fn() };
+    const storage = createBufferedJsonStorage<{ value: number }>(raw, { flushDelayMs: 20 });
+    storage.setItem('delete-after-write', { state: { value: 1 } });
+    await vi.advanceTimersByTimeAsync(20);
+    storage.removeItem('delete-after-write');
+    await vi.advanceTimersByTimeAsync(20);
+    expect(raw.removeItem).not.toHaveBeenCalled();
+    commit();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(raw.removeItem).toHaveBeenCalledWith('delete-after-write');
+  });
+
+  it('reports a failed async write and still persists a newer pending snapshot', async () => {
+    let rejectWrite!: (error: Error) => void;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const raw = { getItem: () => null, removeItem: vi.fn(), setItem: vi.fn()
+      .mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectWrite = reject; }))
+      .mockResolvedValue(undefined) };
+    const storage = createBufferedJsonStorage<{ value: number }>(raw, { flushDelayMs: 20 });
+    storage.setItem('failed-write', { state: { value: 1 } });
+    await vi.advanceTimersByTimeAsync(20);
+    storage.setItem('failed-write', { state: { value: 2 } });
+    rejectWrite(new Error('transaction aborted'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(readPersistenceHealth().latestFailure).toMatchObject({ name: 'failed-write', reason: 'write_failed' });
+    expect(raw.setItem).toHaveBeenLastCalledWith('failed-write', JSON.stringify({ state: { value: 2 } }));
+    warnSpy.mockRestore();
+  });
+
+  it('waits for transaction commit and rejects a write aborted after request success', async () => {
+    vi.resetModules();
+    vi.stubGlobal('localStorage', createStorageMock());
+    const request = {} as IDBRequest;
+    const transaction = { objectStore: () => ({ put: () => request }) } as unknown as IDBTransaction;
+    const database = { transaction: () => transaction, close: vi.fn() };
+    vi.stubGlobal('indexedDB', { open: () => {
+      const open = {} as IDBOpenDBRequest;
+      Object.defineProperty(open, 'result', { value: database });
+      queueMicrotask(() => open.onsuccess?.(new Event('success')));
+      return open;
+    } });
+    const { createScopedIndexedDbStorage: createStorage } = await import('./storePersistenceScope');
+    const storage = createStorage({ storageName: 'durable', getScopedKey: () => 'durable' });
+    let completed = false;
+    const write = Promise.resolve(storage.setItem('durable', 'snapshot')).then(() => { completed = true; });
+    const rejected = expect(write).rejects.toThrow('transaction aborted');
+    await vi.advanceTimersByTimeAsync(0);
+    request.onsuccess?.(new Event('success'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(completed).toBe(false);
+    transaction.onabort?.call(transaction, new Event('abort'));
+    await rejected;
+    const nextWrite = Promise.resolve(storage.setItem('durable', 'next')).then(() => { completed = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    transaction.oncomplete?.call(transaction, new Event('complete'));
+    await nextWrite;
+    expect(completed).toBe(true);
+  });
+
+  it('accepts a healthy read queued beyond the old 1.2 second deadline', async () => {
+    vi.resetModules();
+    vi.stubGlobal('localStorage', createStorageMock());
+    const { createScopedIndexedDbStorage: createStorage } = await import('./storePersistenceScope');
+    const delayedGet = vi.fn(() => {
+      const request = {} as IDBRequest<string>;
+      setTimeout(() => {
+        Object.defineProperty(request, 'result', { value: 'original' });
+        request.onsuccess?.(new Event('success'));
+      }, 2500);
+      return request;
+    });
+    const database = { close: vi.fn(), transaction: () => ({ objectStore: () => ({ get: delayedGet }), abort: vi.fn() }) };
+    vi.stubGlobal('indexedDB', { open: () => {
+      const request = {} as IDBOpenDBRequest;
+      Object.defineProperty(request, 'result', { value: database });
+      queueMicrotask(() => request.onsuccess?.(new Event('success')));
+      return request;
+    } });
+    const storage = createStorage({ getScopedKey: () => 'slow-read', storageName: 'slow-read' });
+    const result = storage.getItem('slow-read');
+    await vi.advanceTimersByTimeAsync(2500);
+    await expect(result).resolves.toBe('original');
+    database.close();
+  });
+
+  it('aborts timed-out transactions before retrying and releases obsolete connections', async () => {
+    vi.resetModules();
+    vi.stubGlobal('localStorage', createStorageMock());
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const abort = vi.fn();
+    const database = { close: vi.fn(), transaction: () => ({ objectStore: () => ({ get: () => ({}) }), abort }) };
+    const open = vi.fn(() => {
+      const request = {} as IDBOpenDBRequest;
+      Object.defineProperty(request, 'result', { value: database });
+      queueMicrotask(() => request.onsuccess?.(new Event('success')));
+      return request;
+    });
+    vi.stubGlobal('indexedDB', { open });
+    const { createScopedIndexedDbStorage: createStorage } = await import('./storePersistenceScope');
+    const storage = createStorage({ storageName: 'stalled', getScopedKey: () => 'stalled' });
+    const read = storage.getItem('stalled');
+    const rejected = expect(read).rejects.toThrow('IndexedDB read timed out');
+    await vi.advanceTimersByTimeAsync(30_000);
+    await rejected;
+    expect(abort).toHaveBeenCalledTimes(2);
+    expect(database.close).toHaveBeenCalledTimes(2);
+    expect(open).toHaveBeenCalledTimes(2);
+    await expect(storage.setItem('stalled', 'unsafe')).rejects.toThrow('write blocked');
+    warnSpy.mockRestore();
   });
 
   it('flushes buffered persistence immediately for manual retry', () => {
@@ -149,9 +291,10 @@ describe('storePersistenceScope', () => {
     });
 
     const resultPromise = storage.getItem('blocked-chats');
-    await vi.advanceTimersByTimeAsync(2400);
+    const rejected = expect(resultPromise).rejects.toThrow('IndexedDB open timed out');
+    await vi.advanceTimersByTimeAsync(30_000);
 
-    await expect(resultPromise).resolves.toBeNull();
+    await rejected;
     expect(readPersistenceHealth().latestFailure).toMatchObject({
       name: 'blocked-chats-user-1',
       reason: 'read_failed',
@@ -159,7 +302,70 @@ describe('storePersistenceScope', () => {
     warnSpy.mockRestore();
   });
 
-  it('reopens IndexedDB and retries once after a stale connection read timeout', async () => {
+  it.each(['direct', 'buffered'] as const)('protects %s storage after a failed read until a successful reread', async (kind) => {
+    const rawStorage = createStorageMock();
+    vi.stubGlobal('localStorage', rawStorage);
+    vi.stubGlobal('indexedDB', { open: vi.fn(() => ({})) });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const key = `protected-${kind}`;
+    const params = { getScopedKey: () => key, storageName: key };
+    const storage = kind === 'direct' ? createScopedIndexedDbStorage(params)
+      : createScopedIndexedDbBufferedJsonStorage<{ value: string }>(params);
+    const write = () => kind === 'direct'
+      ? (storage as ReturnType<typeof createScopedIndexedDbStorage>).setItem(key, 'replacement')
+      : (storage as ReturnType<typeof createScopedIndexedDbBufferedJsonStorage<{ value: string }>>).setItem(key, { state: { value: 'replacement' } });
+    const read = storage.getItem(key);
+    const rejected = expect(read).rejects.toThrow('IndexedDB open timed out');
+    if (kind === 'direct') await expect(write()).rejects.toThrow('write blocked');
+    else expect(write).toThrow('write blocked');
+    await vi.advanceTimersByTimeAsync(30_000);
+    await rejected;
+    if (kind === 'direct') {
+      await expect(write()).rejects.toThrow('write blocked');
+      await expect(storage.removeItem(key)).rejects.toThrow('write blocked');
+    } else {
+      expect(write).toThrow('write blocked');
+      expect(() => storage.removeItem(key)).toThrow('write blocked');
+    }
+    const saved = JSON.stringify({ state: { value: 'original' }, version: 1 });
+    rawStorage.setItem(key, saved);
+    await expect(storage.getItem(key)).resolves.toEqual(kind === 'direct' ? saved : JSON.parse(saved));
+    expect(rawStorage.getItem(key)).toBe(saved);
+    vi.stubGlobal('indexedDB', undefined);
+    await write();
+    flushBufferedPersistenceWrites();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rawStorage.getItem(key)).not.toBe(saved);
+    warnSpy.mockRestore();
+  });
+
+  it('keeps failed hydration retryable and restores the saved snapshot on retry', async () => {
+    const rawStorage = createStorageMock();
+    vi.stubGlobal('localStorage', rawStorage);
+    vi.stubGlobal('indexedDB', { open: vi.fn(() => ({})) });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const key = 'hydrate-failure-retry';
+    const onHydrated = vi.fn();
+    const store = createStore(persist(() => ({ value: 'empty' }), {
+      name: key, skipHydration: true,
+      storage: createScopedIndexedDbBufferedJsonStorage<{ value: string }>({ getScopedKey: () => key, storageName: key }),
+      onRehydrateStorage: () => onHydrated,
+    }));
+    const hydration = store.persist.rehydrate();
+    await vi.advanceTimersByTimeAsync(30_000);
+    await hydration;
+    expect(store.persist.hasHydrated()).toBe(false);
+    expect(onHydrated).toHaveBeenCalledWith(undefined, expect.any(Error));
+    expect(() => store.setState({ value: 'unsafe replacement' })).toThrow('write blocked');
+    rawStorage.setItem(key, JSON.stringify({ state: { value: 'saved history' }, version: 0 }));
+    await store.persist.rehydrate();
+    expect(store.persist.hasHydrated()).toBe(true);
+    expect(store.getState().value).toBe('saved history');
+    expect(JSON.parse(rawStorage.getItem(key)!).state.value).toBe('saved history');
+    warnSpy.mockRestore();
+  });
+
+  it('shares the reopened connection when concurrent stale reads time out', async () => {
     const rawStorage = createStorageMock();
     vi.stubGlobal('localStorage', rawStorage);
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -168,11 +374,12 @@ describe('storePersistenceScope', () => {
     const database = {
       close: vi.fn(),
       transaction: () => ({
+        abort: vi.fn(),
         objectStore: () => ({
           get: () => {
             const request = {} as IDBRequest<string>;
             readCount += 1;
-            if (readCount > 1) {
+            if (readCount > 2) {
               queueMicrotask(() => {
                 Object.defineProperty(request, 'result', { value: JSON.stringify({ state: 'retried-value', version: 5 }) });
                 request.onsuccess?.(new Event('success'));
@@ -197,11 +404,17 @@ describe('storePersistenceScope', () => {
       storageName: 'retry-messages',
     });
 
+    const otherStorage = createScopedIndexedDbStorage({
+      getScopedKey: () => 'retry-characters-user-1',
+      storageName: 'retry-characters',
+    });
     const resultPromise = storage.getItem('retry-messages');
-    await vi.advanceTimersByTimeAsync(1200);
+    const otherResultPromise = otherStorage.getItem('retry-characters');
+    await vi.advanceTimersByTimeAsync(15_000);
     await vi.advanceTimersByTimeAsync(0);
 
     await expect(resultPromise).resolves.toEqual({ state: 'retried-value', version: 5 });
+    await expect(otherResultPromise).resolves.toBe(JSON.stringify({ state: 'retried-value', version: 5 }));
     expect(openCount).toBe(2);
     expect(database.close).toHaveBeenCalledTimes(1);
     warnSpy.mockRestore();

@@ -308,9 +308,14 @@ export function useChatRunLoop(params: {
           current.setCurrentSpeaker(null);
           setRunLoopError(null);
         },
-        onWaitingForInputChange: (waiting) => {
+        onWaitingForInput: () => {
           if (current.loopTokenRef.current !== loopId || current.activeChatIdRef.current !== current.chatId) return;
-          setIsWaitingForInput(waiting);
+          setIsWaitingForInput(true);
+          current.isRunningRef.current = false;
+          current.isPausedRef.current = false;
+          current.loopTokenRef.current = null;
+          current.stop();
+          void current.updateChat(current.chatId!, { isActive: false });
         },
         onClearStreamingState: () => {
           if (current.loopTokenRef.current !== loopId) return;

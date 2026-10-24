@@ -1,5 +1,5 @@
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import { useVirtualizer, type Range } from '@tanstack/react-virtual';
 import { Box, Chip, CircularProgress, Fab, Stack, Typography, keyframes } from '@mui/material';
 import { memo, type CSSProperties, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Message, MessageAttachment, NarrativeBlock, NarrativeTurnMetadata } from '../../types/message';
@@ -22,6 +22,7 @@ import type { AssistantHtmlInteractionPayload, AssistantHtmlRuntimeError } from 
 import { buildBubblePreview, resolveCharacterBubbleStyle } from '../../utils/bubbleStyle';
 import { motion, prefersReducedMotion, transition } from '../../styles/motion';
 import { buildMessageListRenderItems, type MessageListRenderItem } from './messageListRenderItems';
+import { extractMessageSelectionRange } from './messageListSelection';
 import { shouldMaintainTailAfterMutation } from './messageListTailOwnership';
 import { SCROLL_INTENT_PRIORITY, shouldBlockScrollWrite, type ScrollIntentKind, type ScrollTransaction } from '../../services/scrollCoordinator';
 
@@ -659,9 +660,12 @@ export default function MessageList({
   const [initialViewportReady, setInitialViewportReady] = useState(() => !autoStickToBottom && !hasInitialRestorePosition);
   const [prependStabilizing, setPrependStabilizing] = useState(false);
   const [diagramViewerItem, setDiagramViewerItem] = useState<LightboxImageItem | null>(null);
-  const [textSelectionActive, setTextSelectionActive] = useState(false);
-  const textSelectionLayoutAnchorRef = useRef<{ index: number; offsetTop: number } | null>(null);
-  const textSelectionLayoutTransitionRef = useRef(false);
+  const [selectedMessageKeys, setSelectedMessageKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const textSelectionActive = selectedMessageKeys.size > 0;
+  const renderItemKeys = useMemo(() => renderItems.map((item) => item.key), [renderItems]);
+  const selectionRangeExtractor = useCallback((range: Range) => (
+    extractMessageSelectionRange(range, renderItemKeys, selectedMessageKeys)
+  ), [renderItemKeys, selectedMessageKeys]);
   const previousRenderMetricsRef = useRef({
     itemCount: renderItems.length,
     lastItemKey: renderItems.at(-1)?.key ?? null,
@@ -678,20 +682,18 @@ export default function MessageList({
     getItemKey: (index) => renderItems[index]?.key || index,
     estimateSize: () => 108,
     overscan: prependStabilizing ? PREPEND_STABILIZE_OVERSCAN : 2,
+    rangeExtractor: selectionRangeExtractor,
   });
   messageVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = () => (
     autoStickToBottom
     && shouldStickToBottomRef.current
     && !isUserPointerHeldRef.current
     && !textSelectionActive
-    && !textSelectionLayoutTransitionRef.current
     && !tailFollowStartSnapshotRef.current
     && followScrollAnimationRef.current == null
   );
   const virtualMessageItems = messageVirtualizer.getVirtualItems();
-  const renderedMessageItems = textSelectionActive
-    ? renderItems.map((item, index) => ({ index, key: item.key, start: null }))
-    : virtualMessageItems;
+  const renderedMessageItems = virtualMessageItems;
 
   useEffect(() => {
     const updateTextSelectionState = () => {
@@ -703,55 +705,25 @@ export default function MessageList({
         && anchor
         && containerRef.current?.contains(anchor),
       );
-      setTextSelectionActive((current) => {
-        if (current === hasMessageSelection) return current;
-        const container = containerRef.current;
-        if (container) {
-          const containerRect = container.getBoundingClientRect();
-          const firstVisibleItem = Array.from(container.querySelectorAll<HTMLElement>('[data-index]'))
-            .find((item) => {
-              const rect = item.getBoundingClientRect();
-              return rect.bottom > containerRect.top && rect.top < containerRect.bottom;
-            });
-          const index = Number(firstVisibleItem?.dataset.index);
-          if (firstVisibleItem && Number.isInteger(index)) {
-            textSelectionLayoutAnchorRef.current = {
-              index,
-              offsetTop: firstVisibleItem.getBoundingClientRect().top - containerRect.top,
-            };
-            textSelectionLayoutTransitionRef.current = true;
+      const selectedKeys = new Set<string>();
+      const container = containerRef.current;
+      if (hasMessageSelection && selection && container) {
+        const ranges = Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index));
+        container.querySelectorAll<HTMLElement>('[data-selection-key]').forEach((element) => {
+          if (ranges.some((range) => range.intersectsNode(element))) {
+            const key = element.dataset.selectionKey;
+            if (key) selectedKeys.add(key);
           }
-        }
-        return hasMessageSelection;
-      });
+        });
+      }
+      setSelectedMessageKeys((current) => (
+        current.size === selectedKeys.size && [...current].every((key) => selectedKeys.has(key))
+          ? current : selectedKeys
+      ));
     };
     document.addEventListener('selectionchange', updateTextSelectionState);
     return () => document.removeEventListener('selectionchange', updateTextSelectionState);
   }, []);
-
-  useLayoutEffect(() => {
-    const anchor = textSelectionLayoutAnchorRef.current;
-    textSelectionLayoutAnchorRef.current = null;
-    const container = containerRef.current;
-    if (!anchor || !container) {
-      textSelectionLayoutTransitionRef.current = false;
-      return;
-    }
-    const restoreAnchorOffset = () => {
-      const item = container.querySelector<HTMLElement>(`[data-index="${anchor.index}"]`);
-      if (!item) return;
-      const offsetDelta = item.getBoundingClientRect().top - container.getBoundingClientRect().top - anchor.offsetTop;
-      if (Math.abs(offsetDelta) < 0.1) return;
-      container.scrollTop += offsetDelta;
-      lastScrollTopRef.current = container.scrollTop;
-    };
-    restoreAnchorOffset();
-    const frame = requestAnimationFrame(() => {
-      restoreAnchorOffset();
-      textSelectionLayoutTransitionRef.current = false;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [textSelectionActive]);
 
   const viewerIndex = viewerKey ? chatImageTimeline.findIndex((item) => item.key === viewerKey) : -1;
   const viewerImages = diagramViewerItem ? [diagramViewerItem] : chatImageTimeline;
@@ -1154,7 +1126,7 @@ export default function MessageList({
         firstTimestamp: renderItems[0]?.message.timestamp,
         lastMessageId: renderItems.at(-1)?.message.id,
         lastTimestamp: renderItems.at(-1)?.message.timestamp,
-      }, 'warn', 'chat-scroll');
+      }, options?.intent === 'initialRestore' ? 'debug' : 'warn', 'chat-scroll');
       return false;
     }
     const currentOffset = fallbackTarget.getBoundingClientRect().top - containerRect.top;
@@ -1629,7 +1601,7 @@ export default function MessageList({
           firstTimestamp: renderItems[0]?.message.timestamp,
           lastMessageId: renderItems.at(-1)?.message.id,
           lastTimestamp: renderItems.at(-1)?.message.timestamp,
-        }, 'warn');
+        }, 'debug', 'chat-scroll');
         if (scrollVirtualizerToAnchor(initialPosition, { intent: 'initialRestore', allowDuringUserScroll: true })) {
           hasJumpedToBottomRef.current = true;
           scheduleInitialAnchorReveal(initialPosition);
@@ -1645,6 +1617,12 @@ export default function MessageList({
           return;
         }
         if (!hasMore && !hasMoreNewer) {
+          logDeveloperDiagnostic('chat-scroll:initial-restore-failed', {
+            reason: 'no-dom-or-virtual-anchor',
+            messageId: initialPosition.messageId,
+            sourceTimestamp: initialPosition.sourceTimestamp,
+            renderItemCount: renderItems.length,
+          }, 'warn', 'chat-scroll');
           hasJumpedToBottomRef.current = true;
           pendingInitialRestoreRef.current = null;
           setInitialViewportReady(true);
@@ -2148,7 +2126,7 @@ export default function MessageList({
             style={{
               position: 'relative',
               width: '100%',
-              height: textSelectionActive ? undefined : `${messageVirtualizer.getTotalSize()}px`,
+              height: `${messageVirtualizer.getTotalSize()}px`,
             }}
           >
             {renderedMessageItems.map((renderedItem) => {
@@ -2158,10 +2136,11 @@ export default function MessageList({
                 <div
                   key={item.key}
                   data-index={renderedItem.index}
-                  ref={textSelectionActive ? undefined : messageVirtualizer.measureElement}
+                  data-selection-key={item.key}
+                  ref={messageVirtualizer.measureElement}
                   style={{
-                    position: textSelectionActive ? 'relative' : 'absolute',
-                    top: textSelectionActive ? undefined : `${renderedItem.start || 0}px`,
+                    position: 'absolute',
+                    top: `${renderedItem.start}px`,
                     left: 0,
                     width: '100%',
                     minWidth: 0,
@@ -2169,7 +2148,7 @@ export default function MessageList({
                     // Paint containment clips the bubble's shadow at each
                     // virtual row boundary. Keep layout/style isolation for
                     // virtualized rows without changing their visual output.
-                    contain: textSelectionActive ? undefined : 'layout style',
+                    contain: 'layout style',
                   }}
                 >
                   {renderMessageItem(item)}

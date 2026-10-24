@@ -12,7 +12,7 @@ import { getCurrentSessionPhase } from './sessionStateMachine';
 import { getPreferredAIProfile } from '../types/settings';
 import { resolveUserInputHold, type UserDraftActivity } from './userInputBuffer';
 import { isGenerationCancelledError } from './generationCancellation';
-import { logDeveloperDiagnostic } from './developerDiagnostics';
+import { isDeveloperDiagnosticScopeEnabled, logDeveloperDiagnostic } from './developerDiagnostics';
 import { isAutoRunnableSessionAction } from './conversationCapabilities';
 import { applyAnalysisRunPolicy, buildAnalysisRunPolicyEvent, type SessionLoopDecision } from './analysisRunPolicy';
 import { resolvePendingReplyContext } from './scheduler';
@@ -77,6 +77,8 @@ export function shouldPauseSettledConversation(runStart: GroupChat, after: Group
   const settledAt = after.worldState.conversationContinuity?.settledAt;
   return after.type === 'group' && resolveSessionFamilyKey(after) === 'conversation'
     && Boolean(settledAt && settledAt !== runStart.worldState.conversationContinuity?.settledAt)
+    && after.worldState.conversationContinuity?.settledScope === 'room'
+    && Boolean(after.worldState.conversationContinuity?.settledEvidenceText)
     && !resolvePendingReplyContext(characters, messages, after);
 }
 
@@ -84,7 +86,7 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-type SessionLoopPhase = 'starting' | 'paused' | 'waiting_commit' | 'waiting_context' | 'selecting' | 'running_round' | 'sleeping' | 'error_sleeping';
+type SessionLoopPhase = 'starting' | 'paused' | 'waiting_commit' | 'selecting' | 'running_round' | 'sleeping' | 'error_sleeping';
 
 const activeSessionLoops = new Map<string, {
   chatId: string;
@@ -308,7 +310,7 @@ export async function runSessionLoop(params: {
   onTurnWorkFinished?: () => void;
   onIdle?: (reason: string) => void;
   onQuiet?: () => void;
-  onWaitingForInputChange?: (waiting: boolean) => void;
+  onWaitingForInput?: () => void;
   onMessageChunk: (content: string) => void;
   onStreamingComplete?: () => void;
   onMessageDisplayAnomaly?: (message: string) => void;
@@ -353,13 +355,6 @@ export async function runSessionLoop(params: {
   const consumedSpeakerIds = new Set<string>();
   const consumedReplyDebtSpeakerIds = new Set<string>();
   const presenceByMemberId = new Map<string, string>();
-  let waitingForInput = false;
-  const setWaitingForInput = (waiting: boolean) => {
-    if (waitingForInput === waiting) return;
-    waitingForInput = waiting;
-    params.onWaitingForInputChange?.(waiting);
-    if (waiting) console.info('[chat-run:waiting-input] 当前可发言角色均选择不发言，等待用户输入。');
-  };
   activeSessionLoops.set(params.loopId, {
     chatId: params.chatId,
     startedAt: Date.now(),
@@ -372,7 +367,6 @@ export async function runSessionLoop(params: {
       if (params.signal?.aborted) return;
       if (!isActiveLoop(params)) return;
       if (params.isPaused()) {
-        setWaitingForInput(false);
         conversationRunStart = null;
         markSessionLoop(params.loopId, { phase: 'paused' });
         await sleep(120);
@@ -396,15 +390,13 @@ export async function runSessionLoop(params: {
           if (getAutonomousContextKey(waitingChat, waitingMessages) === noSendContextKey
             && !hasPendingReply
             && waitingMembers.every((character) => getEffectiveCharacterPresence(character).status === 'away' || consumedSpeakerIds.has(character.id))) {
-            markSessionLoop(params.loopId, { phase: 'waiting_context' });
-            setWaitingForInput(true);
-            await sleep(250);
-            continue;
+            console.info('[chat-run:waiting-input] 当前可发言角色均选择不发言，停止运行，等待用户输入。');
+            params.onWaitingForInput?.();
+            return;
           }
         }
       }
 
-      setWaitingForInput(false);
       try {
       const turnStartedAt = nowMs();
       let roundStreamingMessage: Message | null = null;
@@ -814,18 +806,37 @@ export async function runSessionLoop(params: {
       if (shouldPauseSettled && committedChat) {
         const continuity = committedChat.worldState.conversationContinuity;
         const pendingReply = resolvePendingReplyContext(latestCharacters, latestMessages, committedChat);
-        logDeveloperDiagnostic('chat-run:settled-pause-evaluated', {
+        const source = latestMessages.find((message) => message.id === continuity?.settledSourceMessageId);
+        const speaker = latestCharacters.find((character) => character.id === source?.senderId);
+        const pauseDetails = {
+          reason: 'room_conversation_settled',
+          stoppedBy: 'sessionRunner',
+          requestedBySpeakerId: source?.senderId || null,
+          requestedBySpeakerName: speaker?.name || source?.senderName || null,
           chatId: params.chatId,
           loopId: params.loopId,
           settledAt: continuity?.settledAt || null,
+          settledScope: continuity?.settledScope,
+          evidenceText: continuity?.settledEvidenceText,
+          sourceMessageId: continuity?.settledSourceMessageId,
           previousSettledAt: conversationRunStart?.worldState.conversationContinuity?.settledAt || null,
           pendingReplyTargetIds: pendingReply?.targetIds || [],
           pendingReplySourceMessageId: pendingReply?.sourceMessageId || null,
           lastAiSpeakerId: [...latestMessages].reverse().find((message) => message.type === 'ai' && !message.isDeleted)?.senderId || null,
           activeContinuityItemCount: continuity?.items?.length || 0,
-        }, 'info', 'chat-run');
+        };
+        logDeveloperDiagnostic('chat-run:settled-pause-evaluated', pauseDetails, 'info', 'chat-run');
+        if (!isDeveloperDiagnosticScopeEnabled('chat-run')) {
+          console.info('[chat-run:settled-pause-evaluated]', pauseDetails);
+        }
         params.pauseLoop?.();
         conversationRunStart = null;
+        await params.appendEventMessage(params.chatId, {
+          eventType: 'conversation_paused',
+          title: '群聊自动暂停',
+          summary: '群聊已自动暂停',
+          eventClass: 'phase', visibilityScope: 'public', channelId: 'public',
+        });
       }
 
       if (params.isRunning() && !params.isPaused() && shouldWaitAfterSessionTick()) {
@@ -869,7 +880,6 @@ export async function runSessionLoop(params: {
       }
     }
   } finally {
-    setWaitingForInput(false);
     activeSessionLoops.delete(params.loopId);
   }
 }

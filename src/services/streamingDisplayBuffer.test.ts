@@ -10,8 +10,13 @@ describe('getNextStreamingDisplayContent', () => {
   it('uses larger steps for long incoming text without jumping to the end', () => {
     const target = 'x'.repeat(160);
 
-    expect(getNextStreamingDisplayContent('', target)).toBe('x'.repeat(4));
-    expect(getNextStreamingDisplayContent('x'.repeat(4), target)).toBe('x'.repeat(8));
+    expect(getNextStreamingDisplayContent('', target)).toBe('x'.repeat(6));
+    expect(getNextStreamingDisplayContent('x'.repeat(6), target)).toBe('x'.repeat(12));
+  });
+
+  it('keeps short replies moving at the faster display interval', () => {
+    expect(getNextStreamingDisplayContent('', '你好')).toBe('你');
+    expect(getNextStreamingDisplayContent('你', '你好')).toBe('你好');
   });
 
   it('jumps to target when stream content is rewritten', () => {

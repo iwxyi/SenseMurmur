@@ -6,6 +6,7 @@ import type { FactArchiveEntry, FactEvidence } from '../services/factualMemoryTy
 
 interface ChatFactArchive {
   deletions?: Record<string, { deleted: boolean; synced: boolean }>;
+  lifecycle?: Record<string, { archived: boolean; archivedAt?: number; synced: boolean }>;
   nodes: Record<string, FactEvidence>;
   entries: Record<string, FactArchiveEntry>;
 }
@@ -17,6 +18,7 @@ interface FactArchiveState {
   invalidate: (ids: string[]) => void;
   clearChat: (chatId: string) => void;
   setDeletion: (chatId: string, factId: string, deleted: boolean, synced: boolean) => void;
+  setLifecycle: (chatId: string, factId: string, archived: boolean, archivedAt: number | undefined, synced: boolean) => void;
 }
 
 export const useFactArchiveStore = create<FactArchiveState>()(persist((set) => ({
@@ -25,6 +27,11 @@ export const useFactArchiveStore = create<FactArchiveState>()(persist((set) => (
     const current = state.chats[chatId] || { nodes: {}, entries: {} };
     return { chats: { ...state.chats, [chatId]: { ...current,
       deletions: { ...current.deletions, [factId]: { deleted, synced } } } } };
+  }),
+  setLifecycle: (chatId, factId, archived, archivedAt, synced) => set((state) => {
+    const current = state.chats[chatId] || { nodes: {}, entries: {} };
+    return { chats: { ...state.chats, [chatId]: { ...current,
+      lifecycle: { ...current.lifecycle, [factId]: { archived, ...(archivedAt ? { archivedAt } : {}), synced } } } } };
   }),
   capture: (chatId, sources) => set((state) => {
     const current = state.chats[chatId] || { nodes: {}, entries: {} };

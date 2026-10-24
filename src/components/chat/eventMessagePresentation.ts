@@ -59,8 +59,10 @@ export function getRuntimeEventPayload(message: Message): EventDisplayPayload {
 }
 
 export function shouldRenderEventMessage(message: Message, flags: EventRenderFlags) {
-  if (message.type !== 'event' || !flags.developerMode) return false;
+  if (message.type !== 'event') return false;
   const payload = getRuntimeEventPayload(message);
+  if (payload.eventType === 'conversation_paused') return true;
+  if (!flags.developerMode) return false;
   if (!shouldRenderDeveloperEvent(payload, flags)) return false;
   return !shouldHideEmptyConflictEvent(payload);
 }

@@ -127,6 +127,7 @@ function toMediaGenerationErrorText(error: unknown, kind: GenerativeAttachmentKi
 }
 
 const latestRichMediaMessageById = new Map<string, Message>();
+const richMediaMessageUsers = new Map<string, number>();
 type RichMediaQueueEntryStatus = 'queued' | 'generating';
 export type RichMediaQueueSnapshotEntry = {
   messageId: string;
@@ -237,6 +238,7 @@ export function resetRichMediaQueueForTests() {
   runningRichMediaQueueEntry = null;
   richMediaQueueSnapshotCache = [];
   latestRichMediaMessageById.clear();
+  richMediaMessageUsers.clear();
   richMediaGenerationErrors.clear();
   dismissedRichMediaGenerationErrorIds.clear();
   publishRichMediaQueueSnapshot();
@@ -700,7 +702,6 @@ export async function processRichMessageMedia(params: {
   priority?: 'normal' | 'next';
 }) {
   if (!isLocalOnlyMediaMode() && !params.message.serverId) return;
-  rememberRichMediaMessage(params.message);
   const attachmentFilter = params.attachmentIds?.length ? new Set(params.attachmentIds) : null;
   const attachments = (params.message.metadata?.attachments || [])
     .filter((item): item is GenerativeAttachment => (
@@ -708,37 +709,51 @@ export async function processRichMessageMedia(params: {
       && (!attachmentFilter || attachmentFilter.has(item.id))
     ));
   if (!attachments.length) return;
-  const imageCount = attachments.filter((attachment) => attachment.kind === 'image').length;
-  if (imageCount > 0 && !params.attachmentIds?.length && useAuthStore.getState().authMode === 'cloud') {
-    try {
-      await api.authorizeImageGenerationBatch(imageCount);
-    } catch (error) {
-      const message = error instanceof Error && error.message
-        ? error.message
-        : `本次请求包含 ${imageCount} 张图片，当前会员单次批量生成上限不足。请减少图片数量或升级会员后重试。`;
-      let failedMessage = params.message;
-      for (const attachment of attachments) {
-        if (attachment.kind !== 'image') continue;
-        failedMessage = updateRichMediaMessage({
-          message: failedMessage,
-          attachmentId: attachment.id,
-          patch: { status: 'failed', error: message },
-          upsertMessage: params.upsertMessage,
-        });
+  const messageId = params.message.id;
+  richMediaMessageUsers.set(messageId, (richMediaMessageUsers.get(messageId) || 0) + 1);
+  rememberRichMediaMessage(params.message);
+  try {
+    const imageCount = attachments.filter((attachment) => attachment.kind === 'image').length;
+    if (imageCount > 0 && !params.attachmentIds?.length && useAuthStore.getState().authMode === 'cloud') {
+      try {
+        await api.authorizeImageGenerationBatch(imageCount);
+      } catch (error) {
+        const message = error instanceof Error && error.message
+          ? error.message
+          : `本次请求包含 ${imageCount} 张图片，当前会员单次批量生成上限不足。请减少图片数量或升级会员后重试。`;
+        let failedMessage = params.message;
+        for (const attachment of attachments) {
+          if (attachment.kind !== 'image') continue;
+          failedMessage = updateRichMediaMessage({
+            message: failedMessage,
+            attachmentId: attachment.id,
+            patch: { status: 'failed', error: message },
+            upsertMessage: params.upsertMessage,
+          });
+        }
+        return;
       }
-      return;
+    }
+    await Promise.all(attachments.map((attachment) => enqueueRichMediaAttachment({
+      message: params.message,
+      attachment,
+      character: params.character,
+      characters: params.characters,
+      messages: params.messages,
+      aiProfiles: params.aiProfiles,
+      upsertMessage: params.upsertMessage,
+      priority: params.priority,
+    })));
+  } finally {
+    // Concurrent retries/attachments share the latest message only while in use.
+    // Finished jobs must not retain message bodies or generated data URLs.
+    const users = (richMediaMessageUsers.get(messageId) || 1) - 1;
+    if (users) richMediaMessageUsers.set(messageId, users);
+    else {
+      richMediaMessageUsers.delete(messageId);
+      latestRichMediaMessageById.delete(messageId);
     }
   }
-  await Promise.all(attachments.map((attachment) => enqueueRichMediaAttachment({
-    message: params.message,
-    attachment,
-    character: params.character,
-    characters: params.characters,
-    messages: params.messages,
-    aiProfiles: params.aiProfiles,
-    upsertMessage: params.upsertMessage,
-    priority: params.priority,
-  })));
 }
 
 export async function retryRichMessageMedia(params: {
@@ -756,7 +771,6 @@ export async function retryRichMessageMedia(params: {
   const generationJobId = createGenerationJobId();
   const retryMetadata = retryAttachmentMetadata(params.message.metadata, params.attachmentId, generationJobId);
   const retryMessage = { ...params.message, metadata: retryMetadata };
-  rememberRichMediaMessage(retryMessage);
   params.upsertMessage(retryMessage);
   persistRichMessageMetadata(retryMessage, retryMetadata, 'rich-message-media.retry-persist-metadata', params.attachmentId);
   void processRichMessageMedia({

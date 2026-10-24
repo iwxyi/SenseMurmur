@@ -387,8 +387,12 @@ describe('chatEngine streaming preview', () => {
         messages: [], apiConfig: buildProfiles(), onChunk,
       });
       expect(generateResponseMock).toHaveBeenCalledTimes(2);
+      expect(generateResponseMock.mock.calls[0]?.[1]).toContain('顶层必须包含 conversationUpdate');
       expect(generateResponseMock.mock.calls[1]?.[2]).toEqual(generateResponseMock.mock.calls[0]?.[2]);
       expect(generateResponseMock.mock.calls[1]?.[1]).toContain('explicitly include top-level conversationUpdate');
+      expect(generateResponseMock.mock.calls[1]?.[1]).toContain('a missing or invalid conversationUpdate field in the JSON object');
+      expect(generateResponseMock.mock.calls[1]?.[1]).toContain('"stage":"conversation_update","field":"conversationUpdate"');
+      expect(generateResponseMock.mock.calls[1]?.[1]).not.toContain('previous attempt returned no valid JSON envelope');
       expect(onChunk).toHaveBeenCalledWith('');
       expect(message.content).toBe('记录交回来了。');
       if (conversationUpdate) expect(message.metadata?.conversationUpdate?.items[0]).toMatchObject({ key: 'report', status: 'resolved' });
@@ -404,7 +408,7 @@ describe('chatEngine streaming preview', () => {
     expect(generateResponseMock).toHaveBeenCalledTimes(3);
     expect(callbacks.onSpeakerSelected).toHaveBeenCalledTimes(1);
     expect(callbacks.onMessageComplete).not.toHaveBeenCalled();
-    expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid' });
+    expect(callbacks.onError.mock.calls[0]?.[0]).toMatchObject({ reason: 'output_protocol_invalid', protocolReason: 'invalid_conversation_update' });
   });
 
   it('distinguishes a recorded activity from newer circumstances in the actual model request', async () => {
@@ -685,6 +689,8 @@ describe('chatEngine streaming preview', () => {
       expect(logs.map((entry) => entry.attempt)).toEqual([1, 2, 3]);
       expect(logs[2].details).toMatchObject({ responseLength: raw.length,
         parseFailure: { stage: 'activity_update', field: 'activityUpdate.durationMinutes' } });
+      expect(logs[2].reason).toBe('invalid_activity_update');
+      expect(generateResponseMock.mock.calls[1]?.[1]).toContain('"field":"activityUpdate.durationMinutes"');
       expect(logs[2].details.rawResponse).toContain('response-end');
       expect(JSON.stringify(warn.mock.calls)).not.toContain('private-test-secret');
       expect(JSON.stringify(debug.mock.calls)).not.toContain('private-test-secret');

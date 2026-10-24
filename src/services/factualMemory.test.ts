@@ -20,7 +20,7 @@ vi.mock('../stores/storePersistenceScope', async (importOriginal) => ({
   flushBufferedPersistenceWrites: mocks.flush,
 }));
 
-import { scheduleFactRecording, flushFactRecording, listDetailedFacts, listConversationDetailedFacts, recallLocalFacts, setDetailedFactDeleted } from './factualMemory';
+import { scheduleFactRecording, flushFactRecording, listDetailedFacts, listConversationDetailedFacts, recallLocalFacts, setDetailedFactArchived, setDetailedFactDeleted } from './factualMemory';
 import { useFactArchiveStore } from '../stores/useFactArchiveStore';
 import { ApiError } from './api';
 
@@ -99,6 +99,28 @@ describe('detailed fact recording notifications', () => {
     expect(await listConversationDetailedFacts(chat.id)).toMatchObject([{ id: fact.id, text: fact.text }]);
   });
 
+  it('automatically archives expired temporary facts and keeps them visible only in the source archive', async () => {
+    mocks.chats = [chat];
+    const temporary = { ...facts[0], lifecycle: 'temporary' };
+    mocks.generate.mockResolvedValue(JSON.stringify({ facts: [temporary] }));
+    scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [], appendEventMessage: vi.fn() });
+    await flushFactRecording();
+    expect(recallLocalFacts('actor-1')).toEqual([]);
+    expect(await listConversationDetailedFacts(chat.id)).toMatchObject([{ text: temporary.text, archived: true, lifecycle: 'temporary' }]);
+  });
+
+  it('manually archives and restores a fact without deleting its evidence', async () => {
+    mocks.chats = [chat];
+    scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [], appendEventMessage: vi.fn() });
+    await flushFactRecording();
+    const [fact] = await listConversationDetailedFacts(chat.id);
+    await setDetailedFactArchived(fact, true);
+    expect(recallLocalFacts('actor-1')).toEqual([]);
+    expect(await listConversationDetailedFacts(chat.id)).toMatchObject([{ id: fact.id, archived: true }]);
+    await setDetailedFactArchived(fact, false);
+    expect(recallLocalFacts('actor-1')).toMatchObject([{ id: fact.id, archived: false }]);
+  });
+
   it('cloud deletion tombstones suppress stale local copies and cloud undo restores them', async () => {
     mocks.chats = [chat];
     scheduleFactRecording({ api: {} as APIConfig, chat, message, messages: [], appendEventMessage: vi.fn() });
@@ -164,7 +186,7 @@ describe('detailed fact recording notifications', () => {
     const input = JSON.parse(mocks.generate.mock.calls[1][2][0].content);
     expect(input.newMessage).toEqual({ id: next.id, speaker: next.senderName, content: next.content });
     expect(input.contextMessages).toEqual([{ id: message.id, speaker: message.senderName, content: message.content }]);
-    expect(input.existingFacts).toEqual([{ ref: 'f0', text: facts[0].text, status: facts[0].status, sourceIds: facts[0].sourceIds }]);
+    expect(input.existingFacts).toEqual([{ ref: 'f0', text: facts[0].text, status: facts[0].status, lifecycle: 'ongoing', sourceIds: facts[0].sourceIds }]);
     expect(useFactArchiveStore.getState().chats[chat.id].entries[next.id].facts).toEqual([]);
     expect(appendEventMessage).toHaveBeenCalledOnce();
   });
@@ -187,10 +209,10 @@ describe('detailed fact recording notifications', () => {
     expect(useFactArchiveStore.getState().chats[chat.id].entries.empty.synced).toBe(true);
   });
 
-  it('presents one merged fact, syncs its references and restores the prior fact if new evidence is withdrawn', async () => {
+  it.each([false, true])('presents, syncs and restores a merged fact when old evidence is inherited: %s', async (inheritEvidence) => {
     mocks.chats = [chat];
     const next = { ...message, id: 'message-2', content: '暗号用于明早接头', timestamp: 101 };
-    const merged = { text: '明早接头暗号为青梅煮酒', status: 'agreed', sourceIds: [message.id, next.id], mergeWith: ['f0'] };
+    const merged = { text: '明早接头暗号为青梅煮酒', status: 'agreed', sourceIds: inheritEvidence ? [next.id] : [message.id, next.id], mergeWith: ['f0'] };
     mocks.generate.mockResolvedValueOnce(JSON.stringify({ facts }))
       .mockResolvedValueOnce(JSON.stringify({ facts: [merged] }));
     const appendEventMessage = vi.fn();
@@ -205,7 +227,7 @@ describe('detailed fact recording notifications', () => {
       .mockResolvedValueOnce({ items: [{ id: 'server-1:0', chatId: chat.id, text: facts[0].text, status: 'agreed', timestamp: 100 }] });
     const result = await listDetailedFacts('actor-1', chat);
     expect(result.map((fact) => fact.text)).toEqual([merged.text]);
-    expect(mocks.request.mock.calls[1][2].facts[0]).toEqual({ text: merged.text, status: 'agreed', sourceIds: ['server-1', 'server-2'],
+    expect(mocks.request.mock.calls[1][2].facts[0]).toEqual({ text: merged.text, status: 'agreed', lifecycle: 'ongoing', sourceIds: inheritEvidence ? ['server-2', 'server-1'] : ['server-1', 'server-2'],
       mergedFrom: [{ messageId: 'server-1', factIndex: 0 }] });
     useFactArchiveStore.getState().invalidate([next.id]);
     expect(recallLocalFacts('actor-1', chat).map((fact) => fact.text)).toEqual([facts[0].text]);

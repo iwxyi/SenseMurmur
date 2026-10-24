@@ -45,9 +45,26 @@ describe('parseDetailedFacts', () => {
     const parse = (value: unknown) => parseDetailedFacts(JSON.stringify({ facts: [value] }), new Set(['m1', 'm2']), 'm2', undefined, candidates);
     expect(parse(fact)[0]).toEqual({ text: fact.text, status: fact.status, sourceIds: fact.sourceIds,
       mergedFrom: [{ messageId: 'm1', factIndex: 0 }] });
-    expect(() => parse({ ...fact, mergeWith: ['invented'] })).toThrow('mergeWith');
-    expect(() => parse({ ...fact, sourceIds: ['m2'] })).toThrow('mergeWith');
-    expect(() => parse({ ...fact, status: 'disputed' })).toThrow('mergeWith');
+    expect(() => parse({ ...fact, mergeWith: ['invented'] })).toThrow('available refs: f0');
+    expect(parse({ ...fact, sourceIds: ['m2'] })[0].sourceIds).toEqual(['m2', 'm1']);
+    expect(() => parse({ ...fact, status: 'disputed' })).toThrow('has status agreed, received disputed');
+  });
+
+  it('inherits deduplicated evidence from multiple references without dropping evidence to fit the limit', () => {
+    const ids = Array.from({ length: 12 }, (_, index) => `m${index}`);
+    const candidates = new Map<string, FactMergeCandidate>([
+      ['f0', { messageId: 'm0', factIndex: 0, fact: { text: '旧事实', status: 'agreed', sourceIds: ids.slice(0, 6) } }],
+      ['f1', { messageId: 'm5', factIndex: 0, fact: { text: '相关事实', status: 'agreed', sourceIds: ids.slice(5) } }],
+    ]);
+    const fact = { text: '完整事项', status: 'agreed', sourceIds: ['new'], mergeWith: ['f0', 'f0'] };
+    const parse = (value: unknown) => parseDetailedFacts(JSON.stringify({ facts: [value] }), new Set([...ids, 'new']), 'new', undefined, candidates);
+    expect(parse(fact)[0].sourceIds).toEqual(['new', ...ids.slice(0, 6)]);
+    expect(parse(fact)[0].mergedFrom).toHaveLength(1);
+    expect(() => parse({ ...fact, mergeWith: ['f0', 'f1'] })).toThrow('merged evidence contains 13 messages');
+    expect(() => parseDetailedFacts(JSON.stringify({ facts: [fact] }), new Set(['new']), 'new', undefined, candidates))
+      .toThrow('evidence outside the supplied messages');
+    candidates.get('f0')!.fact.retracted = true;
+    expect(() => parse(fact)).toThrow('is retracted');
   });
 
   it('collapses successive merges without hiding records in a different chat', () => {
@@ -66,7 +83,8 @@ describe('parseDetailedFacts', () => {
     const parse = (value: unknown) => parseDetailedFacts(JSON.stringify({ facts: [value] }), new Set(['m1', 'm2']), 'm2', undefined, candidates);
     expect(parse(fact)[0].retracted).toBe(true);
     expect(() => parse({ ...fact, mergeWith: [] })).toThrow('mergeWith');
-    expect(() => parse({ ...fact, sourceIds: ['m2'] })).toThrow('mergeWith');
+    expect(parse({ ...fact, sourceIds: ['m2'] })[0].sourceIds).toEqual(['m2', 'm1']);
+    expect(() => parse({ ...fact, sourceIds: ['m1'] })).toThrow('must include newMessageId');
     expect(() => parse({ ...fact, retracted: 'yes' })).toThrow('retracted');
     expect(collapseMergedFacts([{ id: 'm1:0', chatId: 'a' },
       { id: 'm2:0', chatId: 'a', retracted: true, mergedFrom: [{ messageId: 'm1', factIndex: 0 }] }])).toEqual([]);

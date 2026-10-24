@@ -1,5 +1,5 @@
 import { Box } from '@mui/material';
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import type { SxProps, Theme } from '@mui/material/styles';
 import { motion } from '../../styles/motion';
 
@@ -54,7 +54,6 @@ function usePrefersReducedMotion() {
 export default function AnimatedTabContent<T extends string | number>({ value, direction = 1, children, sx }: AnimatedTabContentProps<T>) {
   const prefersReducedMotion = usePrefersReducedMotion();
   const paneChildrenByValueRef = useRef(new Map<T, ReactNode>());
-  paneChildrenByValueRef.current.set(value, children);
   const [currentPane, setCurrentPane] = useState<TabPane<T>>(() => ({
     value,
     children,
@@ -62,9 +61,9 @@ export default function AnimatedTabContent<T extends string | number>({ value, d
   }));
   const [transition, setTransition] = useState<TabTransition<T> | null>(null);
   const transitionKeyRef = useRef(0);
-  const transitionTimeoutRef = useRef<number | null>(null);
 
   useLayoutEffect(() => {
+    paneChildrenByValueRef.current.set(value, children);
     let cancelled = false;
     const scheduleStateUpdate = (callback: () => void) => {
       queueMicrotask(() => {
@@ -73,10 +72,6 @@ export default function AnimatedTabContent<T extends string | number>({ value, d
     };
 
     if (prefersReducedMotion && transition !== null) {
-      if (transitionTimeoutRef.current !== null) {
-        window.clearTimeout(transitionTimeoutRef.current);
-        transitionTimeoutRef.current = null;
-      }
       scheduleStateUpdate(() => setTransition(null));
     }
 
@@ -84,11 +79,6 @@ export default function AnimatedTabContent<T extends string | number>({ value, d
       return () => {
         cancelled = true;
       };
-    }
-
-    if (transitionTimeoutRef.current !== null) {
-      window.clearTimeout(transitionTimeoutRef.current);
-      transitionTimeoutRef.current = null;
     }
 
     const nextPane: TabPane<T> = {
@@ -124,20 +114,10 @@ export default function AnimatedTabContent<T extends string | number>({ value, d
       setCurrentPane(nextPane);
     });
 
-    transitionTimeoutRef.current = window.setTimeout(() => {
-      setTransition((current) => (current?.key === transitionKey ? null : current));
-      transitionTimeoutRef.current = null;
-    }, motion.durations.navTrack + 40);
     return () => {
       cancelled = true;
     };
   }, [children, currentPane, direction, prefersReducedMotion, transition, value]);
-
-  useEffect(() => () => {
-    if (transitionTimeoutRef.current !== null) {
-      window.clearTimeout(transitionTimeoutRef.current);
-    }
-  }, []);
 
   const enteringAnimation = `animatedTabContentEnter ${motion.durations.navTrack}ms ${motion.standard} both`;
   const exitingAnimation = `animatedTabContentExit ${motion.durations.navTrack}ms ${motion.standard} both`;
@@ -153,6 +133,14 @@ export default function AnimatedTabContent<T extends string | number>({ value, d
       <Box
         key={`slot-${slot}`}
         aria-hidden={isOutgoing || undefined}
+        onAnimationEnd={(event) => {
+          if (event.target !== event.currentTarget || isOutgoing
+            || event.animationName !== 'animatedTabContentEnter') return;
+          // Mounting cards can block the main thread longer than the animation
+          // duration. Finish on playback completion, not a timer set before paint.
+          const completedKey = transition?.key;
+          setTransition((current) => current?.key === completedKey ? null : current);
+        }}
         sx={{
           minWidth: 0,
           position: isOutgoing ? 'absolute' : 'relative',

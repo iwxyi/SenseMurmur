@@ -23,4 +23,10 @@ describe('MarkdownText markdown detection', () => {
     expect(transformMarkdownUrl('javascript:alert(1)')).toBe('');
     expect(transformMarkdownUrl('data:text/html,<script>alert(1)</script>')).toBe('');
   });
+
+  it('preserves inline formatting, automatic links and mention parsing', () => {
+    for (const text of ['*强调*', '_强调_', 'https://example.com', 'www.example.com', 'a@example.com', '@角色', '&amp;', '\\*字面星号', '[引用][id]', '    const x = 1', '标题\n===', '---']) {
+      expect(shouldUseRichMarkdown(text), text).toBe(true);
+    }
+  });
 });
