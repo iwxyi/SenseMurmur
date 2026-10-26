@@ -353,8 +353,17 @@ export default function ChatListPage() {
   const toggleChatSelection = (chatId: string) => setSelectedChatIds((ids) => ids.includes(chatId) ? ids.filter((id) => id !== chatId) : [...ids, chatId]);
   const toggleSelectVisibleChats = () => setSelectedChatIds((ids) => ids.length === sortedVisibleChats.length ? [] : sortedVisibleChats.map((chat) => chat.id));
   const batchCounts = useMemo(() => {
-    const selected = chats.filter((chat) => chat.type === 'group' && !chat.deletedAt && selectedChatIds.includes(chat.id));
-    return { selected, basics: selected.filter((chat) => !chat.name.trim() || !chat.topic.trim()).length, avatar: selected.filter((chat) => !chat.groupVisual?.avatarUrl).length, background: selected.filter((chat) => !chat.groupVisual?.backgroundUrl).length };
+    const selected = chats.filter((chat) => !chat.deletedAt && selectedChatIds.includes(chat.id));
+    const basicsEligible = selected.filter((chat) => chat.type === 'group');
+    const avatarEligible = selected.filter((chat) => chat.type === 'group' || chat.type === 'assistant');
+    return {
+      selected,
+      basicsEligible,
+      avatarEligible,
+      basics: basicsEligible.filter((chat) => !chat.name.trim() || !chat.topic.trim()).length,
+      avatar: avatarEligible.filter((chat) => !chat.groupVisual?.avatarUrl).length,
+      background: selected.filter((chat) => !chat.groupVisual?.backgroundUrl).length,
+    };
   }, [chats, selectedChatIds]);
   const batchIncludesExisting = batchMode === 'regenerate' || batchMode === 'clear';
   const startBatchCompletion = async () => {
@@ -375,8 +384,8 @@ export default function ChatListPage() {
     }
     batchCounts.selected.forEach((chat) => {
       const members = charactersForChatCards.filter((character) => chat.memberIds.includes(character.id));
-      if (batchFields.basics && (batchMode === 'regenerate' || !chat.name.trim() || !chat.topic.trim())) enqueueGroupBasicCompletion({ chat, members, profiles: aiProfiles, language: 'zh', mode: batchMode });
-      if (batchFields.avatar && (batchMode === 'regenerate' || !chat.groupVisual?.avatarUrl)) enqueueGroupVisualGeneration({ chat, members, profiles: aiProfiles, settings: avatarGeneration, language: 'zh', kind: 'avatar', requirement: avatarRequirement });
+      if (batchFields.basics && chat.type === 'group' && (batchMode === 'regenerate' || !chat.name.trim() || !chat.topic.trim())) enqueueGroupBasicCompletion({ chat, members, profiles: aiProfiles, language: 'zh', mode: batchMode });
+      if (batchFields.avatar && (chat.type === 'group' || chat.type === 'assistant') && (batchMode === 'regenerate' || !chat.groupVisual?.avatarUrl)) enqueueGroupVisualGeneration({ chat, members, profiles: aiProfiles, settings: avatarGeneration, language: 'zh', kind: 'avatar', requirement: avatarRequirement });
       if (batchFields.background && (batchMode === 'regenerate' || !chat.groupVisual?.backgroundUrl)) enqueueGroupVisualGeneration({ chat, members, profiles: aiProfiles, settings: avatarGeneration, language: 'zh', kind: 'background', requirement: backgroundRequirement });
     });
     setBatchDialogOpen(false);
@@ -563,7 +572,7 @@ export default function ChatListPage() {
                 showListDivider={chatListStyle.displayMode === 'list' && index < sortedVisibleChats.length - 1}
                 onToggleSelection={() => toggleChatSelection(chat.id)}
                 onMemberClick={(member) => navigate(`/characters/${member.id}/edit?returnTo=${encodeURIComponent(location.pathname + location.search)}`)}
-                onAvatarClick={chat.type === 'group'
+                onAvatarClick={chat.type === 'group' || chat.type === 'assistant'
                   ? () => navigate(`/chats/${chat.id}/edit`)
                   : chat.memberIds[0]
                     ? (memberId) => navigate(`/characters/${memberId || chat.memberIds[0]}/edit?returnTo=${encodeURIComponent(location.pathname + location.search)}`)
@@ -619,13 +628,13 @@ export default function ChatListPage() {
         }]}
       />
       <Dialog open={batchDialogOpen} onClose={() => { if (!clearingData) setBatchDialogOpen(false); }} fullWidth maxWidth="sm">
-        <DialogTitle>批量补全群聊</DialogTitle>
+        <DialogTitle>批量补全聊天</DialogTitle>
         <DialogContent dividers>
           <Stack component="fieldset" disabled={clearingData} spacing={1.25} sx={{ border: 0, m: 0, p: 0, minWidth: 0 }}>
-            <Typography variant="body2" color="text.secondary">已选择 {batchCounts.selected.length} 个当前可见群聊</Typography>
-            <FormControlLabel control={<Checkbox checked={batchFields.basics} disabled={!batchIncludesExisting && batchCounts.basics === 0} onChange={(event) => setBatchFields((fields) => ({ ...fields, basics: event.target.checked }))} />} label={`基础信息${batchIncludesExisting ? '' : `（${batchCounts.basics}/${batchCounts.selected.length}）`}`} />
-            <Stack direction="row" sx={{ alignItems: 'center' }} spacing={1}><FormControlLabel sx={{ m: 0, flexShrink: 0 }} control={<Checkbox checked={batchFields.avatar} disabled={!batchIncludesExisting && batchCounts.avatar === 0} onChange={(event) => setBatchFields((fields) => ({ ...fields, avatar: event.target.checked }))} />} label={`群头像${batchIncludesExisting ? '' : `（${batchCounts.avatar}/${batchCounts.selected.length}）`}`} />{batchMode !== 'clear' && <TextField size="small" fullWidth value={avatarRequirement} onChange={(event) => setAvatarRequirement(event.target.value)} placeholder="统一要求（可选）" />}</Stack>
-            <Stack direction="row" sx={{ alignItems: 'center' }} spacing={1}><FormControlLabel sx={{ m: 0, flexShrink: 0 }} control={<Checkbox checked={batchFields.background} disabled={!batchIncludesExisting && batchCounts.background === 0} onChange={(event) => setBatchFields((fields) => ({ ...fields, background: event.target.checked }))} />} label={`群背景${batchIncludesExisting ? '' : `（${batchCounts.background}/${batchCounts.selected.length}）`}`} />{batchMode !== 'clear' && <TextField size="small" fullWidth value={backgroundRequirement} onChange={(event) => setBackgroundRequirement(event.target.value)} placeholder="统一要求（可选）" />}</Stack>
+            <Typography variant="body2" color="text.secondary">已选择 {batchCounts.selected.length} 个当前可见聊天</Typography>
+            {batchCounts.basicsEligible.length ? <FormControlLabel control={<Checkbox checked={batchFields.basics} disabled={!batchIncludesExisting && batchCounts.basics === 0} onChange={(event) => setBatchFields((fields) => ({ ...fields, basics: event.target.checked }))} />} label={`基础信息${batchIncludesExisting ? '' : `（${batchCounts.basics}/${batchCounts.basicsEligible.length}）`}`} /> : null}
+            {batchCounts.avatarEligible.length ? <Stack direction="row" sx={{ alignItems: 'center' }} spacing={1}><FormControlLabel sx={{ m: 0, flexShrink: 0 }} control={<Checkbox checked={batchFields.avatar} disabled={!batchIncludesExisting && batchCounts.avatar === 0} onChange={(event) => setBatchFields((fields) => ({ ...fields, avatar: event.target.checked }))} />} label={`头像${batchIncludesExisting ? '' : `（${batchCounts.avatar}/${batchCounts.avatarEligible.length}）`}`} />{batchMode !== 'clear' && <TextField size="small" fullWidth value={avatarRequirement} onChange={(event) => setAvatarRequirement(event.target.value)} placeholder="统一要求（可选）" />}</Stack> : null}
+            <Stack direction="row" sx={{ alignItems: 'center' }} spacing={1}><FormControlLabel sx={{ m: 0, flexShrink: 0 }} control={<Checkbox checked={batchFields.background} disabled={!batchIncludesExisting && batchCounts.background === 0} onChange={(event) => setBatchFields((fields) => ({ ...fields, background: event.target.checked }))} />} label={`聊天背景${batchIncludesExisting ? '' : `（${batchCounts.background}/${batchCounts.selected.length}）`}`} />{batchMode !== 'clear' && <TextField size="small" fullWidth value={backgroundRequirement} onChange={(event) => setBackgroundRequirement(event.target.value)} placeholder="统一要求（可选）" />}</Stack>
             <RadioGroup row value={batchMode} onChange={(event) => setBatchMode(event.target.value as typeof batchMode)}>
               <Tooltip title="只处理完全为空的字段，不覆盖已有内容"><FormControlLabel value="empty" control={<Radio />} label="仅空数据" /></Tooltip>
               <Tooltip title="补足缺失内容，保留用户已填写的信息"><FormControlLabel value="complete" control={<Radio />} label="补全信息" /></Tooltip>

@@ -222,9 +222,9 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
   // attempt. It is not fetchable from the server and would otherwise produce
   // a noisy 404 on every home-page render.
   const isUnresolvableLocalMediaUrl = (url: string) => authMode !== 'cloud' && chat.id.startsWith('local-chat-') && /\/uploads\/media\//.test(url);
-  const groupAvatarUrl = chat.type === 'group' && !isUnresolvableLocalMediaUrl(chat.groupVisual?.avatarUrl?.trim() || '') ? chat.groupVisual?.avatarUrl?.trim() : '';
+  const groupAvatarUrl = (chat.type === 'group' || chat.type === 'assistant') && !isUnresolvableLocalMediaUrl(chat.groupVisual?.avatarUrl?.trim() || '') ? chat.groupVisual?.avatarUrl?.trim() : '';
   const isList = displayMode === 'list';
-  const requestedBackgroundUrl = showGroupBackground && !isList && chat.type !== 'assistant'
+  const requestedBackgroundUrl = showGroupBackground && !isList
     ? chat.groupVisual?.backgroundUrl?.trim() || ''
     : '';
   const backgroundUrl = isUnresolvableLocalMediaUrl(requestedBackgroundUrl) ? '' : requestedBackgroundUrl;
@@ -241,7 +241,7 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
         slotProps={{ img: { ...CHAT_CARD_AVATAR_IMG_PROPS, onError: () => setGroupAvatarUnavailableUrl(groupAvatarUrl || '') } }}
         sx={{ width: 46, height: 46, bgcolor: 'primary.light', fontSize: '1.05rem' }}
       >
-        <GroupIcon fontSize="small" />
+        {isAssistant ? <AssistantIcon fontSize="small" /> : <GroupIcon fontSize="small" />}
       </Avatar>
       {groupAvatarGenerating ? (
         <Box sx={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', borderRadius: '50%', bgcolor: 'rgba(15,23,42,0.38)' }}>
@@ -413,7 +413,7 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
               ) : null}
               <Box sx={{ display: 'flex', alignItems: 'stretch', gap: 1.5, minWidth: 0, width: '100%' }}>
                 <Box className="chat-card-primary-avatar" sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'center', flexShrink: 0 }}>
-                  {isAssistant ? <Avatar sx={{ width: 46, height: 46, bgcolor: 'primary.light', flexShrink: 0 }}><AssistantIcon fontSize="small" /></Avatar> : groupAvatarNode}
+                  {isAssistant || chat.type === 'group' ? groupAvatarNode : directAvatarNode}
                 </Box>
                 <Box sx={{ minWidth: 0, width: 0, flex: 1 }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0, width: '100%', pr: !isList && (gameplayLabel || deletedStatusLabel || isAssistant) ? 5 : 0 }}>

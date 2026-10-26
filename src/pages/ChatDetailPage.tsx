@@ -4333,6 +4333,9 @@ export default function ChatDetailPage() {
                   <ExtensionOutlinedIcon />
                 </IconButton>
               ) : null}
+              {isAssistantChat ? <IconButton onClick={() => navigate(`/chats/${chat.id}/edit`)} aria-label="编辑助手会话">
+                <InfoIcon />
+              </IconButton> : null}
               {!isAssistantChat ? (
                 <IconButton onClick={toggleRightPanel}>
                 <PeopleIcon />

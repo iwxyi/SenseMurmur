@@ -1750,7 +1750,7 @@ export default function CreateChatPage() {
               operatorIdsHint={i18n.language.startsWith('zh') ? '登记成员列表之外的内部角色；不会接入外部机器人或自动发言。身份由 ID 中的 host、narrator、gm 等关键词推断，会影响动作能力和内容可见性。多个 ID 用逗号分隔。' : 'Register internal roles outside the member list. This does not connect external bots or trigger speech. Keywords such as host, narrator and gm in each ID determine the role and affect action capabilities and content visibility. Separate IDs with commas.'}
               openTopicInspirationLabel={i18n.language.startsWith('zh') ? '打开热点灵感' : 'Open topic inspiration'}
               batchGenerateMembersLabel={i18n.language.startsWith('zh') ? '生成' : 'Generate'}
-              visualSettings={editingChat && editingChat.type !== 'assistant' ? (
+              visualSettings={editingChat ? (
               <SurfaceCard>
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
                   <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>{isGroupConversation ? '头像和背景' : '聊天背景'}</Typography>

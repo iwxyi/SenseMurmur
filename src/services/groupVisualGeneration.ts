@@ -39,14 +39,17 @@ async function waitForCloudChat(chatId: string) {
 
 function buildSource(chat: GroupChat, members: AICharacter[], requirement: string, language: 'zh' | 'en') {
   const memberHints = members.slice(0, 8).map((member) => [member.name, compact(member.background, 100), (member.expertise || []).slice(0, 3).join('、')].filter(Boolean).join('：')).join('\n');
+  const subject = compact(chat.type === 'assistant' ? (chat.name || chat.topic || chat.latestMessage?.content) : (chat.topic || chat.name), 260);
   if (language === 'zh') return [
     `会话名称：${compact(chat.name, 120)}`, `主题：${compact(chat.topic, 220)}`, `讨论种子：${compact(chat.topicSeed, 180)}`,
+    subject ? `视觉主题候选：${subject}` : '',
     `氛围：${compact(chat.worldState?.mood, 100)}；焦点：${compact(chat.worldState?.focus, 140)}；近期事件：${compact(chat.worldState?.recentEvent, 140)}`,
     `会话风格：${chat.style}；玩法：${chat.sessionKind?.scenarioId || chat.mode}`, memberHints ? `成员轮廓：\n${memberHints}` : '',
     requirement ? `本次用户要求（仅用于本次，不写入长期档案）：${compact(requirement, 420)}` : '',
   ].filter(Boolean).join('\n');
   return [
     `Conversation name: ${compact(chat.name, 120)}`, `Topic: ${compact(chat.topic, 220)}`, `Seed: ${compact(chat.topicSeed, 180)}`,
+    subject ? `Visual subject candidate: ${subject}` : '',
     `Mood: ${compact(chat.worldState?.mood, 100)}; focus: ${compact(chat.worldState?.focus, 140)}; recent event: ${compact(chat.worldState?.recentEvent, 140)}`,
     `Conversation style: ${chat.style}; session: ${chat.sessionKind?.scenarioId || chat.mode}`, memberHints ? `Member cues:\n${memberHints}` : '',
     requirement ? `One-off user request (do not persist it): ${compact(requirement, 420)}` : '',
@@ -54,8 +57,8 @@ function buildSource(chat: GroupChat, members: AICharacter[], requirement: strin
 }
 
 function fallbackPlan(chat: GroupChat, kind: GroupVisualKind, language: 'zh' | 'en'): GroupVisualPlan {
-  const subject = compact(chat.topic || chat.name, 260);
-  const conversationLabel = chat.type === 'group' ? (language === 'zh' ? '群聊' : 'group chat') : chat.type === 'ai_direct' ? (language === 'zh' ? 'AI私聊' : 'AI direct chat') : (language === 'zh' ? '单聊' : 'direct chat');
+  const subject = compact(chat.type === 'assistant' ? (chat.name || chat.topic || chat.latestMessage?.content) : (chat.topic || chat.name), 260);
+  const conversationLabel = chat.type === 'group' ? (language === 'zh' ? '群聊' : 'group chat') : chat.type === 'ai_direct' ? (language === 'zh' ? 'AI私聊' : 'AI direct chat') : chat.type === 'assistant' ? (language === 'zh' ? '助手会话' : 'assistant chat') : (language === 'zh' ? '单聊' : 'direct chat');
   const style = '';
   if (kind === 'avatar') return {
     prompt: language === 'zh'
