@@ -604,7 +604,7 @@ export default function ChatListPage() {
           <Checkbox checked={chatListStyle.autoColumns} disabled={chatListStyle.displayMode !== 'card'} size="small" sx={{ p: 0, mr: 1 }} />自适应列数
         </MenuItem>
         <MenuItem disabled={chatListStyle.displayMode !== 'card'} onClick={() => updateChatListStyle({ showGroupBackground: !(chatListStyle.showGroupBackground ?? true) })}>
-          <Checkbox checked={chatListStyle.showGroupBackground ?? true} disabled={chatListStyle.displayMode !== 'card'} size="small" sx={{ p: 0, mr: 1 }} />显示群聊背景
+          <Checkbox checked={chatListStyle.showGroupBackground ?? true} disabled={chatListStyle.displayMode !== 'card'} size="small" sx={{ p: 0, mr: 1 }} />显示聊天背景
         </MenuItem>
           </>,
         }, {

@@ -224,7 +224,7 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
   const isUnresolvableLocalMediaUrl = (url: string) => authMode !== 'cloud' && chat.id.startsWith('local-chat-') && /\/uploads\/media\//.test(url);
   const groupAvatarUrl = chat.type === 'group' && !isUnresolvableLocalMediaUrl(chat.groupVisual?.avatarUrl?.trim() || '') ? chat.groupVisual?.avatarUrl?.trim() : '';
   const isList = displayMode === 'list';
-  const requestedBackgroundUrl = showGroupBackground && !isList && chat.type === 'group'
+  const requestedBackgroundUrl = showGroupBackground && !isList && chat.type !== 'assistant'
     ? chat.groupVisual?.backgroundUrl?.trim() || ''
     : '';
   const backgroundUrl = isUnresolvableLocalMediaUrl(requestedBackgroundUrl) ? '' : requestedBackgroundUrl;
