@@ -228,6 +228,9 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
     ? chat.groupVisual?.backgroundUrl?.trim() || ''
     : '';
   const backgroundUrl = isUnresolvableLocalMediaUrl(requestedBackgroundUrl) ? '' : requestedBackgroundUrl;
+  const backgroundOpacity = typeof chat.groupVisual?.backgroundOpacity === 'number' && Number.isFinite(chat.groupVisual.backgroundOpacity)
+    ? Math.min(1, Math.max(0.05, chat.groupVisual.backgroundOpacity))
+    : 0.3;
   const isCompactCard = compactCard && !isList;
   const [groupAvatarUnavailableUrl, setGroupAvatarUnavailableUrl] = useState('');
   const groupAvatarGenerating = avatarTask?.status === 'queued' || avatarTask?.status === 'running' || chatAvatarTaskStatus === 'queued' || chatAvatarTaskStatus === 'running';
@@ -294,7 +297,7 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
         }),
       } as SxProps<Theme>}
     >
-      <ChatBackground url={backgroundUrl} opacity={0.3} />
+      <ChatBackground url={backgroundUrl} opacity={backgroundOpacity} />
       <CardActionArea
         component="div"
         role="button"
