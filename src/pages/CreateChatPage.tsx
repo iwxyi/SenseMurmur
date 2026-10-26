@@ -1,7 +1,7 @@
 import { lazy, Suspense, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useLayoutHeaderActions } from '../components/layout/AppLayoutContext';
 import {
-  Alert, Box, Typography, Button, Dialog, DialogTitle, DialogContent, DialogActions, IconButton, Menu, MenuItem, Tooltip, TextField, Collapse, Slider,
+  Alert, Box, Typography, Button, Dialog, DialogTitle, DialogContent, DialogActions, IconButton, Menu, MenuItem, TextField, Collapse, Slider,
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
@@ -331,8 +331,11 @@ export default function CreateChatPage() {
   const showManagementTab = !editingChat;
 
   useEffect(() => {
-    setGroupBackgroundOpacityDraft(Math.min(0.4, Math.max(0.05, Number(editingChat?.groupVisual?.backgroundOpacity ?? 0.16))));
+    setGroupBackgroundOpacityDraft(Math.min(1, Math.max(0.05, Number(editingChat?.groupVisual?.backgroundOpacity ?? 0.16))));
   }, [editingChat?.id, editingChat?.groupVisual?.backgroundOpacity, editingChat?.groupVisual?.backgroundUrl]);
+  useEffect(() => {
+    setGroupVisualExpanded(Boolean(editingChat?.groupVisual?.avatarUrl || editingChat?.groupVisual?.backgroundUrl));
+  }, [editingChat?.id, editingChat?.groupVisual?.avatarUrl, editingChat?.groupVisual?.backgroundUrl]);
   const showDirectorTab = !editingChat || isGroupConversation;
   const showGameplayTab = !editingChat || isGroupConversation;
   const useFreeEntitlement = authMode !== 'cloud' || !isLoggedIn;
@@ -1697,6 +1700,7 @@ export default function CreateChatPage() {
               showRoleActions={showRoleActions}
               includeUserAsMember={includeUserAsMember}
               operatorIdsText={operatorIdsText}
+              showOperatorSettings={developerMode}
               ownerCharacterId={ownerCharacterId}
               adminCharacterIds={adminCharacterIds}
               noOwnerLabel={noOwnerLabel}
@@ -1742,13 +1746,12 @@ export default function CreateChatPage() {
               showRoleActionsLabel={i18n.language.startsWith('zh') ? '显示角色动作' : 'Show role actions'}
               includeUserAsMemberLabel={includeUserAsMemberCopy.label}
               includeUserAsMemberHint={includeUserAsMemberCopy.hint}
-              operatorIdsLabel={i18n.language.startsWith('zh') ? '外部主持/机器人 ID（高级，可选）' : 'External host/bot IDs (advanced, optional)'}
-              operatorIdsHint={i18n.language.startsWith('zh') ? '给不会显示在成员列表里的主持、旁白或自动机器人预留身份；普通群聊通常留空。多个 ID 用逗号分隔。' : 'Reserved identities for hosts, narrators, or automation bots that are not shown as members. Leave blank for normal chats. Separate multiple IDs with commas.'}
+              operatorIdsLabel={i18n.language.startsWith('zh') ? '内部操作角色 ID（开发者）' : 'Internal operator IDs (developer)'}
+              operatorIdsHint={i18n.language.startsWith('zh') ? '登记成员列表之外的内部角色；不会接入外部机器人或自动发言。身份由 ID 中的 host、narrator、gm 等关键词推断，会影响动作能力和内容可见性。多个 ID 用逗号分隔。' : 'Register internal roles outside the member list. This does not connect external bots or trigger speech. Keywords such as host, narrator and gm in each ID determine the role and affect action capabilities and content visibility. Separate IDs with commas.'}
               openTopicInspirationLabel={i18n.language.startsWith('zh') ? '打开热点灵感' : 'Open topic inspiration'}
               batchGenerateMembersLabel={i18n.language.startsWith('zh') ? '生成' : 'Generate'}
-            />
-            {editingChat && editingChat.type !== 'assistant' ? (
-              <SurfaceCard sx={{ mt: 2, mb: 2 }}>
+              visualSettings={editingChat && editingChat.type !== 'assistant' ? (
+              <SurfaceCard>
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
                   <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>{isGroupConversation ? '头像和背景' : '聊天背景'}</Typography>
                   <IconButton size="small" aria-label={groupVisualExpanded ? '收起头像和背景' : '展开头像和背景'} onClick={() => setGroupVisualExpanded((current) => !current)} sx={{ transform: groupVisualExpanded ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 180ms ease' }}>
@@ -1777,11 +1780,11 @@ export default function CreateChatPage() {
                           </Box>
                           {kind === 'background' ? (
                             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: { xs: '100%', sm: 210 } }}>
-                              <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>透明度</Typography>
+                              <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>不透明度</Typography>
                               <Slider
                                 size="small"
                                 min={0.05}
-                                max={0.4}
+                                max={1}
                                 step={0.01}
                                 value={groupBackgroundOpacityDraft}
                                 valueLabelDisplay="auto"
@@ -1803,21 +1806,13 @@ export default function CreateChatPage() {
                 </Box>
                 </Collapse>
               </SurfaceCard>
-            ) : null}
+              ) : null}
+            />
             {editingChat ? (
-              <SurfaceCard sx={{ borderColor: 'error.light', bgcolor: 'rgba(211, 47, 47, 0.04)' }}>
+              <SurfaceCard sx={{ mt: 2, mb: 2, borderColor: 'error.light', bgcolor: 'rgba(211, 47, 47, 0.04)' }}>
                 <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1, color: 'error.main' }}>
                   {isZh ? '危险操作' : 'Danger zone'}
                 </Typography>
-                <Tooltip
-                  title={isZh ? `可分别清理消息记录、会话级记忆或删除${conversationNoun}。` : `You can clear messages, clear session memory, or delete the ${conversationNoun}.`}
-                  arrow
-                  placement="top-start"
-                >
-                  <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5, width: 'fit-content', cursor: 'help' }}>
-                    {isZh ? '可清理消息 / 记忆 / 会话' : 'Clear messages / memory / chat'}
-                  </Typography>
-                </Tooltip>
                 <Box sx={{ display: 'flex', flexDirection: { xs: 'column', sm: 'row' }, gap: 1 }}>
                   <Button color="error" variant="outlined" onClick={openClearMessagesDialog}>
                     {clearMessagesLabel}

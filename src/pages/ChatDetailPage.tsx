@@ -48,7 +48,7 @@ import { useChatSidebarProjection } from '../hooks/useChatSidebarProjection';
 import { useMessageAnalysis } from '../hooks/useMessageAnalysis';
 import { useChatSurfaceActions } from '../hooks/useChatSurfaceActions';
 import { useReplyOperation } from '../hooks/useReplyOperation';
-import { useImageResourceAvailability } from '../hooks/useImageResourceAvailability';
+import ChatBackground from '../components/chat/ChatBackground';
 import { getSyncableCharacterMemberIds } from '../services/pageSyncScopeContract';
 import SessionInfoCards from '../components/chat/SessionInfoCards';
 import { projectSessionInfoCards } from '../services/sessionInfoProjection';
@@ -1094,9 +1094,7 @@ export default function ChatDetailPage() {
   const remoteDeletedChat = remoteDeletedChats.find((c) => c.id === id);
   const chat = chats.find((c) => c.id === id) || remoteDeletedChat;
   const groupBackgroundUrl = chat?.groupVisual?.backgroundUrl?.trim() || '';
-  const groupBackgroundOpacity = Math.min(0.4, Math.max(0.05, Number(chat?.groupVisual?.backgroundOpacity ?? 0.16)));
-  const groupBackgroundAvailability = useImageResourceAvailability(groupBackgroundUrl);
-  const canShowGroupBackground = groupBackgroundAvailability === 'ready';
+  const groupBackgroundOpacity = Math.min(1, Math.max(0.05, Number(chat?.groupVisual?.backgroundOpacity ?? 0.16)));
   const sessionInfoCards = useMemo(() => {
     if (!chat) return [];
     return projectSessionInfoCards({ chat, chats, members: characters, isZh: true });
@@ -4267,6 +4265,7 @@ export default function ChatDetailPage() {
     >
       <Box sx={{
         flex: 1,
+        minWidth: 0,
         minHeight: 0,
         height: '100%',
         overflow: 'hidden',
@@ -4279,12 +4278,11 @@ export default function ChatDetailPage() {
           inset: 0,
           pointerEvents: 'none',
           backgroundImage: (theme) => theme.palette.mode === 'light'
-            ? `${canShowGroupBackground && groupBackgroundUrl ? `linear-gradient(rgba(255,255,255,${(1 - groupBackgroundOpacity).toFixed(2)}), rgba(255,255,255,${(1 - groupBackgroundOpacity).toFixed(2)})), url("${groupBackgroundUrl.replace(/"/g, '%22')}"), ` : ''}repeating-linear-gradient(0deg, rgba(15,23,42,0.030) 0 1px, transparent 1px 28px), repeating-linear-gradient(90deg, rgba(15,23,42,0.024) 0 1px, transparent 1px 28px)`
+            ? 'repeating-linear-gradient(0deg, rgba(15,23,42,0.030) 0 1px, transparent 1px 28px), repeating-linear-gradient(90deg, rgba(15,23,42,0.024) 0 1px, transparent 1px 28px)'
             : 'repeating-linear-gradient(0deg, rgba(226,232,240,0.030) 0 1px, transparent 1px 28px), repeating-linear-gradient(90deg, rgba(226,232,240,0.024) 0 1px, transparent 1px 28px)',
-          backgroundSize: (theme) => theme.palette.mode === 'light' && canShowGroupBackground ? 'auto, cover, auto, auto' : undefined,
-          backgroundPosition: (theme) => theme.palette.mode === 'light' && canShowGroupBackground ? 'center, center, center, center' : undefined,
         },
       }}>
+        <ChatBackground url={groupBackgroundUrl} opacity={groupBackgroundOpacity} />
         <GlassHeader
           title={(
             <Box

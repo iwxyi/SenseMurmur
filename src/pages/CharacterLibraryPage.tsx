@@ -38,6 +38,7 @@ import { notifyDiagnosticToast } from '../services/diagnostics';
 import type { AICharacter } from '../types/character';
 import { readPersistentUiValue, writePersistentUiValue } from '../utils/persistentUiState';
 import { buildListGridSx } from '../styles/interaction';
+import { clearCharacterData, type CharacterCompletionField } from '../services/batchDataClear';
 
 type CharacterSortField = 'name' | 'createdAt';
 type CharacterSortDirection = 'asc' | 'desc';
@@ -52,11 +53,10 @@ const CHARACTER_LIBRARY_RENDER_BATCH_SIZE = 24;
 const CHARACTER_LIBRARY_PAGE_SIZE = 24;
 const CHARACTER_COMPLETION_FIELDS_KEY = 'character-library-completion-fields';
 const CHARACTER_COMPLETION_MODE_KEY = 'character-library-completion-mode';
-type CharacterCompletionField = 'base' | 'avatar' | 'visual' | 'bubble' | 'voice' | 'profile' | 'personality';
-type CharacterCompletionMode = 'empty' | 'complete' | 'regenerate';
+type CharacterCompletionMode = 'empty' | 'complete' | 'regenerate' | 'clear';
 const completionFieldLabels: Record<CharacterCompletionField, string> = { base: '基础设定', avatar: '头像图', visual: '形象图', bubble: '消息气泡', voice: '语音音色', profile: '角色画像', personality: '人物性格' };
 const completionFields: CharacterCompletionField[] = ['base', 'avatar', 'visual', 'bubble', 'voice', 'profile', 'personality'];
-const isCompletionMode = (value: unknown): value is CharacterCompletionMode => value === 'empty' || value === 'complete' || value === 'regenerate';
+const isCompletionMode = (value: unknown): value is CharacterCompletionMode => value === 'empty' || value === 'complete' || value === 'regenerate' || value === 'clear';
 const isCompletionField = (value: unknown): value is CharacterCompletionField => completionFields.includes(value as CharacterCompletionField);
 const isCompletionFieldList = (value: unknown): value is CharacterCompletionField[] => Array.isArray(value) && value.every(isCompletionField);
 const isCharacterLibraryGroup = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
@@ -355,6 +355,7 @@ export default function CharacterLibraryPage() {
   const [completionOpen, setCompletionOpen] = useState(false);
   const [completionFieldsSelected, setCompletionFieldsSelected] = useState<CharacterCompletionField[]>(() => readPersistentUiValue(CHARACTER_COMPLETION_FIELDS_KEY, completionFields, isCompletionFieldList));
   const [completionMode, setCompletionMode] = useState<CharacterCompletionMode>(() => readPersistentUiValue(CHARACTER_COMPLETION_MODE_KEY, 'empty', isCompletionMode));
+  const [clearingData, setClearingData] = useState(false);
   const [bulkGroupDialogOpen, setBulkGroupDialogOpen] = useState(false);
   const [bulkGroupValue, setBulkGroupValue] = useState('');
   const [groupActionTarget, setGroupActionTarget] = useState<string | null>(null);
@@ -661,6 +662,7 @@ export default function CharacterLibraryPage() {
 
   const isCompletionFieldDisabled = (field: CharacterCompletionField) => (
     completionMode !== 'regenerate'
+    && completionMode !== 'clear'
     && selectedCustomCharacters.length > 0
     && selectedCustomCharacters.every((character) => !isCompletionMissing(character, field))
   );
@@ -669,7 +671,21 @@ export default function CharacterLibraryPage() {
     setCompletionOpen(true);
   };
 
-  const enqueueCompletion = () => {
+  const enqueueCompletion = async () => {
+    if (completionMode === 'clear') {
+      setClearingData(true);
+      try {
+        await clearCharacterData(selectedCustomCharacters, completionFieldsSelected);
+        setCompletionOpen(false);
+        resetSelection();
+        setSnackbar({ open: true, message: '已清空所选数据', severity: 'success' });
+      } catch (error) {
+        setSnackbar({ open: true, message: `清空未全部完成：${error instanceof Error ? error.message : String(error)}`, severity: 'error' });
+      } finally {
+        setClearingData(false);
+      }
+      return;
+    }
     const charactersToProcess = selectedCustomCharacters;
     charactersToProcess.forEach((character) => completionFieldsSelected.forEach((field) => {
       const missing = isCompletionMissing(character, field);
@@ -1042,7 +1058,7 @@ export default function CharacterLibraryPage() {
         loadingLabel="删除中"
       />
 
-      <Dialog open={completionOpen} onClose={() => setCompletionOpen(false)} maxWidth="sm" fullWidth>
+      <Dialog open={completionOpen} onClose={() => { if (!clearingData) setCompletionOpen(false); }} maxWidth="sm" fullWidth>
         <DialogTitle>批量补全</DialogTitle>
         <DialogContent>
           <Box sx={{ display: 'grid', gap: 0.35 }}>
@@ -1053,16 +1069,16 @@ export default function CharacterLibraryPage() {
               return (
                 <FormControlLabel
                   key={field}
-                  disabled={disabled}
+                  disabled={disabled || clearingData}
                   control={<Checkbox checked={checked} onChange={() => setCompletionFieldsSelected((current) => checked ? current.filter((item) => item !== field) : [...current, field])} />}
                   label={`${completionFieldLabels[field]}（${missingCount}/${selectedCustomCharacters.length}）`}
                 />
               );
             })}
           </Box>
-          <FormControl sx={{ mt: 2 }}>
+          <FormControl disabled={clearingData} sx={{ mt: 2 }}>
             <FormLabel>处理方式</FormLabel>
-            <RadioGroup row value={completionMode} onChange={(event) => setCompletionMode(event.target.value as CharacterCompletionMode)} sx={{ flexWrap: 'nowrap', gap: 1 }}>
+            <RadioGroup row value={completionMode} onChange={(event) => setCompletionMode(event.target.value as CharacterCompletionMode)} sx={{ flexWrap: 'wrap', gap: 1 }}>
               <Tooltip title="只处理完全没有内容的项目，不改已有内容" placement="right">
                 <FormControlLabel value="empty" control={<Radio />} label="仅空数据" sx={{ mr: 0, whiteSpace: 'nowrap' }} />
               </Tooltip>
@@ -1072,12 +1088,15 @@ export default function CharacterLibraryPage() {
               <Tooltip title="基于现有设定重新生成，可替换已有图片" placement="right">
                 <FormControlLabel value="regenerate" control={<Radio />} label="重新生成" sx={{ mr: 0, whiteSpace: 'nowrap' }} />
               </Tooltip>
+              <Tooltip title="删除勾选项目的数据，不重新生成" placement="right">
+                <FormControlLabel value="clear" control={<Radio />} label="清空" sx={{ mr: 0, whiteSpace: 'nowrap' }} />
+              </Tooltip>
             </RadioGroup>
           </FormControl>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setCompletionOpen(false)}>取消</Button>
-          <Button variant="contained" onClick={enqueueCompletion} disabled={!completionFieldsSelected.some((field) => !isCompletionFieldDisabled(field)) || !selectedCustomCharacters.length}>确认</Button>
+          <Button disabled={clearingData} onClick={() => setCompletionOpen(false)}>取消</Button>
+          <Button variant="contained" color={completionMode === 'clear' ? 'error' : 'primary'} onClick={enqueueCompletion} disabled={clearingData || !completionFieldsSelected.some((field) => !isCompletionFieldDisabled(field)) || !selectedCustomCharacters.length}>{clearingData ? '清空中' : completionMode === 'clear' ? '清空所选数据' : '确认'}</Button>
         </DialogActions>
       </Dialog>
 

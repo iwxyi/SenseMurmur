@@ -15,6 +15,12 @@ import { useAuthStore } from '../stores/useAuthStore';
 export type GroupVisualKind = 'avatar' | 'background';
 type GroupVisualPlan = { negativePrompt?: string; backgroundOpacity?: number; prompt: string; fallbackUsed: boolean };
 
+const BACKGROUND_COMPOSITION = {
+  zh: '满幅出血壁纸构图（full-bleed, edge-to-edge）：环境、底色、纹理和光影必须连续铺满整张画布并延伸至四条边与四个角。主体可留在中心60%裁切安全区，但安全区以外仍须有连续的环境细节和底色；低对比不等于空白。禁止四周或左右留白、白边、纯色空白侧栏、透明边缘、相框、卡纸、信箱黑边、画中画和白底上的居中小插画；不要让画面向边缘渐隐为白色或透明。',
+  en: 'Full-bleed, edge-to-edge wallpaper: extend the environment, base colors, texture and lighting continuously across the entire canvas to all four edges and corners. Keep essential motifs inside the central 60% crop-safe zone, while continuing the environment and colors outside it; low contrast must not mean empty margins. No white margins, blank sidebars, transparent borders, frames, mats, letterboxing, inset pictures or small centered illustrations on a blank canvas. Do not fade the scene to white or transparency at the edges.',
+};
+const BACKGROUND_NEGATIVE_PROMPT = 'white borders, white margins, blank margins, empty sidebars, transparent borders, frame, mat border, letterbox, pillarbox, inset picture, small centered illustration on blank background, fade to white edges, fade to transparent edges';
+
 function compact(value?: string | null, max = 320) { return value?.trim().replace(/\s+/g, ' ').slice(0, max) || ''; }
 
 async function waitForCloudChat(chatId: string) {
@@ -59,8 +65,8 @@ function fallbackPlan(chat: GroupChat, kind: GroupVisualKind, language: 'zh' | '
   return {
     backgroundOpacity: 0.16,
     prompt: language === 'zh'
-      ? `方形群聊背景图，主题“${subject}”，${style || '浅色纸张、雾感与柔和光影'}，低饱和、低对比、低视觉噪声，中心60%安全区保持干净，重要元素不要贴边，适合横竖屏cover裁切，作为浅色聊天背景仍需保证文字可读，无文字、无人脸、无海报感、无强动作。`
-      : `Square group chat background about ${subject}, ${style || 'pale paper, mist, and soft light'}, low saturation, low contrast, low visual frequency; keep the central 60% calm and crop-safe for landscape and portrait cover, preserve text readability in a light chat UI; no text, faces, poster design, or strong action.`,
+      ? `方形群聊背景图，主题“${subject}”，${style || '连续的柔和环境纹理与自然光影'}，低饱和、低对比、低视觉噪声；主体留在中心60%裁切安全区，环境纹理连续延伸至全部边缘，适合横竖屏cover裁切，作为浅色聊天背景仍需保证文字可读，无文字、无人脸、无海报感、无强动作。`
+      : `Square group chat background about ${subject}, ${style || 'continuous soft environmental textures and natural light'}, low saturation, low contrast, low visual frequency; keep essential motifs in the central 60% crop-safe zone and extend the environment to every edge for landscape and portrait cover, preserve text readability in a light chat UI; no text, faces, poster design, or strong action.`,
     negativePrompt: 'text, watermark, faces, people, poster, high contrast, busy details, dark image', fallbackUsed: true,
   };
 }
@@ -71,7 +77,7 @@ function normalizePlan(value: unknown): Omit<GroupVisualPlan, 'fallbackUsed'> | 
   const prompt = typeof record.prompt === 'string' ? record.prompt.trim() : '';
   if (!prompt) return null;
   const backgroundOpacity = typeof record.backgroundOpacity === 'number' && Number.isFinite(record.backgroundOpacity)
-    ? Math.min(0.4, Math.max(0.05, record.backgroundOpacity))
+    ? Math.min(1, Math.max(0.05, record.backgroundOpacity))
     : undefined;
   return { prompt, negativePrompt: typeof record.negativePrompt === 'string' ? record.negativePrompt.trim() : undefined, backgroundOpacity };
 }
@@ -81,11 +87,14 @@ async function createPlan(profile: AIModelProfile, source: string, kind: GroupVi
   const system = language === 'zh'
     ? avatar
       ? '你是群聊头像视觉导演。只返回严格 JSON：{"prompt":"可直接生图的中文提示词","negativePrompt":"负面词"}。这些内容仅用于本次生成，不能要求保存。头像为1024方图，小尺寸40px识别优先：将群聊主题和成员关系凝练为一个中心符号或近景片段，而不是群像；主体占中心大面积，1到2主色块和清晰明度分离。不能有文字、水印、通用聊天图标、远景、多张小脸或杂乱场景。'
-      : '你是群聊背景视觉导演。只返回严格 JSON：{"prompt":"可直接生图的中文提示词","negativePrompt":"负面词","backgroundOpacity":0.16}。除 backgroundOpacity 外，这些内容仅用于本次生成，不能要求保存。backgroundOpacity 是界面显示图片的透明度，取 0.05 到 0.40，默认建议 0.16。输出1024方图，但会被横竖屏cover裁切：核心要留在中心60%安全区且不要靠边。它只在浅色聊天背景显示，须低饱和、低对比、低视觉噪声，用柔和环境、抽象纹理或远景隐喻群主题；禁止文字、人脸、强动作、海报感和抢眼细节。'
+      : '你是群聊背景视觉导演。只返回严格 JSON：{"prompt":"可直接生图的中文提示词","negativePrompt":"负面词","backgroundOpacity":0.16}。除 backgroundOpacity 外，这些内容仅用于本次生成，不能要求保存。backgroundOpacity 是界面显示图片的不透明度，取 0.05 到 1.00（1 为完全不透明），默认建议 0.16，可根据图片内容调整。输出1024方图，但会被横竖屏cover裁切：核心要留在中心60%安全区且不要靠边。须低对比、低视觉噪声，用柔和环境、抽象纹理或远景表现群主题；禁止文字、人脸、强动作、海报感和抢眼细节。'
     : avatar
       ? 'You are a group-chat avatar visual director. Return strict JSON only: {"prompt":"image-ready English prompt","negativePrompt":"negative prompt"}. This content is for the current generation only and must not be retained. Create a 1024 square image optimized for 40px recognition: condense group theme and relationship into one central symbol or close scene fragment, never a group photo; large central subject, one or two color blocks, clear value separation. No text, watermark, generic chat icon, distant shot, face collage, or clutter.'
-      : 'You are a group-chat background visual director. Return strict JSON only: {"prompt":"image-ready English prompt","negativePrompt":"negative prompt","backgroundOpacity":0.16}. Except backgroundOpacity, this content is for the current generation only and must not be retained. backgroundOpacity is the UI display opacity, between 0.05 and 0.40, normally 0.16. Create a 1024 square source image that will be cover-cropped for landscape and portrait: keep its essential motif in the calm central 60% crop-safe zone. It appears only beneath a light chat UI, so use low saturation, low contrast, and low visual frequency—soft environment, abstract texture, or distant metaphor. No text, faces, strong action, poster design, or distracting detail.';
-  const request = async (repair = false) => normalizePlan(parseGeneratedJsonPayload(await generateResponse(profile, system, [{ role: 'user', content: `${source}\n\n${repair ? '上次格式无效，请只返回合法 JSON。' : '请根据上述配置设计本次视觉方案。'}` }], undefined, { maxTokens: 750, aiUsage: { type: 'character_visual_identity', label: avatar ? '设计群头像' : '设计群背景', scope: 'chat' } })));
+      : 'You are a group-chat background visual director. Return strict JSON only: {"prompt":"image-ready English prompt","negativePrompt":"negative prompt","backgroundOpacity":0.16}. Except backgroundOpacity, this content is for the current generation only and must not be retained. backgroundOpacity is the UI display opacity, between 0.05 and 1.00 (1 is fully opaque), normally 0.16; adjust it to the image content. Create a 1024 square source image that will be cover-cropped for landscape and portrait: keep its essential motif in the calm central 60% crop-safe zone. Use low contrast and low visual frequency with soft environments, abstract textures or distant scenery reflecting the group theme. No text, faces, strong action, poster design, or distracting detail.';
+  const composition = avatar ? '' : `\n${BACKGROUND_COMPOSITION[language]}\n${language === 'zh'
+    ? '围绕输入的群聊主题、世界氛围与成员关系选择具体的场景、意象和配色，让图片能体现这个群聊。原图保留自然色彩与层次，用柔和光线和简洁布局适配聊天背景；不要预先叠加白色半透明蒙版、过曝或把整张图雾化褪色。'
+    : 'Choose specific scenery, motifs and colors grounded in the supplied group topic, world mood and member relationships. Preserve natural colors and depth in the source image; use soft lighting and a calm layout suitable for a chat background. Do not bake in a translucent white overlay, overexpose or wash out the entire image.'}`;
+  const request = async (repair = false) => normalizePlan(parseGeneratedJsonPayload(await generateResponse(profile, system + composition, [{ role: 'user', content: `${source}\n\n${repair ? '上次格式无效，请只返回合法 JSON。' : '请根据上述配置设计本次视觉方案。'}` }], undefined, { maxTokens: 750, aiUsage: { type: 'character_visual_identity', label: avatar ? '设计群头像' : '设计群背景', scope: 'chat' } })));
   return await request() || await request(true);
 }
 
@@ -113,6 +122,13 @@ export function enqueueGroupVisualGeneration(params: { chat: GroupChat; members:
           warning = error instanceof Error ? error.message : String(error);
         }
       } else warning = language === 'zh' ? '未配置文本 AI，已使用基础模板。' : 'No text AI configured; using the base template.';
+      if (kind === 'background') {
+        plan = {
+          ...plan,
+          prompt: `${plan.prompt}\n${BACKGROUND_COMPOSITION[language]}`,
+          negativePrompt: [plan.negativePrompt, BACKGROUND_NEGATIVE_PROMPT].filter(Boolean).join(', '),
+        };
+      }
       if (warning) notifyDiagnosticToast({ message: `${kind === 'avatar' ? '群头像' : '聊天背景'}视觉方案失败，已使用基础模板继续生成。原因：${warning}`, severity: 'warning', location: 'chat-visual:director' });
       const taskId = avatarGenerationQueue.enqueue(imageProfile, plan.prompt, { targetKey: `chat-${kind}:${chat.id}`, characterId: null, errorReporting: 'caller', negativePrompt: plan.negativePrompt, description: `${chat.name || '未命名聊天'} · ${kind === 'avatar' ? '群头像' : '聊天背景'}${plan.fallbackUsed ? '（基础模板）' : ''}` });
       const result = await avatarGenerationQueue.waitForTask(taskId);

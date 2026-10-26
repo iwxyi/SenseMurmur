@@ -9,7 +9,6 @@ import {
   AccordionSummary,
   Avatar,
   Box,
-  Button,
   Chip,
   FormControlLabel,
   IconButton,
@@ -22,6 +21,7 @@ import {
   Typography,
 } from '@mui/material';
 import { CHAT_STYLE_OPTIONS, MAX_MEMBERS } from '../../constants/defaults';
+import type { ReactNode } from 'react';
 import type { AICharacter } from '../../types/character';
 import type { ChatStyle, RuntimeEvolutionIntensity } from '../../types/chat';
 import { isImageAvatar } from '../../utils/avatar';
@@ -82,10 +82,12 @@ interface ChatConfigSectionProps {
   includeUserAsMemberHint: string;
   operatorIdsLabel: string;
   operatorIdsHint: string;
+  showOperatorSettings?: boolean;
   operatorValidationHint?: string;
   operatorNormalizedIds?: string[];
   openTopicInspirationLabel: string;
   batchGenerateMembersLabel: string;
+  visualSettings?: ReactNode;
 }
 
 export default function ChatConfigSection(props: ChatConfigSectionProps) {
@@ -292,6 +294,8 @@ export default function ChatConfigSection(props: ChatConfigSectionProps) {
         </SurfaceCard>
       ) : null}
 
+      {props.visualSettings}
+
       <SurfaceCard contentSx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
           <Stack spacing={0.5}>
             <FormControlLabel
@@ -312,17 +316,27 @@ export default function ChatConfigSection(props: ChatConfigSectionProps) {
                 }
               />
             )}
-            <Box sx={{ pt: 0.5 }}>
+            {props.showOperatorSettings ? <Box sx={{ pt: 0.5 }}>
               <TextField
                 label={props.operatorIdsLabel}
                 placeholder="host, narrator_bot"
                 value={props.operatorIdsText}
                 onChange={(e) => props.onOperatorIdsTextChange(e.target.value)}
                 fullWidth
+                slotProps={{
+                  input: {
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <Tooltip title={props.operatorIdsHint}>
+                          <IconButton size="small" aria-label={isZh ? '内部操作角色说明' : 'About internal operators'}>
+                            <HelpOutlineIcon sx={{ fontSize: 18, color: 'text.secondary' }} />
+                          </IconButton>
+                        </Tooltip>
+                      </InputAdornment>
+                    ),
+                  },
+                }}
               />
-              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
-                {props.operatorIdsHint}
-              </Typography>
               {props.operatorValidationHint ? (
                 <Typography variant="caption" color="warning.main" sx={{ mt: 0.35, display: 'block' }}>
                   {props.operatorValidationHint}
@@ -333,7 +347,7 @@ export default function ChatConfigSection(props: ChatConfigSectionProps) {
                   {`IDs: ${props.operatorNormalizedIds.join(', ')}`}
                 </Typography>
               ) : null}
-            </Box>
+            </Box> : null}
           </Stack>
       </SurfaceCard>
     </Stack>

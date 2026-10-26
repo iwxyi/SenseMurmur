@@ -451,7 +451,7 @@ function compactGroupVisualForCloud(value: unknown): GroupChat['groupVisual'] {
   const backgroundUrl = typeof visual.backgroundUrl === 'string' && visual.backgroundUrl.trim() ? visual.backgroundUrl.trim() : null;
   const rawOpacity = visual.backgroundOpacity;
   const backgroundOpacity = typeof rawOpacity === 'number' && Number.isFinite(rawOpacity)
-    ? Math.min(0.4, Math.max(0.05, rawOpacity))
+    ? Math.min(1, Math.max(0.05, rawOpacity))
     : null;
   return {
     ...(avatarUrl ? { avatarUrl } : {}),

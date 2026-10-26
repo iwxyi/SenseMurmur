@@ -902,7 +902,7 @@ export interface ChatMemberCharacterSummary {
 export interface GroupVisualIdentity {
   avatarUrl?: string | null;
   backgroundUrl?: string | null;
-  /** Opacity of the background image after the readable chat-surface veil is applied. */
+  /** Background image opacity over the page surface, from 0.05 to 1 (fully opaque). */
   backgroundOpacity?: number | null;
 }
 

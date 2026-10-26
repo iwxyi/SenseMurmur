@@ -37,6 +37,7 @@ import { MIN_MEMBERS } from '../constants/defaults';
 import type { AICharacter } from '../types/character';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { enqueueGroupBasicCompletion, enqueueGroupVisualGeneration } from '../services/groupVisualGeneration';
+import { clearGroupData } from '../services/batchDataClear';
 
 const CHAT_LIST_TAB_KEY = 'chat-list-tab';
 const CHAT_LIST_STYLE_KEY = 'chat-list-style';
@@ -48,17 +49,17 @@ type ChatListSortField = 'time' | 'name' | 'members';
 type ChatListStylePreferences = {
   displayMode: ChatListDisplayMode;
   autoColumns: boolean;
-  themeRendering: boolean;
-  backgroundRendering: boolean;
+  showGroupBackground?: boolean;
   sortField: ChatListSortField;
   sortDirection: 'asc' | 'desc';
 };
-const DEFAULT_CHAT_LIST_STYLE: ChatListStylePreferences = { displayMode: 'card', autoColumns: true, themeRendering: false, backgroundRendering: false, sortField: 'time', sortDirection: 'desc' };
+const DEFAULT_CHAT_LIST_STYLE: ChatListStylePreferences = { displayMode: 'card', autoColumns: true, showGroupBackground: true, sortField: 'time', sortDirection: 'desc' };
 function isChatListStylePreferences(value: unknown): value is ChatListStylePreferences {
   if (!value || typeof value !== 'object') return false;
   const item = value as Record<string, unknown>;
   return (item.displayMode === 'list' || item.displayMode === 'card')
-    && typeof item.autoColumns === 'boolean' && typeof item.themeRendering === 'boolean' && typeof item.backgroundRendering === 'boolean'
+    && typeof item.autoColumns === 'boolean'
+    && (item.showGroupBackground === undefined || typeof item.showGroupBackground === 'boolean')
     && (item.sortField === 'time' || item.sortField === 'name' || item.sortField === 'members')
     && (item.sortDirection === 'asc' || item.sortDirection === 'desc');
 }
@@ -127,7 +128,8 @@ export default function ChatListPage() {
   const [batchDialogOpen, setBatchDialogOpen] = useState(false);
   const [batchDeleteConfirmOpen, setBatchDeleteConfirmOpen] = useState(false);
   const [batchFields, setBatchFields] = useState({ basics: true, avatar: true, background: false });
-  const [batchMode, setBatchMode] = useState<'empty' | 'complete' | 'regenerate'>('empty');
+  const [batchMode, setBatchMode] = useState<'empty' | 'complete' | 'regenerate' | 'clear'>('empty');
+  const [clearingData, setClearingData] = useState(false);
   const [avatarRequirement, setAvatarRequirement] = useState('');
   const [backgroundRequirement, setBackgroundRequirement] = useState('');
   const aiProfiles = useSettingsStore((state) => state.aiProfiles);
@@ -354,7 +356,23 @@ export default function ChatListPage() {
     const selected = chats.filter((chat) => chat.type === 'group' && !chat.deletedAt && selectedChatIds.includes(chat.id));
     return { selected, basics: selected.filter((chat) => !chat.name.trim() || !chat.topic.trim()).length, avatar: selected.filter((chat) => !chat.groupVisual?.avatarUrl).length, background: selected.filter((chat) => !chat.groupVisual?.backgroundUrl).length };
   }, [chats, selectedChatIds]);
-  const startBatchCompletion = () => {
+  const batchIncludesExisting = batchMode === 'regenerate' || batchMode === 'clear';
+  const startBatchCompletion = async () => {
+    if (batchMode === 'clear') {
+      setClearingData(true);
+      try {
+        await clearGroupData(batchCounts.selected, batchFields);
+        setBatchDialogOpen(false);
+        setBatchMenuAnchor(null);
+        setSelectedChatIds([]);
+        setSelectionMode(false);
+      } catch (error) {
+        setAssistantDeleteError(`清空未全部完成：${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        setClearingData(false);
+      }
+      return;
+    }
     batchCounts.selected.forEach((chat) => {
       const members = charactersForChatCards.filter((character) => chat.memberIds.includes(character.id));
       if (batchFields.basics && (batchMode === 'regenerate' || !chat.name.trim() || !chat.topic.trim())) enqueueGroupBasicCompletion({ chat, members, profiles: aiProfiles, language: 'zh', mode: batchMode });
@@ -541,8 +559,7 @@ export default function ChatListPage() {
                 selectable={selectionMode}
                 multiSelected={selectedChatIds.includes(chat.id)}
                 displayMode={chatListStyle.displayMode}
-                cardThemeRendering={chatListStyle.themeRendering}
-                cardBackgroundRendering={chatListStyle.backgroundRendering}
+                showGroupBackground={chatListStyle.showGroupBackground ?? true}
                 showListDivider={chatListStyle.displayMode === 'list' && index < sortedVisibleChats.length - 1}
                 onToggleSelection={() => toggleChatSelection(chat.id)}
                 onMemberClick={(member) => navigate(`/characters/${member.id}/edit?returnTo=${encodeURIComponent(location.pathname + location.search)}`)}
@@ -586,11 +603,8 @@ export default function ChatListPage() {
         <MenuItem disabled={chatListStyle.displayMode !== 'card'} onClick={() => updateChatListStyle({ autoColumns: !chatListStyle.autoColumns })}>
           <Checkbox checked={chatListStyle.autoColumns} disabled={chatListStyle.displayMode !== 'card'} size="small" sx={{ p: 0, mr: 1 }} />自适应列数
         </MenuItem>
-        <MenuItem onClick={() => updateChatListStyle({ themeRendering: !chatListStyle.themeRendering })}>
-          <Checkbox checked={chatListStyle.themeRendering} size="small" sx={{ p: 0, mr: 1 }} />主题色渲染
-        </MenuItem>
-        <MenuItem onClick={() => updateChatListStyle({ backgroundRendering: !chatListStyle.backgroundRendering })}>
-          <Checkbox checked={chatListStyle.backgroundRendering} size="small" sx={{ p: 0, mr: 1 }} />背景图渲染
+        <MenuItem disabled={chatListStyle.displayMode !== 'card'} onClick={() => updateChatListStyle({ showGroupBackground: !(chatListStyle.showGroupBackground ?? true) })}>
+          <Checkbox checked={chatListStyle.showGroupBackground ?? true} disabled={chatListStyle.displayMode !== 'card'} size="small" sx={{ p: 0, mr: 1 }} />显示群聊背景
         </MenuItem>
           </>,
         }, {
@@ -604,22 +618,23 @@ export default function ChatListPage() {
           </>,
         }]}
       />
-      <Dialog open={batchDialogOpen} onClose={() => setBatchDialogOpen(false)} fullWidth maxWidth="sm">
+      <Dialog open={batchDialogOpen} onClose={() => { if (!clearingData) setBatchDialogOpen(false); }} fullWidth maxWidth="sm">
         <DialogTitle>批量补全群聊</DialogTitle>
         <DialogContent dividers>
-          <Stack spacing={1.25}>
+          <Stack component="fieldset" disabled={clearingData} spacing={1.25} sx={{ border: 0, m: 0, p: 0, minWidth: 0 }}>
             <Typography variant="body2" color="text.secondary">已选择 {batchCounts.selected.length} 个当前可见群聊</Typography>
-            <FormControlLabel control={<Checkbox checked={batchFields.basics} disabled={batchMode !== 'regenerate' && batchCounts.basics === 0} onChange={(event) => setBatchFields((fields) => ({ ...fields, basics: event.target.checked }))} />} label={`基础信息${batchMode === 'regenerate' ? '' : `（${batchCounts.basics}/${batchCounts.selected.length}）`}`} />
-            <Stack direction="row" sx={{ alignItems: 'center' }} spacing={1}><FormControlLabel sx={{ m: 0, flexShrink: 0 }} control={<Checkbox checked={batchFields.avatar} disabled={batchMode !== 'regenerate' && batchCounts.avatar === 0} onChange={(event) => setBatchFields((fields) => ({ ...fields, avatar: event.target.checked }))} />} label={`群头像${batchMode === 'regenerate' ? '' : `（${batchCounts.avatar}/${batchCounts.selected.length}）`}`} /><TextField size="small" fullWidth value={avatarRequirement} onChange={(event) => setAvatarRequirement(event.target.value)} placeholder="统一要求（可选）" /></Stack>
-            <Stack direction="row" sx={{ alignItems: 'center' }} spacing={1}><FormControlLabel sx={{ m: 0, flexShrink: 0 }} control={<Checkbox checked={batchFields.background} disabled={batchMode !== 'regenerate' && batchCounts.background === 0} onChange={(event) => setBatchFields((fields) => ({ ...fields, background: event.target.checked }))} />} label={`群背景${batchMode === 'regenerate' ? '' : `（${batchCounts.background}/${batchCounts.selected.length}）`}`} /><TextField size="small" fullWidth value={backgroundRequirement} onChange={(event) => setBackgroundRequirement(event.target.value)} placeholder="统一要求（可选）" /></Stack>
+            <FormControlLabel control={<Checkbox checked={batchFields.basics} disabled={!batchIncludesExisting && batchCounts.basics === 0} onChange={(event) => setBatchFields((fields) => ({ ...fields, basics: event.target.checked }))} />} label={`基础信息${batchIncludesExisting ? '' : `（${batchCounts.basics}/${batchCounts.selected.length}）`}`} />
+            <Stack direction="row" sx={{ alignItems: 'center' }} spacing={1}><FormControlLabel sx={{ m: 0, flexShrink: 0 }} control={<Checkbox checked={batchFields.avatar} disabled={!batchIncludesExisting && batchCounts.avatar === 0} onChange={(event) => setBatchFields((fields) => ({ ...fields, avatar: event.target.checked }))} />} label={`群头像${batchIncludesExisting ? '' : `（${batchCounts.avatar}/${batchCounts.selected.length}）`}`} />{batchMode !== 'clear' && <TextField size="small" fullWidth value={avatarRequirement} onChange={(event) => setAvatarRequirement(event.target.value)} placeholder="统一要求（可选）" />}</Stack>
+            <Stack direction="row" sx={{ alignItems: 'center' }} spacing={1}><FormControlLabel sx={{ m: 0, flexShrink: 0 }} control={<Checkbox checked={batchFields.background} disabled={!batchIncludesExisting && batchCounts.background === 0} onChange={(event) => setBatchFields((fields) => ({ ...fields, background: event.target.checked }))} />} label={`群背景${batchIncludesExisting ? '' : `（${batchCounts.background}/${batchCounts.selected.length}）`}`} />{batchMode !== 'clear' && <TextField size="small" fullWidth value={backgroundRequirement} onChange={(event) => setBackgroundRequirement(event.target.value)} placeholder="统一要求（可选）" />}</Stack>
             <RadioGroup row value={batchMode} onChange={(event) => setBatchMode(event.target.value as typeof batchMode)}>
               <Tooltip title="只处理完全为空的字段，不覆盖已有内容"><FormControlLabel value="empty" control={<Radio />} label="仅空数据" /></Tooltip>
               <Tooltip title="补足缺失内容，保留用户已填写的信息"><FormControlLabel value="complete" control={<Radio />} label="补全信息" /></Tooltip>
               <Tooltip title="基于现有设定重新生成所选内容"><FormControlLabel value="regenerate" control={<Radio />} label="重新生成" /></Tooltip>
+              <Tooltip title="删除勾选项目的数据，不重新生成"><FormControlLabel value="clear" control={<Radio />} label="清空" /></Tooltip>
             </RadioGroup>
           </Stack>
         </DialogContent>
-        <DialogActions><Button onClick={() => setBatchDialogOpen(false)}>取消</Button><Button variant="contained" disabled={!batchCounts.selected.length || !Object.values(batchFields).some(Boolean)} onClick={startBatchCompletion}>加入队列</Button></DialogActions>
+        <DialogActions><Button disabled={clearingData} onClick={() => setBatchDialogOpen(false)}>取消</Button><Button variant="contained" color={batchMode === 'clear' ? 'error' : 'primary'} disabled={clearingData || !batchCounts.selected.length || !Object.values(batchFields).some(Boolean)} onClick={startBatchCompletion}>{clearingData ? '清空中' : batchMode === 'clear' ? '清空所选数据' : '加入队列'}</Button></DialogActions>
       </Dialog>
       <ConfirmDialog
         open={Boolean(deleteId)}

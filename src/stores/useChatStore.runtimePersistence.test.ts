@@ -550,6 +550,14 @@ describe('chat runtime persistence', () => {
     expect(useChatStore.getState().getChat(base.id)?.runtimeEventsV2?.some((event) => event.summary === `handled_social_event:${candidate.id}`)).toBe(true);
   });
 
+  it.each([0.75, 1])('preserves background opacity %s in cloud patches', async (backgroundOpacity) => {
+    const { __chatRuntimePersistenceForTests } = await import('./useChatStore');
+    const patch = __chatRuntimePersistenceForTests.compactChatPatchForCloud({
+      groupVisual: { backgroundUrl: '/uploads/background.png', backgroundOpacity },
+    });
+    expect(patch.groupVisual).toEqual({ backgroundUrl: '/uploads/background.png', backgroundOpacity });
+  });
+
   it('keeps bounded runtime fields in cloud patches', async () => {
     const { __chatRuntimePersistenceForTests } = await import('./useChatStore');
     const { compactChatPatchForCloud, limits } = __chatRuntimePersistenceForTests;

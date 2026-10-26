@@ -15,8 +15,9 @@ import { getChatGameplayShortLabel } from '../../services/chatGameplayPresentati
 import { sanitizeChatLatestMessage } from '../../services/chatLatestMessage';
 import { avatarGenerationQueue, type AvatarGenerationTaskState } from '../../services/avatarGenerationQueue';
 import { getChatCompletionTaskStatus, subscribeChatCompletionQueue } from '../../services/chatCompletionQueue';
-import { useImageResourceAvailability } from '../../hooks/useImageResourceAvailability';
 import { buildAvatarDirectHoverSx, buildCardAvatarHoverMotionSx } from '../../styles/avatarHoverMotion';
+import { useAuthStore } from '../../stores/useAuthStore';
+import ChatBackground from './ChatBackground';
 
 interface ChatCardProps {
   chat: GroupChat;
@@ -32,8 +33,7 @@ interface ChatCardProps {
   onLongPress?: () => void;
   displayMode?: 'list' | 'card';
   compactCard?: boolean;
-  cardThemeRendering?: boolean;
-  cardBackgroundRendering?: boolean;
+  showGroupBackground?: boolean;
   showListDivider?: boolean;
 }
 
@@ -82,7 +82,8 @@ function ExpandableMemberAvatars({ members, onMemberClick }: { members: AICharac
   );
 }
 
-function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, selectable = false, multiSelected = false, onToggleSelection, onMemberClick: onEditMember, onAvatarClick: onEditAvatar, onLongPress, displayMode = 'card', compactCard = false, cardThemeRendering = false, cardBackgroundRendering = false, showListDivider = false }: ChatCardProps) {
+function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, selectable = false, multiSelected = false, onToggleSelection, onMemberClick: onEditMember, onAvatarClick: onEditAvatar, onLongPress, displayMode = 'card', compactCard = false, showGroupBackground = false, showListDivider = false }: ChatCardProps) {
+  const authMode = useAuthStore((state) => state.authMode);
   const onMemberClick = selectable ? undefined : onEditMember;
   const onAvatarClick = selectable ? undefined : onEditAvatar;
   const longPressTimerRef = useRef<number | null>(null);
@@ -220,17 +221,13 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
   // Local-only chats can retain an upload-shaped URL from a previous sync
   // attempt. It is not fetchable from the server and would otherwise produce
   // a noisy 404 on every home-page render.
-  const isUnresolvableLocalMediaUrl = (url: string) => chat.id.startsWith('local-chat-') && /\/uploads\/media\//.test(url);
+  const isUnresolvableLocalMediaUrl = (url: string) => authMode !== 'cloud' && chat.id.startsWith('local-chat-') && /\/uploads\/media\//.test(url);
   const groupAvatarUrl = chat.type === 'group' && !isUnresolvableLocalMediaUrl(chat.groupVisual?.avatarUrl?.trim() || '') ? chat.groupVisual?.avatarUrl?.trim() : '';
-  const requestedCardBackgroundUrl = cardBackgroundRendering ? chat.groupVisual?.backgroundUrl?.trim() : '';
-  const requestedCardAccentImageUrl = cardThemeRendering
-    ? (groupAvatarUrl || (isImageAvatar(directMember?.avatar) && !isUnresolvableLocalMediaUrl(directMember.avatar) ? directMember.avatar : ''))
-    : '';
-  const backgroundAvailability = useImageResourceAvailability(requestedCardBackgroundUrl);
-  const accentAvailability = useImageResourceAvailability(requestedCardAccentImageUrl);
-  const cardBackgroundUrl = backgroundAvailability === 'ready' ? requestedCardBackgroundUrl : '';
-  const cardAccentImageUrl = accentAvailability === 'ready' ? requestedCardAccentImageUrl : '';
   const isList = displayMode === 'list';
+  const requestedBackgroundUrl = showGroupBackground && !isList && chat.type === 'group'
+    ? chat.groupVisual?.backgroundUrl?.trim() || ''
+    : '';
+  const backgroundUrl = isUnresolvableLocalMediaUrl(requestedBackgroundUrl) ? '' : requestedBackgroundUrl;
   const isCompactCard = compactCard && !isList;
   const [groupAvatarUnavailableUrl, setGroupAvatarUnavailableUrl] = useState('');
   const groupAvatarGenerating = avatarTask?.status === 'queued' || avatarTask?.status === 'running' || chatAvatarTaskStatus === 'queued' || chatAvatarTaskStatus === 'running';
@@ -256,6 +253,9 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
       variant="outlined"
       sx={{
         ...buildInteractiveSurfaceSx({ selected: selected || multiSelected }),
+        position: 'relative',
+        backdropFilter: 'none',
+        WebkitBackdropFilter: 'none',
         width: '100%',
         minWidth: 0,
         boxSizing: 'border-box',
@@ -292,14 +292,9 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
             transform: 'translateY(-1px)',
           },
         }),
-        '&::after': (cardBackgroundUrl || cardAccentImageUrl) ? {
-          content: '""', position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 0, borderRadius: 'inherit',
-          backgroundImage: (theme) => { const veil = isList ? (theme.palette.mode === 'light' ? 'rgba(255,255,255,0.91)' : 'rgba(18,20,28,0.92)') : (theme.palette.mode === 'light' ? 'rgba(255,255,255,0.84)' : 'rgba(18,20,28,0.86)'); return `linear-gradient(${veil}, ${veil}), url("${(cardBackgroundUrl || cardAccentImageUrl).replace(/"/g, '%22')}")`; },
-          backgroundSize: 'cover', backgroundPosition: 'center', opacity: isList ? (cardBackgroundUrl ? 0.5 : 0.34) : (cardBackgroundUrl ? 0.82 : 0.52),
-          filter: cardBackgroundUrl ? 'saturate(0.68)' : 'blur(16px) saturate(1.15)', transform: cardAccentImageUrl ? 'scale(1.12)' : undefined,
-        } : { borderRadius: 'inherit' },
       } as SxProps<Theme>}
     >
+      <ChatBackground url={backgroundUrl} opacity={0.3} />
       <CardActionArea
         component="div"
         role="button"
@@ -461,7 +456,6 @@ export default memo(ChatCard, (prev, next) => (
   && prev.onLongPress === next.onLongPress
   && prev.displayMode === next.displayMode
   && prev.compactCard === next.compactCard
-  && prev.cardThemeRendering === next.cardThemeRendering
-  && prev.cardBackgroundRendering === next.cardBackgroundRendering
+  && prev.showGroupBackground === next.showGroupBackground
   && prev.showListDivider === next.showListDivider
 ));
