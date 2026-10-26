@@ -664,7 +664,13 @@ export default function HomePage() {
       : `当前只有 ${customCharacters.length} 个AI角色，群聊至少需要 ${noCharactersRequiredCount} 个AI角色。请再创建 ${noCharactersRequiredCount - customCharacters.length} 个角色，或根据主题批量生成。`
     : '创建单聊前，需要先在角色库中创建至少一个AI角色。也可以根据主题或故事批量生成角色。';
   const recentChatsTitle = '最近会话';
-  const homeChatDisplayMode = readPersistentUiValue('chat-list-style', { displayMode: 'card' }, (value): value is { displayMode: 'list' | 'card' } => Boolean(value && typeof value === 'object' && ((value as { displayMode?: unknown }).displayMode === 'list' || (value as { displayMode?: unknown }).displayMode === 'card'))).displayMode;
+  const homeChatStyle = readPersistentUiValue('chat-list-style', { displayMode: 'card', showGroupBackground: true }, (value): value is { displayMode: 'list' | 'card'; showGroupBackground?: boolean } => {
+    if (!value || typeof value !== 'object') return false;
+    const item = value as { displayMode?: unknown; showGroupBackground?: unknown };
+    return (item.displayMode === 'list' || item.displayMode === 'card')
+      && (item.showGroupBackground === undefined || typeof item.showGroupBackground === 'boolean');
+  });
+  const homeChatDisplayMode = homeChatStyle.displayMode;
   const recentChatsActionTab = recentChats[0] ? resolveChatListTab(recentChats[0]) : 0;
   const needsAIModelSetup = !hasUsableDefaultTextAI(aiProfiles);
   const needsLogin = authMode === 'local' || !isLoggedIn;
@@ -1378,6 +1384,7 @@ export default function HomePage() {
                   characters={characters}
                   displayMode={homeChatDisplayMode as 'list' | 'card'}
                   compactCard={homeChatDisplayMode === 'card'}
+                  showGroupBackground={homeChatStyle.showGroupBackground ?? true}
                   showListDivider={homeChatDisplayMode === 'list' && index < recentChats.length - 1}
                   onClick={() => openChatFromHome(chat)}
                   onAvatarClick={chat.type === 'group'
