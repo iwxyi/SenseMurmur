@@ -49,19 +49,20 @@ export function resolvePostMomentPublishGuard(params: {
     .filter((event) => {
       if (event.kind !== 'artifact') return false;
       if ((event.actorIds || [])[0] !== actorId) return false;
-      if (now - event.createdAt > 90 * 60_000) return false;
-      const payload = event.payload as { eventKind?: string; artifactType?: string };
+      const payload = event.payload as { eventKind?: string; artifactType?: string; processedAt?: number };
+      if (now - (payload.processedAt || event.createdAt) > 90 * 60_000) return false;
       return payload.eventKind === 'post_moment' && payload.artifactType === 'moment_text';
     })
     .sort((a, b) => b.createdAt - a.createdAt);
   const latest = recentPostMomentArtifacts[0];
-  if (latest && now - latest.createdAt < 90 * 60_000) {
+  const latestProcessedAt = latest && ((latest.payload as { processedAt?: number }).processedAt || latest.createdAt);
+  if (latestProcessedAt && now - latestProcessedAt < 90 * 60_000) {
     return {
       allow: false,
       reasonType: 'world_attention_moment_spam_window',
       reasonLabel: '发圈冷却中',
       reasonDetail: '短时间内已发布动态，延后本次发布以避免刷屏。',
-      nextSuggestedAt: latest.createdAt + 90 * 60_000,
+      nextSuggestedAt: latestProcessedAt + 90 * 60_000,
     };
   }
 

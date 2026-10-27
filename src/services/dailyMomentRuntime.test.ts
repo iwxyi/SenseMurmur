@@ -11,6 +11,7 @@ import { DailyMomentFlowError, getDailyMomentMemories, runDailyMomentFlow } from
 import { projectWorldMoments } from './worldRuntimeProjection';
 import { hasPendingAutoSocialEventCandidate } from '../hooks/useChatAutoSocialFlow';
 import { retainRuntimeEvents } from './runtimeEventRetention';
+import { resolvePostMomentPublishGuard } from './postMomentPublishPolicy';
 
 vi.mock('./aiGenerationAdapter', () => ({ generateJsonWithAdapter: vi.fn(), generateImageWithAdapter: vi.fn() }));
 vi.mock('./momentMediaStorage', () => ({ persistGeneratedMomentMedia: vi.fn() }));
@@ -84,7 +85,7 @@ describe('daily moments from character memories', () => {
     chats[0] = { ...chats[0], runtimeEventsV2: chats[0].runtimeEventsV2!.map((event) => {
       if ((event.payload as { artifactType?: string }).artifactType !== 'daily_moment_skip') return event;
       return { ...event, payload: { ...event.payload, decisionPolicyVersion: undefined } };
-    }) };
+    }).filter((event) => (event.payload as { artifactType?: string }).artifactType !== 'daily_moment_processed') };
     await runDailyMomentFlow('room-a', ops());
     expect(generateJsonWithAdapter).toHaveBeenCalledTimes(2);
     await runDailyMomentFlow('room-a', ops());
@@ -99,7 +100,8 @@ describe('daily moments from character memories', () => {
     chats[0] = { ...chats[0], runtimeEventsV2: retainRuntimeEvents(chats[0].runtimeEventsV2 || [], 0) };
     await runDailyMomentFlow('room-a', ops());
     expect(generateJsonWithAdapter).toHaveBeenCalledOnce();
-    actor.layeredMemories = [...actor.layeredMemories!, memory({ id: 'new-memory', text: '今天完成一件值得纪念的事情。' })];
+    actor.layeredMemories = [...actor.layeredMemories!, memory({ id: 'new-memory', updatedAt: Date.now() - 2 * 60 * 60_000,
+      text: '今天完成一件值得纪念的事情。' })];
     await runDailyMomentFlow('room-a', ops());
     expect(generateJsonWithAdapter).toHaveBeenCalledTimes(2);
   });
@@ -113,13 +115,109 @@ describe('daily moments from character memories', () => {
     expect(projectWorldMoments(chats, [actor])).toEqual([]);
   });
 
-  it('filters private, user, uncertain, archived, old and unrelated memories before the prompt', () => {
+  it('keeps old public memories but filters private, user, uncertain, archived and unrelated memories', () => {
     actor.layeredMemories = [memory(), memory({ visibility: 'private', text: '秘密' }),
       memory({ subjectIds: ['user'], text: '用户私事' }), memory({ subjectOwner: 'user', text: '用户资料' }),
       memory({ validity: 'uncertain', text: '不确定' }), memory({ archivedAt: 1, text: '归档' }),
       memory({ updatedAt: Date.now() - 86400000, text: '昨天' }),
       memory({ ownerId: 'b', subjectIds: ['b'], text: '旁人' })];
-    expect(getDailyMomentMemories(actor, chats[0])).toEqual([actor.layeredMemories[0].text]);
+    expect(getDailyMomentMemories(actor, chats[0])).toEqual([actor.layeredMemories[0].text, '昨天']);
+  });
+
+  it('resumes memories after several closed days and displays a later historical time only once', async () => {
+    const sourceAt = Date.now() - 5 * 86_400_000;
+    actor.layeredMemories = [memory({ createdAt: sourceAt, updatedAt: sourceAt,
+      text: '前些天在群里聊到茉莉花香。' })];
+    await runDailyMomentFlow('room-a', ops());
+    const moment = chats[0].runtimeEventsV2!.find((event) => (event.payload as { artifactType?: string }).artifactType === 'moment_text')!;
+    expect(moment.createdAt).toBeGreaterThan(sourceAt);
+    expect(moment.createdAt).toBeLessThan(Date.now() - 4 * 86_400_000);
+    expect(moment.payload).toMatchObject({ processedAt: Date.now(), processedThroughAt: sourceAt });
+    expect(vi.mocked(generateJsonWithAdapter).mock.calls[0][0].messages[0].content).toContain('前些天在群里聊到茉莉花香');
+    chats[0].runtimeEventsV2 = retainRuntimeEvents(chats[0].runtimeEventsV2!, 0);
+    await vi.advanceTimersByTimeAsync(86_400_000);
+    await runDailyMomentFlow('room-a', ops());
+    expect(generateJsonWithAdapter).toHaveBeenCalledOnce();
+  });
+
+  it('uses actual processing time for the daily limit when an old post is backdated', async () => {
+    const sourceAt = Date.now() - 5 * 86_400_000;
+    actor.layeredMemories = [memory({ createdAt: sourceAt, updatedAt: sourceAt })];
+    await runDailyMomentFlow('room-a', ops());
+    actor.layeredMemories = [...actor.layeredMemories!, memory({ id: 'today', createdAt: Date.now() - 60 * 60_000,
+      updatedAt: Date.now() - 60 * 60_000, text: '今天又有了新想法。' })];
+    await runDailyMomentFlow('room-a', ops());
+    expect(generateJsonWithAdapter).toHaveBeenCalledOnce();
+    const guard = resolvePostMomentPublishGuard({ chat: chats[0], actor,
+      payload: { eventKind: 'post_moment', initiatorId: actor.id, participantIds: [actor.id], reasonType: 'test',
+        confidence: 1, urgency: 'soon', seedIntent: 'test', visibilityPlan: 'public' } });
+    expect(guard).toMatchObject({ allow: false, reasonType: 'world_attention_moment_spam_window' });
+  });
+
+  it('resumes an overdue appointment after five closed days with a short independent delay', async () => {
+    const other = { ...actor, id: 'b', name: '乙', layeredMemories: [] } as AICharacter;
+    const sharedOps = { ...ops(), getCharacters: () => [actor, other] };
+    const first = await runDailyMomentFlow('room-a', sharedOps);
+    expect(first?.nextCheckAt).toBeGreaterThan(Date.now());
+    chats[0].runtimeEventsV2 = retainRuntimeEvents(chats[0].runtimeEventsV2!, 0);
+    await vi.advanceTimersByTimeAsync(5 * 86_400_000);
+    const resumed = await runDailyMomentFlow('room-a', sharedOps);
+    expect(resumed?.nextCheckAt).toBeGreaterThan(Date.now());
+    expect(resumed!.nextCheckAt! - Date.now()).toBeLessThan(15 * 60_000);
+    expect(generateJsonWithAdapter).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(resumed!.nextCheckAt! - Date.now());
+    await runDailyMomentFlow('room-a', sharedOps);
+    expect(projectWorldMoments(chats, [actor])).toHaveLength(1);
+  });
+
+  it('staggered overdue appointments remain independent for multiple characters', async () => {
+    const other = { ...actor, id: 'b', name: '乙', layeredMemories: [memory({
+      id: 'memory-b', ownerId: 'b', subjectIds: ['b'], text: '乙在群里记录了一件小事。',
+    })] } as AICharacter;
+    chats[0].memberIds = ['a', 'b'];
+    const sharedOps = { ...ops(), getCharacters: () => [actor, other],
+      loadCharacter: vi.fn(async (id: string) => id === 'a' ? actor : other) };
+    await runDailyMomentFlow('room-a', sharedOps);
+    await vi.advanceTimersByTimeAsync(5 * 86_400_000);
+    await runDailyMomentFlow('room-a', sharedOps);
+    const appointments = chats[0].runtimeEventsV2!.filter((event) => {
+      const payload = event.payload as { artifactType?: string; resumedAt?: number };
+      return payload.artifactType === 'daily_moment_schedule' && payload.resumedAt;
+    }).map((event) => (event.payload as { readyAt: number }).readyAt);
+    expect(appointments).toHaveLength(2);
+    expect(new Set(appointments).size).toBe(2);
+    expect(appointments.every((readyAt) => readyAt > Date.now() && readyAt < Date.now() + 15 * 60_000)).toBe(true);
+  });
+
+  it('remembers an old declined batch across restarts and handles a new memory later', async () => {
+    const sourceAt = Date.now() - 12 * 86_400_000;
+    actor.layeredMemories = [memory({ createdAt: sourceAt, updatedAt: sourceAt })];
+    vi.mocked(generateJsonWithAdapter).mockResolvedValueOnce('{"publish":false,"text":""}');
+    await runDailyMomentFlow('room-a', ops());
+    chats[0].runtimeEventsV2 = retainRuntimeEvents(chats[0].runtimeEventsV2!, 0);
+    await vi.advanceTimersByTimeAsync(3 * 86_400_000);
+    await runDailyMomentFlow('room-a', ops());
+    expect(generateJsonWithAdapter).toHaveBeenCalledOnce();
+    actor.layeredMemories = [...actor.layeredMemories!, memory({ id: 'new', createdAt: Date.now() - 3 * 60 * 60_000,
+      updatedAt: Date.now() - 3 * 60 * 60_000, text: '后来又闻到茉莉花香。' })];
+    await runDailyMomentFlow('room-a', ops());
+    expect(generateJsonWithAdapter).toHaveBeenCalledTimes(2);
+    expect(projectWorldMoments(chats, [actor])).toHaveLength(1);
+  });
+
+  it('continues a backlog beyond six memories without discarding older unprocessed entries', async () => {
+    actor.layeredMemories = Array.from({ length: 8 }, (_, index) => memory({
+      id: `backlog-${index}`, text: `第 ${index + 1} 条公开记忆`,
+      createdAt: Date.now() - (20 - index) * 60 * 60_000,
+      updatedAt: Date.now() - (20 - index) * 60 * 60_000,
+    }));
+    vi.mocked(generateJsonWithAdapter).mockResolvedValueOnce('{"publish":false,"text":""}');
+    await runDailyMomentFlow('room-a', ops());
+    expect(vi.mocked(generateJsonWithAdapter).mock.calls[0][0].messages[0].content).toContain('第 1 条公开记忆');
+    expect(vi.mocked(generateJsonWithAdapter).mock.calls[0][0].messages[0].content).not.toContain('第 7 条公开记忆');
+    await runDailyMomentFlow('room-a', ops());
+    expect(vi.mocked(generateJsonWithAdapter).mock.calls[1][0].messages[0].content).toContain('第 7 条公开记忆');
+    expect(projectWorldMoments(chats, [actor])).toHaveLength(1);
   });
 
   it('allows only one room to generate for a shared character', async () => {

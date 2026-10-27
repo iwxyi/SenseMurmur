@@ -26,13 +26,31 @@ export function retainRuntimeEvents(events: RuntimeEventV2[], historyLimit: numb
   getSocialIntentStateEventIds(events, stateIds).forEach((id) => stateIds.add(id));
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  // Today's posts remain evidence for the daily limit and publishing cooldown.
+  // Keep one cursor and one appointment per actor across ordinary history trimming.
+  const latestMomentCursor = new Map<string, RuntimeEventV2>();
+  const latestMomentSchedule = new Map<string, RuntimeEventV2>();
   for (const event of events) {
-    const payload = event.payload as { artifactType?: string; eventKind?: string; candidateId?: string };
+    const payload = event.payload as { artifactType?: string; processedThroughAt?: number };
+    if (event.kind !== 'artifact' || !event.actorIds?.[0]) continue;
+    if (payload.artifactType === 'daily_moment_processed') {
+      const previous = latestMomentCursor.get(event.actorIds[0]);
+      if (!previous || (payload.processedThroughAt || 0) > ((previous.payload as { processedThroughAt?: number }).processedThroughAt || 0)) {
+        latestMomentCursor.set(event.actorIds[0], event);
+      }
+    } else if (payload.artifactType === 'daily_moment_schedule') {
+      const previous = latestMomentSchedule.get(event.actorIds[0]);
+      if (!previous || event.createdAt > previous.createdAt) latestMomentSchedule.set(event.actorIds[0], event);
+    }
+  }
+  latestMomentCursor.forEach((event) => stateIds.add(event.id));
+  latestMomentSchedule.forEach((event) => stateIds.add(event.id));
+  // Today's processed posts remain evidence for the daily limit and publishing cooldown.
+  for (const event of events) {
+    const payload = event.payload as { artifactType?: string; eventKind?: string; candidateId?: string; processedAt?: number };
     if (event.kind === 'artifact' && (payload.artifactType === 'daily_moment_skip' || payload.artifactType === 'daily_moment_schedule')
       && event.createdAt >= today.getTime()) stateIds.add(event.id);
     if (event.kind === 'artifact' && payload.artifactType === 'moment_text'
-      && payload.eventKind === 'post_moment' && event.createdAt >= today.getTime()) {
+      && payload.eventKind === 'post_moment' && (payload.processedAt || event.createdAt) >= today.getTime()) {
       stateIds.add(event.id);
       if (payload.candidateId) {
         stateIds.add(payload.candidateId);

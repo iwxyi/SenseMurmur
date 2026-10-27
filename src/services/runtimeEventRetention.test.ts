@@ -5,6 +5,29 @@ import { hasPendingAutoSocialEventCandidate } from '../hooks/useChatAutoSocialFl
 import { createTestChat } from '../test/fixtures';
 
 describe('calendar event retention', () => {
+  it('keeps only the newest daily moment cursor and a backdated post processed today', () => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const marker = (id: string, processedThroughAt: number): RuntimeEventV2 => ({
+      id, conversationId: 'chat', kind: 'artifact', createdAt: today.getTime() - 86_400_000,
+      actorIds: ['a'], visibility: 'role_private', summary: 'processed',
+      payload: { artifactType: 'daily_moment_processed', processedThroughAt, decisionPolicyVersion: 2 },
+    });
+    const post: RuntimeEventV2 = { ...marker('post', 0), createdAt: today.getTime() - 5 * 86_400_000,
+      visibility: 'derived_public', payload: { artifactType: 'moment_text', eventKind: 'post_moment',
+        processedAt: today.getTime() + 1 } };
+    expect(retainRuntimeEvents([marker('old', 1), marker('latest', 2), post], 0)
+      .map((event) => event.id)).toEqual(['latest', 'post']);
+  });
+
+  it('keeps an overdue daily moment appointment after several days of unrelated events', () => {
+    const appointment: RuntimeEventV2 = { id: 'appointment', conversationId: 'chat', kind: 'artifact',
+      createdAt: Date.now() - 5 * 86_400_000, actorIds: ['a'], visibility: 'role_private',
+      summary: 'scheduled', payload: { artifactType: 'daily_moment_schedule', memorySignature: 'pending', readyAt: Date.now() - 4 * 86_400_000 } };
+    const history = Array.from({ length: 200 }, (_, index): RuntimeEventV2 => ({ ...appointment,
+      id: `history-${index}`, kind: 'room_shift', createdAt: Date.now() - index, payload: {} }));
+    expect(retainRuntimeEvents([appointment, ...history], 0)).toEqual([appointment]);
+  });
   it('preserves unresolved social intents and prevents retained calendar intents resurrecting after completion', () => {
     const intent: RuntimeEventV2 = { id: 'intent', conversationId: 'chat', kind: 'artifact', createdAt: 1, visibility: 'derived_public', summary: 'pending',
       payload: { status: 'tentative', eventKind: 'check_in', initiatorId: 'a' } };
