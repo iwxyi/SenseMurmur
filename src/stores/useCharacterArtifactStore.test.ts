@@ -165,8 +165,8 @@ describe('useCharacterArtifactStore', () => {
     expect(artifactStore.getState().unreadLetterCount).toBe(1);
   });
 
-  it('keeps a letter read when delayed detail contains stale unread state', async () => {
-    const detail = buildLetter('detail');
+  it.each(['birth_letter', 'diary'] as const)('keeps %s read when delayed detail contains stale unread state', async (kind) => {
+    const detail = { ...buildLetter('detail'), kind };
     artifactStore.setState({ items: [{ ...detail, text: '' }], unreadLetterCount: 1 });
     let resolveDetail!: (value: { item: CharacterArtifactEntry }) => void;
     apiMocks.getCharacterArtifactItem.mockImplementation(() => new Promise((resolve) => { resolveDetail = resolve; }));
@@ -176,6 +176,23 @@ describe('useCharacterArtifactStore', () => {
     await pending;
     expect(artifactStore.getState().unreadLetterCount).toBe(0);
     expect(artifactStore.getState().items[0].text).toBe(detail.text);
+    expect(artifactStore.getState().items[0].unread).toBe(false);
+  });
+
+  it('marks diaries read individually only after their body loads', async () => {
+    const diary = { ...buildLetter('diary'), kind: 'diary' as const };
+    artifactStore.setState({ items: [{ ...diary, text: '' }, buildLetter('letter')], unreadLetterCount: 1 });
+    artifactStore.getState().markArtifactRead(diary.id);
+    expect(artifactStore.getState().items[0].unread).toBe(true);
+    apiMocks.getCharacterArtifactItem.mockResolvedValue({ item: diary });
+    await artifactStore.getState().ensureArtifactDetail(diary.id);
+    artifactStore.getState().markArtifactRead(diary.id);
+    expect(artifactStore.getState().items.find((item) => item.id === diary.id)?.unread).toBe(false);
+    expect(artifactStore.getState().unreadLetterCount).toBe(1);
+    const items = artifactStore.getState().items;
+    artifactStore.getState().markArtifactRead(diary.id);
+    artifactStore.getState().markArtifactRead('missing');
+    expect(artifactStore.getState().items).toBe(items);
   });
 
   it('loads an unread placeholder before acknowledging its displayed body', async () => {
@@ -233,6 +250,7 @@ describe('useCharacterArtifactStore', () => {
     const diaries = artifactStore.getState().getDiaryEntries(character.id);
     expect(diaries.length).toBeGreaterThan(0);
     expect(diaries[0]?.kind).toBe('diary');
+    expect(diaries[0]?.unread).toBe(true);
     expect(diaries[0]?.generationSnapshot?.character.name).toBe('苏苏');
     expect(diaries[0]?.generationSnapshot?.character.visualIdentity?.referenceImages?.[0]?.url).toBeUndefined();
 

@@ -87,6 +87,7 @@ interface CharacterArtifactStore extends ArtifactSnapshot {
   enqueueFinalLetter: (character: AICharacter, relatedCharacters: Array<{ id: string; name: string }>) => void;
   markLettersRead: () => void;
   markLetterRead: (itemId: string) => void;
+  markArtifactRead: (itemId: string) => void;
   getDiaryEntries: (characterId: string) => CharacterArtifactEntry[];
   getLetterEntries: () => CharacterArtifactEntry[];
   regenerateArtifact: (params: {
@@ -392,8 +393,8 @@ function chooseBetterArtifactEntry(a: CharacterArtifactEntry, b: CharacterArtifa
 function mergeArtifactItems(...sources: CharacterArtifactEntry[][]) {
   const mergeEntry = (a: CharacterArtifactEntry, b: CharacterArtifactEntry) => {
     const preferred = chooseBetterArtifactEntry(a, b);
-    // Reading a letter is irreversible; a stale summary/detail must not restore its badge.
-    if (isLetterKind(preferred.kind) && a.unread !== b.unread) {
+    // A stale summary/detail must not restore unread state after reading.
+    if (a.unread !== b.unread) {
       const readEntry = a.unread ? b : a;
       const unreadEntry = a.unread ? a : b;
       return { ...preferred, unread: false, updatedAt: Math.max(readEntry.updatedAt, unreadEntry.updatedAt + 1), revision: Math.max(a.revision || 0, b.revision || 0) };
@@ -968,7 +969,7 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
                     : buildFinalLetterTitle(characterName),
                 text,
                 source: isAIProfileUsable(modelProfile) ? 'ai' : 'local',
-                unread: nextJob.kind === 'final_letter' || nextJob.kind === 'birth_letter',
+                unread: true,
                 generationSnapshot: buildGenerationSnapshot(nextJob.snapshot, nextJob.relatedCharacters),
               });
 
@@ -1140,9 +1141,13 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
             sourceKey: character.deletedAt ? `${character.deletedAt}` : `${now()}`,
           });
         },
-        markLetterRead: (itemId) => set((state) => {
+        markLetterRead: (itemId) => {
+          const target = get().items.find((item) => item.id === itemId);
+          if (target && isLetterKind(target.kind)) get().markArtifactRead(itemId);
+        },
+        markArtifactRead: (itemId) => set((state) => {
           const target = state.items.find((item) => item.id === itemId);
-          if (!target || !isLetterKind(target.kind) || !target.unread || target.deletedAt != null || !hasArtifactText(target)) return state;
+          if (!target || !target.unread || target.deletedAt != null || !hasArtifactText(target)) return state;
           const items = state.items.map((item) => item.id === itemId ? { ...item, unread: false, updatedAt: Math.max(now(), item.updatedAt + 1) } : item);
           queueMicrotask(scheduleCloudSync);
           return { items, unreadLetterCount: computeUnreadLetterCount(items) };

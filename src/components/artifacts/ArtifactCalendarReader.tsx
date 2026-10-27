@@ -275,7 +275,8 @@ export default function ArtifactCalendarReader({
                     inMonth,
                     eventCount: entries.length ? 1 : 0,
                     countLabel: showDayCharacters && entries.length ? String(entries.length) : undefined,
-                    dotColors: hasUnreadItem ? ['error.main'] : ['primary.main'],
+                    countUnread: hasUnreadItem,
+                    dotColors: !showDayCharacters && hasUnreadItem ? ['error.main'] : ['primary.main'],
                   };
                 }}
               />
@@ -302,7 +303,7 @@ export default function ArtifactCalendarReader({
                   aria-pressed={selectedItem?.id === item.id}
                   color={selectedItem?.id === item.id ? 'primary' : 'default'}
                   variant={selectedItem?.id === item.id ? 'filled' : 'outlined'}
-                  icon={item.unread ? <Box component="span" sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: 'error.main' }} /> : undefined}
+                  icon={item.unread ? <Box component="span" aria-label={isZh ? '未读' : 'Unread'} sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: 'error.main' }} /> : undefined}
                   sx={{ ...compactPillChipSx, flexShrink: 0, maxWidth: '100%' }}
                 />
               );
@@ -323,7 +324,6 @@ export default function ArtifactCalendarReader({
           contentInset={false}
           sx={[
             { height: readerHeight, minHeight: readerHeight, maxHeight: readerHeight, display: 'flex', flexDirection: 'column', overflow: 'hidden', px: { xs: 2, sm: 2.75 } },
-            selectedItem?.unread ? { outline: '1px solid rgba(244, 67, 54, 0.18)' } : {},
           ]}
         >
           <Box className="paper-surface-content" sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, alignItems: 'flex-start', mb: 0.5, flexShrink: 0 }}>

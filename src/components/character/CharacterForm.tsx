@@ -378,6 +378,8 @@ export default function CharacterForm({ initial, existingNames = [], saveError =
   const modelDefaultsAppliedRef = useRef(false);
   const characters = useCharacterStore((state) => state.characters);
   const artifactItems = useCharacterArtifactStore((state) => state.items);
+  const markArtifactRead = useCharacterArtifactStore((state) => state.markArtifactRead);
+  const ensureArtifactDetail = useCharacterArtifactStore((state) => state.ensureArtifactDetail);
   const regenerateArtifact = useCharacterArtifactStore((state) => state.regenerateArtifact);
   const [personalityExpanded, setPersonalityExpanded] = useState(true);
   const [socialExpanded, setSocialExpanded] = useState(true);
@@ -1936,6 +1938,8 @@ export default function CharacterForm({ initial, existingNames = [], saveError =
               emptyDescription=""
               getMeta={(item) => item.dateKey || new Date(item.createdAt).toLocaleDateString(i18n.language.startsWith('zh') ? 'zh-CN' : 'en-US')}
               onRegenerateDebug={settings.developerMode ? handleRegenerateDiaryDebug : undefined}
+              onRead={markArtifactRead}
+              onEnsureDetail={ensureArtifactDetail}
             />
           </Box>
         ) : null}

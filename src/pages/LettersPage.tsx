@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Badge, Box, FormControl, InputLabel, MenuItem, Select, Stack } from '@mui/material';
+import { Box, FormControl, InputLabel, MenuItem, Select, Stack } from '@mui/material';
 import type { Theme } from '@mui/material/styles';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
@@ -47,8 +47,7 @@ export default function LettersPage() {
   const { setHeaderTitle, setHeaderBackAction, setHideMobileBottomNav } = useLayoutHeaderActions();
   const characters = useCharacterStore((state) => state.characters);
   const items = useCharacterArtifactStore((state) => state.items);
-  const unreadLetterCount = useCharacterArtifactStore((state) => state.unreadLetterCount);
-  const markLetterRead = useCharacterArtifactStore((state) => state.markLetterRead);
+  const markArtifactRead = useCharacterArtifactStore((state) => state.markArtifactRead);
   const regenerateArtifact = useCharacterArtifactStore((state) => state.regenerateArtifact);
   const ensureArtifactDetail = useCharacterArtifactStore((state) => state.ensureArtifactDetail);
   const syncArtifactsFromCharacters = useCharacterArtifactStore((state) => state.syncCharacters);
@@ -165,11 +164,7 @@ export default function LettersPage() {
               items={[
                 {
                   value: 'letters',
-                  label: (
-                    <Badge badgeContent={unreadLetterCount} color="error" max={99}>
-                      <span>{i18n.language.startsWith('zh') ? '信件' : 'Letters'}</span>
-                    </Badge>
-                  ),
+                  label: i18n.language.startsWith('zh') ? '信件' : 'Letters',
                 },
                 { value: 'diary', label: i18n.language.startsWith('zh') ? '日记' : 'Diary' },
               ]}
@@ -240,7 +235,7 @@ export default function LettersPage() {
             getMeta={(item) => item.dateKey || new Date(item.createdAt).toLocaleDateString(i18n.language.startsWith('zh') ? 'zh-CN' : 'en-US')}
             onRegenerateDebug={developerMode ? handleRegenerateDebug : undefined}
             onEnsureDetail={ensureArtifactDetail}
-            onRead={tab === 'letters' ? markLetterRead : undefined}
+            onRead={markArtifactRead}
           />
         </AnimatedTabContent>
       </Stack>

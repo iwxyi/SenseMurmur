@@ -17,6 +17,7 @@ export interface CalendarDayRenderMeta {
   hasDot?: boolean;
   eventCount?: number;
   countLabel?: string;
+  countUnread?: boolean;
   dotColors?: string[];
   warning?: boolean;
   titles?: string[];
@@ -459,9 +460,12 @@ export default function BaseCalendar({
                   </Typography>
                 ) : null}
                 {meta.countLabel ? (
-                  <Typography sx={{ fontSize: 12, lineHeight: 1.2, color: dotColors[0], fontWeight: 400, fontVariantNumeric: 'tabular-nums', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {meta.countLabel}
-                  </Typography>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, maxWidth: '100%' }}>
+                    {meta.countUnread ? <Box component="span" aria-label={isZh ? '未读' : 'Unread'} sx={{ width: 5, height: 5, flexShrink: 0, borderRadius: '50%', bgcolor: 'error.main' }} /> : null}
+                    <Typography sx={{ fontSize: 12, lineHeight: 1.2, color: dotColors[0], fontWeight: 400, fontVariantNumeric: 'tabular-nums', maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {meta.countLabel}
+                    </Typography>
+                  </Box>
                 ) : null}
                 {!meta.countLabel && !visibleTitles.length && eventCount > 0 ? (
                   <Box

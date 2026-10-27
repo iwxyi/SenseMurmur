@@ -8,10 +8,9 @@ import {
   IconButton,
   Divider,
   Tooltip,
-  Badge,
   Avatar,
 } from '@mui/material';
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment } from 'react';
 import CollapseIcon from '@mui/icons-material/ChevronLeft';
 import ExpandIcon from '@mui/icons-material/ChevronRight';
 import { useNavigate, useLocation } from 'react-router-dom';
@@ -55,39 +54,6 @@ const navSections: NavItem[][] = [
 const introNavItem: NavItem = { path: '/intro', iconKind: 'intro', labelKey: 'nav.intro' };
 const settingsNavItem: NavItem = { path: '/settings', iconKind: 'settings', labelKey: 'nav.settings' };
 
-function useDeferredUnreadLetterCount(enabled: boolean) {
-  const [count, setCount] = useState(0);
-
-  useEffect(() => {
-    if (!enabled) {
-      setCount(0);
-      return undefined;
-    }
-    let cancelled = false;
-    let unsubscribe: (() => void) | undefined;
-    const load = () => {
-      void import('../../stores/useCharacterArtifactStore').then(({ useCharacterArtifactStore }) => {
-        if (cancelled) return;
-        setCount((current) => {
-          const next = useCharacterArtifactStore.getState().unreadLetterCount;
-          return current === next ? current : next;
-        });
-        unsubscribe = useCharacterArtifactStore.subscribe((state) => {
-          setCount((current) => current === state.unreadLetterCount ? current : state.unreadLetterCount);
-        });
-      });
-    };
-    const handle = window.setTimeout(load, 0);
-    return () => {
-      cancelled = true;
-      unsubscribe?.();
-      window.clearTimeout(handle);
-    };
-  }, [enabled]);
-
-  return count;
-}
-
 export default function Sidebar({ collapsed }: SidebarProps) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -100,7 +66,6 @@ export default function Sidebar({ collapsed }: SidebarProps) {
   const user = useAuthStore((state) => state.user);
   const authMode = useAuthStore((state) => state.authMode);
   const isAccountActive = location.pathname.startsWith('/account');
-  const unreadLetterCount = useDeferredUnreadLetterCount(location.pathname.startsWith('/letters'));
   const accountTitle = user?.nickname || (authMode === 'cloud' ? t('nav.account') : t('nav.localMode'));
   const accountSubtitle = user?.phone || (authMode === 'cloud' ? t('nav.account') : t('nav.signInSync'));
   const accountAvatar = user?.avatar?.trim() === '🍵' ? '' : user?.avatar;
@@ -177,13 +142,7 @@ export default function Sidebar({ collapsed }: SidebarProps) {
             transform: isActive ? 'scale(1.04)' : 'none',
           }}
         >
-          {item.path === '/letters' ? (
-            <Badge badgeContent={unreadLetterCount} color="error" max={99}>
-              <AnimatedNavIcon kind={item.iconKind} active={isActive} />
-            </Badge>
-          ) : (
-            <AnimatedNavIcon kind={item.iconKind} active={isActive} />
-          )}
+          <AnimatedNavIcon kind={item.iconKind} active={isActive} />
         </ListItemIcon>
         {!collapsed && (
           <ListItemText
