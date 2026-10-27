@@ -7,6 +7,10 @@ import InsertDriveFileOutlinedIcon from '@mui/icons-material/InsertDriveFileOutl
 import ImageOutlinedIcon from '@mui/icons-material/ImageOutlined';
 import AudioFileOutlinedIcon from '@mui/icons-material/AudioFileOutlined';
 import { adminApi } from '../../services/adminApi';
+import SettingsOutlinedIcon from '@mui/icons-material/SettingsOutlined';
+import StorageSettingsDialog from '../../components/admin/StorageSettingsDialog';
+import { ADMIN_PERMISSION_CODES, adminHasPermission } from '../../constants/adminPermissions';
+import { useAdminAuthStore } from '../../stores/useAdminAuthStore';
 
 const size = (n: number) => n < 1024 * 1024 ? `${Math.round(n / 1024)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
 const isImage = (file: Record<string, unknown>) => String(file.mimeType || '').startsWith('image/');
@@ -14,6 +18,8 @@ const isAudio = (file: Record<string, unknown>) => String(file.mimeType || '').s
 function fileIcon(file: Record<string, unknown>) { return isImage(file) ? <ImageOutlinedIcon /> : isAudio(file) ? <AudioFileOutlinedIcon /> : <InsertDriveFileOutlinedIcon />; }
 
 export default function AdminCloudStoragePage() {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const canManageStorage = adminHasPermission(useAdminAuthStore((state) => state.admin), ADMIN_PERMISSION_CODES.platformManage);
   const [users, setUsers] = useState<Array<Record<string, unknown>>>([]);
   const [files, setFiles] = useState<Array<Record<string, unknown>>>([]);
   const [user, setUser] = useState<Record<string, unknown> | null>(null);
@@ -38,7 +44,9 @@ export default function AdminCloudStoragePage() {
   };
   const preview = previewIndex === null ? null : files[previewIndex];
   const selectedSize = useMemo(() => files.filter((file) => selected.includes(String(file.id))).reduce((sum, file) => sum + Number(file.sizeBytes || 0), 0), [files, selected]);
-  return <Box sx={{ p: { xs: 2, md: 3 } }}>
+  return <Box sx={{ mt: -1 }}>
+    {canManageStorage && <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 2 }}><Button size="small" variant="outlined" startIcon={<SettingsOutlinedIcon />} onClick={() => setSettingsOpen(true)}>存储设置</Button></Box>}
+    <StorageSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
     <Card><CardContent sx={{ p: 0 }}><Table><TableHead><TableRow><TableCell>用户</TableCell><TableCell>账号</TableCell><TableCell>空间占用</TableCell></TableRow></TableHead><TableBody>{users.map((item) => <TableRow hover key={String(item.id)} onClick={() => void open(item)} sx={{ cursor: 'pointer' }}><TableCell>{String(item.nickname || '未命名')}</TableCell><TableCell>{String(item.phone || '')}</TableCell><TableCell>{size(Number(item.usedBytes || 0))} / {size(Number(item.totalBytes || 0))}</TableCell></TableRow>)}</TableBody></Table>{loading && <Typography variant="caption" color="text.secondary" sx={{ display: 'block', p: 2 }}>加载中…</Typography>}</CardContent></Card>
     <Dialog open={Boolean(user)} onClose={() => setUser(null)} maxWidth="lg" fullWidth><DialogContent sx={{ p: 2 }}>

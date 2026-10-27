@@ -15,7 +15,7 @@ const navItems = [
   { path: '/admin/admins', label: '管理员', permissions: [ADMIN_PERMISSION_CODES.adminAll] },
   { path: '/admin/global-config', label: '全局配置', permissions: [ADMIN_PERMISSION_CODES.platformRead] },
   { path: '/admin/platform', label: '平台配置', permissions: [ADMIN_PERMISSION_CODES.platformRead, ADMIN_PERMISSION_CODES.aiRead] },
-  { path: '/admin/files', label: '空间管理', permissions: [ADMIN_PERMISSION_CODES.usersRead] },
+  { path: '/admin/files', label: '存储管理', permissions: [ADMIN_PERMISSION_CODES.usersRead] },
   { path: '/admin/billing', label: '会员订单', permissions: [ADMIN_PERMISSION_CODES.billingRead] },
   { path: '/admin/moderation', label: '分享审核', permissions: [ADMIN_PERMISSION_CODES.sharesReview] },
   { path: '/admin/market', label: '市场管理', permissions: [ADMIN_PERMISSION_CODES.marketRead] },

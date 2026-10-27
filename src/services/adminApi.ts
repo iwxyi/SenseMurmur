@@ -3,6 +3,11 @@ import type { SitePublicConfig } from './api';
 import { backendUrl } from './backendUrl';
 
 const ADMIN_BASE = '/api/admin';
+export type StorageProvider = 'local' | 'tencent-cos' | 's3' | 'webdav' | 'ftps';
+export interface StorageBucketConfig { bucket: string; region: string; endpoint: string; prefix: string; accessKeyId: string; secretAccessKey: string; forcePathStyle: boolean; rootPath?: string }
+export interface StorageDestination { id: string; name: string; provider: StorageProvider; config: StorageBucketConfig; isDefault: boolean; hasCredentials: boolean; archivedAt?: number | null; defaultLocalPath?: string }
+export interface StorageMigration { id: string; source_id: string; target_id: string; mode: 'copy' | 'move'; switch_references?: boolean; conflict: 'overwrite' | 'skip' | 'coexist'; status: 'pending' | 'running' | 'completed' | 'failed'; total: number; completed: number; skipped: number; failed: number; conflicts: number; error: string | null; created_at: number; updated_at: number }
+export interface StorageMigrationIssue { name: string; status: 'failed' | 'skipped'; error: string | null }
 const ADMIN_TOKEN_KEY = 'pneumata-admin-token';
 const ADMIN_LOGIN_EVENT = 'pneumata-admin-auth-required';
 const READ_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
@@ -758,6 +763,15 @@ class AdminApiClient {
   }
 
   getCloudStorageOverview() { return this.request<{ items: Array<Record<string, unknown>> }>('GET', '/files/overview'); }
+  getStorageDestinations() { return this.request<{ items: StorageDestination[] }>('GET', '/files/storage'); }
+  saveStorageDestination(payload: Pick<StorageDestination, 'name' | 'provider' | 'config'>, id?: string) { return this.request<StorageDestination>(id ? 'PUT' : 'POST', '/files/storage' + (id ? '/' + encodeURIComponent(id) : ''), payload); }
+  setDefaultStorage(id: string) { return this.request<{ success: boolean }>('POST', '/files/storage/' + encodeURIComponent(id) + '/default', {}); }
+  testStorage(id: string) { return this.request<{ success: boolean }>('POST', '/files/storage/' + encodeURIComponent(id) + '/test', {}); }
+  deleteStorageDestination(id: string) { return this.request<{ success: boolean }>('DELETE', '/files/storage/' + encodeURIComponent(id)); }
+  getStorageMigrations(before?: string) { return this.request<{ items: StorageMigration[]; hasMore: boolean }>('GET', '/files/storage/migrations' + (before ? '?before=' + encodeURIComponent(before) : '')); }
+  getStorageMigrationIssues(id: string, offset = 0) { return this.request<{ items: StorageMigrationIssue[]; hasMore: boolean }>('GET', '/files/storage/migrations/' + encodeURIComponent(id) + '/issues?offset=' + offset); }
+  createStorageMigration(payload: { sourceId: string; targetId: string; mode: 'copy' | 'move'; switchReferences?: boolean; conflict: 'overwrite' | 'skip' | 'coexist' }) { return this.request<{ id: string }>('POST', '/files/storage/migrations', payload); }
+  retryStorageMigration(id: string) { return this.request<{ success: boolean }>('POST', '/files/storage/migrations/' + encodeURIComponent(id) + '/retry', {}); }
   getCloudStorageUserFiles(userId: string) { return this.request<{ items: Array<Record<string, unknown>> }>('GET', `/files/users/${encodeURIComponent(userId)}/files`); }
   deleteCloudStorageFile(id: string) { return this.request<{ success: boolean }>('DELETE', `/files/files/${encodeURIComponent(id)}`); }
 }
