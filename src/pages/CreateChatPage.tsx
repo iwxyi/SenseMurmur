@@ -323,7 +323,8 @@ export default function CreateChatPage() {
   const memberPressTimerRef = useRef<number | null>(null);
   const styleOverriddenRef = useRef(false);
 
-  const showRuntimeTab = Boolean(editingChat);
+  const isAssistantEditing = editingChat?.type === 'assistant';
+  const showRuntimeTab = Boolean(editingChat) && !isAssistantEditing;
   const isZh = i18n.language.startsWith('zh');
   const gameplayTabIndex = 1;
   const conversationKind = editingChat?.type === 'assistant' ? 'group' : editingChat?.type || 'group';
@@ -336,8 +337,8 @@ export default function CreateChatPage() {
   useEffect(() => {
     setGroupVisualExpanded(Boolean(editingChat?.groupVisual?.avatarUrl || editingChat?.groupVisual?.backgroundUrl));
   }, [editingChat?.id, editingChat?.groupVisual?.avatarUrl, editingChat?.groupVisual?.backgroundUrl]);
-  const showDirectorTab = !editingChat || isGroupConversation;
-  const showGameplayTab = !editingChat || isGroupConversation;
+  const showDirectorTab = !isAssistantEditing && (!editingChat || isGroupConversation);
+  const showGameplayTab = !isAssistantEditing && (!editingChat || isGroupConversation);
   const useFreeEntitlement = authMode !== 'cloud' || !isLoggedIn;
   const entitlementReady = useFreeEntitlement ? freeEntitlementLoaded : membershipLoaded;
   const managementTabIndex = showGameplayTab ? 2 : 1;
@@ -1122,11 +1123,11 @@ export default function CreateChatPage() {
       useChatStore.getState().clearPendingOperationsForChat(editingChat.id);
       await apiClient.clearChatMessages(editingChat.id);
       await updateChat(editingChat.id, {
-        ...buildInitialSessionResetPatch(editingChat),
+        ...(editingChat.type === 'assistant' ? { messageBranchState: null } : buildInitialSessionResetPatch(editingChat)),
         latestMessage: null,
         lastMessageAt: editingChat.createdAt,
       });
-      await seedOpeningTopicMessage(editingChat.id, editingChat.topic);
+      if (editingChat.type !== 'assistant') await seedOpeningTopicMessage(editingChat.id, editingChat.topic);
       markChatsWarm();
       void prefetchChats();
       setClearMessagesConfirmOpen(false);
@@ -1303,7 +1304,9 @@ export default function CreateChatPage() {
   const cancelLabel = t('common.cancel');
   const confirmDeleteLabel = t('common.delete');
   const clearMessagesTitle = isZh ? '清空聊天记录' : 'Clear chat messages';
-  const clearMessagesConfirm = isZh ? `这会永久删除当前${conversationNoun}的全部消息记录，并把场景规则、运行态、事件、会话级记忆与摘要重置成新${conversationNoun}状态；角色自身记忆会保留。此操作无法撤销。` : `This permanently deletes all messages in this ${conversationNoun} and resets scene rules, runtime state, events, session-level memory, and summaries as a fresh ${conversationNoun}. Character memory is kept. This action cannot be undone.`;
+  const clearMessagesConfirm = isAssistantEditing
+    ? (isZh ? '这会永久删除当前助手会话的全部消息记录，保留会话名称、头像、背景和助手能力设置。此操作无法撤销。' : 'This permanently deletes all messages in this assistant conversation. The name, avatar, background and capability settings are preserved. This cannot be undone.')
+    : isZh ? `这会永久删除当前${conversationNoun}的全部消息记录，并把场景规则、运行态、事件、会话级记忆与摘要重置成新${conversationNoun}状态；角色自身记忆会保留。此操作无法撤销。` : `This permanently deletes all messages in this ${conversationNoun} and resets scene rules, runtime state, events, session-level memory, and summaries as a fresh ${conversationNoun}. Character memory is kept. This action cannot be undone.`;
   const clearMessagesLabel = isZh ? '清空聊天记录' : 'Clear chat messages';
   const clearMemoryTitle = isZh ? '重置会话状态' : 'Reset session state';
   const clearMemoryConfirm = isZh ? `这会把当前${conversationNoun}的场景规则、运行态、事件、会话级记忆与摘要重置成新${conversationNoun}状态，但保留聊天记录和角色自身记忆。此操作无法撤销。` : `This resets scene rules, runtime state, events, session-level memory, and summaries for this ${conversationNoun} as a fresh ${conversationNoun}, while keeping message history and character memory. This action cannot be undone.`;
@@ -1489,6 +1492,27 @@ export default function CreateChatPage() {
       showError(i18n.language.startsWith('zh') ? '正在处理中，请稍候' : 'Already processing, please wait');
       return;
     }
+    if (editingChat?.type === 'assistant') {
+      setSaving(true);
+      try {
+        const nextName = name.trim();
+        await updateChat(editingChat.id, {
+          name: nextName,
+          modeState: {
+            ...editingChat.modeState,
+            assistantTitle: nextName !== editingChat.name.trim()
+              ? { source: 'user', updatedAt: Date.now() }
+              : editingChat.modeState.assistantTitle,
+          },
+        });
+        navigate(`/chats/${editingChat.id}`);
+      } catch (error) {
+        showError(getActionErrorMessage(error, isZh ? '保存助手会话失败' : 'Failed to save assistant conversation'));
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
     if (chatLimitReached) {
       showChatLimitDialog();
       return;
@@ -1535,18 +1559,9 @@ export default function CreateChatPage() {
           draftContext.normalizedOwnerCharacterId,
           draftContext.normalizedAdminCharacterIds,
         );
-        const nameChanged = name.trim() !== (editingChat.name || '').trim();
         await updateChat(editingChat.id, {
           ...nextDraft,
-          modeState: editingChat.type === 'assistant'
-            ? {
-              ...editingChat.modeState,
-              ...nextDraft.modeState,
-              assistantTitle: nameChanged
-                ? { source: 'user', updatedAt: Date.now() }
-                : editingChat.modeState?.assistantTitle,
-            }
-            : {
+          modeState: {
               ...nextDraft.modeState,
               // Detail-page initialization owns this lifecycle. Keep a completed
               // marker until a changed member fingerprint makes it stale again.
@@ -1666,7 +1681,7 @@ export default function CreateChatPage() {
             {isZh ? `聊天数量已达当前会员上限（${chats.filter((chat) => !chat.deletedAt).length}/${maxChats}），升级会员后可创建更多聊天。` : `Chat limit reached (${chats.filter((chat) => !chat.deletedAt).length}/${maxChats}). Upgrade membership to create more chats.`}
           </Alert>
         ) : null}
-        <Box
+        {!isAssistantEditing ? <Box
           sx={{ ...buildFloatingTabContainerSx(), mb: 0 }}
         >
           <FloatingSegmentedTabs
@@ -1681,7 +1696,7 @@ export default function CreateChatPage() {
               ...(showDirectorTab ? [{ value: directorTabIndex, label: i18n.language.startsWith('zh') ? '导演控制' : 'Director' }] : []),
             ]}
           />
-        </Box>
+        </Box> : null}
 
         <AnimatedTabContent
           value={configTab}
@@ -1690,6 +1705,7 @@ export default function CreateChatPage() {
           {configTab === 0 ? (
             <>
             <ChatConfigSection
+              assistantOnly={isAssistantEditing}
               lockMembers={Boolean(editingChat && !isGroupConversation)}
               showMembers={Boolean(!editingChat || isGroupConversation)}
               maxMembers={maxAllowedMembers}
@@ -1817,12 +1833,12 @@ export default function CreateChatPage() {
                   <Button color="error" variant="outlined" onClick={openClearMessagesDialog}>
                     {clearMessagesLabel}
                   </Button>
-                  <Button color="error" variant="outlined" onClick={openClearMemoryDialog}>
+                  {!isAssistantEditing ? <Button color="error" variant="outlined" onClick={openClearMemoryDialog}>
                     {clearMemoryLabel}
-                  </Button>
-                  <Button color="error" variant="outlined" startIcon={<DeleteIcon />} onClick={openDeleteDialog}>
+                  </Button> : null}
+                  {!isAssistantEditing ? <Button color="error" variant="outlined" startIcon={<DeleteIcon />} onClick={openDeleteDialog}>
                     {deleteLabel}
-                  </Button>
+                  </Button> : null}
                 </Box>
               </SurfaceCard>
             ) : null}

@@ -12,6 +12,7 @@ import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
 import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
 import GridViewOutlinedIcon from '@mui/icons-material/GridViewOutlined';
 import InsertDriveFileOutlinedIcon from '@mui/icons-material/InsertDriveFileOutlined';
+import ImageOutlinedIcon from '@mui/icons-material/ImageOutlined';
 import KeyboardArrowDownOutlinedIcon from '@mui/icons-material/KeyboardArrowDownOutlined';
 import KeyboardArrowUpOutlinedIcon from '@mui/icons-material/KeyboardArrowUpOutlined';
 import LanguageOutlinedIcon from '@mui/icons-material/LanguageOutlined';
@@ -62,6 +63,7 @@ const artifactKindLabels: Record<AssistantArtifactKind, string> = {
 };
 
 function ArtifactKindIcon({ kind }: { kind: AssistantArtifactKind }) {
+  if (kind === 'image') return <ImageOutlinedIcon fontSize="small" />;
   if (kind === 'diagram') return <AccountTreeOutlinedIcon fontSize="small" />;
   if (kind === 'code') return <CodeOutlinedIcon fontSize="small" />;
   if (kind === 'json') return <DataObjectOutlinedIcon fontSize="small" />;
@@ -89,7 +91,6 @@ function artifactFileExtension(item: AssistantArtifactItem) {
   if (item.kind === 'html') return 'html';
   if (item.kind === 'json') return 'json';
   if (item.kind === 'table') return language === 'tsv' ? 'tsv' : 'csv';
-  if (item.kind === 'image') return 'json';
   if (item.kind === 'diagram') {
     if (language === 'plantuml') return 'puml';
     if (language === 'dot' || language === 'graphviz') return 'dot';
@@ -140,20 +141,32 @@ function artifactMimeType(item: AssistantArtifactItem) {
   if (item.kind === 'json') return 'application/json;charset=utf-8';
   if (item.kind === 'table') return 'text/csv;charset=utf-8';
   if (item.kind === 'document') return 'text/markdown;charset=utf-8';
-  if (item.kind === 'image') return 'application/json;charset=utf-8';
   return 'text/plain;charset=utf-8';
 }
 
-function downloadArtifact(item: AssistantArtifactItem, content: string) {
-  const blob = new Blob([content], { type: artifactMimeType(item) });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `${sanitizeFileName(item.title)}.${artifactFileExtension(item)}`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+async function downloadArtifact(item: AssistantArtifactItem, content: string, version = getArtifactCurrentVersion(item)) {
+  const media = version?.media?.filter((entry) => entry.url) || [];
+  if (item.kind === 'image' && !media.length) throw new Error('当前版本没有可下载的图片。');
+  const files = item.kind === 'image'
+    ? await Promise.all(media.map(async (entry, index) => {
+      const response = await fetch(entry.url!);
+      if (!response.ok) throw new Error('图片下载失败，请稍后重试。');
+      const blob = await response.blob();
+      const mimeType = (entry.mimeType || blob.type).split(';')[0];
+      const extension = mimeType === 'image/jpeg' ? 'jpg' : mimeType === 'image/svg+xml' ? 'svg' : mimeType.split('/')[1] || 'png';
+      return { blob, extension, suffix: media.length > 1 ? `-${index + 1}` : '' };
+    }))
+    : [{ blob: new Blob([content], { type: artifactMimeType(item) }), extension: artifactFileExtension(item), suffix: '' }];
+  for (const { blob, extension, suffix } of files) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${sanitizeFileName(item.title)}${suffix}.${extension}`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
 }
 
 function getArtifactVersionContent(version: AssistantArtifactVersion | null | undefined) {
@@ -432,7 +445,29 @@ function AssistantLocalWorkspaceFiles({ chatId }: { chatId: string }) {
   );
 }
 
+function ArtifactImage({ src, fallbackSrc, alt, thumbnail = false }: { src: string; fallbackSrc?: string; alt: string; thumbnail?: boolean }) {
+  const [failedSources, setFailedSources] = useState<string[]>([]);
+  const resolvedSrc = failedSources.includes(src) ? fallbackSrc : src;
+  if (!resolvedSrc || failedSources.includes(resolvedSrc)) {
+    return <Typography variant="body2" color="text.secondary" role="status">图片加载失败，请稍后重试。</Typography>;
+  }
+  return <Box component="img" src={resolvedSrc} alt={alt} loading="lazy" decoding="async" onError={() => setFailedSources((previous) => [...previous, resolvedSrc])} sx={{ display: 'block', width: thumbnail ? '100%' : 'auto', maxWidth: '100%', height: 'auto', maxHeight: thumbnail ? 'none' : '80vh', objectFit: 'contain', borderRadius: '8px', boxShadow: thumbnail ? '0 1px 4px rgba(0,0,0,0.1)' : 'none' }} />;
+}
+
+function ArtifactImages({ item, version, thumbnail = false }: { item: AssistantArtifactItem; version?: AssistantArtifactVersion | null; thumbnail?: boolean }) {
+  const media = (version || getArtifactCurrentVersion(item))?.media || [];
+  const images = thumbnail ? media.slice(0, 1) : media;
+  if (!images.length) return <Typography variant="body2" color="text.secondary">当前版本没有可显示的图片。</Typography>;
+  return <Stack spacing={thumbnail ? 0 : 1} sx={{ width: '100%', alignItems: 'center', justifyContent: 'center' }}>
+    {images.map((image, index) => {
+      const src = thumbnail ? image.thumbnailUrl || image.url : image.url || image.thumbnailUrl;
+      return src ? <ArtifactImage key={`${index}-${src}`} src={src} fallbackSrc={thumbnail ? image.url : undefined} alt={image.alt || item.title} thumbnail={thumbnail} /> : <Typography key={index} variant="body2" color="text.secondary">图片不可用。</Typography>;
+    })}
+  </Stack>;
+}
+
 function ArtifactThumbnail({ item, mode, expanded = false }: { item: AssistantArtifactItem; mode: ArtifactViewMode; expanded?: boolean }) {
+  if (item.kind === 'image') return <ArtifactImages item={item} thumbnail />;
   const content = getAssistantArtifactCurrentContent(item);
   const renderMermaid = isRenderableMermaid(item, content);
   const isDataPreview = item.kind === 'table' || item.kind === 'json';
@@ -514,6 +549,7 @@ function ArtifactPreview({ item, version, expanded = false, fullscreen = false, 
   onHtmlRepair?: (error: AssistantHtmlRuntimeError) => void | Promise<void>;
 }) {
   const content = version ? getArtifactVersionContent(version) : getAssistantArtifactCurrentContent(item);
+  if (item.kind === 'image') return <ArtifactImages item={item} version={version} />;
   if (!content) {
     return <Typography variant="body2" color="text.secondary">当前版本为空。</Typography>;
   }
@@ -575,6 +611,15 @@ function AssistantArtifactList({
   const artifactItems = useAssistantArtifactStore((state) => state.items);
   const [viewMode, setViewMode] = useState<ArtifactViewMode>('list');
   const [sortMode, setSortMode] = useState<ArtifactSortMode>('manual');
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const handleDownload = async (item: AssistantArtifactItem, version = getArtifactCurrentVersion(item)) => {
+    setDownloadError(null);
+    try {
+      await downloadArtifact(item, getArtifactVersionContent(version), version);
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : '产物下载失败，请稍后重试。');
+    }
+  };
   const artifacts = useMemo(() => sortArtifacts(artifactItems
     .filter((item) => item.chatId === chatId && item.deletedAt == null), sortMode), [artifactItems, chatId, sortMode]);
   const deleteArtifact = useAssistantArtifactStore((state) => state.deleteArtifact);
@@ -751,7 +796,7 @@ function AssistantArtifactList({
         </IconButton>
       </Tooltip>
       <Tooltip title="下载当前版本">
-        <IconButton size="small" onClick={(event) => { event.stopPropagation(); downloadArtifact(item, getAssistantArtifactCurrentContent(item)); }}>
+        <IconButton size="small" onClick={(event) => { event.stopPropagation(); void handleDownload(item); }}>
           <DownloadOutlinedIcon fontSize="small" />
         </IconButton>
       </Tooltip>
@@ -766,7 +811,7 @@ function AssistantArtifactList({
   const renderMeta = (item: AssistantArtifactItem) => (
     <Stack direction="row" spacing={0.75} sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 0.5 }}>
       <Chip size="small" label={artifactKindLabels[item.kind]} sx={{ height: 20 }} />
-      {item.language ? <Chip size="small" label={item.language} variant="outlined" sx={{ height: 20 }} /> : null}
+      {item.language && item.kind !== 'image' ? <Chip size="small" label={item.language} variant="outlined" sx={{ height: 20 }} /> : null}
       {item.versions.length > 1 ? <Chip size="small" label={`${item.versions.length} 版`} variant="outlined" sx={{ height: 20 }} /> : null}
       {getArtifactCurrentVersion(item)?.stage === 'autosave' ? <Chip size="small" color="warning" variant="outlined" label="自动保存" sx={{ height: 20 }} /> : null}
       <Typography variant="caption" color="text.secondary">{formatArtifactTime(item.updatedAt)}</Typography>
@@ -774,10 +819,11 @@ function AssistantArtifactList({
   );
 
   const renderArtifactCard = (item: AssistantArtifactItem, index: number) => {
+    const isImage = item.kind === 'image';
     const active = selected?.id === item.id;
     const expanded = expandedIds.has(item.id);
     const content = getAssistantArtifactCurrentContent(item);
-    const canExpand = content.length > 360 || item.kind === 'document' || item.kind === 'diagram' || item.kind === 'html';
+    const canExpand = !isImage && (content.length > 360 || item.kind === 'document' || item.kind === 'diagram' || item.kind === 'html');
     return (
       <Box
         key={item.id}
@@ -796,16 +842,17 @@ function AssistantArtifactList({
         }}
         sx={{
           width: '100%',
-          p: 1,
-          border: '1px solid',
+          p: isImage ? 0 : 1,
+          border: isImage ? 0 : '1px solid',
           borderColor: active ? 'primary.main' : ((theme) => theme.palette.mode === 'light' ? 'rgba(15,23,42,0.08)' : 'rgba(226,232,240,0.12)'),
-          bgcolor: active ? 'action.selected' : 'background.paper',
+          bgcolor: isImage ? 'transparent' : active ? 'action.selected' : 'background.paper',
           color: 'text.primary',
           textAlign: 'left',
           cursor: 'pointer',
           borderRadius: 1,
           boxShadow: 'none',
-          '&:hover': { bgcolor: 'action.hover' },
+          '&:hover': { bgcolor: isImage ? 'transparent' : 'action.hover' },
+          '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: 2 },
         }}
       >
         <Stack spacing={1}>
@@ -838,7 +885,7 @@ function AssistantArtifactList({
           <ArtifactThumbnail item={item} mode={viewMode} expanded={expanded} />
           {viewMode === 'list' ? (
             <Box>
-              {expanded && item.kind !== 'diagram' && item.kind !== 'html' && item.kind !== 'table' && item.kind !== 'json' ? <ArtifactPreview item={item} /> : null}
+              {expanded && item.kind !== 'image' && item.kind !== 'diagram' && item.kind !== 'html' && item.kind !== 'table' && item.kind !== 'json' ? <ArtifactPreview item={item} /> : null}
               {canExpand && item.kind !== 'diagram' && item.kind !== 'html' ? (
                 <Button
                   size="small"
@@ -861,6 +908,10 @@ function AssistantArtifactList({
 
   return (
     <Stack spacing={1.25}>
+      <Dialog open={Boolean(downloadError)} onClose={() => setDownloadError(null)}>
+        <DialogTitle>下载失败</DialogTitle>
+        <DialogContent><Typography color="error">{downloadError}</Typography><Button onClick={() => setDownloadError(null)}>关闭</Button></DialogContent>
+      </Dialog>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', rowGap: 1 }}>
         <FloatingSegmentedTabs
           value={viewMode}
@@ -989,7 +1040,7 @@ function AssistantArtifactList({
                 <IconButton onClick={async () => { const value = getArtifactVersionContent(fullscreenVersion); if (!(await copyTextToClipboard(value))) setCopyFallback({ label: fullscreenItem?.title || '产物内容', value }); }}>
                   <ContentCopyOutlinedIcon />
                 </IconButton>
-                <IconButton onClick={() => downloadArtifact(fullscreenItem, getArtifactVersionContent(fullscreenVersion))}>
+                <IconButton onClick={() => void handleDownload(fullscreenItem, fullscreenVersion)}>
                   <DownloadOutlinedIcon />
                 </IconButton>
                 <IconButton onClick={closeFullscreen} aria-label="关闭产物详情">

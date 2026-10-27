@@ -28,6 +28,7 @@ import { isImageAvatar } from '../../utils/avatar';
 import SurfaceCard from '../common/SurfaceCard';
 
 interface ChatConfigSectionProps {
+  assistantOnly?: boolean;
   lockMembers?: boolean;
   showMembers?: boolean;
   maxMembers?: number;
@@ -92,6 +93,19 @@ interface ChatConfigSectionProps {
 
 export default function ChatConfigSection(props: ChatConfigSectionProps) {
   const isZh = props.language.startsWith('zh');
+  if (props.assistantOnly) return (
+    <Stack spacing={2}>
+      <SurfaceCard>
+        <TextField
+          label={isZh ? '会话名称' : 'Conversation name'}
+          value={props.name}
+          onChange={(event) => props.onNameChange(event.target.value)}
+          fullWidth
+        />
+      </SurfaceCard>
+      {props.visualSettings}
+    </Stack>
+  );
   const conversationKind = props.conversationKind || 'group';
   const isGroup = conversationKind === 'group';
   const ownerLabel = isGroup ? (isZh ? '群主' : 'Owner') : (isZh ? '主角色' : 'Primary role');
