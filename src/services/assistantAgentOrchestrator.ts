@@ -19,6 +19,7 @@ import { enhanceImagePrompt } from './imagePromptComposer';
 import { logRecoverableError } from './diagnostics';
 import { normalizeAssistantHtmlRuntime } from '../features/assistantHtml/assistantHtmlValidation';
 import { summarizeAssistantArtifactData } from './assistantArtifactData';
+import { parseAssistantAgentWriterOutput } from './assistantAgentWriterProtocol';
 
 const VALID_ARTIFACT_KINDS = new Set<AssistantArtifactKind>(['document', 'code', 'diagram', 'html', 'table', 'json', 'text', 'image']);
 const MAX_RECENT_MESSAGES = 12;
@@ -406,7 +407,7 @@ function normalizePlan(
 function buildWriterPrompt(options: { includeImages: boolean; includeLocalFiles: boolean; includeHtml: boolean; includeData: boolean; requiresHtmlRuntimeRepair?: boolean }) {
   const sections = [
     '你是企业级 Artifact Patch Writer。',
-    '必须只输出严格 JSON，不要 Markdown，不要解释。',
+    '输出由 JSON 元数据和独立正文块组成，不要在协议之外输出解释。JSON 内只放元数据，不要把完整源码转义后嵌入 JSON 字符串。',
     '根据 changePlan、用户输入、最近对话、图片引用注册表、产物注册表和必要的当前版本正文，生成可提交的 patch set。',
     '如果 localFiles 非空，可以把它们作为用户授权的文件内容使用；localFiles 之外的本地文件都没有读取权限，不能假装知道。',
     '',
@@ -471,6 +472,10 @@ function buildWriterPrompt(options: { includeImages: boolean; includeLocalFiles:
     '输出格式：',
     'dataOperations.filter 顶层数组表示 AND；复杂条件可使用 {"all":[...]}, {"any":[...]}, {"not":{...}}。',
     '{"assistantMessage":"面向用户的自然回复文案","patches":[{"action":"create|update","artifactId":"...","kind":"document|code|diagram|html|table|json|text","title":"...","summary":"...","language":"...","content":"完整内容","files":[],"baseVersionId":"...","changeSummary":"...","dataDescriptor":{"description":"...","primaryKey":"...","fields":[{"name":"...","type":"string|number|boolean|date|datetime|array|object","description":"..."}]},"htmlRuntime":{}}],"dataOperations":[{"kind":"query|insert|update|delete|add_column","artifactId":"...","baseVersionId":"...","filePath":"...","column":"newColumn","defaultValue":"","filter":[{"field":"...","operator":"eq|contains|startsWith|endsWith|gt|gte|lt|lte|exists|notExists|isNull|isNotNull","value":"..."}],"values":{},"limit":100,"offset":0,"sort":{"field":"...","direction":"asc|desc"}}],"workspaceOperations":[{"directoryId":"...","kind":"write|delete|copy|move","path":"relative/file.txt","destinationPath":"relative/new-file.txt","content":"write 时的完整文本","conflictPolicy":"rename|skip|overwrite"}],"mediaTasks":[{"kind":"image","slotId":"image-1","prompt":"仅对应此槽位的一张图片的最终完整提示词","altText":"用户可见的简短说明","userCaption":"用户可见的简短说明","aspectRatio":"3:4","imageSize":"1K","targetArtifactId":"","targetImageIds":[],"referenceImageIds":[],"styleImageIds":[]}]}',
+    '传输规则：上面的结构描述的是解析后的对象。实际输出先写一个 ```json 围栏块；patches[].content、patches[].files[].content、workspaceOperations[].content 均改为 contentRef，例如 "contentRef":"source-1"，不要同时输出 content。files 中保留 path、language 等元数据。',
+    '在 JSON 围栏之后，每个 contentRef 对应一个独立原文围栏块，起始行写 ~~~~artifact-content source-1，接完整正文，结束行写 ~~~~。正文里的引号、反斜杠、换行均按源码原样输出，不做 JSON 转义。标识符只能含英文字母、数字、下划线、连字符，且不得重复或缺失。围栏长度必须大于正文中任何单独成行的同类波浪线围栏，以免提前结束。',
+    '最后必须单独一行输出 <!-- assistant-patch-set:end -->，表示所有内容完整结束。没有正文时也输出 JSON 围栏和结束标记。不要省略代码，不要把结束标记放进正文围栏。',
+    '最小示例：\n```json\n{"assistantMessage":"已创建程序。","patches":[{"action":"create","kind":"code","title":"示例","language":"javascript","contentRef":"source-1"}]}\n```\n~~~~artifact-content source-1\nconsole.log("Hello");\n~~~~\n<!-- assistant-patch-set:end -->',
   );
   return sections.join('\n');
 }
@@ -1151,10 +1156,8 @@ export async function writeAssistantAgentPatchSet(params: {
     [{ role: 'user', content: stringifyAgentPayload(payload, 'Assistant Agent writer') }],
     undefined,
     {
-      responseFormat: 'json',
-      // Complete HTML artifacts can exceed 8K tokens, especially when a model
-      // JSON-escapes Chinese as \uXXXX. Truncation produces an unterminated
-      // JSON string, so the writer needs enough room for the full patch set.
+      responseFormat: 'text',
+      // Source blocks are emitted verbatim outside the JSON manifest.
       maxTokens: MAX_WRITER_OUTPUT_TOKENS,
       signal: params.signal,
       aiUsage: {
@@ -1165,7 +1168,14 @@ export async function writeAssistantAgentPatchSet(params: {
       },
     },
   );
-  const parsed = safeJsonParse(raw);
+  let parsed: unknown;
+  try {
+    parsed = parseAssistantAgentWriterOutput(raw, safeJsonParse);
+  } catch (error) {
+    if (error instanceof AssistantAgentFormatError) throw error;
+    console.error('[assistant-agent:invalid-writer-output]', { responseLength: raw.length });
+    throw new AssistantAgentFormatError();
+  }
   return validateAssistantAgentPatchSet({
     patchSet: normalizePatchSet(parsed, imageReferenceRegistry, params.userMessage, params.plan, (params.workspaceDirectories || []).map((directory) => directory.id)),
     plan: params.plan,

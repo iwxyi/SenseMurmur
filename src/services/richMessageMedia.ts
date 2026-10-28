@@ -595,7 +595,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
     reportRecoverableError({
       location: 'rich-message-media.process',
       error,
-      userMessage: attachment.kind === 'image' ? '图片生成失败。' : '语音生成失败。',
+      userMessage: attachment.kind === 'sticker' ? '表情包搜索失败。' : attachment.kind === 'image' ? '图片生成失败。' : '语音生成失败。',
       extra: {
         messageId: workingMessage.id,
         attachmentId: attachment.id,
@@ -606,7 +606,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
     const errorText = toMediaGenerationErrorText(error, attachment.kind);
     richMediaGenerationErrors.set(entry.id, {
       id: entry.id,
-      title: attachment.kind === 'image' ? '聊天图片生成' : '聊天语音生成',
+      title: attachment.kind === 'sticker' ? '聊天表情包搜索' : attachment.kind === 'image' ? '聊天图片生成' : '聊天语音生成',
       message: errorText,
       createdAt: Date.now(),
     });
@@ -767,7 +767,7 @@ export async function retryRichMessageMedia(params: {
 }): Promise<void> {
   const attachments = params.message.metadata?.attachments || [];
   const target = attachments.find((attachment) => attachment.id === params.attachmentId);
-  if (!target || (target.status !== 'failed' && target.status !== 'queued' && target.status !== 'generating' && !(target.status === 'ready' && !target.url))) return;
+  if (!target || (target.status !== 'failed' && target.status !== 'queued' && target.status !== 'generating' && !(target.status === 'ready' && (!target.url || target.kind === 'sticker')))) return;
   const generationJobId = createGenerationJobId();
   const retryMetadata = retryAttachmentMetadata(params.message.metadata, params.attachmentId, generationJobId);
   const retryMessage = { ...params.message, metadata: retryMetadata };

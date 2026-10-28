@@ -36,7 +36,7 @@ import { buildHumanizationPrompt, postProcessHumanChat } from './dialogueHumaniz
 import { buildInnerLifeMetadata, buildInnerLifePromptBlock, projectInnerLife, type InnerLifeProjection } from './innerLifeEngine';
 import { maybeAutoWithdrawMessage } from './messageWithdrawal';
 import { BASE_COOLDOWN_MS, MAX_HISTORY_FOR_PROMPT } from '../constants/defaults';
-import { buildInlineInteractionContract, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope, resolveConversationMemberReferences, type InlineEnvelopeParseFailure, type InlineStoryAssets } from './inlineInteractionHint';
+import { buildInlineInteractionContract, buildMemberReference, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope, resolveConversationMemberReferences, type InlineEnvelopeParseFailure, type InlineStoryAssets } from './inlineInteractionHint';
 import { getExpressionFeedbackCategoryLabel, summarizeExpressionFeedbackInfluence } from './expressionFeedbackInfluence';
 import type { UserGuidanceIntent } from './userGuidanceIntent';
 import { collectGuidanceProgressAfterTimestamp, evaluateGuidanceGeneratedContent, type GuidanceExecutionReason, type GuidanceRejectionReason } from './guidanceExecution';
@@ -3559,19 +3559,16 @@ async function generateNonDuplicateResponse(params: {
           : invalidStateEvidence ? 'a state update whose evidenceText was not an exact quote from one of this response\'s visible sends'
             : invalidMemberReference ? 'a state update referencing an id outside the supplied member list, or outgoing routing referencing an unknown member or the current speaker'
               : invalidDelivery ? 'an invalid delivery state or fields that contradict it'
-                : invalidRouting ? 'invalid per-send routing fields; follow the supplied schema and field diagnostic'
+              : invalidRouting ? 'invalid per-send routing fields; primaryTargetId must be a valid member id and included in that same routing object\'s targetIds; never target the current speaker'
                   : invalidConversationUpdate ? 'a missing or invalid conversationUpdate field in the JSON object'
                     : invalidActivityUpdate ? 'an invalid activityUpdate field in the JSON object'
             : 'no valid JSON envelope';
         const deliveryRule = params.allowNoSend
           ? 'You may still return exactly {"delivery":"no_send","messages":[]} when you have nothing to express; no other fields are needed then. For delivery=send, follow these rules.'
           : 'This turn requires delivery=send with visible character speech.';
+        const memberErrors = 'memberReferenceErrors' in generated.diagnostic ? generated.diagnostic.memberReferenceErrors : undefined;
         const memberReferenceRule = invalidMemberReference
-          ? `\nMember reference correction: conversationUpdate.items[].participantIds and all room member references must contain exact member ids, never display names, nicknames or aliases. The current speaker is allowed in participantIds for their own commitment, but never in outgoing addressedTargets or replyDebtTargets. Use this name-to-id registry: ${JSON.stringify([
-            ...(params.characters || []).filter((character) => params.chat.memberIds.includes(character.id))
-              .map((character) => ({ name: character.name, id: character.id })),
-            { name: '用户/我', id: 'user' },
-          ])}. Do not remove a supported update merely to avoid correcting its ids.`
+          ? `\nMember reference correction: conversationUpdate.items[].participantIds and all room member references must contain exact member ids, never display names, nicknames or aliases. The current speaker is allowed in participantIds for their own commitment, but never in outgoing addressedTargets or replyDebtTargets. Use this name-to-id registry:\n${buildMemberReference({ chat: params.chat, characters: params.characters || [], speakerId: params.speaker.id })}\nExact member validation errors: ${JSON.stringify(memberErrors)}. Correct each reported field. Use null routing when the send has no actual member recipient; never invent a recipient. Do not remove a supported update merely to avoid correcting its ids.`
           : '';
         prompt = `${params.systemPrompt}\n\nOutput protocol retry:\n- The previous attempt returned ${failure}. Return one valid JSON object using the supplied output contract. ${deliveryRule} Preserve the supported structured fields for this turn; use null when there is no supported update. If known public items exist, explicitly include top-level conversationUpdate after checking whether this turn changes them: null or an update object with items; never omit it. State evidenceText must be copied exactly from one visible send in this response, never from the earlier transcript or known records. Do not add spoken confirmations merely to manufacture evidence. Do not invent updates, emit tool-call markup or simulate unavailable tools. Do not repeat or continue the previous plain-text draft; discard it and write the visible content inside the new JSON envelope. The response must begin with the JSON object and contain no prose before or after it. Do not mention this retry to participants.`;
         prompt += memberReferenceRule;

@@ -83,7 +83,6 @@ export async function runChatCommitPipeline(params: {
     const nextMessages = params.currentMessages.filter((message) => !message.isDeleted && message.id !== params.streamingMessage?.id && !isLocalInterceptionMessage(message));
     let mediaProcessingStarted = false;
     const startMediaProcessing = (message: Message) => {
-      if (!params.aiProfiles?.length) return;
       if (mediaProcessingStarted) return;
       if (!message.metadata?.attachments?.some((item) => item.status === 'queued')) return;
       mediaProcessingStarted = true;
@@ -131,7 +130,7 @@ export async function runChatCommitPipeline(params: {
         ),
       });
     }
-    if (params.aiProfiles?.length && persistedMessage.metadata?.attachments?.some((item) => item.status === 'queued')) {
+    if (persistedMessage.metadata?.attachments?.some((item) => item.status === 'queued')) {
       if (isLocalOnlyMediaMode() || persistedMessage.serverId) {
         startMediaProcessing(persistedMessage);
       } else {

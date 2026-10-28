@@ -17,6 +17,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/useAuthStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useCharacterStore } from '../stores/useCharacterStore';
+import { deleteFileItems } from '../services/fileDeletion';
 
 type Category = 'all' | 'document' | 'image' | 'sticker' | 'avatar' | 'character' | 'background' | 'chat-avatar' | 'chat-background' | 'audio' | 'table' | 'web' | 'other';
 type FileItem = { id: string; name: string; url: string; mimeType: string; sizeBytes: number; kind: string; category: string; createdAt: number; deletedAt: number | null; chatId?: string; messageId?: string; attachmentId?: string; checksum?: string; characterId?: string; characterName?: string; sourceType?: string; description?: string; promptText?: string; syncStatus?: string };
@@ -70,7 +71,8 @@ export default function FilesPage() {
   const cloudStorageBytes = useAuthStore((state) => state.user?.cloudStorageBytes || 0);
   const cloudStorageMembershipBytes = useAuthStore((state) => state.user?.cloudStorageMembershipBytes || 0);
   const cloudStorageAccountBytes = useAuthStore((state) => state.user?.cloudStorageAccountBytes || 0);
-  const cloudStorageGrants = useAuthStore((state) => state.user?.cloudStorageGrants || []);
+  const user = useAuthStore((state) => state.user);
+  const cloudStorageGrants = user?.cloudStorageGrants || [];
   const [items, setItems] = useState<FileItem[]>([]);
   const [allItems, setAllItems] = useState<FileItem[]>([]);
   const [category, setCategory] = useState<Category>('all'); const [range, setRange] = useState('all'); const [selected, setSelected] = useState<string[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState('');
@@ -92,7 +94,21 @@ export default function FilesPage() {
   const toggle = (id: string) => setSelected((current) => { const index = items.findIndex((item) => item.id === id); if (index >= 0) selectionAnchor.current = index; return current.includes(id) ? current.filter((item) => item !== id) : [...current, id]; });
   const selectRange = (index: number) => { const anchor = selectionAnchor.current ?? index; const lo = Math.max(0, Math.min(anchor, index)); const hi = Math.min(items.length - 1, Math.max(anchor, index)); const ids = items.slice(lo, hi + 1).map((item) => item.id); setSelected((current) => { const allSelected = ids.every((id) => current.includes(id)); return allSelected ? current.filter((id) => !ids.includes(id)) : Array.from(new Set([...current, ...ids])); }); selectionAnchor.current = index; };
   useEffect(() => { const handleKeyDown = (event: KeyboardEvent) => { const target = event.target as HTMLElement | null; if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return; const modifier = event.ctrlKey || event.metaKey; if (modifier && event.key.toLowerCase() === 'a') { event.preventDefault(); setSelectionMode(true); setSelected(items.map((item) => item.id)); return; } if (event.key === 'Escape' && selectionMode) { event.preventDefault(); setSelectionMode(false); setSelected([]); return; } if (activeIndex == null || !items.length) return; if (modifier && event.key === ' ') { event.preventDefault(); toggle(items[activeIndex].id); return; } if (event.shiftKey && (event.key === 'ArrowRight' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowUp')) { event.preventDefault(); const next = Math.max(0, Math.min(items.length - 1, activeIndex + ((event.key === 'ArrowRight' || event.key === 'ArrowDown') ? 1 : -1))); setSelectionMode(true); selectRange(next); setActiveIndex(next); } }; window.addEventListener('keydown', handleKeyDown); return () => window.removeEventListener('keydown', handleKeyDown); }, [items, activeIndex, selectionMode]);
-  const doDelete = useCallback(async () => { if (!selected.length) return; try { await api.deleteFiles(selected); await load(); } catch (e) { setError(e instanceof Error ? e.message : '文件删除失败'); } }, [selected, load]);
+  const deletingRef = useRef(false);
+  const doDelete = useCallback(async () => {
+    if (!selected.length || deletingRef.current) return;
+    deletingRef.current = true;
+    let deletionError = '';
+    try {
+      await deleteFileItems(items.filter(item => selected.includes(item.id)));
+    } catch (error) {
+      deletionError = error instanceof Error ? error.message : '文件删除失败';
+    } finally {
+      await load();
+      if (deletionError) setError(deletionError);
+      deletingRef.current = false;
+    }
+  }, [selected, items, load]);
   const downloadItem = () => { if (!menuItem?.url) return; const link = document.createElement('a'); link.href = menuItem.url; link.download = menuItem.name || '文件'; link.target = '_blank'; link.rel = 'noreferrer'; link.click(); setMenuAnchor(null); setMenuItem(null); };
   const openCharacter = () => { if (!menuItem?.characterId) return; window.open(`/characters/${encodeURIComponent(menuItem.characterId)}/edit`, '_blank', 'noopener,noreferrer'); setMenuAnchor(null); setMenuItem(null); };
   const openChat = () => {

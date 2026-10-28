@@ -364,9 +364,9 @@ export function resolveConversationMemberReferences(
   const resolved = structuredClone(envelope);
   const corrections: Array<{ field: string; value: string; resolvedId: string }> = [];
   const errors: Array<{ field: string; value: string; reason: string }> = [];
-  const resolve = (value: string, field: string, outgoing = false, allowUser = false) => {
+  const resolve = (value: string, field: string, outgoing = false) => {
     let id = value;
-    if (!members.has(id) && !(allowUser && id === 'user')) {
+    if (!members.has(id)) {
       const candidates = names.get(value);
       if (candidates?.size === 1) {
         id = [...candidates][0];
@@ -392,18 +392,18 @@ export function resolveConversationMemberReferences(
     }
   });
   resolved.conversationUpdate?.items.forEach((item, index) => {
-    item.participantIds = item.participantIds.map((id, i) => resolve(id, `conversationUpdate.items[${index}].participantIds[${i}]`, false, true));
+    item.participantIds = item.participantIds.map((id, i) => resolve(id, `conversationUpdate.items[${index}].participantIds[${i}]`));
   });
   const room = resolved.conversationUpdate?.room;
   if (room) {
     for (const key of ['addAlliances', 'removeAlliances', 'addConflictPairs', 'removeConflictPairs'] as const) {
       room[key]?.forEach((pair, index) => {
-        pair[0] = resolve(pair[0], `conversationUpdate.room.${key}[${index}][0]`, false, true);
-        pair[1] = resolve(pair[1], `conversationUpdate.room.${key}[${index}][1]`, false, true);
+        pair[0] = resolve(pair[0], `conversationUpdate.room.${key}[${index}][0]`);
+        pair[1] = resolve(pair[1], `conversationUpdate.room.${key}[${index}][1]`);
       });
     }
-    if (room.pileOnTarget) room.pileOnTarget = resolve(room.pileOnTarget, 'conversationUpdate.room.pileOnTarget', false, true);
-    if (room.silencedActors) room.silencedActors = room.silencedActors.map((id, index) => resolve(id, `conversationUpdate.room.silencedActors[${index}]`, false, true));
+    if (room.pileOnTarget) room.pileOnTarget = resolve(room.pileOnTarget, 'conversationUpdate.room.pileOnTarget');
+    if (room.silencedActors) room.silencedActors = room.silencedActors.map((id, index) => resolve(id, `conversationUpdate.room.silencedActors[${index}]`));
   }
   return { envelope: resolved, corrections, errors };
 }
@@ -420,7 +420,6 @@ export function hasInvalidConversationMemberReferences(
   )))) return true;
   const update = envelope.conversationUpdate;
   if (!update) return false;
-  members.add('user');
   const valid = (id: string) => members.has(id);
   if (update.items.some((item) => item.participantIds.some((id) => !valid(id)))) return true;
   const room = update.room;
@@ -436,12 +435,14 @@ export function hasInvalidConversationMemberReferences(
   return Boolean(room.silencedActors?.some((id) => !valid(id)));
 }
 
-function buildMemberReference(params: { chat: GroupChat; characters: AICharacter[]; speakerId?: string }) {
+export function buildMemberReference(params: { chat: GroupChat; characters: AICharacter[]; speakerId?: string }) {
   const memberIds = new Set(params.chat.memberIds);
   const characterLines = params.characters
     .filter((character) => memberIds.has(character.id))
     .map((character) => `- id=${character.id}; name=${character.name}; aliases=${[character.name, character.group || ''].filter(Boolean).join(', ')}${character.id === params.speakerId ? '; current speaker: valid participant, never an outgoing interaction or reply target' : ''}`);
-  const userLine = params.chat.memberIds.includes('user') ? ['- id=user; name=用户/我; aliases=用户,我'] : [];
+  const userLine = params.chat.memberIds.includes('user')
+    ? ['- id=user; name=用户/我; aliases=用户,我']
+    : ['- The human is not a member of this chat. Never use user as a member id or response target.'];
   return [...characterLines, ...userLine].join('\n') || '- No valid targets.';
 }
 
@@ -703,7 +704,7 @@ Known public continuity (keys are only for writeback):\n${continuityContext || '
   const interactionRule = isOrdinaryConversation
     ? `${compactInteractionRule}${aiDirectInteractionRules}`
     : `Before writing, appraise the latest visible human turn's immediate effect on the current speaker. If that latest turn is from the user or director and it clearly warms, needles, embarrasses, pressures, reassures, alarms, or excites this speaker, emit incomingImpact as {"kind":"${interactionKinds}","tone":"warm|annoyed|defensive|excited|sarcastic|cold","intensity":3,"confidence":0.86,"evidenceText":"exact short quote from the human turn","reason":"why that quote has this effect","immediateImpact":{"targetEmotionDelta":{"irritation":8,"insecurity":4}}}; otherwise incomingImpact is null. The incoming targetEmotionDelta is the immediate effect on the current speaker, not a relationship change. Write the visible reply from this person's reaction first, then classify only the effect actually visible in it. Never insert an agreement, concession, apology, or named preface just to make an interaction kind or evidenceText easy to report. interactionHints is the outgoing fast-affect channel: emit it whenever the speaker's own words clearly land on a particular member by warming them, needling them, embarrassing them, putting them on the spot, defending them, dismissing them, apologizing or conceding to them, taking responsibility toward them, including or excluding them, setting a boundary, making them wary, or making them excited. Do not omit a hint merely because the exchange is ordinary or because the slow relationship does not change. Use null only when no member-specific emotional effect is visible. When used, targetId must be a member id: {"primary":{"targetId":"member-id","kind":"${interactionKinds}","tone":"warm|annoyed|defensive|excited|sarcastic|cold","intensity":3,"confidence":0.86,"evidenceText":"exact short quote from this reply","reason":"why the quote has this effect","immediateImpact":{"speakerEmotionDelta":{"irritation":-8},"targetEmotionDelta":{"insecurity":12},"roomDelta":{"heat":5,"cohesion":-2,"topicDrift":0}},"relationship":null},"secondary":[]}. immediateImpact is your semantic judgement of this visible line, not a local keyword score: use signed integer deltas, emotion axes within -40..40 and room axes within -20..20. Positive raises an axis and negative releases it. Put the whole-turn speaker release and room effect on primary only; secondary hints contain only their own targetEmotionDelta so effects are not duplicated. Omit zero axes. evidenceText is required, must be a short exact substring of the visible source turn, and must support the chosen kind, tone, and impact by itself; never use the whole reply as evidence. Classify what the quoted words actually do, not their hoped-for outcome: admitting fault is apologize or take_responsibility, yielding a point is concede, and naming who was left out is exclude rather than support. intensity is the immediate spike (1-5), not a permanent score: one sharp line may be 4-5, a small sting or warmth 1-2. The interaction event may exist without any lasting relationship change. Include relationship only when this turn itself gives evidence for a slow relationship update: {"delta":{"warmth":0,"competence":0,"trust":0,"threat":0,"attachment":0,"deference":0},"labels":["meaning"],"stance":"stance"}. attachment and deference are especially slow axes: omit them or keep them within -2..2 unless this turn contains a real turning point. Omit uncertain hints.${aiDirectInteractionRules}`;
-  const addressedTargetRule = `Each messages[] item has its own addressedTargets and replyDebtTargets; use null when absent. addressedTargets records who this send is actually directed to, even without expecting an answer: {"targetIds":["member-id"],"primaryTargetId":"member-id","confidence":0.9,"reason":"why this send is directed to this member"}. Merely mentioning or affecting someone is not addressing them. replyDebtTargets uses the same shape only when this send actually expects that member to answer next; agreement, a brief reaction, or a goodbye alone need not create a debt. Use valid member ids below, never the speaker. Personal expression may have both fields null. Top-level routing is legacy only: leave it null when providing item routing; it cannot supply targets for another send.`;
+  const addressedTargetRule = `Each messages[] item has its own addressedTargets and replyDebtTargets; use null when absent. addressedTargets records who this send is actually directed to, even without expecting an answer: {"targetIds":["member-id"],"primaryTargetId":"member-id","confidence":0.9,"reason":"why this send is directed to this member"}. If primaryTargetId is non-null, that exact id MUST also appear in targetIds; normally make it the first targetIds entry. Never set primaryTargetId to a person missing from targetIds. Merely mentioning or affecting someone is not addressing them. replyDebtTargets uses the same shape only when this send actually expects that member to answer next; agreement, a brief reaction, or a goodbye alone need not create a debt. Use valid member ids below, never the speaker. Personal expression may have both fields null. Top-level routing is legacy only: leave it null when providing item routing; it cannot supply targets for another send.`;
   const ownActivityContext = projectWorldCalendar([params.chat], params.characters, { inferTemporalStatus: false, publicOnly: true }).items
     .filter((item) => !item.derivedFromItemId && item.participantIds.includes(params.speaker.id))
     .slice(0, 8)
@@ -835,9 +836,15 @@ export function parseInlineInteractionEnvelope(raw: string, options: {
             || routing.targetIds.some((id) => typeof id !== 'string' || !id.trim())) return reject({
             stage, field: path, message: 'Expected null or a routing object with targetIds containing non-empty member id strings.',
           });
-          if (routing.primaryTargetId != null && (typeof routing.primaryTargetId !== 'string' || !routing.targetIds.includes(routing.primaryTargetId))) return reject({
-            stage, field: `${path}.primaryTargetId`, message: 'primaryTargetId must be null or a member of targetIds.',
+          if (routing.primaryTargetId != null && typeof routing.primaryTargetId !== 'string') return reject({
+            stage, field: `${path}.primaryTargetId`, message: 'primaryTargetId must be null or a member id string included in targetIds.',
           });
+          // The primary recipient is necessarily one of the targets. Models
+          // sometimes omit it from targetIds despite naming it explicitly;
+          // canonicalize that redundant list before strict member validation.
+          if (routing.primaryTargetId && !routing.targetIds.includes(routing.primaryTargetId)) {
+            routing.targetIds.unshift(routing.primaryTargetId);
+          }
         }
       }
     }

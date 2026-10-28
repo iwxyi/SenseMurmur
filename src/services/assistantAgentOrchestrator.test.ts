@@ -868,6 +868,24 @@ describe('assistantAgentOrchestrator validation', () => {
     expect(patchSet.assistantMessage).toContain('上下文不足');
   });
 
+  it('passes verbatim writer source blocks through patch validation', async () => {
+    const source = 'const pattern = /\\w+\\s+"quoted"/g;\nconsole.log("你好", pattern);';
+    generateResponseMock.mockResolvedValue([
+      '```json',
+      JSON.stringify({ assistantMessage: '已创建程序', patches: [{ action: 'create', kind: 'code', title: '示例', language: 'javascript', contentRef: 'main' }] }),
+      '```', '~~~~artifact-content main', source, '~~~~', '<!-- assistant-patch-set:end -->',
+    ].join('\n'));
+    const patchSet = await writeAssistantAgentPatchSet({
+      api: { provider: 'openai', apiKey: 'k', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4.1' },
+      chatId: 'chat-a', messages: [], existingArtifacts: [],
+      userMessage: { id: 'user-message', chatId: 'chat-a', type: 'user', senderId: 'user', senderName: '用户', content: '创建一个程序文件', emotion: 0, timestamp: 1, isDeleted: false },
+      plan: { intent: 'create', scope: { targetMode: 'unknown', artifactIds: [] }, operations: [{ kind: 'create', instruction: '创建程序文件' }], requiresConfirmation: false, confidence: 1 },
+    });
+    expect(patchSet.patches[0]?.content).toBe(source);
+    expect(generateResponseMock.mock.calls[0]?.[4]).toMatchObject({ responseFormat: 'text' });
+    expect(generateResponseMock).toHaveBeenCalledTimes(1);
+  });
+
   it('does not automatically retry malformed HTML repair output', async () => {
     generateResponseMock.mockResolvedValue('这不是 JSON');
     const plan: AssistantAgentChangePlan = {

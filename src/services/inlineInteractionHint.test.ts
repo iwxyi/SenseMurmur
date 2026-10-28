@@ -4,9 +4,27 @@ import type { GroupChat } from '../types/chat';
 import { createTestChat } from '../test/fixtures';
 import { normalizeInteractionHintCollection } from '../types/runtimeEvent';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
-import { buildInlineInteractionContract, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope, resolveConversationMemberReferences } from './inlineInteractionHint';
+import { buildInlineInteractionContract, buildMemberReference, hasInvalidConversationMemberReferences, hasInvalidStateEvidence, parseInlineInteractionEnvelope, resolveConversationMemberReferences } from './inlineInteractionHint';
 
 describe('envelope rejection diagnostics', () => {
+  it.each([
+    ['group', ['speaker'], false],
+    ['group', ['speaker', 'user'], true],
+    ['direct', ['speaker'], false],
+    ['ai_direct', ['speaker', 'other'], false],
+  ] as const)('keeps the %s member registry consistent with routing validation (%j)', (type, ids, allowsUser) => {
+    const chat = createTestChat({ type, memberIds: [...ids] });
+    const registry = buildMemberReference({ chat, characters: [], speakerId: 'speaker' });
+    expect(registry.includes('id=user;')).toBe(allowsUser);
+    const envelope = parseInlineInteractionEnvelope(JSON.stringify({ messages: [{ content: '你好。',
+      addressedTargets: { targetIds: ['user'], primaryTargetId: 'user' },
+    }] }))!;
+    const members = [...chat.memberIds];
+    expect(hasInvalidConversationMemberReferences(envelope, members, 'speaker')).toBe(!allowsUser);
+    expect(resolveConversationMemberReferences(envelope, members, [], 'speaker').errors.length === 0).toBe(allowsUser);
+    if (!allowsUser) expect(registry).toContain('human is not a member');
+  });
+
   it('resolves exact names without mutating input and reports unknown, ambiguous and self targets', () => {
     const envelope = parseInlineInteractionEnvelope(JSON.stringify({
       messages: [{ content: '我来核账。', addressedTargets: { targetIds: ['重名', '不存在', '刘备'] } }],
@@ -48,17 +66,36 @@ describe('envelope rejection diagnostics', () => {
     expect(hasInvalidConversationMemberReferences(parsed!, ['a', 'b'], 'b')).toBe(true);
   });
 
+  it('adds an explicit primary recipient to targetIds when the model omits the duplicate id', () => {
+    const parsed = parseInlineInteractionEnvelope(JSON.stringify({
+      messages: [{ content: '这件事你来决定。', addressedTargets: {
+        targetIds: ['b'], primaryTargetId: 'a', confidence: 0.9, reason: '直接交由甲决定',
+      } }],
+    }));
+    expect(parsed?.messages?.[0].addressedTargets).toMatchObject({
+      targetIds: ['a', 'b'], primaryTargetId: 'a',
+    });
+    expect(hasInvalidConversationMemberReferences(parsed!, ['speaker', 'a', 'b'], 'speaker')).toBe(false);
+  });
+
   it.each([
     { content: '', addressedTargets: null },
     { content: '嗯', addressedTargets: { targetIds: 'b' } },
-    { content: '嗯', replyDebtTargets: { targetIds: ['b'], primaryTargetId: 'c' } },
     { content: '嗯', addressedTargets: { targetIds: [''] } },
-  ])('reports invalid per-send routing without salvaging content: %j', (part) => {
+  ])('reports malformed per-send routing without salvaging content: %j', (part) => {
     const failures: unknown[] = [];
     expect(parseInlineInteractionEnvelope(JSON.stringify({ messages: [part], content: '不能兜底成这句话' }), {
       onFailure: (failure) => failures.push(failure),
     })).toBeNull();
     expect(failures).toEqual([expect.objectContaining({ stage: 'message_routing' })]);
+  });
+
+  it('accepts a known primary target omitted from targetIds but rejects an unknown target later', () => {
+    const parsed = parseInlineInteractionEnvelope(JSON.stringify({ messages: [{ content: '嗯',
+      replyDebtTargets: { targetIds: ['b'], primaryTargetId: 'c' },
+    }] }));
+    expect(parsed?.messages?.[0].replyDebtTargets?.targetIds).toEqual(['c', 'b']);
+    expect(hasInvalidConversationMemberReferences(parsed!, ['speaker', 'b'], 'speaker')).toBe(true);
   });
 
   it('accepts explicit no-send without requiring continuity writeback or visible content', () => {
@@ -250,14 +287,15 @@ describe('continuity member reference boundary', () => {
     expect(hasInvalidConversationMemberReferences(parsed!, ['speaker', 'other'])).toBe(true);
   });
 
-  it('accepts current members and the user member', () => {
+  it('accepts the user only when user is explicitly in the member list', () => {
     const parsed = parseInlineInteractionEnvelope(JSON.stringify({
       messages: [{ content: '我接下巡城。' }],
       conversationUpdate: {
         items: [{ key: 'patrol', kind: 'commitment', status: 'established', summary: '接下巡城', participantIds: ['speaker', 'user'], evidenceText: '我接下巡城' }],
       },
     }));
-    expect(hasInvalidConversationMemberReferences(parsed!, ['speaker', 'other'])).toBe(false);
+    expect(hasInvalidConversationMemberReferences(parsed!, ['speaker', 'other'])).toBe(true);
+    expect(hasInvalidConversationMemberReferences(parsed!, ['speaker', 'other', 'user'])).toBe(false);
   });
 });
 

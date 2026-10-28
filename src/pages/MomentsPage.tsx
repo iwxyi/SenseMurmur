@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Avatar, Box, Button, Chip, Snackbar, Stack, Typography } from '@mui/material';
+import { Alert, Avatar, Box, Button, Chip, Link, Snackbar, Stack, Typography } from '@mui/material';
+import { Link as RouterLink, useLocation } from 'react-router-dom';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../stores/useChatStore';
@@ -7,7 +8,6 @@ import { useCharacterStore } from '../stores/useCharacterStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import EmptyState from '../components/common/EmptyState';
 import ImageLightbox from '../components/common/ImageLightbox';
-import SurfaceCard from '../components/common/SurfaceCard';
 import { compactPillChipSx } from '../styles/interaction';
 import { sanitizeUserFacingText } from '../services/displayTextSanitizer';
 import { projectWorldMoments } from '../services/worldRuntimeProjection';
@@ -56,6 +56,7 @@ function getErrorMessage(error: unknown) {
 function MomentMediaThumbnail(props: {
   item: { url: string; thumbnailUrl?: string; alt?: string };
   alt: string;
+  single: boolean;
   onClick: () => void;
 }) {
   const requestedSrc = props.item.thumbnailUrl || props.item.url;
@@ -76,21 +77,33 @@ function MomentMediaThumbnail(props: {
       src={src}
       alt={props.item.alt || props.alt}
       onClick={props.onClick}
+      tabIndex={0}
+      role="button"
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          props.onClick();
+        }
+      }}
       sx={{
-        width: '100%',
-        aspectRatio: '1 / 1',
-        objectFit: 'cover',
-        borderRadius: 1,
-        border: 1,
-        borderColor: 'divider',
+        display: 'block',
+        width: props.single ? 'auto' : '100%',
+        maxWidth: '100%',
+        height: props.single ? 'auto' : undefined,
+        maxHeight: props.single ? 320 : undefined,
+        aspectRatio: props.single ? undefined : '1 / 1',
+        objectFit: props.single ? 'contain' : 'cover',
+        borderRadius: 0.5,
         bgcolor: 'action.hover',
         cursor: 'zoom-in',
+        '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: 3 },
       }}
     />
   );
 }
 
 export default function MomentsPage() {
+  const location = useLocation();
   const { i18n } = useTranslation();
   const isZh = i18n.language.startsWith('zh');
   const chats = useChatStore((state) => state.chats);
@@ -337,44 +350,58 @@ export default function MomentsPage() {
   }, [canGenerate, developerMode, handleGenerateMoment, isZh, setHeaderActions, setHeaderBackAction, setHeaderTitle, showMomentDebug]);
 
   return (
-    <Box sx={{ px: { xs: 1.5, sm: 2, md: 3 }, pt: { xs: 1, sm: 1.5, md: 2 }, pb: { xs: 'calc(env(safe-area-inset-bottom, 0px) + 90px)', md: 4 }, maxWidth: 920, mx: 'auto' }}>
+    <Box sx={{ px: { xs: 2, sm: 3 }, pt: { xs: 0.5, sm: 1 }, pb: { xs: 'calc(env(safe-area-inset-bottom, 0px) + 90px)', md: 4 }, maxWidth: 760, mx: 'auto', bgcolor: 'background.paper' }}>
       {!moments.length ? (
         <EmptyState
           icon="📝"
           message={isZh ? '还没有朋友圈动态。角色发布后的动态会显示在这里。' : 'No moments yet. Published character posts will appear here.'}
         />
       ) : (
-        <Stack spacing={{ xs: 1.25, sm: 1.5 }}>
+        <Stack>
           {visibleMoments.map((moment) => {
             const avatar = moment.actorId ? characterAvatars.get(moment.actorId) : undefined;
+            const actorName = sanitizeUserFacingText(moment.actorName, textMembers).trim();
+            const conversationName = sanitizeUserFacingText(moment.conversationName, textMembers).trim();
+            const characterPath = moment.actorId && characterAvatars.has(moment.actorId)
+              ? `/characters/${encodeURIComponent(moment.actorId)}/edit?returnTo=${encodeURIComponent(location.pathname + location.search)}`
+              : undefined;
+            const chatAvailable = chats.some((chat) => chat.id === moment.conversationId && !chat.deletedAt);
             const text = cleanDisplayedMomentText(sanitizeUserFacingText(moment.text, textMembers));
             return (
-              <SurfaceCard
+              <Box
+                component="article"
                 key={moment.id}
-                contentSx={{ p: { xs: 1.5, sm: 1.75 }, '&:last-child': { pb: { xs: 1.5, sm: 1.75 } } }}
+                sx={{ py: { xs: 2, sm: 2.5 }, borderBottom: 1, borderColor: 'divider' }}
               >
                 <Stack direction="row" spacing={{ xs: 1.15, sm: 1.4 }} sx={{ alignItems: 'flex-start' }}>
-                  <Avatar
-                    src={isImageAvatar(avatar) ? avatar : undefined}
-                    alt={moment.actorName}
-                    sx={{
-                      width: { xs: 40, sm: 44 },
-                      height: { xs: 40, sm: 44 },
-                      bgcolor: 'primary.light',
-                      color: 'primary.contrastText',
-                      fontSize: '1rem',
-                      fontWeight: 760,
-                      flexShrink: 0,
-                    }}
+                  <Box
+                    component={characterPath ? RouterLink : 'span'}
+                    to={characterPath}
+                    aria-label={characterPath ? (isZh ? `查看${actorName}的资料` : `View ${actorName}'s profile`) : undefined}
+                    sx={{ display: 'block', flexShrink: 0, borderRadius: 1, textDecoration: 'none', '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: 3 } }}
                   >
-                    {isImageAvatar(avatar) ? undefined : formatAvatarFallback(avatar, moment.actorName)}
-                  </Avatar>
+                    <Avatar
+                      src={isImageAvatar(avatar) ? avatar : undefined}
+                      alt={moment.actorName}
+                      sx={{
+                        width: 40,
+                        height: 40,
+                        borderRadius: 1,
+                        bgcolor: 'primary.light',
+                        color: 'primary.contrastText',
+                        fontSize: '1rem',
+                        fontWeight: 760,
+                        flexShrink: 0,
+                      }}
+                    >
+                      {isImageAvatar(avatar) ? undefined : formatAvatarFallback(avatar, moment.actorName)}
+                    </Avatar>
+                  </Box>
                   <Box sx={{ minWidth: 0, flex: 1 }}>
-                    <Typography variant="subtitle1" sx={{ fontWeight: 760, letterSpacing: 0, lineHeight: 1.25 }}>
-                      {sanitizeUserFacingText(moment.actorName, textMembers)}
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.25 }}>
-                      {sanitizeUserFacingText(moment.conversationName, textMembers)} · {formatTime(moment.createdAt)}
+                    <Typography sx={{ fontSize: 14, fontWeight: 600, letterSpacing: 0, lineHeight: 1.5, overflowWrap: 'anywhere', color: (theme) => theme.palette.mode === 'dark' ? '#a5b9dc' : '#576b95' }}>
+                      {characterPath ? (
+                        <Link component={RouterLink} to={characterPath} underline="hover" color="inherit">{actorName}</Link>
+                      ) : actorName}
                     </Typography>
                     {developerMode && showMomentDebug && moment.debugState === 'candidate' ? (
                       <Stack direction="row" spacing={0.75} useFlexGap sx={{ mt: 0.8, flexWrap: 'wrap' }}>
@@ -390,12 +417,14 @@ export default function MomentsPage() {
                       </Stack>
                     ) : null}
                     <Typography
-                      variant="body1"
+                      variant="body2"
                       sx={{
-                        mt: 1.15,
+                        mt: 0.35,
+                        fontSize: 14,
+                        color: 'text.primary',
                         whiteSpace: 'pre-wrap',
                         wordBreak: 'break-word',
-                        lineHeight: 1.75,
+                        lineHeight: 1.65,
                       }}
                     >
                       {text || (isZh ? '这条动态暂时没有正文。' : 'This post has no content yet.')}
@@ -403,23 +432,39 @@ export default function MomentsPage() {
                     {moment.media.length ? (
                       <Box
                         sx={{
-                          mt: 1.25,
-                          display: 'grid',
-                          gap: 0.75,
-                          gridTemplateColumns: moment.media.length > 1 ? { xs: '1fr 1fr', sm: 'repeat(3, minmax(0, 1fr))' } : 'minmax(0, 420px)',
-                          maxWidth: moment.media.length > 1 ? { sm: 420 } : 420,
+                          mt: 1,
+                          display: moment.media.length === 1 ? 'block' : 'grid',
+                          gap: 0.5,
+                          gridTemplateColumns: moment.media.length === 2 || moment.media.length === 4 ? 'repeat(2, minmax(0, 1fr))' : 'repeat(3, minmax(0, 1fr))',
+                          width: moment.media.length === 1 ? '50%' : '100%',
+                          maxWidth: moment.media.length === 1 ? '50%' : moment.media.length === 2 || moment.media.length === 4 ? 240 : 360,
                         }}
                       >
-                        {moment.media.slice(0, 4).map((item, index) => (
+                        {moment.media.slice(0, 9).map((item, index) => (
                           <MomentMediaThumbnail
                             key={`${item.url}-${index}`}
                             item={item}
+                            single={moment.media.length === 1}
                             alt={moment.title || moment.actorName}
                             onClick={() => void openViewer(Math.max(0, visibleMomentMedia.findIndex((entry) => entry.key === `${moment.id}-${index}`)))}
                           />
                         ))}
                       </Box>
                     ) : null}
+                    <Stack direction="row" useFlexGap sx={{ mt: 1.1, gap: '4px 12px', flexWrap: 'wrap', alignItems: 'baseline' }}>
+                      <Typography component="time" dateTime={new Date(moment.createdAt).toISOString()} sx={{ fontSize: 11, color: 'text.disabled', lineHeight: 1.5 }}>
+                        {formatTime(moment.createdAt)}
+                      </Typography>
+                      {conversationName && chatAvailable ? (
+                        <Link component={RouterLink} to={`/chats/${encodeURIComponent(moment.conversationId)}`} underline="hover" sx={{ fontSize: 11, color: 'text.secondary', lineHeight: 1.5, overflowWrap: 'anywhere' }}>
+                          {conversationName === actorName ? (isZh ? '查看聊天' : 'View Chat') : conversationName}
+                        </Link>
+                      ) : conversationName && conversationName !== actorName ? (
+                        <Typography sx={{ fontSize: 11, color: 'text.secondary', lineHeight: 1.5, overflowWrap: 'anywhere' }}>
+                          {conversationName}
+                        </Typography>
+                      ) : null}
+                    </Stack>
                     {developerMode && showMomentDebug && moment.debugEvidence.length ? (
                       <Box sx={{ mt: 1.25, p: 1, borderRadius: 1, bgcolor: 'action.hover' }}>
                         <Typography variant="caption" sx={{ display: 'block', fontWeight: 760, mb: 0.5 }}>
@@ -436,7 +481,7 @@ export default function MomentsPage() {
                     ) : null}
                   </Box>
                 </Stack>
-              </SurfaceCard>
+              </Box>
             );
           })}
           {hasMoreMoments ? (

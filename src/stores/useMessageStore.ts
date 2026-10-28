@@ -852,7 +852,7 @@ interface MessageStore {
   hasMessageWindow: (chatId: string) => boolean;
   loadMessages: (chatId: string, options?: MessageLoadOptions) => Promise<void>;
   addMessage: (msg: Omit<Message, 'id' | 'timestamp' | 'isDeleted'> & { timestamp?: number }) => Promise<Message>;
-  upsertMessage: (message: Message) => void;
+  upsertMessage: (message: Message, options?: { replaceAttachments?: boolean }) => void;
   upsertMessages: (messages: Message[]) => void;
   queueMessageSync: (message: Message) => void;
   flushPendingOperations: () => Promise<void>;
@@ -1436,11 +1436,20 @@ export const useMessageStore = create<MessageStore>()(
         return created as unknown as Message;
       },
 
-      upsertMessage: (message) => {
+      upsertMessage: (message, options) => {
         set((state) => {
           const currentWindow = state.messageWindowsByChatId[message.chatId];
           const current = currentWindow?.messages || [];
-          const nextActiveMessages = trimActiveMessages(mergeMessages(state.messages, [message]));
+          const merge = (messages: Message[]) => {
+            const merged = mergeMessages(messages, [message]);
+            // Explicit attachment edits replace the list; sync merges preserve missing media.
+            return options?.replaceAttachments
+              ? merged.map(item => item.id === message.id
+                ? { ...item, metadata: { ...item.metadata, attachments: message.metadata?.attachments || [] } }
+                : item)
+              : merged;
+          };
+          const nextActiveMessages = trimActiveMessages(merge(state.messages));
           const pendingOperations = state.pendingOperations.length > 0 && hasPendingCreateOperation(state.pendingOperations, message)
             ? upsertPendingCreateOperation(state.pendingOperations, message)
             : state.pendingOperations;
@@ -1450,7 +1459,7 @@ export const useMessageStore = create<MessageStore>()(
               pendingOperations,
             };
           }
-          const nextChatMessages = trimMessagesWithBranchContext(mergeMessages(current, [message]));
+          const nextChatMessages = trimMessagesWithBranchContext(merge(current));
           logMessageWindowDebug('upsert-one', {
             chatId: message.chatId,
             messageId: message.id,

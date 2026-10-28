@@ -17,7 +17,7 @@ export function buildCharacterFormTabs(params: {
   if (!isEditingExistingCharacter) return baseTabs;
   return [
     ...baseTabs,
-    { value: 4, label: isZh ? '运行态' : 'Runtime' },
+    { value: 4, label: isZh ? '状态' : 'Status' },
     { value: 5, label: isZh ? '活动' : 'Activities' },
     { value: 6, label: isZh ? '日记' : 'Diary' },
   ];

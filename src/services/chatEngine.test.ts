@@ -451,6 +451,29 @@ describe('chatEngine streaming preview', () => {
     expect(message.metadata?.activityUpdate).toMatchObject({ status: 'completed' });
   });
 
+  it('corrects non-member user routing with exact diagnostics and the same registry on retry', async () => {
+    generateResponseMock.mockReset();
+    generateResponseMock
+      .mockResolvedValueOnce(JSON.stringify({ messages: [{ content: '今晚继续核账。',
+        addressedTargets: { targetIds: ['user'], primaryTargetId: 'user' },
+        replyDebtTargets: { targetIds: ['user'], primaryTargetId: 'user' },
+      }] }))
+      .mockResolvedValueOnce(JSON.stringify({ messages: [{ content: '今晚继续核账。', addressedTargets: null, replyDebtTargets: null }] }));
+    const message = await generateSpeakerMessage({
+      chat: buildChat({ memberIds: ['mei', 'hui'] }), speaker: buildCharacter('mei', '美羊羊'),
+      characters: [buildCharacter('mei', '美羊羊'), buildCharacter('hui', '灰太狼')], messages: [], apiConfig: buildProfiles(),
+    });
+    expect(generateResponseMock).toHaveBeenCalledTimes(2);
+    const retry = String(generateResponseMock.mock.calls[1]?.[1]);
+    expect(retry).toContain('human is not a member');
+    expect(retry).not.toContain('id=user;');
+    expect(retry).not.toContain('"name":"用户/我","id":"user"');
+    expect(retry).toContain('messages[0].addressedTargets.targetIds[0]');
+    expect(retry).toContain('messages[0].replyDebtTargets.primaryTargetId');
+    expect(retry).toContain('"value":"user"');
+    expect(message.content).toBe('今晚继续核账。');
+  });
+
   it('retries continuity updates that reference a member outside the supplied registry', async () => {
     generateResponseMock.mockReset();
     generateResponseMock

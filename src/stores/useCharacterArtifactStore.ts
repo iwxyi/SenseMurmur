@@ -21,6 +21,7 @@ import { isCloudSyncBootstrapLocked } from '../services/cloudSyncBootstrapLock';
 import { createSyncScheduler } from './storeSyncScheduler';
 import { completeLocalOutboxWorkerOperation, markLocalOutboxWorkerOperation, mirrorLocalOutboxWorkerQueue, removeLocalOutboxWorkerOperation } from '../services/localOutboxWorkerBridge';
 import { characterPublicationOffset, DIARY_SPREAD_WINDOW_MS } from '../services/characterPublicationSchedule';
+import { isWorkspaceActive } from '../services/workspaceLifecycle';
 
 export type CharacterArtifactKind = 'birth_letter' | 'diary' | 'final_letter';
 export type CharacterArtifactJobStatus = 'pending' | 'running' | 'succeeded' | 'failed';
@@ -195,12 +196,15 @@ export async function resetCharacterArtifactStoreForAccountBoundary() {
   }
 }
 
-export function ensureCharacterArtifactStoreHydrated() {
-  if (useCharacterArtifactStore.persist.hasHydrated()) return Promise.resolve();
+export async function ensureCharacterArtifactStoreHydrated() {
+  if (useCharacterArtifactStore.persist.hasHydrated()) return;
   artifactHydrationPromise ??= Promise.resolve(useCharacterArtifactStore.persist.rehydrate()).finally(() => {
     artifactHydrationPromise = null;
   });
-  return artifactHydrationPromise;
+  await artifactHydrationPromise;
+  if (!useCharacterArtifactStore.persist.hasHydrated()) {
+    throw new Error('角色记录尚未成功读取，已停止后台处理以保护本地数据。');
+  }
 }
 
 function artifactSyncScope(query: CharacterArtifactQuery = {}) {
@@ -908,10 +912,16 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
 
       const processNext = async () => {
         if (processingPromise) return processingPromise;
+        const storageScope = getArtifactStorageKey();
+        const isCurrentScope = () => isWorkspaceActive() && getArtifactStorageKey() === storageScope;
 
         processingPromise = (async () => {
+          await ensureCharacterArtifactStoreHydrated();
+          if (!isCurrentScope()) return;
           await mirrorLocalOutboxWorkerQueue('artifact', get().jobs);
           for (;;) {
+            await ensureCharacterArtifactStoreHydrated();
+            if (!isCurrentScope()) return;
             const nextJob = filterCancelledSyncTasks(getArtifactStorageKey(), get().jobs)
               .find((job) => job.status === 'pending' && (job.readyAt || 0) <= now());
             if (!nextJob) break;
@@ -951,7 +961,8 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
                   language: useSettingsStore.getState().language === 'zh' ? 'zh' : 'en',
                 })
                 : await generateArtifactText(nextJob.kind, nextJob.snapshot, nextJob.relatedCharacters, nextJob.dateKey || null, modelProfile, recentDiaryTexts);
-              if (getLocalDataUserId() !== accountId || !get().jobs.some((job) => job.id === nextJob.id)) continue;
+              await ensureCharacterArtifactStoreHydrated();
+              if (!isCurrentScope() || getLocalDataUserId() !== accountId || !get().jobs.some((job) => job.id === nextJob.id)) continue;
               if (generated === null) {
                 set((state) => ({
                   jobs: state.jobs.filter((job) => job.id !== nextJob.id),
@@ -1006,6 +1017,8 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
               scheduleCloudSync();
             } catch (error) {
               console.error('[character-artifact] generation failed', { kind: nextJob.kind, error });
+              await ensureCharacterArtifactStoreHydrated();
+              if (!isCurrentScope()) return;
               const message = error instanceof Error ? error.message : String(error);
               set((state) => ({
                 jobs: state.jobs.map((job) => job.id === nextJob.id ? { ...job, status: 'failed' as const, error: message, attempts: job.attempts + 1, updatedAt: now() } : job),
@@ -1017,12 +1030,16 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
                 lastError: message,
               });
             } finally {
-              set({ isProcessing: false });
+              if (isCurrentScope() && useCharacterArtifactStore.persist.hasHydrated() && get().isProcessing) {
+                set({ isProcessing: false });
+              }
             }
           }
-        })().finally(() => {
-          processingPromise = null;
-          set({ isProcessing: false });
+        })().finally(async () => {
+          if (!isCurrentScope()) return;
+          await ensureCharacterArtifactStoreHydrated();
+          if (!isCurrentScope()) return;
+          if (get().isProcessing) set({ isProcessing: false });
           if (publicationTimer) clearTimeout(publicationTimer);
           const pendingTimes = get().jobs.filter((job) => job.status === 'pending').map((job) => job.readyAt || now());
           if (pendingTimes.length) {
@@ -1032,6 +1049,8 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
               if (getLocalDataUserId() === accountId) void processNext();
             }, Math.max(1, Math.min(...pendingTimes) - now()));
           }
+        }).finally(() => {
+          processingPromise = null;
         });
 
         return processingPromise;
@@ -1376,6 +1395,9 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
         },
         getSyncScopeStates: () => artifactSyncScopes.listStates(),
         resumeProcessing: async () => {
+          const storageScope = getArtifactStorageKey();
+          await ensureCharacterArtifactStoreHydrated();
+          if (!isWorkspaceActive() || getArtifactStorageKey() !== storageScope) return;
           if (processingPromise) return processingPromise;
           const hasTextModel = hasUsableDefaultTextAI(useSettingsStore.getState().aiProfiles);
           set((state) => ({
@@ -1389,6 +1411,7 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
             unreadLetterCount: computeUnreadLetterCount(state.items),
           }));
           await mirrorLocalOutboxWorkerQueue('artifact', get().jobs);
+          if (!isWorkspaceActive() || getArtifactStorageKey() !== storageScope) return;
           void get().syncCloud();
           await processNext();
         },

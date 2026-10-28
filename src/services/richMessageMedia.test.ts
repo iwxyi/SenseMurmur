@@ -10,6 +10,7 @@ vi.mock('./api', () => ({
   api: {
     createMediaAsset: vi.fn(),
     updateMessageMetadata: vi.fn(),
+    searchDoutu: vi.fn(),
   },
 }));
 
@@ -132,6 +133,41 @@ describe('processRichMessageMedia', () => {
     chatStoreState.chats = [];
     artifactStoreState.createImageArtifactFromAttachment.mockReset();
     vi.mocked(api.updateMessageMetadata).mockResolvedValue({});
+  });
+
+  it('searches stickers without a model profile and preserves the keyword on retry', async () => {
+    vi.mocked(api.searchDoutu)
+      .mockRejectedValueOnce(new Error('搜索暂时失败'))
+      .mockResolvedValueOnce({ keyword: '开心', imageUrl: 'https://example.test/happy.gif', pointCost: 1, balanceAfter: 9 });
+    const message = buildQueuedImageMessage({ metadata: { attachments: [{
+      id: 'sticker-1', kind: 'sticker', status: 'queued', promptText: '开心',
+      altText: '开心地笑', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    const upsertMessage = (next: Message) => upserts.push(next);
+    await processRichMessageMedia({ message, aiProfiles: [], upsertMessage });
+    const failed = upserts.at(-1)!;
+    expect(failed.metadata?.attachments?.[0].status).toBe('failed');
+    await retryRichMessageMedia({ message: failed, attachmentId: 'sticker-1', aiProfiles: [], upsertMessage });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({
+      status: 'ready', url: 'https://example.test/happy.gif', promptText: '开心',
+    }));
+    expect(api.searchDoutu).toHaveBeenCalledTimes(2);
+    for (const call of vi.mocked(api.searchDoutu).mock.calls) expect(call[0]).toBe('开心');
+  });
+
+  it('searches again when a ready sticker URL fails to load in the browser', async () => {
+    vi.mocked(api.searchDoutu).mockResolvedValue({ keyword: '开心', imageUrl: 'https://example.test/recovered.gif', pointCost: 1, balanceAfter: 9 });
+    const message = buildQueuedImageMessage({ metadata: { attachments: [{
+      id: 'sticker-broken', kind: 'sticker', status: 'ready', promptText: '开心',
+      altText: '开心地笑', url: 'https://example.test/missing.gif', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    await retryRichMessageMedia({ message, attachmentId: 'sticker-broken', aiProfiles: [], upsertMessage: next => upserts.push(next) });
+    expect(upserts[0].metadata?.attachments?.[0]).toMatchObject({ status: 'queued', url: undefined });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'ready', url: 'https://example.test/recovered.gif' }));
+    expect(api.searchDoutu).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.searchDoutu).mock.calls[0][0]).toBe('开心');
   });
 
   it('marks the message-level generation state as failed when image generation cannot run', async () => {

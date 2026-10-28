@@ -71,7 +71,8 @@ export default function MentionTextInput({ value, mentions, characters, inputRef
       bgcolor: (theme) => theme.palette.mode === 'light' ? 'rgba(248,250,252,0.74)' : 'rgba(255,255,255,0.065)',
       fontFamily: 'inherit', fontSize: '1rem', lineHeight: '1.4375em', opacity: disabled ? 0.6 : 1,
       '& textarea': { display: 'block', width: '100%', margin: 0, padding: 0, border: 0, outline: 0, resize: 'none', background: 'transparent', font: 'inherit', letterSpacing: 0,
-        color: 'transparent', WebkitTextFillColor: 'transparent', caretColor: 'text.primary', overflowWrap: 'break-word', position: 'relative', zIndex: 1,
+        // Unlike color, caretColor does not resolve MUI palette tokens.
+        color: 'transparent', WebkitTextFillColor: 'transparent', caretColor: (theme) => theme.palette.text.primary, overflowWrap: 'break-word', position: 'relative', zIndex: 1,
         '&::placeholder': { color: 'text.secondary', WebkitTextFillColor: 'currentColor', opacity: 1 } } }}>
       <Box aria-hidden sx={{ position: 'absolute', inset: '8.5px 14px', overflow: 'hidden', pointerEvents: 'none', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', color: 'text.primary' }}>
         <Box sx={{ transform: `translateY(-${scroll}px)` }}>{segments}{'\u200b'}</Box>

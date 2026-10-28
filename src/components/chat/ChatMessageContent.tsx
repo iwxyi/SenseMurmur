@@ -92,12 +92,14 @@ function MessageImageAttachment({
   attachment,
   onOpenImage,
   onOpenPrompt,
+  onRetryMedia,
   caption,
 }: {
   message: Message;
   attachment: MessageAttachment;
   onOpenImage?: (message: Message, attachment: MessageAttachment) => void;
   onOpenPrompt?: (attachment: MessageAttachment, event: MouseEvent<HTMLElement>) => void;
+  onRetryMedia?: (message: Message, attachmentId: string) => void | Promise<void>;
   caption?: string;
 }) {
   const knownSize = getAttachmentKnownSize(attachment);
@@ -114,6 +116,7 @@ function MessageImageAttachment({
   const isSticker = attachment.kind === 'sticker';
   const displaySize = activeImage.size || knownSize;
   const imageStatus = activeImage.status;
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const hasDeclaredRatio = Boolean(displaySize || attachment.aspectRatio);
   const ratioValue = displaySize ? displaySize.width / displaySize.height : parseAttachmentRatio(attachment);
   const maxWidth = getAttachmentMaxWidth(ratioValue, attachment.kind);
@@ -132,7 +135,7 @@ function MessageImageAttachment({
         display: 'grid',
         gridTemplateColumns: 'minmax(0, 1fr)',
         gap: 0.45,
-        width: isSticker && !hasDeclaredRatio ? 'fit-content' : width,
+        width: imageStatus === 'failed' ? 200 : isSticker && !hasDeclaredRatio ? 'fit-content' : width,
         minWidth: 0,
         maxWidth: '100%',
         justifySelf: 'start',
@@ -143,15 +146,16 @@ function MessageImageAttachment({
           position: 'relative',
           minWidth: isSticker && !hasDeclaredRatio && imageStatus !== 'failed' ? 44 : 0,
           maxWidth: '100%',
-          aspectRatio: isSticker && !hasDeclaredRatio ? undefined : `${ratioValue} / 1`,
+          aspectRatio: imageStatus === 'failed' || isSticker ? undefined : `${ratioValue} / 1`,
           minHeight: isSticker && !hasDeclaredRatio && imageStatus !== 'failed' ? 44 : 0,
-          width: isSticker && !hasDeclaredRatio ? 'fit-content' : undefined,
+          width: imageStatus !== 'failed' && isSticker ? 'fit-content' : undefined,
           borderRadius: 1.5,
           overflow: 'hidden',
           bgcolor: 'action.hover',
         }}
       >
           <Box
+            key={loadAttempt}
             component="img"
             src={imageSource}
             alt={attachment.altText}
@@ -186,15 +190,15 @@ function MessageImageAttachment({
               onOpenPrompt(attachment, event);
             }}
             sx={{
-              width: isSticker && !hasDeclaredRatio ? 'auto' : '100%',
+              width: isSticker ? 'auto' : '100%',
               boxSizing: 'border-box',
-              height: isSticker && !hasDeclaredRatio ? 'auto' : '100%',
+              height: isSticker ? 'auto' : '100%',
               opacity: imageStatus === 'ready' ? 1 : 0,
               transition: 'opacity 120ms ease-out',
-              maxWidth: isSticker ? 'min(100%, 240px)' : '100%',
-              maxHeight: isSticker ? 'min(56vh, 240px)' : 'min(56vh, 520px)',
+              maxWidth: isSticker ? `min(100%, 240px${displaySize ? `, ${displaySize.width}px` : ''})` : '100%',
+              maxHeight: isSticker ? `min(56vh, 240px${displaySize ? `, ${displaySize.height}px` : ''})` : 'min(56vh, 520px)',
               objectFit: 'contain',
-              display: 'block',
+              display: imageStatus === 'failed' ? 'none' : 'block',
               cursor: onOpenImage ? 'zoom-in' : 'default',
               borderRadius: 1.5,
               border: '1px solid',
@@ -208,8 +212,16 @@ function MessageImageAttachment({
             </Box>
           ) : null}
           {imageStatus === 'failed' ? (
-            <Box role="status" sx={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', p: 1 }}>
-              <Typography variant="caption" color="text.secondary">{isSticker ? '表情包加载失败' : '图片加载失败'}</Typography>
+            <Box sx={{ display: 'grid', justifyItems: 'center', alignContent: 'center', gap: 1, minHeight: 112, boxSizing: 'border-box', p: 1.5 }}>
+              <Typography role="status" variant="caption" color="text.secondary" sx={{ overflowWrap: 'anywhere', textAlign: 'center' }}>{isSticker ? '表情包加载失败' : '图片加载失败'}</Typography>
+              <Button size="small" variant="outlined" onClick={() => {
+                if (isSticker && onRetryMedia) {
+                  void onRetryMedia(message, attachment.id);
+                  return;
+                }
+                setLoadedImage({ source: imageSource, size: knownSize, status: 'loading' });
+                setLoadAttempt((attempt) => attempt + 1);
+              }}>重试</Button>
             </Box>
           ) : null}
       </Box>
@@ -341,7 +353,6 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
       minWidth: 0,
       maxWidth: '100%',
       boxSizing: 'border-box' as const,
-      maxHeight: isSticker ? 'min(56vh, 240px)' : 'min(56vh, 520px)',
       justifySelf: 'start',
       aspectRatio: ratio,
       borderRadius: 1.5,
@@ -368,12 +379,13 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
             caption={captionOverride || attachment.caption}
             onOpenImage={onOpenImage}
             onOpenPrompt={onOpenPrompt}
+            onRetryMedia={onRetryMedia}
           />
         );
       }
       return (
-        <Box key={attachment.id} sx={getMediaFrameStyle(attachment)}>
-          <Box sx={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', p: 1.5, textAlign: 'center' }}>
+        <Box key={attachment.id} sx={{ ...getMediaFrameStyle(attachment), display: 'grid', aspectRatio: attachment.status === 'failed' ? undefined : getMediaFrameStyle(attachment).aspectRatio }}>
+          <Box sx={{ display: 'grid', placeItems: 'center', minWidth: 0, minHeight: 112, p: 1.5, boxSizing: 'border-box', textAlign: 'center' }}>
             <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 0.75, minWidth: 0, maxWidth: '85%' }}>
               <Typography variant="caption" color={attachment.status === 'failed' ? 'error' : 'text.secondary'}>
                 {getAttachmentStatusLabel(attachment)}

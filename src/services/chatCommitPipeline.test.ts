@@ -134,7 +134,7 @@ describe('runChatCommitPipeline', () => {
     }));
   });
 
-  it('waits for a server message id before processing queued media in cloud mode', async () => {
+  it.each(['image', 'sticker'] as const)('waits for a server message id before processing queued %s in cloud mode', async (kind) => {
     isLocalOnlyMediaModeMock.mockReturnValue(false);
     const chat = buildChat();
     const upsertMessage = vi.fn();
@@ -153,7 +153,7 @@ describe('runChatCommitPipeline', () => {
       metadata: {
         attachments: [{
           id: 'image-1',
-          kind: 'image',
+          kind,
           status: 'queued',
           promptText: 'A chat image',
           altText: '一张图',
@@ -183,7 +183,7 @@ describe('runChatCommitPipeline', () => {
       },
       streamingMessage: null,
       currentMessages: [],
-      aiProfiles: [{
+      aiProfiles: kind === 'sticker' ? [] : [{
         id: 'image-default',
         name: '默认图片',
         type: 'image',
@@ -215,7 +215,7 @@ describe('runChatCommitPipeline', () => {
     expect(processRichMessageMediaMock).toHaveBeenCalledWith(expect.objectContaining({
       message: serverMessage,
       characters: expect.arrayContaining([expect.objectContaining({ id: 'char-1' })]),
-      aiProfiles: expect.arrayContaining([expect.objectContaining({ id: 'image-default' })]),
+      aiProfiles: kind === 'sticker' ? [] : expect.arrayContaining([expect.objectContaining({ id: 'image-default' })]),
       upsertMessage,
     }));
   });

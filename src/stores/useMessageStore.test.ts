@@ -92,6 +92,24 @@ async function waitForAssertion(assertion: () => void, attempts = 20) {
 }
 
 describe('useMessageStore', () => {
+  it('replaces explicitly edited attachments in active messages, cached windows and pending uploads', async () => {
+    const { useMessageStore } = await import('./useMessageStore');
+    const message: Message = { ...buildMessage(1), metadata: { attachments: ['remove', 'keep'].map(id => ({
+      id, kind: 'sticker', status: 'ready', altText: id, url: `https://example.test/${id}.gif`, createdAt: 1, updatedAt: 1,
+    })) } };
+    useMessageStore.setState({ activeChatId: message.chatId, messages: [message],
+      messageWindowsByChatId: { [message.chatId]: { messages: [message], lastSyncedAt: 0, updatedAt: 1 } },
+      pendingOperations: [{ id: 'pending-file-edit', kind: 'create', chatId: message.chatId,
+        localMessageId: message.id, messageId: message.id, payload: message, createdAt: 1, attemptCount: 0, status: 'pending' }],
+    });
+    const edited = { ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.slice(1) } };
+    useMessageStore.getState().upsertMessage(edited, { replaceAttachments: true });
+    const state = useMessageStore.getState();
+    for (const saved of [state.messages[0], state.messageWindowsByChatId[message.chatId].messages[0], state.pendingOperations[0].payload]) {
+      expect(saved?.metadata?.attachments?.map(attachment => attachment.id)).toEqual(['keep']);
+    }
+  });
+
   it('keeps the parent edge when syncing after the active page has closed', async () => {
     localStorage.setItem(storageKey('auth-mode'), 'cloud');
     const { useAuthStore } = await import('./useAuthStore');

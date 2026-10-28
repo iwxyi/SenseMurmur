@@ -34,7 +34,7 @@ describe('ChatMessageContent media layout', () => {
     })).toBe(240);
   });
 
-  it('uses sticker metadata dimensions and shows a loading state until decoding finishes', () => {
+  it('keeps stickers at their intrinsic size even when metadata dimensions are present', () => {
     const message = {
       id: 'sticker-message', chatId: 'chat-1', type: 'ai', senderId: 'a', senderName: '甲',
       content: '', timestamp: 1, emotion: 0, isDeleted: false,
@@ -42,8 +42,8 @@ describe('ChatMessageContent media layout', () => {
         width: 320, height: 160, url: 'data:image/png;base64,AAA', createdAt: 1, updatedAt: 1 }] },
     } as Message;
     const html = renderToStaticMarkup(createElement(MessageContent, { message }));
-    expect(html).toContain('aspect-ratio:2/1');
-    expect(html).toContain('height:100%');
+    expect(html).not.toContain('aspect-ratio:2/1');
+    expect(html).toContain('height:auto');
     expect(html).toContain('aria-label="正在加载表情包"');
   });
 

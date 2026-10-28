@@ -111,7 +111,7 @@ const STORY_READING_POSITION_SAVE_MS = 700;
 
 function isRecoverableRichMediaAttachment(attachment: Pick<MessageAttachment, 'kind' | 'status'>) {
   return (
-    (attachment.kind === 'image' || attachment.kind === 'audio')
+    (attachment.kind === 'image' || attachment.kind === 'audio' || attachment.kind === 'sticker')
     && (attachment.status === 'queued' || attachment.status === 'generating')
   );
 }
@@ -1162,7 +1162,7 @@ export default function ChatDetailPage() {
       .map((attachment) => `${message.id}:${message.serverId || 'pending'}:${attachment.id}:${attachment.updatedAt || attachment.createdAt || 0}`))
     .join('|'), [currentChatMessages]);
   useEffect(() => {
-    if (!queuedRichMediaSignature || !aiProfiles.length) return undefined;
+    if (!queuedRichMediaSignature) return undefined;
     const messagesWithQueuedMedia = currentChatMessages.filter((message) => (
       (!cloudRichMediaRequiresServerId || Boolean(message.serverId))
       && message.metadata?.attachments?.some(isRecoverableRichMediaAttachment)

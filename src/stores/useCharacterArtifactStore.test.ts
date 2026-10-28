@@ -153,6 +153,79 @@ describe('useCharacterArtifactStore', () => {
     settingsStore.getState().setAIGeneration({ enableMoments: true, enableDiaries: true });
   });
 
+  it('waits for hydration before resuming and avoids an empty worker cleanup write', async () => {
+    let finishRead!: () => void;
+    const read = new Promise<void>((resolve) => { finishRead = resolve; });
+    const hydrated = vi.spyOn(artifactStore.persist, 'hasHydrated').mockReturnValue(false);
+    const rehydrate = vi.spyOn(artifactStore.persist, 'rehydrate').mockImplementation(async () => {
+      await read;
+      hydrated.mockReturnValue(true);
+    });
+    const changed = vi.fn();
+    const unsubscribe = artifactStore.subscribe(changed);
+    try {
+      const pending = artifactStore.getState().resumeProcessing();
+      await Promise.resolve();
+      expect(changed).not.toHaveBeenCalled();
+      expect(rehydrate).toHaveBeenCalledTimes(1);
+      finishRead();
+      await pending;
+      expect(changed).toHaveBeenCalledTimes(1);
+      expect(artifactStore.getState().isProcessing).toBe(false);
+    } finally {
+      unsubscribe();
+      rehydrate.mockRestore();
+      hydrated.mockRestore();
+    }
+  });
+
+  it('stops processing when hydration finishes without a successful read', async () => {
+    const hydrated = vi.spyOn(artifactStore.persist, 'hasHydrated').mockReturnValue(false);
+    const rehydrate = vi.spyOn(artifactStore.persist, 'rehydrate').mockResolvedValue(undefined);
+    const changed = vi.fn();
+    const unsubscribe = artifactStore.subscribe(changed);
+    try {
+      await expect(artifactStore.getState().resumeProcessing()).rejects.toThrow('角色记录尚未成功读取');
+      expect(changed).not.toHaveBeenCalled();
+    } finally {
+      unsubscribe();
+      rehydrate.mockRestore();
+      hydrated.mockRestore();
+    }
+  });
+
+  it('waits for a concurrent storage read before committing a generated diary', async () => {
+    let finishGeneration!: (value: string) => void;
+    generateDailyDiaryMock.mockImplementationOnce(() => new Promise((resolve) => { finishGeneration = resolve; }));
+    artifactStore.getState().syncCharacters([{ ...buildCharacter(), isPreset: true }]);
+    const processing = artifactStore.getState().resumeProcessing();
+    await vi.waitFor(() => expect(generateDailyDiaryMock).toHaveBeenCalledOnce());
+    let finishRead!: () => void;
+    const read = new Promise<void>((resolve) => { finishRead = resolve; });
+    const hydrated = vi.spyOn(artifactStore.persist, 'hasHydrated').mockReturnValue(false);
+    const rehydrate = vi.spyOn(artifactStore.persist, 'rehydrate').mockImplementation(async () => {
+      await read;
+      hydrated.mockReturnValue(true);
+    });
+    const changed = vi.fn();
+    const unsubscribe = artifactStore.subscribe(changed);
+    try {
+      finishGeneration('今天终于把那件心事说清楚了。');
+      await vi.waitFor(() => expect(rehydrate).toHaveBeenCalledOnce());
+      expect(changed).not.toHaveBeenCalled();
+      expect(artifactStore.getState().items).toHaveLength(0);
+      finishRead();
+      await processing;
+      expect(artifactStore.getState().getDiaryEntries('c1')).toHaveLength(1);
+      expect(artifactStore.getState().isProcessing).toBe(false);
+    } finally {
+      finishRead();
+      unsubscribe();
+      rehydrate.mockRestore();
+      hydrated.mockRestore();
+    }
+  });
+
   it('marks only the opened letter read and ignores repeated or invalid acknowledgments', () => {
     artifactStore.setState({ items: [buildLetter('one'), buildLetter('two'), { ...buildLetter('diary'), kind: 'diary' }, { ...buildLetter('deleted'), deletedAt: 2 }, { ...buildLetter('placeholder'), text: '' }], unreadLetterCount: 3 });
     artifactStore.getState().markLetterRead('one');
