@@ -27,6 +27,7 @@ import { buildInteractiveSurfaceSx, compactPillChipSx } from '../../styles/inter
 import BaseCalendar from './BaseCalendar';
 import ManualCalendarEventDialog from './ManualCalendarEventDialog';
 import type { RuntimeEventV2 } from '../../types/runtimeEvent';
+import { generateId } from '../../utils/id';
 
 const calendarFilterChipSx = {
   ...compactPillChipSx,
@@ -424,14 +425,45 @@ export default function WorldCalendarPanel({
     }
     const existingEvents = targetChat.runtimeEventsV2 || [];
     if (existingEvents.some((item) => item.id === event.id)) return;
+    const mergedIds = detailItem?.mergedItemIds;
+    const events = mergedIds?.length && mergedIds.includes(String((event.payload as { calendarItemId?: string }).calendarItemId))
+      ? mergedIds.map((id, index): RuntimeEventV2 => ({
+        ...event,
+        id: index === 0 ? event.id : `manual-calendar-event-${generateId()}`,
+        payload: { ...event.payload, calendarItemId: id },
+      }))
+      : [event];
     await updateChat(chatId, {
-      runtimeEventsV2: [...existingEvents, event],
+      runtimeEventsV2: [...existingEvents, ...events],
     });
     setSnackbar({
       open: true,
       message: isZh ? '日程已更新' : 'Event updated',
       severity: 'success',
     });
+  };
+
+  const handleDeleteCalendarItem = async (item: WorldCalendarItem) => {
+    const targetChat = item.sourceRefs
+      .map((source) => chats.find((chat) => chat.id === source.conversationId && !chat.deletedAt))
+      .find((chat): chat is GroupChat => Boolean(chat)) || chats.find((chat) => !chat.deletedAt);
+    if (!targetChat) throw new Error(isZh ? '关联会话不存在，无法删除日程' : 'The source chat is unavailable.');
+    const now = Date.now();
+    const tombstones: RuntimeEventV2[] = (item.mergedItemIds || [item.id]).map((id) => ({
+      id: `calendar-delete-${generateId()}`,
+      conversationId: targetChat.id,
+      kind: 'calendar_item_patch',
+      createdAt: now,
+      actorIds: [],
+      targetIds: [],
+      summary: isZh ? `从日历移除：${item.title}` : `Removed from calendar: ${item.title}`,
+      visibility: 'derived_public',
+      payload: { calendarItemId: id, deleted: true, source: 'manual_calendar_entry' },
+    }));
+    await updateChat(targetChat.id, {
+      runtimeEventsV2: [...(targetChat.runtimeEventsV2 || []), ...tombstones],
+    });
+    setSnackbar({ open: true, message: isZh ? '日程已删除' : 'Event deleted', severity: 'success' });
   };
 
   return (
@@ -726,6 +758,7 @@ export default function WorldCalendarPanel({
         isZh={isZh}
         onClose={() => setDetailItemId(null)}
         onCreate={handleSaveCalendarEdit}
+        onDelete={handleDeleteCalendarItem}
       />
     </Box>
   );

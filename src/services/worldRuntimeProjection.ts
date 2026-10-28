@@ -16,6 +16,7 @@ export interface WorldCalendarSourceRef {
 
 export interface WorldCalendarItem {
   id: string;
+  mergedItemIds?: string[];
   derivedFromItemId?: string;
   kind: 'activity' | 'travel' | 'reminder' | 'blocked_time' | 'rest' | 'preparation';
   status: 'tentative' | 'planned' | 'confirmed' | 'in_progress' | 'completed' | 'cancelled';
@@ -466,6 +467,7 @@ function mergeCalendarItem(existing: WorldCalendarItem, incoming: WorldCalendarI
   });
   return {
     ...existing,
+    mergedItemIds: Array.from(new Set([...(existing.mergedItemIds || [existing.id]), ...(incoming.mergedItemIds || [incoming.id])])),
     status: existing.status === 'confirmed' || incoming.status === 'confirmed' ? 'confirmed' : incoming.status,
     title: incoming.title || existing.title,
     activityType: incoming.activityType || existing.activityType,
@@ -483,6 +485,29 @@ function mergeCalendarItem(existing: WorldCalendarItem, incoming: WorldCalendarI
     conflict: existing.conflict || incoming.conflict || null,
     updatedAt: Math.max(existing.updatedAt, incoming.updatedAt),
   };
+}
+
+function mergeMatchingCalendarActivities(items: WorldCalendarItem[]) {
+  const bySchedule = new Map<string, WorldCalendarItem>();
+  for (const item of items) {
+    if (item.kind !== 'activity' || item.status === 'cancelled') {
+      bySchedule.set(item.id, item);
+      continue;
+    }
+    const time = typeof item.startAt === 'number'
+      ? `at:${item.startAt}`
+      : item.timeHint?.trim().toLowerCase()
+        ? `hint:${new Date(item.updatedAt).toDateString()}:${item.timeHint.trim().toLowerCase()}`
+        : null;
+    if (!time) {
+      bySchedule.set(item.id, item);
+      continue;
+    }
+    const key = `activity:${item.title.trim().toLowerCase()}:${time}`;
+    const existing = bySchedule.get(key);
+    bySchedule.set(key, existing ? mergeCalendarItem(existing, item) : item);
+  }
+  return [...bySchedule.values()];
 }
 
 function mergeSourceRef(existing: WorldCalendarItem['sourceRefs'], incoming: WorldCalendarSourceRef) {
@@ -762,6 +787,16 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
   const now = typeof options.now === 'number' ? options.now : Date.now();
   const names = characterNameMap(characters);
   const items = new Map<string, WorldCalendarItem>();
+  const deletedItemIds = new Set<string>();
+  chats.forEach((chat) => (chat.runtimeEventsV2 || []).forEach((event) => {
+    if (!isCalendarPatchEvent(event)) return;
+    if (options.publicOnly && ((event.visibility && event.visibility !== 'public' && event.visibility !== 'derived_public')
+      || event.visibleToIds?.length || event.visibleToRoles?.length)) return;
+    if (getPayload(event).deleted === true) {
+      const id = resolvePatchCalendarId(event);
+      if (id) deletedItemIds.add(id);
+    }
+  }));
   chats.forEach((chat) => {
     const events = (chat.runtimeEventsV2 || [])
       .filter((event) => !options.publicOnly || ((!event.visibility || event.visibility === 'public' || event.visibility === 'derived_public')
@@ -1014,7 +1049,9 @@ export function projectWorldCalendar(chats: GroupChat[], characters: AICharacter
       }));
     });
   });
-  const projectedItems = detectConflicts(Array.from(items.values()))
+  const projectedItems = detectConflicts(mergeMatchingCalendarActivities(
+    Array.from(items.values()).filter((item) => !deletedItemIds.has(item.id) && !deletedItemIds.has(item.derivedFromItemId || '')),
+  ))
     .map((item) => ({
       ...item,
       status: options.inferTemporalStatus === false ? item.status : deriveTemporalCalendarStatus(item.status, item.startAt, item.endAt, now),

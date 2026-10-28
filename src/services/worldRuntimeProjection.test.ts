@@ -62,6 +62,37 @@ function buildChat(id: string, name: string, runtimeEventsV2: RuntimeEventV2[]) 
 }
 
 describe('worldRuntimeProjection', () => {
+  it('merges same-title activities at the same time and hides every merged source after deletion', () => {
+    const now = Date.now();
+    const makeEvent = (id: string, participants: string[]): RuntimeEventV2 => ({
+      id, conversationId: 'chat-1', kind: 'event_candidate', createdAt: now + participants.length,
+      actorIds: participants, summary: '羊肉火锅', visibility: 'derived_public',
+      payload: { eventKind: 'social_outing', dedupeKey: id, title: '羊肉火锅', activityType: '羊肉火锅',
+        status: 'planned', timeHint: '晚上8点', participantIds: participants },
+    });
+    const chat = buildChat('chat-1', '群聊', [makeEvent('outing-a', ['a']), makeEvent('outing-b', ['a', 'b'])]);
+    const people = [character('a', '甲'), character('b', '乙')];
+    const merged = projectWorldCalendarItems([chat], people, { now });
+    expect(merged).toHaveLength(1);
+    expect(merged[0].participantIds).toEqual(['a', 'b']);
+    expect(merged[0].mergedItemIds).toEqual(['outing-a', 'outing-b']);
+
+    chat.runtimeEventsV2?.push(...merged[0].mergedItemIds!.map((id, index): RuntimeEventV2 => ({
+      id: `edit-${index}`, conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now + 50 + index,
+      actorIds: [], summary: '改到明天', visibility: 'derived_public',
+      payload: { calendarItemId: id, title: '明天的羊肉火锅', startAt: now + 86_400_000 },
+    })));
+    const edited = projectWorldCalendarItems([chat], people, { now });
+    expect(edited).toHaveLength(1);
+    expect(edited[0].title).toBe('明天的羊肉火锅');
+
+    chat.runtimeEventsV2?.push(...merged[0].mergedItemIds!.map((id, index): RuntimeEventV2 => ({
+      id: `delete-${index}`, conversationId: 'chat-1', kind: 'calendar_item_patch', createdAt: now + 100 + index,
+      actorIds: [], summary: '从日历移除', visibility: 'derived_public', payload: { calendarItemId: id, deleted: true },
+    })));
+    expect(projectWorldCalendarItems([chat], people, { now })).toEqual([]);
+  });
+
   it('filters private calendar sources and patches before merging only when publicOnly is requested', () => {
     const now = Date.now();
     const chat = buildChat('chat-1', '群聊', [

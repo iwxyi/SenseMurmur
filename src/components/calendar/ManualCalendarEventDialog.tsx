@@ -9,6 +9,7 @@ import {
   Dialog,
   DialogActions,
   DialogContent,
+  DialogContentText,
   DialogTitle,
   FormControlLabel,
   InputAdornment,
@@ -20,6 +21,7 @@ import SearchIcon from '@mui/icons-material/Search';
 import ForumIcon from '@mui/icons-material/Forum';
 import PersonIcon from '@mui/icons-material/Person';
 import LockIcon from '@mui/icons-material/Lock';
+import DeleteOutlinedIcon from '@mui/icons-material/DeleteOutlined';
 import type { GroupChat } from '../../types/chat';
 import type { AICharacter } from '../../types/character';
 import type { RuntimeEventV2 } from '../../types/runtimeEvent';
@@ -40,6 +42,7 @@ interface ManualCalendarEventDialogProps {
   isZh: boolean;
   onClose: () => void;
   onCreate: (chatId: string, event: RuntimeEventV2) => Promise<void>;
+  onDelete?: (item: WorldCalendarItem) => Promise<void>;
 }
 
 interface FormState {
@@ -347,6 +350,7 @@ export default function ManualCalendarEventDialog({
   isZh,
   onClose,
   onCreate,
+  onDelete,
 }: ManualCalendarEventDialogProps) {
   const activeChats = useMemo(() => chats.filter((chat) => !chat.deletedAt), [chats]);
   const activeCharacters = useMemo(() => characters.filter((character) => !character.deletedAt), [characters]);
@@ -359,6 +363,7 @@ export default function ManualCalendarEventDialog({
   const [error, setError] = useState('');
   const [memberDialogOpen, setMemberDialogOpen] = useState(false);
   const [conversationDialogOpen, setConversationDialogOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -367,6 +372,7 @@ export default function ManualCalendarEventDialog({
       : createInitialForm(activeChats, activeCharacters, resolvedFixedConversationId, initialActorId));
     setSubmitting(false);
     setError('');
+    setConfirmDelete(false);
   }, [activeCharacters, activeChats, editingItem, initialActorId, isZh, open, resolvedFixedConversationId]);
 
   const selectedCharacterNames = useMemo(() => {
@@ -469,6 +475,22 @@ export default function ManualCalendarEventDialog({
       onClose();
     } catch {
       setError(isZh ? '保存失败，请稍后重试' : 'Failed to save. Try again later.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!editingItem || !onDelete || submitting) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      await onDelete(editingItem);
+      setConfirmDelete(false);
+      onClose();
+    } catch (cause) {
+      setConfirmDelete(false);
+      setError(cause instanceof Error ? cause.message : (isZh ? '删除失败，请稍后重试' : 'Failed to delete. Try again later.'));
     } finally {
       setSubmitting(false);
     }
@@ -595,11 +617,26 @@ export default function ManualCalendarEventDialog({
         </Stack>
       </DialogContent>
       <DialogActions sx={{ px: 3, pb: 2.5 }}>
+        {editingItem && onDelete ? (
+          <Button color="error" startIcon={<DeleteOutlinedIcon />} onClick={() => setConfirmDelete(true)} disabled={submitting} sx={{ mr: 'auto' }}>
+            {isZh ? '删除' : 'Delete'}
+          </Button>
+        ) : null}
         <Button onClick={onClose} disabled={submitting}>{isZh ? '取消' : 'Cancel'}</Button>
         <Button variant="contained" onClick={handleSubmit} disabled={submitting || !activeChats.length}>
           {submitting ? (isZh ? '保存中...' : 'Saving...') : (editingItem ? (isZh ? '保存修改' : 'Save changes') : (isZh ? '保存' : 'Save'))}
         </Button>
       </DialogActions>
+      <Dialog open={confirmDelete} onClose={() => setConfirmDelete(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>{isZh ? '删除日程？' : 'Delete event?'}</DialogTitle>
+        <DialogContent>
+          <DialogContentText>{isZh ? '这项日程将从日历中移除，聊天记录不受影响。' : 'This event will be removed from the calendar. Chat history is unchanged.'}</DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmDelete(false)} disabled={submitting}>{isZh ? '取消' : 'Cancel'}</Button>
+          <Button color="error" variant="contained" onClick={() => { void handleDelete(); }} disabled={submitting}>{isZh ? '删除' : 'Delete'}</Button>
+        </DialogActions>
+      </Dialog>
       <MemberSelectionDialog
         open={memberDialogOpen}
         onClose={() => setMemberDialogOpen(false)}
