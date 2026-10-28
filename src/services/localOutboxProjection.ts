@@ -3,6 +3,7 @@ export type LocalOutboxStatus = 'pending' | 'syncing' | 'failed' | 'succeeded';
 
 export interface LocalOutboxPatchOperationLike {
   id: string;
+  targetLabel?: string;
   kind?: string;
   entityId?: string;
   targetIds?: string[];
@@ -17,6 +18,7 @@ export interface LocalOutboxPatchOperationLike {
 
 export interface LocalOutboxMessageOperationLike {
   id: string;
+  targetLabel?: string;
   kind?: string;
   chatId?: string;
   localMessageId?: string;
@@ -31,6 +33,7 @@ export interface LocalOutboxMessageOperationLike {
 
 export interface LocalOutboxArtifactJobLike {
   id: string;
+  targetLabel?: string;
   kind?: string;
   characterId?: string;
   dateKey?: string | null;
@@ -44,6 +47,7 @@ export interface LocalOutboxArtifactJobLike {
 
 export interface LocalOutboxItem {
   id: string;
+  targetLabel?: string;
   scopeType: LocalOutboxScopeType;
   kind: string;
   targetId: string;
@@ -94,6 +98,7 @@ function patchOperationToOutbox(scopeType: 'character' | 'chat', operation: Loca
   const targetIds = operation.targetIds?.length ? operation.targetIds : [operation.entityId || ''].filter(Boolean);
   return {
     id: operation.id,
+    targetLabel: operation.targetLabel || (typeof operation.patch?.name === 'string' ? operation.patch.name : undefined),
     scopeType,
     kind,
     targetId: operation.entityId || targetIds[0] || '',
@@ -116,6 +121,7 @@ function messageOperationToOutbox(operation: LocalOutboxMessageOperationLike): L
   const targetId = operation.messageId || operation.localMessageId || operation.chatId || '';
   return {
     id: operation.id,
+    targetLabel: operation.targetLabel,
     scopeType: 'message',
     kind,
     targetId,
@@ -137,6 +143,7 @@ function artifactJobToOutbox(job: LocalOutboxArtifactJobLike): LocalOutboxItem |
   const targetId = job.characterId || '';
   return {
     id: job.id,
+    targetLabel: job.targetLabel,
     scopeType: 'artifact',
     kind: job.kind || 'generate',
     targetId,

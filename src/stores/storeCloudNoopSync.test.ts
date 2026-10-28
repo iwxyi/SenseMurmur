@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { storageKey } from '../constants/brand';
 import {
   DEFAULT_CONVERSATION_DIRECTOR_CONTROLS,
@@ -34,6 +34,7 @@ const apiMocks = vi.hoisted(() => ({
   getMessages: vi.fn(),
   getDeletedChats: vi.fn(),
   syncChatPatch: vi.fn(),
+  createChat: vi.fn(),
   getCharacter: vi.fn(),
   getCharacters: vi.fn(),
   getDeletedCharacters: vi.fn(),
@@ -57,6 +58,7 @@ vi.mock('../services/api', async () => {
       getMessages: apiMocks.getMessages,
       getDeletedChats: apiMocks.getDeletedChats,
       syncChatPatch: apiMocks.syncChatPatch,
+      createChat: apiMocks.createChat,
       getCharacter: apiMocks.getCharacter,
       getCharacters: apiMocks.getCharacters,
       getDeletedCharacters: apiMocks.getDeletedCharacters,
@@ -149,6 +151,7 @@ describe('cloud no-op sync', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.stubGlobal('localStorage', createStorageMock());
+    vi.stubGlobal('navigator', { locks: { request: async (_name: string, callback: () => unknown) => callback() } });
     seedCloudAuth();
     Object.values(apiMocks).forEach((mock) => mock.mockReset());
     apiMocks.getSyncChanges.mockResolvedValue({
@@ -166,6 +169,7 @@ describe('cloud no-op sync', () => {
     });
     apiMocks.login.mockResolvedValue({
       token: 'token',
+      refreshToken: 'refresh-token',
       user: {
         id: 'local-user',
         phone: '13500000000',
@@ -177,6 +181,164 @@ describe('cloud no-op sync', () => {
     apiMocks.getSettings.mockResolvedValue({});
     apiMocks.syncChatPatch.mockResolvedValue({ success: true, accepted: true, revision: 1 });
     apiMocks.syncCharacterPatch.mockResolvedValue({ success: true, accepted: true, revision: 1 });
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('clears selected chat and character tasks while retaining content, other tasks, and running requests', async () => {
+    const { useChatStore } = await import('./useChatStore');
+    const { useCharacterStore } = await import('./useCharacterStore');
+    const operations = (['failed', 'pending', 'syncing'] as const).map((status) => ({
+      id: status, entityId: 'chat-1', kind: 'patch' as const, targetIds: ['chat-1'],
+      clientTimestamp: 100, patch: { name: '未上传名称' }, status, attemptCount: 1,
+    }));
+    useChatStore.setState({ chats: [chat()], pendingOperations: operations, fieldConflicts: [] });
+    useCharacterStore.setState({ characters: [character()], pendingOperations: operations, fieldConflicts: [] });
+
+    useChatStore.getState().clearSyncTasks(['failed']);
+    useCharacterStore.getState().clearSyncTasks(['failed']);
+    expect(useChatStore.getState().pendingOperations.map((item) => item.id)).toEqual(['pending', 'syncing']);
+    expect(useCharacterStore.getState().pendingOperations.map((item) => item.id)).toEqual(['pending', 'syncing']);
+
+    useChatStore.getState().clearSyncTasks(['pending', 'syncing']);
+    useCharacterStore.getState().clearSyncTasks(['pending', 'syncing']);
+    expect(useChatStore.getState().pendingOperations.map((item) => item.id)).toEqual(['syncing']);
+    expect(useCharacterStore.getState().pendingOperations.map((item) => item.id)).toEqual(['syncing']);
+    expect(useChatStore.getState().chats).toEqual([chat()]);
+    expect(useCharacterStore.getState().characters).toEqual([character()]);
+    expect(useChatStore.getState().pendingEditSyncCount).toBe(1);
+    expect(useCharacterStore.getState().pendingEditSyncCount).toBe(1);
+
+    // A late callback or stale tab snapshot must not restore the cancelled tasks.
+    useChatStore.setState({ pendingOperations: operations });
+    useCharacterStore.setState({ pendingOperations: operations });
+    expect(useChatStore.getState().pendingOperations.map((item) => item.id)).toEqual(['syncing']);
+    expect(useCharacterStore.getState().pendingOperations.map((item) => item.id)).toEqual(['syncing']);
+  });
+
+  it('does not restore cleared chat tasks from an older snapshot after hydration', async () => {
+    const { useChatStore } = await import('./useChatStore');
+    await useChatStore.persist.rehydrate();
+    const operations = [{
+      id: 'week-old-task', entityId: 'chat-1', kind: 'patch' as const, targetIds: ['chat-1'],
+      clientTimestamp: Date.now() - 7 * 86400_000, patch: { name: '旧编辑' }, status: 'failed' as const, attemptCount: 2,
+    }];
+    useChatStore.setState({ chats: [chat()], pendingOperations: operations });
+    useChatStore.getState().clearSyncTasks(['week-old-task']);
+    const storage = useChatStore.persist.getOptions().storage!;
+    const read = vi.spyOn(storage, 'getItem').mockResolvedValue({
+      state: { chats: [chat()], currentChatId: null, lastSyncedAt: 0, pendingOperations: operations },
+    });
+    try {
+      await useChatStore.getState().restoreLocalChats();
+      expect(useChatStore.getState().pendingOperations).toEqual([]);
+      expect(useChatStore.getState().pendingEditSyncCount).toBe(0);
+      expect(useChatStore.getState().chats).toHaveLength(1);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it('clears selected message and artifact tasks without cancelling running work or deleting artifacts', async () => {
+    const { useMessageStore } = await import('./useMessageStore');
+    const { useCharacterArtifactStore } = await import('./useCharacterArtifactStore');
+    const statuses = ['failed', 'pending', 'syncing'] as const;
+    useMessageStore.setState({ pendingOperations: statuses.map((status) => ({
+      id: status, kind: 'delete' as const, chatId: 'chat-1', messageId: 'message-1',
+      createdAt: 100, attemptCount: 1, status,
+    })) });
+    useCharacterArtifactStore.setState({ items: [artifact()], jobs: statuses.map((status) => ({
+      id: status, key: status, kind: 'diary' as const, characterId: 'character-1', snapshot: {},
+      relatedCharacters: [], status: status === 'syncing' ? 'running' as const : status,
+      error: null, attempts: 1, createdAt: 100, updatedAt: 100,
+    })) });
+
+    useMessageStore.getState().clearSyncTasks(['failed']);
+    useCharacterArtifactStore.getState().clearSyncTasks(['failed']);
+    expect(useMessageStore.getState().pendingOperations.map((item) => item.id)).toEqual(['pending', 'syncing']);
+    expect(useCharacterArtifactStore.getState().jobs.map((item) => item.id)).toEqual(['pending', 'syncing']);
+    useMessageStore.getState().clearSyncTasks([...statuses]);
+    useCharacterArtifactStore.getState().clearSyncTasks([...statuses]);
+    expect(useMessageStore.getState().pendingOperations.map((item) => item.id)).toEqual(['syncing']);
+    expect(useCharacterArtifactStore.getState().jobs.map((item) => item.id)).toEqual(['syncing']);
+    expect(useCharacterArtifactStore.getState().items).toEqual([artifact()]);
+    const staleMessageTasks = statuses.map((status) => ({
+      id: status, kind: 'delete' as const, chatId: 'chat-1', messageId: 'message-1',
+      createdAt: 100, attemptCount: 1, status,
+    }));
+    useMessageStore.setState({ pendingOperations: staleMessageTasks });
+    expect(useMessageStore.getState().pendingOperations.map((item) => item.id)).toEqual(['syncing']);
+    useCharacterArtifactStore.setState({ jobs: [{
+      id: 'failed', key: 'failed', kind: 'diary', characterId: 'character-1', snapshot: {},
+      relatedCharacters: [], status: 'failed', error: null, attempts: 1, createdAt: 100, updatedAt: 100,
+    }] });
+    expect(useCharacterArtifactStore.getState().jobs).toEqual([]);
+  });
+
+  describe('missing cloud chat recovery', () => {
+    beforeEach(() => {
+      vi.stubGlobal('window', { setTimeout: vi.fn(), clearTimeout: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn() });
+      vi.stubGlobal('navigator', { onLine: true });
+      localStorage.setItem(storageKey('cloud-sync-enabled'), '1');
+    });
+    afterEach(() => vi.unstubAllGlobals());
+
+    async function prepare() {
+      const { useAuthStore } = await import('./useAuthStore');
+      useAuthStore.setState({ authMode: 'cloud', isLoggedIn: true, token: 'token' });
+      const { useChatStore } = await import('./useChatStore');
+      const { useCharacterStore } = await import('./useCharacterStore');
+      useCharacterStore.setState({ characters: [character()] });
+      useChatStore.setState({ chats: [chat()], pendingOperations: [], remoteDeletedChatIds: [], remoteDeletedChats: [] });
+      apiMocks.createChat.mockResolvedValue(chat());
+      return useChatStore;
+    }
+
+    it('keeps a complete create when an edit follows it', async () => {
+      const store = await prepare();
+      store.getState().queuePatch('chat-1', { ...chat() }, 'create');
+      store.getState().queuePatch('chat-1', { topic: '离线编辑' });
+      await store.getState().flushPendingOperations();
+      expect(apiMocks.createChat).toHaveBeenCalledWith(expect.objectContaining({ name: '测试群聊', topic: '离线编辑' }));
+      expect(apiMocks.syncChatPatch).not.toHaveBeenCalled();
+      expect(store.getState().pendingOperations).toEqual([]);
+    });
+
+    it('rebuilds a missing chat and retries the edit with a separate idempotency key', async () => {
+      const store = await prepare();
+      const { ApiError } = await import('../services/api');
+      apiMocks.syncChatPatch.mockRejectedValueOnce(new ApiError('群聊不存在', { status: 404 }));
+      store.getState().queuePatch('chat-1', { topic: '本地编辑' });
+      const originalId = store.getState().pendingOperations[0].id;
+      await store.getState().flushPendingOperations();
+      expect(apiMocks.createChat).toHaveBeenCalledWith(expect.objectContaining({ id: 'chat-1', topic: '本地编辑' }));
+      expect(apiMocks.syncChatPatch).toHaveBeenLastCalledWith('chat-1', expect.objectContaining({ operationId: `${originalId}:recovered` }));
+      expect(store.getState().pendingOperations).toEqual([]);
+    });
+
+    it('replaces an old terminal failure with a fresh full create', async () => {
+      const store = await prepare();
+      store.getState().queuePatch('chat-1', { topic: '未上传内容' });
+      const original = store.getState().pendingOperations[0];
+      store.setState({ pendingOperations: [{ ...original, status: 'failed', lastError: 'conflict_ignored: 群聊不存在' }] });
+      expect(store.getState().queueMissingCloudChat('chat-1')).toBe(true);
+      expect(store.getState().pendingOperations[0]).toMatchObject({ kind: 'create', status: 'pending', targetLabel: '测试群聊', patch: { topic: '未上传内容' } });
+      expect(store.getState().pendingOperations[0].id).not.toBe(original.id);
+      await store.getState().flushPendingOperations();
+      expect(store.getState().pendingOperations).toEqual([]);
+    });
+
+    it('does not automatically restore a chat known to be deleted remotely', async () => {
+      const store = await prepare();
+      const { ApiError } = await import('../services/api');
+      store.setState({ remoteDeletedChatIds: ['chat-1'] });
+      expect(store.getState().queueMissingCloudChat('chat-1')).toBe(false);
+      store.getState().queuePatch('chat-1', { topic: '冲突编辑' });
+      apiMocks.syncChatPatch.mockRejectedValueOnce(new ApiError('群聊不存在', { status: 404 }));
+      await store.getState().flushPendingOperations();
+      expect(apiMocks.createChat).not.toHaveBeenCalled();
+      expect(store.getState().pendingOperations[0].status).toBe('failed');
+    });
   });
 
   it('does not force remote summaries after auth when cloud sync is explicitly disabled', async () => {
@@ -300,6 +462,7 @@ describe('cloud no-op sync', () => {
     const accountId = `disabled-sync-account-${Date.now()}-${Math.random()}`;
     apiMocks.login.mockResolvedValueOnce({
       token: 'token',
+      refreshToken: 'refresh-token',
       user: {
         id: accountId,
         phone: '13500000000',
@@ -1690,5 +1853,16 @@ describe('cloud no-op sync', () => {
     expect(apiMocks.getSyncChanges).toHaveBeenCalledWith({ scope: 'artifacts.summary', since: null });
     expect(apiMocks.getCharacterArtifactSummaries).not.toHaveBeenCalled();
     expect(apiMocks.getCharacterArtifactItem).not.toHaveBeenCalled();
+  });
+
+  it('checks artifact summaries when the user explicitly retries cloud saving', async () => {
+    const { useCharacterArtifactStore } = await import('./useCharacterArtifactStore');
+    useCharacterArtifactStore.setState({ items: [], jobs: [], isProcessing: false, unreadLetterCount: 0 });
+    apiMocks.getCharacterArtifactSummaries.mockResolvedValue({ items: [], updatedAt: 1 });
+
+    await useCharacterArtifactStore.getState().retryCloudSync();
+
+    expect(apiMocks.getCharacterArtifactSummaries).toHaveBeenCalledWith({ includeDeleted: true });
+    expect(apiMocks.getSyncChanges).not.toHaveBeenCalled();
   });
 });

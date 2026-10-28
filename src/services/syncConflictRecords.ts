@@ -11,6 +11,7 @@ export interface FieldConflictRecord {
   localUpdatedAt: number;
   remoteUpdatedAt: number;
   detectedAt: number;
+  accepted?: boolean;
 }
 
 const HIDDEN_FIELDS = new Set(['updatedAt', 'lastMessageAt', 'createdAt', 'fieldVersions']);
@@ -88,8 +89,14 @@ export function detectPendingFieldConflicts<TEntity extends { id: string; update
       pendingByEntity.set(operation.entityId, list);
     });
 
-  const nextById = new Map((params.existingConflicts || []).map((record) => [record.id, record]));
-  const seen = new Set<string>();
+  const refreshedById = new Map(params.remoteEntities.map((entity) => [entity.id, entity as Record<string, unknown>]));
+  const nextById = new Map((params.existingConflicts || [])
+    .filter((record) => record.entityType !== params.entityType || (
+      !Object.prototype.hasOwnProperty.call(refreshedById.get(record.entityId) || {}, record.field)
+      && record.remoteUpdatedAt > record.localUpdatedAt
+      && pendingByEntity.get(record.entityId)?.some((operation) => operation.id === record.localOperationIds.at(-1))
+    ))
+    .map((record) => [record.id, record]));
 
   for (const remote of params.remoteEntities) {
     const local = localById.get(remote.id);
@@ -103,9 +110,12 @@ export function detectPendingFieldConflicts<TEntity extends { id: string; update
       for (const field of Object.keys(operation.patch).filter(isDisplayableField)) {
         if (!remotePatchFields.has(field)) continue;
         if (!valuesDiffer(localRecord[field], remoteRecord[field])) continue;
+        const remoteFieldVersion = remote.fieldVersions
+          ? (remote.fieldVersions[field] || 0)
+          : (remote.updatedAt || 0);
+        if (remoteFieldVersion <= operation.clientTimestamp) continue;
         const id = conflictId(params.entityType, remote.id, field);
-        seen.add(id);
-        const previous = nextById.get(id);
+        const previous = (params.existingConflicts || []).find((record) => record.id === id);
         nextById.set(id, {
           id,
           entityType: params.entityType,
@@ -115,17 +125,31 @@ export function detectPendingFieldConflicts<TEntity extends { id: string; update
           remoteValue: compactConflictValue(remoteRecord[field]),
           localOperationIds: Array.from(new Set([...(previous?.localOperationIds || []), operation.id])),
           localUpdatedAt: operation.clientTimestamp,
-          remoteUpdatedAt: remote.updatedAt || previous?.remoteUpdatedAt || now,
+          remoteUpdatedAt: remoteFieldVersion,
           detectedAt: previous?.detectedAt || now,
+          accepted: previous?.accepted === true
+            && previous.localOperationIds.includes(operation.id)
+            && previous.remoteUpdatedAt >= remoteFieldVersion,
         });
       }
     }
   }
 
   return Array.from(nextById.values())
-    .filter((record) => record.entityType !== params.entityType || seen.has(record.id) || pendingByEntity.has(record.entityId))
     .sort((a, b) => b.detectedAt - a.detectedAt)
     .slice(0, MAX_CONFLICTS);
+}
+
+export function removePendingConflictField<TOperation extends SyncPatchOperation<Record<string, unknown>>>(
+  operations: TOperation[], entityId: string, field: string,
+): TOperation[] {
+  return operations.flatMap((operation) => {
+    if (operation.entityId !== entityId || !Object.prototype.hasOwnProperty.call(operation.patch, field)) return [operation];
+    if (operation.status === 'syncing') throw new Error('同步正在进行，请完成后重试');
+    const patch = { ...operation.patch };
+    delete patch[field];
+    return Object.keys(patch).length ? [{ ...operation, patch }] : [];
+  });
 }
 
 export function clearResolvedFieldConflicts(

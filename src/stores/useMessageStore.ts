@@ -8,13 +8,13 @@ import { hasLocalDataUrlMedia, scrubLocalMediaUrlsForCloud, uploadLocalMessageMe
 import { useAuthStore } from './useAuthStore';
 import { CLIENT_STORE_SCHEMA_VERSION, migrateMessageStoreState } from './storeMigrations';
 import { createScopedIndexedDbBufferedJsonStorage, flushBufferedPersistenceWrites } from './storePersistenceScope';
+import { bindSyncTaskCancellation, cancelSyncTasks, filterCancelledSyncTasks } from '../services/syncTaskCancellation';
 import { createSyncScheduler } from './storeSyncScheduler';
 import { canAttemptOnlineSync, getPendingQueueWorkerPriority, isTerminalSyncError, recoverInterruptedOperations, retryFailedOperations, runPendingOperationQueue } from './storeSyncHelpers';
 import { scopedStorageKey } from '../constants/brand';
 import { getLocalDataUserId } from '../services/authStorageScope';
 import { isCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { useChatStore } from './useChatStore';
-import { useCharacterStore } from './useCharacterStore';
 import { useFactArchiveStore } from './useFactArchiveStore';
 import { createSyncScopeMetadata, type SyncScopeSnapshot } from './syncScopeMetadata';
 import { completeLocalOutboxWorkerOperation, markLocalOutboxWorkerOperation, mirrorLocalOutboxWorkerQueue, removeLocalOutboxWorkerOperation } from '../services/localOutboxWorkerBridge';
@@ -22,7 +22,6 @@ import { useSettingsStore } from './useSettingsStore';
 import { compactMessage, compactMessageMetadata } from '../services/messageMetadataCompaction';
 import { logDeveloperDiagnostic } from '../services/developerDiagnostics';
 import { buildMessageIdentityKeys } from '../services/messageIdentity';
-import { canRecreateMissingCloudChat } from '../services/chatAvailability';
 import {
   type CachedMessageWindow,
   MAX_ACTIVE_MESSAGES_PER_CHAT,
@@ -409,6 +408,7 @@ const MAX_CACHED_CHATS = 12;
 const MAX_PERSISTED_DATA_URL_CHARS = 2048;
 
 interface PendingMessageOperation {
+  targetLabel?: string;
   id: string;
   kind: 'create' | 'delete';
   chatId: string;
@@ -495,6 +495,7 @@ function createMessageStorage(key = getMessageStorageKey()) {
   return createScopedIndexedDbBufferedJsonStorage<PersistedMessageState>({
     getScopedKey: () => key,
     storageName: getMessageStoreStorageName(),
+    syncTaskField: 'pendingOperations',
     flushDelayMs: 64,
   });
 }
@@ -687,6 +688,7 @@ function createPendingMessageOperation(message: Message): PendingMessageOperatio
     id: `message-create-${operationId}`,
     kind: 'create',
     chatId: message.chatId,
+    targetLabel: useChatStore.getState().chats.find((chat) => chat.id === message.chatId)?.name,
     localMessageId: message.id,
     messageId: message.serverId || message.id,
     payload: compactMessage(message, { dropContextText: true }),
@@ -812,11 +814,7 @@ async function reconcilePendingChatCreate(chatId: string) {
 }
 
 function ensureLocalChatCreateQueued(chatId: string) {
-  if (shouldSkipCloudSync() || hasPendingChatCreate(chatId)) return false;
-  const chat = useChatStore.getState().chats.find((item) => item.id === chatId && item.deletedAt == null);
-  if (!chat) return false;
-  if (!canRecreateMissingCloudChat(chat, useCharacterStore.getState().characters)) return false;
-  void useChatStore.getState().syncPatch(chatId, { ...chat, id: chat.id } as Record<string, unknown>, 'create');
+  if (!useChatStore.getState().queueMissingCloudChat(chatId)) return false;
   scheduleChatSyncFirst();
   return true;
 }
@@ -859,6 +857,7 @@ interface MessageStore {
   queueMessageSync: (message: Message) => void;
   flushPendingOperations: () => Promise<void>;
   discardFailedOperation: (operationId: string) => void;
+  clearSyncTasks: (operationIds: string[]) => void;
   retryFailedOperations: () => void;
   clearChatMessagesLocal: (chatId: string) => void;
   deleteMessage: (id: string) => Promise<void>;
@@ -875,7 +874,7 @@ export const useMessageStore = create<MessageStore>()(
       const flushPendingOperations = async () => {
         await mirrorLocalOutboxWorkerQueue('message', get().pendingOperations);
         await runPendingOperationQueue<PendingMessageOperation>({
-          getOperations: () => get().pendingOperations,
+          getOperations: () => filterCancelledSyncTasks(getMessageStorageKey(), get().pendingOperations),
           canRun: canAttemptOnlineSync,
           retryDelays: MESSAGE_SYNC_DELAYS,
           isTerminalError: isTerminalMessageSyncError,
@@ -914,6 +913,7 @@ export const useMessageStore = create<MessageStore>()(
                 throw new ApiError('branch parent pending: 分支父消息尚未完成云端同步，子消息稍后重试。', { code: 'BRANCH_PARENT_PENDING', status: 409 });
               }
               let savedMessage: unknown;
+              const accountId = getLocalDataUserId();
               try {
                 savedMessage = await api.createMessage(localMessage.chatId, messagePayloadForCloud(localMessage, operation.id));
               } catch (error) {
@@ -921,15 +921,25 @@ export const useMessageStore = create<MessageStore>()(
                 if (barrier && Number(localMessage.timestamp || 0) <= barrier && error instanceof ApiError && error.code === 'BRANCH_PARENT_NOT_FOUND') {
                   return null as never;
                 }
-                throw error;
+                if (!isCloudMissingResourceError(error) || accountId !== getLocalDataUserId()) throw error;
+                try {
+                  await api.getChat(localMessage.chatId);
+                } catch (probeError) {
+                  if (accountId === getLocalDataUserId() && isCloudMissingResourceError(probeError) && ensureLocalChatCreateQueued(localMessage.chatId)) {
+                    throw new ApiError('对应会话尚未完成云端创建，消息稍后重试。', { code: 'CHAT_CREATE_PENDING', status: 409 });
+                  }
+                  throw probeError;
+                }
+                if (accountId !== getLocalDataUserId()) throw new Error('同步期间账号已切换');
+                // A previous missing-chat response is cached under the original
+                // operation key. The message clientKey still prevents duplicates.
+                savedMessage = await api.createMessage(localMessage.chatId, messagePayloadForCloud(localMessage, `${operation.id}:recovered`));
               }
               const persistedMessage = mergeMessageServerConfirmation(localMessage, savedMessage);
               set((current) => ({
                 ...localUpsertMessage(current, persistedMessage),
                 pendingOperations: removePendingMessageOperation(current.pendingOperations, operation.id),
               }));
-              completeLocalOutboxWorkerOperation(operation.id);
-              window.setTimeout(() => removeLocalOutboxWorkerOperation(operation.id), 1500);
               if (hasLocalDataUrlMedia(localMessage)) {
                 await uploadLocalMessageMediaToCloud({ localMessage, cloudMessage: persistedMessage });
               }
@@ -939,8 +949,7 @@ export const useMessageStore = create<MessageStore>()(
             set((current) => ({
               pendingOperations: removePendingMessageOperation(current.pendingOperations, operation.id),
             }));
-            completeLocalOutboxWorkerOperation(operation.id);
-            window.setTimeout(() => removeLocalOutboxWorkerOperation(operation.id), 1500);
+            void completeLocalOutboxWorkerOperation('message', operation);
           },
           onFailure: (operation, _error, retry) => {
             const stillQueued = get().pendingOperations.some((item) => item.id === operation.id);
@@ -1530,10 +1539,20 @@ export const useMessageStore = create<MessageStore>()(
       discardFailedOperation: (operationId) => set((state) => {
         const operation = state.pendingOperations.find((item) => item.id === operationId);
         if (operation?.status !== 'failed') return {};
+        cancelSyncTasks(getMessageStorageKey(), [operationId]);
         return { pendingOperations: removePendingMessageOperation(state.pendingOperations, operationId) };
       }),
+      clearSyncTasks: (operationIds) => set((state) => {
+        const ids = new Set(operationIds);
+        const removed = state.pendingOperations.filter((operation) => ids.has(operation.id) && operation.status !== 'syncing');
+        if (!removed.length) return {};
+        const removedIds = new Set(removed.map((operation) => operation.id));
+        cancelSyncTasks(getMessageStorageKey(), [...removedIds]);
+        removedIds.forEach(removeLocalOutboxWorkerOperation);
+        return { pendingOperations: state.pendingOperations.filter((operation) => !removedIds.has(operation.id)) };
+      }),
       retryFailedOperations: () => set((state) => {
-        const pendingOperations = retryFailedOperations(state.pendingOperations);
+        const pendingOperations = retryFailedOperations(state.pendingOperations, { includeTerminal: false });
         if (pendingOperations === state.pendingOperations) return {};
         return { pendingOperations };
       }),
@@ -1713,6 +1732,12 @@ export const useMessageStore = create<MessageStore>()(
     }
   )
 );
+
+bindSyncTaskCancellation(useMessageStore, {
+  getStorageKey: getMessageStorageKey,
+  getQueue: (state) => state.pendingOperations,
+  applyQueue: (_state, pendingOperations) => ({ pendingOperations }),
+});
 
 export const __messageRuntimePersistenceForTests = {
   buildPersistedMessageState,

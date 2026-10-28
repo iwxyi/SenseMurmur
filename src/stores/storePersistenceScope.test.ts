@@ -92,6 +92,25 @@ describe('storePersistenceScope', () => {
     expect(raw.removeItem).toHaveBeenCalledWith('delete-after-write');
   });
 
+  it('reads the cleared queue while its snapshot is still committing', async () => {
+    const raw = createStorageMock();
+    raw.setItem('queue', JSON.stringify({ state: { pendingOperations: ['old-task'] } }));
+    let commit!: () => void;
+    const storage = createBufferedJsonStorage<{ pendingOperations: string[] }>({
+      ...raw,
+      setItem: (name, value) => new Promise<void>((resolve) => {
+        commit = () => { raw.setItem(name, value); resolve(); };
+      }),
+    }, { flushDelayMs: 20 });
+    storage.setItem('queue', { state: { pendingOperations: [] } });
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(storage.getItem('queue')).toEqual({ state: { pendingOperations: [] } });
+    commit();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(storage.getItem('queue')).toEqual({ state: { pendingOperations: [] } });
+  });
+
   it('reports a failed async write and still persists a newer pending snapshot', async () => {
     let rejectWrite!: (error: Error) => void;
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);

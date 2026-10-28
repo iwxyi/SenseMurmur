@@ -5,6 +5,7 @@ import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import { generateResponse } from './aiClient';
 import { sanitizeUserFacingText } from './displayTextSanitizer';
 import type { HomeCompanionshipSnapshot } from './companionshipProjection';
+import { generateId } from '../utils/id';
 
 const CACHE_MS = 6 * 60 * 60 * 1000;
 const pending = new Map<string, Promise<RuntimeEventV2>>();
@@ -92,7 +93,7 @@ export async function generateHomeCompanionship(params: {
     const text = cleanGeneratedText(output, params.character);
     const now = Date.now();
     return {
-      id: crypto.randomUUID(), conversationId: params.snapshot.chatId,
+      id: generateId(), conversationId: params.snapshot.chatId,
       kind: 'artifact', eventClass: 'artifact', createdAt: now,
       actorIds: [params.character.id], targetIds: ['user'],
       visibility: 'pair_private', visibleToIds: [params.character.id, 'user'],

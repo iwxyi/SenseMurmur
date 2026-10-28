@@ -348,7 +348,7 @@ export default function CharacterShowcaseCard({ character, onEdit, onDelete, onS
                   className="character-showcase-avatar"
                   src={isImageAvatar(character.avatar) ? resolveSafeAvatarSrc(character.avatar) : undefined}
                   slotProps={{ img: { onError: () => rememberFailedAvatarUrl(character.avatar), loading: 'lazy', decoding: 'async' } }}
-                  sx={{ width: 34, height: 34, fontSize: '1rem', bgcolor: 'primary.light' }}
+                  sx={{ width: 34, height: 34, fontSize: '1rem', bgcolor: 'primary.light', viewTransitionName: `character-avatar-${character.id}` }}
                 >
                   {isImageAvatar(character.avatar) ? undefined : character.avatar}
                 </Avatar>

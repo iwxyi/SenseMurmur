@@ -40,6 +40,18 @@ describe('homeCompanionshipGeneration', () => {
     expect(results[0].id).toBe(results[1].id);
   });
 
+  it('generates an event when crypto.randomUUID is unavailable', async () => {
+    const cryptoApi = globalThis.crypto;
+    vi.stubGlobal('crypto', { getRandomValues: cryptoApi.getRandomValues.bind(cryptoApi) });
+    try {
+      model.mockResolvedValue('等你回来再聊。');
+      const event = await generateHomeCompanionship(params);
+      expect(event.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('rejects raw prompts and propagates model failures without a local replacement', async () => {
     model.mockResolvedValue('对刘备的关系纹理可以私下写成余波，不要写成系统记录：放心不下。');
     await expect(generateHomeCompanionship(params)).rejects.toThrow('正文格式');

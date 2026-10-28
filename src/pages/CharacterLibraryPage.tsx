@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLayoutHeaderActions } from '../components/layout/AppLayoutContext';
-import { Box, Button, Alert, IconButton, Menu, MenuItem, Chip, Dialog, DialogTitle, DialogContent, DialogActions, TextField, Typography, Divider, Tooltip, Checkbox, FormControlLabel, Radio, RadioGroup, FormControl, FormLabel } from '@mui/material';
+import { Box, Button, Alert, IconButton, Menu, MenuItem, Chip, Dialog, DialogTitle, DialogContent, DialogActions, TextField, Typography, Divider, Tooltip, Checkbox, FormControlLabel, Radio, RadioGroup, FormControl, FormLabel, useMediaQuery } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import MoreIcon from '@mui/icons-material/MoreVert';
 import SortIcon from '@mui/icons-material/Sort';
@@ -332,6 +332,7 @@ export default function CharacterLibraryPage() {
   })));
   const pane = usePaneLayout();
   const isMasterPane = pane.role === 'master';
+  const isThreeColumn = useMediaQuery('(min-width:1280px)');
   const { chats, addChat } = useChatStore(useShallow((state) => ({
     chats: state.chats,
     addChat: state.addChat,
@@ -384,11 +385,10 @@ export default function CharacterLibraryPage() {
   const [membershipLoaded, setMembershipLoaded] = useState(authMode !== 'cloud' || !isLoggedIn);
   const [vipLimitDialog, setVipLimitDialog] = useState<{ title: string; description: string; current?: number | null; limit?: number | null; helperText?: string } | null>(null);
   const activeCharacterId = isMasterPane && !selectionMode ? getActiveCharacterId(location.pathname) : null;
-  const floatingActionPositionSx = isMasterPane ? {
+  const floatingActionPositionSx = isMasterPane && isThreeColumn ? {
     position: 'fixed' as const,
     right: pane.bounds ? `calc(100vw - ${pane.bounds.right}px + 28px)` : 28,
     bottom: pane.bounds ? `calc(100vh - ${pane.bounds.bottom}px + 32px)` : 32,
-    visibility: pane.bounds ? 'visible' as const : 'hidden' as const,
   } : {
     position: 'fixed' as const,
     right: { xs: 20, sm: 28, md: 36 },

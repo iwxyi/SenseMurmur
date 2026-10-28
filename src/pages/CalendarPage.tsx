@@ -40,7 +40,6 @@ export default function CalendarPage() {
     position: 'fixed' as const,
     right: pane.bounds ? `calc(100vw - ${pane.bounds.right}px + 28px)` : 28,
     bottom: pane.bounds ? `calc(100vh - ${pane.bounds.bottom}px + 32px)` : 32,
-    visibility: pane.bounds ? 'visible' as const : 'hidden' as const,
   } : {
     position: 'fixed' as const,
     right: { xs: 20, sm: 28, md: 36 },

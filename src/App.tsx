@@ -1,5 +1,5 @@
-import { lazy, Suspense, useMemo, useEffect, useRef, useState } from 'react';
-import { BrowserRouter, HashRouter, Routes, Route, Navigate, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Activity, lazy, Suspense, useMemo, useEffect, useRef, useState } from 'react';
+import { BrowserRouter, HashRouter, Routes, Route, Navigate, Outlet, useLocation, useNavigate, useNavigationType, useParams, UNSAFE_LocationContext } from 'react-router-dom';
 import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, LinearProgress, ThemeProvider, CssBaseline, Typography, useMediaQuery } from '@mui/material';
 import { createAppTheme } from './theme';
 import { useSettingsStore } from './stores/useSettingsStore';
@@ -7,7 +7,7 @@ import { useAuthStore } from './stores/useAuthStore';
 import { readAuthSnapshot } from './services/authSnapshot';
 import { isWorkspaceActive } from './services/workspaceLifecycle';
 import AppLayout from './components/layout/AppLayout';
-import MasterDetailLayout from './components/layout/MasterDetailLayout';
+import MasterDetailLayout, { clearPaneScrollPositions } from './components/layout/MasterDetailLayout';
 import AdminPermissionGate from './components/admin/AdminPermissionGate';
 import { useAdminAuthStore } from './stores/useAdminAuthStore';
 import { ADMIN_DASHBOARD_PERMISSIONS, ADMIN_PERMISSION_CODES } from './constants/adminPermissions';
@@ -16,6 +16,7 @@ import { api, type SystemAnnouncementItem } from './services/api';
 import { AUTH_SESSION_EXPIRED_EVENT, type AuthSessionExpiredDetail } from './services/authSession';
 import { APP_DESCRIPTION, APP_TITLE } from './constants/brand';
 import { buildSettingsPath } from './routes/settingsRoute';
+import { advanceRouteCache, createRouteCache } from './routes/routeCache';
 import DevUpdatePrompt from './components/common/DevUpdatePrompt';
 import PwaUpdatePrompt from './components/common/PwaUpdatePrompt';
 import {
@@ -630,6 +631,64 @@ function AppUsageSessionBootstrap() {
   return null;
 }
 
+function CachedAppRoutes() {
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  const accountScope = useAuthStore((state) => `${state.authMode}:${state.user?.id || 'anonymous'}`);
+  const [routeCache, setRouteCache] = useState(() => createRouteCache(location, navigationType, accountScope));
+  const previousAccountScopeRef = useRef(accountScope);
+  let resolvedCache = routeCache;
+  if (routeCache.location !== location || routeCache.accountScope !== accountScope) {
+    resolvedCache = advanceRouteCache(routeCache, location, navigationType, accountScope);
+    setRouteCache(resolvedCache);
+  }
+  useEffect(() => {
+    if (previousAccountScopeRef.current !== accountScope) {
+      clearPaneScrollPositions();
+      previousAccountScopeRef.current = accountScope;
+    }
+  }, [accountScope]);
+
+  return (
+    <>
+      {resolvedCache.entries.map((entry) => (
+        <Activity
+          key={entry.id}
+          mode={entry.id === resolvedCache.activeId ? 'visible' : 'hidden'}
+        >
+          <UNSAFE_LocationContext.Provider value={{ location: entry.location, navigationType: entry.navigationType }}>
+            <Routes location={entry.location}>
+              <Route path="/" element={<RouteElement><HomePage /></RouteElement>} />
+              <Route path="/chats" element={<ChatMasterDetailRouteElement detail={null} fallback="master" />} />
+              <Route path="/chats/create" element={<ChatMasterDetailRouteElement detail={<RouteElement><CreateChatPage /></RouteElement>} />} />
+              <Route path="/direct/create" element={<ChatMasterDetailRouteElement detail={<RouteElement><CreateDirectChatPage /></RouteElement>} />} />
+              <Route path="/chats/:id/edit" element={<ChatMasterDetailRouteElement detail={<RouteElement><CreateChatPage /></RouteElement>} />} />
+              <Route path="/chats/:id" element={<ChatMasterDetailRouteElement detail={<ChatDetailRouteElement />} detailTitle={null} />} />
+              <Route path="/characters" element={<CharacterMasterDetailRouteElement detail={null} fallback="master" />} />
+              <Route path="/characters/create" element={<CharacterMasterDetailRouteElement detail={<RouteElement><CharacterEditorPage /></RouteElement>} />} />
+              <Route path="/characters/:id/edit" element={<CharacterMasterDetailRouteElement detail={<RouteElement><CharacterEditorPage /></RouteElement>} />} />
+              <Route path="/characters/batch-generate" element={<RouteElement><BatchGenerateCharactersPage /></RouteElement>} />
+              <Route path="/letters" element={<RouteElement><LettersPage /></RouteElement>} />
+              <Route path="/calendar" element={<RouteElement><CalendarPage /></RouteElement>} />
+              <Route path="/moments" element={<RouteElement><MomentsPage /></RouteElement>} />
+              <Route path="/market" element={<RouteElement><MarketPage /></RouteElement>} />
+              <Route path="/files" element={<RouteElement><FilesPage /></RouteElement>} />
+              <Route path="/intro" element={<RouteElement><IntroPage /></RouteElement>} />
+              <Route path="/ai-models" element={<Navigate to={buildSettingsPath({ tab: 'models' })} replace />} />
+              <Route path="/ai-proxy" element={<RouteElement><AIProxyPage /></RouteElement>} />
+              <Route path="/membership" element={<RouteElement><MembershipPage /></RouteElement>} />
+              <Route path="/account" element={<RouteElement><AccountPage /></RouteElement>} />
+              <Route path="/account/sync-status" element={<RouteElement><SyncStatusPage /></RouteElement>} />
+              <Route path="/settings" element={<RouteElement><SettingsPage /></RouteElement>} />
+              <Route path="/settings/recycle-bin" element={<RouteElement><RecycleBinPage /></RouteElement>} />
+            </Routes>
+          </UNSAFE_LocationContext.Provider>
+        </Activity>
+      ))}
+    </>
+  );
+}
+
 function RoutedApp() {
   return (
     <Routes>
@@ -661,31 +720,7 @@ function RoutedApp() {
           <Route path="me" element={<RouteElement><AdminProfilePage /></RouteElement>} />
         </Route>
       </Route>
-      <Route element={<AppLayout />}>
-        <Route path="/" element={<RouteElement><HomePage /></RouteElement>} />
-        <Route path="/chats" element={<ChatMasterDetailRouteElement detail={null} fallback="master" />} />
-        <Route path="/chats/create" element={<ChatMasterDetailRouteElement detail={<RouteElement><CreateChatPage /></RouteElement>} />} />
-        <Route path="/direct/create" element={<ChatMasterDetailRouteElement detail={<RouteElement><CreateDirectChatPage /></RouteElement>} />} />
-        <Route path="/chats/:id/edit" element={<ChatMasterDetailRouteElement detail={<RouteElement><CreateChatPage /></RouteElement>} />} />
-        <Route path="/chats/:id" element={<ChatMasterDetailRouteElement detail={<ChatDetailRouteElement />} detailTitle={null} />} />
-        <Route path="/characters" element={<CharacterMasterDetailRouteElement detail={null} fallback="master" />} />
-        <Route path="/characters/create" element={<CharacterMasterDetailRouteElement detail={<RouteElement><CharacterEditorPage /></RouteElement>} />} />
-        <Route path="/characters/:id/edit" element={<CharacterMasterDetailRouteElement detail={<RouteElement><CharacterEditorPage /></RouteElement>} />} />
-        <Route path="/characters/batch-generate" element={<RouteElement><BatchGenerateCharactersPage /></RouteElement>} />
-        <Route path="/letters" element={<RouteElement><LettersPage /></RouteElement>} />
-        <Route path="/calendar" element={<RouteElement><CalendarPage /></RouteElement>} />
-        <Route path="/moments" element={<RouteElement><MomentsPage /></RouteElement>} />
-        <Route path="/market" element={<RouteElement><MarketPage /></RouteElement>} />
-        <Route path="/files" element={<RouteElement><FilesPage /></RouteElement>} />
-        <Route path="/intro" element={<RouteElement><IntroPage /></RouteElement>} />
-        <Route path="/ai-models" element={<Navigate to={buildSettingsPath({ tab: 'models' })} replace />} />
-        <Route path="/ai-proxy" element={<RouteElement><AIProxyPage /></RouteElement>} />
-        <Route path="/membership" element={<RouteElement><MembershipPage /></RouteElement>} />
-        <Route path="/account" element={<RouteElement><AccountPage /></RouteElement>} />
-        <Route path="/account/sync-status" element={<RouteElement><SyncStatusPage /></RouteElement>} />
-        <Route path="/settings" element={<RouteElement><SettingsPage /></RouteElement>} />
-        <Route path="/settings/recycle-bin" element={<RouteElement><RecycleBinPage /></RouteElement>} />
-      </Route>
+      <Route path="/*" element={<AppLayout><CachedAppRoutes /></AppLayout>} />
     </Routes>
   );
 }

@@ -3,6 +3,7 @@ import type { LocalOutboxItem, LocalOutboxScopeType, LocalOutboxStatus } from '.
 export interface LocalOutboxRecord extends LocalOutboxItem {
   sourceType: LocalOutboxScopeType;
   sourceId: string;
+  resultId?: string;
   updatedAt: number;
   payload?: unknown;
 }
@@ -78,8 +79,10 @@ export function sanitizeLocalOutboxRecord(value: unknown): LocalOutboxRecord | n
     scopeType,
     sourceType,
     sourceId: stringValue(record.sourceId) || id,
+    resultId: typeof record.resultId === 'string' ? record.resultId : undefined,
     kind: stringValue(record.kind) || 'operation',
     targetId,
+    targetLabel: typeof record.targetLabel === 'string' ? record.targetLabel : undefined,
     targetIds: targetIds.length ? targetIds : [targetId].filter(Boolean),
     status,
     createdAt: numberValue(record.createdAt),

@@ -161,6 +161,7 @@ export function createPendingOperation<TPatch extends Record<string, unknown>, T
     targetIds?: string[];
     patch?: TPatch;
     timestamp?: number;
+    targetLabel?: string;
   }
 ): TOp {
   const timestamp = params.timestamp ?? Date.now();
@@ -169,6 +170,7 @@ export function createPendingOperation<TPatch extends Record<string, unknown>, T
     id: createOperationId(String(params.kind), timestamp, targetIds),
     kind: params.kind,
     entityId: targetIds[0] || '',
+    targetLabel: params.targetLabel,
     patch: (params.patch || {}) as TPatch,
     targetIds,
     clientTimestamp: timestamp,
@@ -336,9 +338,9 @@ export function recoverInterruptedOperations<T extends { status: 'pending' | 'sy
     : item);
 }
 
-export function retryFailedOperations<T extends { status: 'pending' | 'syncing' | 'failed'; lastError?: string; retryAt?: number; lockedAt?: number }>(queue: T[] = []) {
+export function retryFailedOperations<T extends { status: 'pending' | 'syncing' | 'failed'; lastError?: string; retryAt?: number; lockedAt?: number }>(queue: T[] = [], options: { includeTerminal?: boolean } = {}) {
   let changed = false;
-  const nextQueue = queue.map((item) => item.status === 'failed'
+  const nextQueue = queue.map((item) => item.status === 'failed' && (options.includeTerminal !== false || !parseSyncErrorClassification(item.lastError).terminal)
     ? {
       ...item,
       status: 'pending' as const,

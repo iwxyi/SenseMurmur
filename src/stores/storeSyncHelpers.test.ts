@@ -65,6 +65,8 @@ describe('storeSyncHelpers', () => {
     });
     expect(retried[1]).toBe(operations[1]);
 
+    expect(helpers.retryFailedOperations(operations, { includeTerminal: false })).toBe(operations);
+
     const noFailed = [operations[1]];
     expect(helpers.retryFailedOperations(noFailed)).toBe(noFailed);
   });

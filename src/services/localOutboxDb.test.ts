@@ -65,12 +65,14 @@ describe('localOutboxDb', () => {
       status: 'pending',
       kind: 'patch',
       targetId: 'chat-1',
+      targetLabel: '离线聊天',
     })).toMatchObject({
       id: 'op-1',
       scopeType: 'chat',
       sourceType: 'chat',
       status: 'pending',
       targetIds: ['chat-1'],
+      targetLabel: '离线聊天',
     });
 
     expect(sanitizeLocalOutboxRecord({ id: 'bad', scopeType: 'chat', status: 'done' })).toBeNull();

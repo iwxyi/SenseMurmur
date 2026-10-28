@@ -11,7 +11,9 @@ export function buildFloatingTabContainerSx() {
     flexDirection: 'column',
     alignItems: 'center',
     gap: 1,
-    transition: `top ${motion.durations.slow}ms ${motion.emphasized}`,
+    // Keep the state change perceptible without making the control chase every
+    // small scroll delta. Header hysteresis controls when this transition starts.
+    transition: `top ${motion.durations.base}ms ${motion.standard}`,
   } as const;
 }
 

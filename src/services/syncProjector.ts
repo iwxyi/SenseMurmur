@@ -1,6 +1,7 @@
 export interface SyncPatchOperation<TPatch extends Record<string, unknown>> {
   id: string;
   entityId: string;
+  targetLabel?: string;
   clientTimestamp: number;
   patch: TPatch;
   status: 'pending' | 'syncing' | 'failed';

@@ -182,7 +182,7 @@ export default function CharacterCard({ character, onEdit, onDelete, onStartDire
                 className="character-card-avatar"
                 src={isImageAvatar(character.avatar) ? resolveSafeAvatarSrc(character.avatar) : undefined}
                 slotProps={{ img: { onError: () => rememberFailedAvatarUrl(character.avatar), loading: 'lazy', decoding: 'async' } }}
-                sx={{ gridRow: '1 / span 2', width: 36, height: 36, fontSize: '1rem', bgcolor: 'primary.light', flexShrink: 0, '@container (max-width: 175px)': { width: 32, height: 32, fontSize: '0.9rem' } }}>
+                sx={{ gridRow: '1 / span 2', width: 36, height: 36, fontSize: '1rem', bgcolor: 'primary.light', flexShrink: 0, viewTransitionName: `character-avatar-${character.id}`, '@container (max-width: 175px)': { width: 32, height: 32, fontSize: '0.9rem' } }}>
                 {isImageAvatar(character.avatar) ? undefined : character.avatar}
               </Avatar>
               <Typography variant="subtitle1" noWrap sx={{ minWidth: 0, pr: (onEdit || onDelete) ? 4 : 0, fontWeight: 400, '@container (max-width: 175px)': { fontSize: '0.9rem', lineHeight: 1.25 } }}>

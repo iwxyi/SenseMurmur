@@ -6,9 +6,10 @@ import { api, type SyncChangeScope } from '../services/api';
 import { buildApiErrorUserMessage } from '../services/apiErrorMessage';
 import { reportRecoverableError, reportRecoverableWarning } from '../services/diagnostics';
 import { projectEntities, type SyncPatchOperation } from '../services/syncProjector';
-import { clearResolvedFieldConflicts, detectPendingFieldConflicts, type FieldConflictRecord } from '../services/syncConflictRecords';
+import { clearResolvedFieldConflicts, detectPendingFieldConflicts, removePendingConflictField, type FieldConflictRecord } from '../services/syncConflictRecords';
 import { buildWarmState } from './storeWarmHelpers';
 import { createScopedIndexedDbBufferedJsonStorage, createScopedIndexedDbStorage, flushBufferedPersistenceWrites } from './storePersistenceScope';
+import { bindSyncTaskCancellation, cancelSyncTasks, filterCancelledSyncTasks } from '../services/syncTaskCancellation';
 import { createSyncScheduler } from './storeSyncScheduler';
 import { createSyncScopeMetadata, type SyncScopeSnapshot } from './syncScopeMetadata';
 import { CLIENT_STORE_SCHEMA_VERSION, migrateCharacterStoreState } from './storeMigrations';
@@ -657,7 +658,9 @@ interface CharacterStore extends PersistedCharacterState {
   clearPendingOperations: () => void;
   confirmCreateOperationsSynced: (entityIds: string[]) => void;
   discardFailedOperation: (operationId: string) => void;
+  clearSyncTasks: (operationIds: string[]) => void;
   resolveRemoteDeleteConflict: (id: string, resolution: 'restore_local' | 'discard_local' | 'save_as_new') => Promise<void>;
+  resolveFieldConflict: (id: string, field: string, resolution: 'keep_local' | 'use_remote') => Promise<void>;
   retryFailedOperations: () => void;
   loadPendingSnapshot: () => Promise<AICharacter[]>;
   loadProjectedRecycleBin: () => Promise<AICharacter[]>;
@@ -743,15 +746,16 @@ function mergeCharacterPatchOperations(operations: PendingCharacterOperation[]) 
       merged.set(operation.entityId, compactedOperation);
       continue;
     }
+    const terminalFailure = existing.status === 'failed' && isTerminalSyncError(existing.lastError || '');
     merged.set(operation.entityId, {
       ...existing,
-      id: compactedOperation.id,
+      id: terminalFailure ? existing.id : compactedOperation.id,
       patch: {
         ...(existing.patch || {}),
         ...(compactedOperation.patch || {}),
       },
       clientTimestamp: compactedOperation.clientTimestamp,
-      status: existing.status === 'syncing' ? 'syncing' : compactedOperation.status,
+      status: terminalFailure ? 'failed' : existing.status === 'syncing' ? 'syncing' : compactedOperation.status,
       attemptCount: Math.max(existing.attemptCount || 0, compactedOperation.attemptCount || 0),
       lastError: compactedOperation.lastError || existing.lastError,
       targetIds: compactedOperation.targetIds?.length ? compactedOperation.targetIds : existing.targetIds,
@@ -968,6 +972,7 @@ export async function resetCharacterStoreForAccountBoundary() {
 const characterStorage = createScopedIndexedDbBufferedJsonStorage<PersistedCharacterState>({
   getScopedKey: getCharacterStorageKey,
   storageName: getCharacterStoreStorageName(),
+  syncTaskField: 'pendingOperations',
   flushDelayMs: 96,
 });
 
@@ -988,7 +993,7 @@ export const useCharacterStore = create<CharacterStore>()(
       const flushPendingOperations = async () => {
         await mirrorLocalOutboxWorkerQueue('character', get().pendingOperations);
         await runPendingOperationQueue<PendingCharacterOperation>({
-          getOperations: () => get().pendingOperations,
+          getOperations: () => filterCancelledSyncTasks(getCharacterStorageKey(), get().pendingOperations),
           canRun: canAttemptSync,
           retryDelays: CHARACTER_SYNC_DELAYS,
           isTerminalError: isTerminalSyncError,
@@ -1011,8 +1016,7 @@ export const useCharacterStore = create<CharacterStore>()(
               pendingEditSyncError: latestCharacterError(nextQueue),
               lastSyncedAt: Date.now(),
             }));
-            completeLocalOutboxWorkerOperation(operation.id);
-            window.setTimeout(() => removeLocalOutboxWorkerOperation(operation.id), 1500);
+            void completeLocalOutboxWorkerOperation('character', operation);
           },
           onFailure: (operation, _error, retry) => {
             set((current) => ({
@@ -1292,7 +1296,8 @@ export const useCharacterStore = create<CharacterStore>()(
           }
           const cloudPatch = compactCharacterPatchForCloud(patch);
           const operation = Object.keys(cloudPatch).length > 0
-            ? createPendingCharacterOperation({ kind, targetIds: entityId ? [entityId] : [], patch: cloudPatch })
+            ? createPendingCharacterOperation({ kind, targetIds: entityId ? [entityId] : [], patch: cloudPatch,
+              targetLabel: typeof patch.name === 'string' ? patch.name : get().characters.find((item) => item.id === entityId)?.name })
             : null;
           set((state) => {
             const queued = operation ? queueAndProjectCharacters(state, [operation]) : queueAndProjectCharacters(state, []);
@@ -1342,11 +1347,27 @@ export const useCharacterStore = create<CharacterStore>()(
         discardFailedOperation: (operationId) => set((state) => {
           const operation = state.pendingOperations.find((item) => item.id === operationId);
           if (operation?.status !== 'failed') return {};
+          cancelSyncTasks(getCharacterStorageKey(), [operationId]);
           const pendingOperations = removePendingCharacterOperation(state.pendingOperations, operationId);
           return {
             characters: projectVisibleCharacters(state.characters, pendingOperations),
             pendingOperations,
             fieldConflicts: clearResolvedFieldConflicts(state.fieldConflicts, { entityType: 'character', operationIds: [operationId] }),
+            pendingEditSyncCount: pendingOperations.length,
+            pendingEditSyncError: latestCharacterError(pendingOperations),
+          };
+        }),
+        clearSyncTasks: (operationIds) => set((state) => {
+          const ids = new Set(operationIds);
+          const removed = state.pendingOperations.filter((operation) => ids.has(operation.id) && operation.status !== 'syncing');
+          if (!removed.length) return {};
+          const removedIds = new Set(removed.map((operation) => operation.id));
+          cancelSyncTasks(getCharacterStorageKey(), [...removedIds]);
+          const pendingOperations = state.pendingOperations.filter((operation) => !removedIds.has(operation.id));
+          removedIds.forEach(removeLocalOutboxWorkerOperation);
+          return {
+            pendingOperations,
+            fieldConflicts: clearResolvedFieldConflicts(state.fieldConflicts, { entityType: 'character', operationIds: [...removedIds] }),
             pendingEditSyncCount: pendingOperations.length,
             pendingEditSyncError: latestCharacterError(pendingOperations),
           };
@@ -1380,8 +1401,33 @@ export const useCharacterStore = create<CharacterStore>()(
             };
           });
         },
+        resolveFieldConflict: async (id, field, resolution) => {
+          const conflict = get().fieldConflicts.find((item) => item.entityId === id && item.field === field && !item.accepted);
+          if (!conflict) return;
+          if (resolution === 'keep_local') {
+            set((state) => ({ fieldConflicts: state.fieldConflicts.map((item) => item.id === conflict.id ? { ...item, accepted: true } : item) }));
+            scheduleCharacterFlush(flushPendingOperations, 0);
+            return;
+          }
+          const remote = await fetchCharacterDetail(id);
+          set((state) => {
+            if (!state.fieldConflicts.some((item) => item.id === conflict.id)) return {};
+            const pendingOperations = removePendingConflictField(state.pendingOperations, id, field);
+            const characters = state.characters.map((character) => character.id === id
+              ? normalizeCharacter({ ...character, [field]: (remote as unknown as Record<string, unknown>)[field], fieldVersions: { ...character.fieldVersions, [field]: remote.fieldVersions?.[field] || 0 } } as AICharacter)
+              : character);
+            return {
+              characters: projectVisibleCharacters(characters, pendingOperations),
+              pendingOperations,
+              fieldConflicts: state.fieldConflicts.filter((item) => item.id !== conflict.id),
+              pendingEditSyncCount: pendingOperations.length,
+              pendingEditSyncError: latestCharacterError(pendingOperations),
+            };
+          });
+          scheduleCharacterFlush(flushPendingOperations, 0);
+        },
         retryFailedOperations: () => set((state) => {
-          const pendingOperations = retryFailedOperations(state.pendingOperations);
+          const pendingOperations = retryFailedOperations(state.pendingOperations, { includeTerminal: false });
           if (pendingOperations === state.pendingOperations) return {};
           return {
             pendingOperations,
@@ -1422,6 +1468,7 @@ export const useCharacterStore = create<CharacterStore>()(
               : createdCharacters.map((character) => createPendingCharacterOperation({
                 kind: 'create',
                 targetIds: [character.id],
+                targetLabel: character.name,
                 patch: compactCharacterPatchForCloud({ ...character, id: character.id } as Record<string, unknown>),
               }));
             const queued = operations.length
@@ -1491,7 +1538,7 @@ export const useCharacterStore = create<CharacterStore>()(
               if (character?.isPreset) return null;
               const cloudPatch = compactCharacterPatchForCloud(patch.updates as Record<string, unknown>);
               if (Object.keys(cloudPatch).length === 0) return null;
-              return createPendingCharacterOperation({ kind: 'patch', targetIds: [patch.id], patch: cloudPatch });
+              return createPendingCharacterOperation({ kind: 'patch', targetIds: [patch.id], patch: cloudPatch, targetLabel: character?.name });
             })
             .filter(Boolean) as PendingCharacterOperation[];
           set((state) => {
@@ -1707,6 +1754,20 @@ export const useCharacterStore = create<CharacterStore>()(
     }
   )
 );
+
+bindSyncTaskCancellation(useCharacterStore, {
+  getStorageKey: getCharacterStorageKey,
+  getQueue: (state) => state.pendingOperations,
+  applyQueue: (state, pendingOperations) => ({
+    pendingOperations,
+    pendingEditSyncCount: pendingOperations.length,
+    pendingEditSyncError: latestCharacterError(pendingOperations),
+    fieldConflicts: clearResolvedFieldConflicts(state.fieldConflicts, {
+      entityType: 'character',
+      operationIds: state.pendingOperations.filter((operation) => !pendingOperations.includes(operation)).map((operation) => operation.id),
+    }),
+  }),
+});
 
 export const __characterRuntimePersistenceForTests = {
   compactCharacterPatchForCloud,

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Message } from '../types/message';
-import { createTestChat } from '../test/fixtures';
+import { createTestCharacter, createTestChat } from '../test/fixtures';
 import { storageKey } from '../constants/brand';
 
 const getMessagesMock = vi.hoisted(() => vi.fn());
@@ -129,6 +129,70 @@ describe('useMessageStore', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+  });
+
+  it('retries a cached missing-chat response with a fresh operation key after the chat exists', async () => {
+    localStorage.setItem(storageKey('auth-mode'), 'cloud');
+    const { useAuthStore } = await import('./useAuthStore');
+    vi.stubGlobal('window', { setTimeout: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    vi.stubGlobal('navigator', { onLine: true });
+    const { useMessageStore } = await import('./useMessageStore');
+    const { api } = await import('../services/api');
+    useAuthStore.setState({ authMode: 'cloud', isLoggedIn: true, token: 'token' });
+    const message = buildMessage(10, 'recovered-chat');
+    getChatMock.mockResolvedValue(createTestChat({ id: message.chatId }));
+    vi.mocked(api.createMessage)
+      .mockReset()
+      .mockRejectedValueOnce(new MockApiError('聊天不存在', { code: 'NOT_FOUND', status: 404 }))
+      .mockResolvedValueOnce({ ...message, id: 'remote-message' });
+    useMessageStore.setState({
+      messages: [message], activeChatId: message.chatId,
+      pendingOperations: [{ id: 'recover-message', kind: 'create', chatId: message.chatId, localMessageId: message.id,
+        messageId: message.id, payload: message, createdAt: Date.now(), attemptCount: 0, status: 'pending' }],
+    });
+
+    expect((await import('./storeSyncHelpers')).canAttemptOnlineSync()).toBe(true);
+    await useMessageStore.getState().flushPendingOperations();
+
+    expect(useMessageStore.getState().pendingOperations[0]?.lastError).toBeUndefined();
+    expect(api.createMessage).toHaveBeenNthCalledWith(1, message.chatId, expect.objectContaining({ operationId: 'recover-message' }));
+    expect(api.createMessage).toHaveBeenNthCalledWith(2, message.chatId, expect.objectContaining({ operationId: 'recover-message:recovered', content: message.content }));
+    expect(useMessageStore.getState().pendingOperations).toEqual([]);
+    expect(useMessageStore.getState().messages.some((item) => item.content === message.content)).toBe(true);
+  });
+
+  it.each([false, true])('handles a missing chat during message upload with remote deletion = %s', async (remoteDeleted) => {
+    localStorage.setItem(storageKey('auth-mode'), 'cloud');
+    const { useAuthStore } = await import('./useAuthStore');
+    vi.stubGlobal('window', { setTimeout: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    vi.stubGlobal('navigator', { onLine: true });
+    const { useMessageStore } = await import('./useMessageStore');
+    const { useChatStore } = await import('./useChatStore');
+    const { useCharacterStore } = await import('./useCharacterStore');
+    const { api } = await import('../services/api');
+    useAuthStore.setState({ authMode: 'cloud', isLoggedIn: true, token: 'token' });
+    const message = buildMessage(10, 'missing-chat-upload');
+    const chat = createTestChat({ id: message.chatId, memberIds: ['character-1'] });
+    useCharacterStore.setState({ characters: [createTestCharacter({ id: 'character-1' })] });
+    useChatStore.setState({ chats: [chat], pendingOperations: [], remoteDeletedChatIds: remoteDeleted ? [chat.id] : [], remoteDeletedChats: [] });
+    vi.mocked(api.createMessage).mockReset().mockRejectedValue(new MockApiError('聊天不存在', { code: 'NOT_FOUND', status: 404 }));
+    useMessageStore.setState({
+      messages: [message], activeChatId: message.chatId,
+      pendingOperations: [{ id: 'missing-message', kind: 'create', chatId: message.chatId, localMessageId: message.id,
+        messageId: message.id, payload: message, createdAt: Date.now(), attemptCount: 0, status: 'pending' }],
+    });
+
+    await useMessageStore.getState().flushPendingOperations();
+
+    expect(api.createMessage).toHaveBeenCalledTimes(1);
+    expect(useMessageStore.getState().messages[0].content).toBe(message.content);
+    if (remoteDeleted) {
+      expect(useChatStore.getState().pendingOperations).toEqual([]);
+      expect(useMessageStore.getState().pendingOperations[0].status).toBe('failed');
+    } else {
+      expect(useChatStore.getState().pendingOperations).toEqual([expect.objectContaining({ entityId: chat.id, kind: 'create', status: 'pending' })]);
+      expect(useMessageStore.getState().pendingOperations[0]).toMatchObject({ status: 'pending', payload: message });
+    }
   });
 
   it('caps active chat messages during repeated upserts', async () => {
@@ -1263,6 +1327,7 @@ describe('useMessageStore', () => {
 
   it('queues local chat creation when cloud messages fail because the chat is missing remotely', async () => {
     localStorage.setItem(storageKey('auth-mode'), 'cloud');
+    localStorage.setItem(storageKey('token'), 'test-token');
     const [{ useMessageStore }, { useChatStore }, { useCharacterStore }, { buildDeletedCharacter }] = await Promise.all([
       import('./useMessageStore'),
       import('./useChatStore'),
@@ -1349,6 +1414,7 @@ describe('useMessageStore', () => {
 
   it('does not recreate a cloud direct chat when its required character is deleted locally', async () => {
     localStorage.setItem(storageKey('auth-mode'), 'cloud');
+    localStorage.setItem(storageKey('token'), 'test-token');
     const [{ useMessageStore }, { useChatStore }, { useCharacterStore }, { buildDeletedCharacter }] = await Promise.all([
       import('./useMessageStore'),
       import('./useChatStore'),

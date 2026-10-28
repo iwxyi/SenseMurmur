@@ -4,6 +4,7 @@ import type { AICharacter } from '../types/character';
 import type { AIModelProfile } from '../types/settings';
 import { getUsableDefaultTextAIProfile, hasUsableDefaultTextAI, isAIProfileUsable } from '../types/settings';
 import { createScopedIndexedDbBufferedJsonStorage, createScopedIndexedDbStorage, flushBufferedPersistenceWrites } from './storePersistenceScope';
+import { bindSyncTaskCancellation, cancelSyncTasks, filterCancelledSyncTasks } from '../services/syncTaskCancellation';
 import { createSyncScopeMetadata, type SyncScopeSnapshot } from './syncScopeMetadata';
 import { CLIENT_STORE_SCHEMA_VERSION } from './storeMigrations';
 import { buildDiaryCompanionshipReflectionEvents, pickChatsForDiaryCompanionshipBackflow } from '../services/diaryCompanionshipBackflow';
@@ -97,9 +98,11 @@ interface CharacterArtifactStore extends ArtifactSnapshot {
   }) => Promise<CharacterArtifactEntry>;
   ensureArtifactDetail: (itemId: string) => Promise<void>;
   syncCloud: (query?: CharacterArtifactQuery) => Promise<void>;
+  retryCloudSync: () => Promise<void>;
   getSyncScopeStates: () => SyncScopeSnapshot[];
   resumeProcessing: () => Promise<void>;
   discardFailedJob: (jobId: string) => void;
+  clearSyncTasks: (jobIds: string[]) => void;
 }
 
 function getArtifactStorageKey() {
@@ -143,6 +146,7 @@ function createArtifactStorage() {
 const artifactStorage = createScopedIndexedDbBufferedJsonStorage<ArtifactSnapshot>({
   getScopedKey: getArtifactStorageKey,
   storageName: scopedStorageKey('character-artifacts'),
+  syncTaskField: 'jobs',
   flushDelayMs: 96,
 });
 
@@ -153,6 +157,7 @@ function now() {
 const DIARY_BACKFILL_WINDOW_DAYS = 7;
 const ARTIFACT_SYNC_TTL_MS = 30_000;
 const ARTIFACT_SUMMARY_SCOPE: SyncChangeScope = 'artifacts.summary';
+export const ARTIFACT_CLOUD_SYNC_CHANGED_EVENT = 'pneumata-artifact-cloud-sync-changed';
 const artifactScopeSyncScheduler = createSyncScheduler('artifact.scope-refresh', { priority: 15 });
 const artifactSyncScopes = createSyncScopeMetadata(ARTIFACT_SYNC_TTL_MS, {
   getStorageKey: () => scopedStorageKey(`artifact-sync-scopes-${getLocalDataUserId()}`),
@@ -907,7 +912,8 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
         processingPromise = (async () => {
           await mirrorLocalOutboxWorkerQueue('artifact', get().jobs);
           for (;;) {
-            const nextJob = get().jobs.find((job) => job.status === 'pending' && (job.readyAt || 0) <= now());
+            const nextJob = filterCancelledSyncTasks(getArtifactStorageKey(), get().jobs)
+              .find((job) => job.status === 'pending' && (job.readyAt || 0) <= now());
             if (!nextJob) break;
 
             set((state) => ({
@@ -996,8 +1002,7 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
                 relatedCharacters: nextJob.relatedCharacters,
                 recentDiaryTexts,
               });
-              completeLocalOutboxWorkerOperation(nextJob.id);
-              setTimeout(() => removeLocalOutboxWorkerOperation(nextJob.id), 1500);
+              void completeLocalOutboxWorkerOperation('artifact', { ...nextJob, targetLabel: nextJob.snapshot.name }, entry.id);
               scheduleCloudSync();
             } catch (error) {
               console.error('[character-artifact] generation failed', { kind: nextJob.kind, error });
@@ -1356,6 +1361,7 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
             if (forceSync) cloudSyncDirty = true;
           } finally {
             cloudSyncRunning = false;
+            if (typeof window !== 'undefined') window.dispatchEvent(new Event(ARTIFACT_CLOUD_SYNC_CHANGED_EVENT));
             if (cloudSyncPending) {
               const nextQuery = cloudSyncPendingQuery;
               cloudSyncPending = false;
@@ -1363,6 +1369,10 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
               void get().syncCloud(nextQuery);
             }
           }
+        },
+        retryCloudSync: async () => {
+          cloudSyncDirty = true;
+          await get().syncCloud();
         },
         getSyncScopeStates: () => artifactSyncScopes.listStates(),
         resumeProcessing: async () => {
@@ -1385,8 +1395,18 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
         discardFailedJob: (jobId) => set((state) => {
           const job = state.jobs.find((item) => item.id === jobId);
           if (job?.status !== 'failed') return {};
+          cancelSyncTasks(getArtifactStorageKey(), [jobId]);
           removeLocalOutboxWorkerOperation(jobId);
           return { jobs: state.jobs.filter((item) => item.id !== jobId) };
+        }),
+        clearSyncTasks: (jobIds) => set((state) => {
+          const ids = new Set(jobIds);
+          const removed = state.jobs.filter((job) => ids.has(job.id) && job.status !== 'running');
+          if (!removed.length) return {};
+          const removedIds = new Set(removed.map((job) => job.id));
+          cancelSyncTasks(getArtifactStorageKey(), [...removedIds]);
+          removedIds.forEach(removeLocalOutboxWorkerOperation);
+          return { jobs: state.jobs.filter((job) => !removedIds.has(job.id)) };
         }),
       };
     },
@@ -1413,3 +1433,9 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
     }
   )
 );
+
+bindSyncTaskCancellation(useCharacterArtifactStore, {
+  getStorageKey: getArtifactStorageKey,
+  getQueue: (state) => state.jobs,
+  applyQueue: (_state, jobs) => ({ jobs }),
+});

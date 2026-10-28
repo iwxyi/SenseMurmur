@@ -10,6 +10,8 @@ import { useAutoHideHeader } from '../../hooks/useAutoHideHeader';
 import { DETAIL_COLLAPSED_CHANGE_EVENT, DETAIL_COLLAPSED_STORAGE_KEY, readDetailCollapsedState, writeDetailCollapsedState } from './masterDetailState';
 import PaneResizeDivider, { PANE_RESIZE_DIVIDER_LAYOUT_WIDTH } from './PaneResizeDivider';
 import { CONTENT_SCROLL_TO_TOP_EVENT, type ContentScrollToTopDetail } from '../../services/contentScrollRegion';
+import { motion } from '../../styles/motion';
+import { useLocation } from 'react-router-dom';
 
 const MIN_MASTER_WIDTH = 320;
 const DEFAULT_MASTER_WIDTH = 430;
@@ -17,6 +19,19 @@ const MAX_MASTER_WIDTH = 720;
 const MIN_DETAIL_WIDTH = 240;
 const DIVIDER_LAYOUT_WIDTH = PANE_RESIZE_DIVIDER_LAYOUT_WIDTH;
 const MASTER_WIDTH_STORAGE_KEY = storageKey('master-detail-master-width');
+const paneScrollPositions = new Map<string, number>();
+
+export function clearPaneScrollPositions() {
+  paneScrollPositions.clear();
+}
+
+function paneScrollKey(role: 'master' | 'detail', pathname: string) {
+  if (role === 'detail') return `${role}:${pathname}`;
+  const section = pathname.startsWith('/characters') ? '/characters'
+    : pathname.startsWith('/chats') ? '/chats'
+      : pathname;
+  return `${role}:${section}`;
+}
 
 function clampMasterWidth(value: number, containerWidth?: number | null) {
   if (!Number.isFinite(value)) return DEFAULT_MASTER_WIDTH;
@@ -35,15 +50,64 @@ function getInitialMasterWidth() {
 }
 
 function PaneShell({ role, title, children }: { role: 'master' | 'detail'; title: ReactNode | null; children: ReactNode }) {
+  const location = useLocation();
   const [headerTitle, setHeaderTitleState] = useState<ReactNode | null>(null);
   const [headerActions, setHeaderActions] = useState<ReactNode>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const suppressHeaderScrollRef = useRef(false);
   const releaseHeaderScrollFrameRef = useRef<number | null>(null);
+  const restoringScrollRef = useRef(false);
   const resolvedTitle = headerTitle ?? title;
   const showHeader = resolvedTitle != null || headerActions != null;
   const autoHide = useAutoHideHeader(!showHeader);
+  const { syncScrollTop } = autoHide;
   const topInset = showHeader && !autoHide.hidden ? GLASS_HEADER_HEIGHT : 0;
+  const scrollKey = paneScrollKey(role, location.pathname);
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return undefined;
+    const storedTop = paneScrollPositions.get(scrollKey);
+    if (storedTop == null) return undefined;
+    restoringScrollRef.current = true;
+    let settled = false;
+    const restore = () => {
+      if (settled) return;
+      const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
+      // Async list data may not have laid out yet. Keep retrying while the
+      // container grows, then stop as soon as the saved position is reachable.
+      const nextTop = Math.min(storedTop, maxTop);
+      container.scrollTop = nextTop;
+      syncScrollTop(nextTop);
+      if (maxTop >= storedTop || storedTop === 0) {
+        settled = true;
+        restoringScrollRef.current = false;
+      }
+    };
+    restore();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(restore);
+    observer?.observe(container);
+    const mutationObserver = typeof MutationObserver === 'undefined' ? null : new MutationObserver(restore);
+    mutationObserver?.observe(container, { childList: true, subtree: true });
+    const frame = window.requestAnimationFrame(restore);
+    const retryInterval = window.setInterval(restore, 100);
+    const timer = window.setTimeout(() => {
+      restore();
+      observer?.disconnect();
+      mutationObserver?.disconnect();
+      window.clearInterval(retryInterval);
+      restoringScrollRef.current = false;
+    }, 1200);
+    return () => {
+      settled = true;
+      observer?.disconnect();
+      mutationObserver?.disconnect();
+      window.cancelAnimationFrame(frame);
+      window.clearInterval(retryInterval);
+      window.clearTimeout(timer);
+      restoringScrollRef.current = false;
+    };
+  }, [scrollKey, syncScrollTop]);
 
   const contextValue = useMemo(() => ({
     setHeaderActions,
@@ -109,6 +173,9 @@ function PaneShell({ role, title, children }: { role: 'master' | 'detail'; title
             data-pneumata-scroll-region={`pane-${role}`}
             onScroll={(event) => {
               const { currentTarget } = event;
+              if (!restoringScrollRef.current) {
+                paneScrollPositions.set(scrollKey, currentTarget.scrollTop);
+              }
               if (suppressHeaderScrollRef.current) {
                 autoHide.syncScrollTop(currentTarget.scrollTop);
                 return;
@@ -149,6 +216,7 @@ export default function MasterDetailLayout({
   fallback?: 'master' | 'detail';
 }) {
   const isThreeColumn = useMediaQuery('(min-width:1280px)');
+  const isPhone = useMediaQuery('(max-width:599px)');
   const [masterWidth, setMasterWidth] = useState(getInitialMasterWidth);
   const [detailCollapsed, setDetailCollapsed] = useState(readDetailCollapsedState);
   const [resizing, setResizing] = useState(false);
@@ -230,7 +298,40 @@ export default function MasterDetailLayout({
 
   useEffect(() => () => finishResize(), [finishResize]);
 
-  if (!isThreeColumn) return <>{fallback === 'master' ? master : detail}</>;
+  if (!isThreeColumn) {
+    const showingDetail = fallback !== 'master' && detail != null;
+    return (
+      <Box
+        sx={{
+          width: '100%',
+          minWidth: 0,
+          minHeight: 0,
+          position: 'relative',
+          // Chat content is absolutely positioned and needs a definite flex viewport.
+          ...(showingDetail ? {
+            flex: 1,
+            height: '100%',
+            display: 'flex',
+            flexDirection: 'column',
+          } : isPhone ? { height: '100%' } : {}),
+          ...(isPhone ? {
+            animation: `${showingDetail ? 'masterDetailPhoneIn' : 'masterDetailPhoneBack'} ${showingDetail ? motion.durations.slow : motion.durations.base}ms ${showingDetail ? motion.emphasized : motion.standard}`,
+            '@keyframes masterDetailPhoneIn': {
+              from: { opacity: 0.72 },
+              to: { opacity: 1 },
+            },
+            '@keyframes masterDetailPhoneBack': {
+              from: { opacity: 0.84 },
+              to: { opacity: 1 },
+            },
+            '@media (prefers-reduced-motion: reduce)': { animation: 'none' },
+          } : {}),
+        }}
+      >
+        {showingDetail ? detail : master}
+      </Box>
+    );
+  }
 
   const divider = (
     <PaneResizeDivider

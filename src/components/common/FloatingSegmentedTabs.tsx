@@ -170,7 +170,9 @@ export default function FloatingSegmentedTabs<T extends string | number>({
   const updateScrollEdges = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) {
-      setScrollEdges({ left: false, right: false });
+      setScrollEdges((current) => (
+        current.left === false && current.right === false ? current : { left: false, right: false }
+      ));
       return;
     }
     const maxLeft = Math.max(0, container.scrollWidth - container.clientWidth);
@@ -217,7 +219,7 @@ export default function FloatingSegmentedTabs<T extends string | number>({
     updateScrollPosition();
     updateIndicator();
     updateScrollEdges();
-  }, [items, updateIndicator, updateScrollEdges, updateScrollPosition]);
+  }, [itemValues, updateIndicator, updateScrollEdges, updateScrollPosition]);
 
   useEffect(() => stopScrollAnimation, [stopScrollAnimation]);
 
@@ -302,6 +304,8 @@ export default function FloatingSegmentedTabs<T extends string | number>({
     markIndicatorAnimation();
     markScrollAnimation();
     setVisualPreview(itemValue);
+    // A direct press changes immediately; equality in commitChange prevents duplicate work.
+    commitChange(itemValue);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
@@ -340,12 +344,9 @@ export default function FloatingSegmentedTabs<T extends string | number>({
       event.currentTarget.releasePointerCapture(pointer.pointerId);
     }
 
-    if (pointer.scrollIntent) {
-      setVisualPreview(null);
-      return;
-    }
-
-    const targetValue = previewValueRef.current;
+    const targetValue = pointer.scrollIntent
+      ? resolveValueAtPoint(event.clientX, event.clientY)
+      : previewValueRef.current;
     if (targetValue === null) {
       setVisualPreview(null);
       return;

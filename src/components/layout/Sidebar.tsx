@@ -78,10 +78,10 @@ export default function Sidebar({ collapsed }: SidebarProps) {
     .filter((section) => section.length > 0);
 
   const handleNav = (path: string) => {
-    navigate(path);
     if (!isDesktop) {
       setSidebarOpen(false);
     }
+    navigate(path);
   };
 
   const renderNavItem = (item: NavItem) => {

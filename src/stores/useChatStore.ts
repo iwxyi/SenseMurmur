@@ -6,11 +6,12 @@ import type { Message } from '../types/message';
 import type { RuntimeEventV2 } from '../types/runtimeEvent';
 import { getCalendarStateEventIds } from '../services/runtimeEventRetention';
 import { useCharacterStore } from './useCharacterStore';
-import { api, type SyncChangeScope } from '../services/api';
+import { api, ApiError, type SyncChangeScope } from '../services/api';
+import { canRecreateMissingCloudChat } from '../services/chatAvailability';
 import { buildApiErrorUserMessage } from '../services/apiErrorMessage';
 import { reportRecoverableError, reportRecoverableWarning } from '../services/diagnostics';
 import { projectEntities, type SyncPatchOperation } from '../services/syncProjector';
-import { clearResolvedFieldConflicts, detectPendingFieldConflicts, type FieldConflictRecord } from '../services/syncConflictRecords';
+import { clearResolvedFieldConflicts, detectPendingFieldConflicts, removePendingConflictField, type FieldConflictRecord } from '../services/syncConflictRecords';
 import { buildWarmState } from './storeWarmHelpers';
 import { createScopedIndexedDbBufferedJsonStorage, createScopedIndexedDbStorage, flushBufferedPersistenceWrites } from './storePersistenceScope';
 import { createSyncScheduler } from './storeSyncScheduler';
@@ -40,6 +41,7 @@ import { useLocalWorkspaceStore } from './useLocalWorkspaceStore';
 import { logDeveloperDiagnostic } from '../services/developerDiagnostics';
 import { sanitizeChatLatestMessage } from '../services/chatLatestMessage';
 import { buildChatRuntimeDeltaPatch } from '../services/chatRuntimeDelta';
+import { bindSyncTaskCancellation, cancelSyncTasks, filterCancelledSyncTasks } from '../services/syncTaskCancellation';
 
 function createLocalChatId() {
   return `local-chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -539,6 +541,7 @@ interface ChatStore extends PersistedChatState {
   restoreLocalChats: () => Promise<void>;
   refreshChatSummaryFromCloud: () => Promise<void>;
   flushPendingOperations: () => Promise<void>;
+  queueMissingCloudChat: (id: string) => boolean;
   queuePatch: (entityId: string, patch: Record<string, unknown>, kind?: PendingChatOperation['kind']) => void;
   loadProjectedDeletedChats: () => Promise<GroupChat[]>;
   loadProjectedChats: () => Promise<GroupChat[]>;
@@ -550,7 +553,9 @@ interface ChatStore extends PersistedChatState {
   clearPendingOperationsForChat: (chatId: string) => void;
   confirmCreateOperationsSynced: (entityIds: string[]) => void;
   discardFailedOperation: (operationId: string) => void;
+  clearSyncTasks: (operationIds: string[]) => void;
   resolveRemoteDeleteConflict: (id: string, resolution: 'restore_local' | 'discard_local' | 'save_as_new') => Promise<void>;
+  resolveFieldConflict: (id: string, field: string, resolution: 'keep_local' | 'use_remote') => Promise<void>;
   retryFailedOperations: () => void;
   loadPendingSnapshot: () => Promise<GroupChat[]>;
   loadProjectedRecycleBin: () => Promise<GroupChat[]>;
@@ -1044,17 +1049,23 @@ function mergeChatPatchOperations(operations: PendingChatOperation[]) {
       merged.set(operation.entityId, compactedOperation);
       continue;
     }
+    const terminalFailure = existing.status === 'failed' && isTerminalSyncError(existing.lastError || '');
+    const replacesFailedPatch = terminalFailure && existing.kind === 'patch' && compactedOperation.kind === 'create';
     merged.set(operation.entityId, {
       ...existing,
-      id: compactedOperation.id,
+      kind: existing.kind === 'create' || compactedOperation.kind === 'create' ? 'create' : 'patch',
+      targetLabel: compactedOperation.targetLabel || existing.targetLabel,
+      id: terminalFailure && !replacesFailedPatch ? existing.id : compactedOperation.id,
       patch: {
         ...(existing.patch || {}),
         ...(compactedOperation.patch || {}),
       },
       clientTimestamp: compactedOperation.clientTimestamp,
-      status: existing.status === 'syncing' ? 'syncing' : compactedOperation.status,
+      status: replacesFailedPatch ? 'pending' : terminalFailure ? 'failed' : existing.status === 'syncing' ? 'syncing' : compactedOperation.status,
       attemptCount: Math.max(existing.attemptCount || 0, compactedOperation.attemptCount || 0),
-      lastError: compactedOperation.lastError || existing.lastError,
+      lastError: replacesFailedPatch ? undefined : compactedOperation.lastError || existing.lastError,
+      retryAt: replacesFailedPatch ? 0 : existing.retryAt,
+      lockedAt: replacesFailedPatch ? 0 : existing.lockedAt,
       targetIds: compactedOperation.targetIds?.length ? compactedOperation.targetIds : existing.targetIds,
     });
   }
@@ -1069,11 +1080,28 @@ async function executeChatOperation(operation: PendingChatOperation) {
       operationId: operation.id,
     });
   }
-  return api.syncChatPatch(operation.entityId, {
+  const request = {
     operationId: operation.id,
     clientTimestamp: operation.clientTimestamp,
     patch: operation.patch,
-  });
+  };
+  const accountId = getLocalDataUserId();
+  try {
+    return await api.syncChatPatch(operation.entityId, request);
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 404 || accountId !== getLocalDataUserId()) throw error;
+    const state = useChatStore.getState();
+    const chat = state.chats.find((item) => item.id === operation.entityId);
+    if (!chat || chat.deletedAt != null || state.remoteDeletedChatIds.includes(chat.id)
+      || state.remoteDeletedChats.some((item) => item.id === chat.id)
+      || !canRecreateMissingCloudChat(chat, useCharacterStore.getState().characters)) throw error;
+    const restored = await createChatRemote({ ...chat, id: chat.id, operationId: operation.id });
+    if (accountId !== getLocalDataUserId()) throw new Error('同步期间账号已切换');
+    if (restored.deletedAt != null) throw error;
+    // The server remembers the original PATCH's 404. A separate key lets the
+    // recovered resource accept this edit, including a concurrent create.
+    return api.syncChatPatch(chat.id, { ...request, operationId: `${operation.id}:recovered` });
+  }
 }
 
 async function applyChatPurge(ids: string[]) {
@@ -1143,6 +1171,7 @@ export async function resetChatStoreForAccountBoundary() {
 const chatStorage = createScopedIndexedDbBufferedJsonStorage<PersistedChatState>({
   getScopedKey: getChatStorageKey,
   storageName: getChatStoreStorageName(),
+  syncTaskField: 'pendingOperations',
   flushDelayMs: 96,
 });
 let chatSyncLifecycleRegistered = false;
@@ -1171,7 +1200,7 @@ export const useChatStore = create<ChatStore>()(
       const flushPendingOperations = async () => {
         await mirrorLocalOutboxWorkerQueue('chat', get().pendingOperations);
         await runPendingOperationQueue<PendingChatOperation>({
-          getOperations: () => get().pendingOperations,
+          getOperations: () => filterCancelledSyncTasks(getChatStorageKey(), get().pendingOperations),
           canRun: canSyncChats,
           retryDelays: CHAT_SYNC_DELAYS,
           isTerminalError: isTerminalSyncError,
@@ -1194,8 +1223,7 @@ export const useChatStore = create<ChatStore>()(
               pendingEditSyncError: latestChatError(nextQueue),
               lastSyncedAt: Date.now(),
             }));
-            completeLocalOutboxWorkerOperation(operation.id);
-            window.setTimeout(() => removeLocalOutboxWorkerOperation(operation.id), 1500);
+            void completeLocalOutboxWorkerOperation('chat', operation);
           },
           onFailure: (operation, _error, retry) => {
             set((current) => ({
@@ -1624,9 +1652,9 @@ export const useChatStore = create<ChatStore>()(
           }, 'debug', 'chat-sync');
           if (!persisted?.chats?.length) return;
           set((state) => {
-            const pendingOperations = state.pendingOperations.length
-              ? state.pendingOperations
-              : recoverInterruptedOperations(persisted.pendingOperations || []);
+            // Hydration already restored the queue. An empty live queue can mean
+            // the user cleared it; a slower disk snapshot must not resurrect it.
+            const pendingOperations = state.pendingOperations;
             const nextChats = mergeVisibleChats(
               persisted.chats,
               state.chats,
@@ -1676,10 +1704,29 @@ export const useChatStore = create<ChatStore>()(
 
         flushPendingOperations,
 
+        queueMissingCloudChat: (id) => {
+          const state = get();
+          const chat = state.chats.find((item) => item.id === id && item.deletedAt == null);
+          if (shouldSkipCloudSync() || !chat || state.remoteDeletedChatIds.includes(id)
+            || state.remoteDeletedChats.some((item) => item.id === id)
+            || !canRecreateMissingCloudChat(chat, useCharacterStore.getState().characters)) return false;
+          if (state.pendingOperations.some((item) => item.entityId === id && item.kind === 'create' && item.status !== 'failed')) return true;
+          // Explicit recovery replaces terminal failures with a fresh create key.
+          const previous = state.pendingOperations.filter((item) => item.entityId === id);
+          const operation = createPendingChatOperation({ kind: 'create', targetIds: [id], targetLabel: chat.name,
+            patch: compactChatPatchForCloud({ ...chat, id }) });
+          const pendingOperations = [...state.pendingOperations.filter((item) => item.entityId !== id), operation];
+          set({ pendingOperations, pendingEditSyncCount: pendingOperations.length, pendingEditSyncError: latestChatError(pendingOperations) });
+          previous.forEach((item) => removeLocalOutboxWorkerOperation(item.id));
+          scheduleChatFlush(flushPendingOperations, 0);
+          return true;
+        },
+
         queuePatch: (entityId, patch, kind = 'patch') => {
           const cloudPatch = compactChatPatchForCloud(patch);
           const operation = Object.keys(cloudPatch).length > 0
-            ? createPendingChatOperation({ kind, targetIds: entityId ? [entityId] : [], patch: cloudPatch })
+            ? createPendingChatOperation({ kind, targetIds: entityId ? [entityId] : [], patch: cloudPatch,
+              targetLabel: typeof patch.name === 'string' ? patch.name : get().chats.find((item) => item.id === entityId)?.name })
             : null;
           set((state) => {
             const pendingOperations = operation
@@ -1774,11 +1821,27 @@ export const useChatStore = create<ChatStore>()(
         discardFailedOperation: (operationId) => set((state) => {
           const operation = state.pendingOperations.find((item) => item.id === operationId);
           if (operation?.status !== 'failed') return {};
+          cancelSyncTasks(getChatStorageKey(), [operationId]);
           const pendingOperations = removePendingChatOperation(state.pendingOperations, operationId);
           return {
             chats: projectVisibleChats(state.chats, pendingOperations),
             pendingOperations,
             fieldConflicts: clearResolvedFieldConflicts(state.fieldConflicts, { entityType: 'chat', operationIds: [operationId] }),
+            pendingEditSyncCount: pendingOperations.length,
+            pendingEditSyncError: latestChatError(pendingOperations),
+          };
+        }),
+        clearSyncTasks: (operationIds) => set((state) => {
+          const ids = new Set(operationIds);
+          const removed = state.pendingOperations.filter((operation) => ids.has(operation.id) && operation.status !== 'syncing');
+          if (!removed.length) return {};
+          const removedIds = new Set(removed.map((operation) => operation.id));
+          cancelSyncTasks(getChatStorageKey(), [...removedIds]);
+          const pendingOperations = state.pendingOperations.filter((operation) => !removedIds.has(operation.id));
+          removedIds.forEach(removeLocalOutboxWorkerOperation);
+          return {
+            pendingOperations,
+            fieldConflicts: clearResolvedFieldConflicts(state.fieldConflicts, { entityType: 'chat', operationIds: [...removedIds] }),
             pendingEditSyncCount: pendingOperations.length,
             pendingEditSyncError: latestChatError(pendingOperations),
           };
@@ -1813,8 +1876,33 @@ export const useChatStore = create<ChatStore>()(
             };
           });
         },
+        resolveFieldConflict: async (id, field, resolution) => {
+          const conflict = get().fieldConflicts.find((item) => item.entityId === id && item.field === field && !item.accepted);
+          if (!conflict) return;
+          if (resolution === 'keep_local') {
+            set((state) => ({ fieldConflicts: state.fieldConflicts.map((item) => item.id === conflict.id ? { ...item, accepted: true } : item) }));
+            scheduleChatFlush(flushPendingOperations, 0);
+            return;
+          }
+          const remote = await fetchChatDetail(id);
+          set((state) => {
+            if (!state.fieldConflicts.some((item) => item.id === conflict.id)) return {};
+            const pendingOperations = removePendingConflictField(state.pendingOperations, id, field);
+            const chats = state.chats.map((chat) => chat.id === id
+              ? normalizeConversation({ ...chat, [field]: (remote as unknown as Record<string, unknown>)[field], fieldVersions: { ...chat.fieldVersions, [field]: remote.fieldVersions?.[field] || 0 } } as GroupChat)
+              : chat);
+            return {
+              chats: projectVisibleChats(chats, pendingOperations),
+              pendingOperations,
+              fieldConflicts: state.fieldConflicts.filter((item) => item.id !== conflict.id),
+              pendingEditSyncCount: pendingOperations.length,
+              pendingEditSyncError: latestChatError(pendingOperations),
+            };
+          });
+          scheduleChatFlush(flushPendingOperations, 0);
+        },
         retryFailedOperations: () => set((state) => {
-          const pendingOperations = retryFailedOperations(state.pendingOperations);
+          const pendingOperations = retryFailedOperations(state.pendingOperations, { includeTerminal: false });
           if (pendingOperations === state.pendingOperations) return {};
           return {
             pendingOperations,
@@ -1841,6 +1929,7 @@ export const useChatStore = create<ChatStore>()(
                 createPendingChatOperation({
                   kind: 'create',
                   targetIds: [chat.id],
+                  targetLabel: chat.name,
                   patch: compactChatPatchForCloud({ ...chat, id: chat.id } as Record<string, unknown>),
                 }),
               ]);
@@ -1888,7 +1977,7 @@ export const useChatStore = create<ChatStore>()(
             const cleanPatch = sanitizeChatLatestPatch(chat, patch);
             const cloudPatch = compactChatPatchForCloud(cleanPatch as Record<string, unknown>);
             const operation = !shouldSkipCloudSync() && Object.keys(cloudPatch).length > 0
-              ? createPendingChatOperation({ kind: 'patch', targetIds: [id], patch: cloudPatch })
+              ? createPendingChatOperation({ kind: 'patch', targetIds: [id], patch: cloudPatch, targetLabel: chat.name })
               : null;
             const pendingOperations = operation
               ? mergeChatPatchOperations([...state.pendingOperations, operation])
@@ -2004,6 +2093,20 @@ export const useChatStore = create<ChatStore>()(
     }
   )
 );
+
+bindSyncTaskCancellation(useChatStore, {
+  getStorageKey: getChatStorageKey,
+  getQueue: (state) => state.pendingOperations,
+  applyQueue: (state, pendingOperations) => ({
+    pendingOperations,
+    pendingEditSyncCount: pendingOperations.length,
+    pendingEditSyncError: latestChatError(pendingOperations),
+    fieldConflicts: clearResolvedFieldConflicts(state.fieldConflicts, {
+      entityType: 'chat',
+      operationIds: state.pendingOperations.filter((operation) => !pendingOperations.includes(operation)).map((operation) => operation.id),
+    }),
+  }),
+});
 
 export const __chatRuntimePersistenceForTests = {
   compactChatPatchForCloud,

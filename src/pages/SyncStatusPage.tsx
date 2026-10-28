@@ -1,15 +1,19 @@
 import HelpOutlineIcon from '@mui/icons-material/HelpOutlineOutlined';
-import { Alert, Box, Button, Card, CardContent, Chip, IconButton, Stack, Tooltip, Typography } from '@mui/material';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
+import RefreshIcon from '@mui/icons-material/Refresh';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutlined';
+import { Alert, Box, Button, ButtonGroup, Card, CardContent, Chip, Divider, IconButton, Menu, MenuItem, Stack, Tab, Tabs, Tooltip, Typography } from '@mui/material';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useCharacterStore } from '../stores/useCharacterStore';
 import { useChatStore } from '../stores/useChatStore';
 import { useAuthStore } from '../stores/useAuthStore';
 import { useMessageStore } from '../stores/useMessageStore';
-import { ensureCharacterArtifactStoreHydrated, useCharacterArtifactStore } from '../stores/useCharacterArtifactStore';
+import { ARTIFACT_CLOUD_SYNC_CHANGED_EVENT, ensureCharacterArtifactStoreHydrated, useCharacterArtifactStore } from '../stores/useCharacterArtifactStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import EmptyState from '../components/common/EmptyState';
+import ConfirmDialog from '../components/common/ConfirmDialog';
 import { readCloudSyncBootstrapStatus, type CloudSyncBootstrapStatus } from '../services/cloudSyncBootstrapStatus';
 import { scheduleSyncWorkersByPriority } from '../stores/storeSyncScheduler';
 import { buildOperationsDiffPreview, buildPatchDiffPreview } from '../services/syncDiffPreview';
@@ -21,8 +25,11 @@ import { runLocalPersistenceMaintenance, type LocalPersistenceMaintenanceResult 
 import { classifySyncError, parseSyncErrorClassification, type SyncErrorKind } from '../stores/storeSyncHelpers';
 import { buildLocalOutboxProjection } from '../services/localOutboxProjection';
 import { mirrorLocalOutboxQueues } from '../services/localOutboxMirror';
-import { clearLocalOutboxHistory, listLocalOutboxHistory, type LocalOutboxHistoryEntry } from '../services/localOutboxWorkerBridge';
+import { clearLocalOutboxHistory, listLocalOutboxHistory, LOCAL_OUTBOX_HISTORY_CHANGED_EVENT, type LocalOutboxHistoryEntry } from '../services/localOutboxWorkerBridge';
 import type { Message } from '../types/message';
+import { hasUsableDefaultTextAI } from '../types/settings';
+import { isCloudSyncEnabled } from '../services/cloudSyncPreference';
+import { api, type CharacterArtifactSummaryEntry } from '../services/api';
 
 function clipText(value: unknown, max = 120) {
   if (value == null) return '';
@@ -31,10 +38,35 @@ function clipText(value: unknown, max = 120) {
   return text.length > max ? `${text.slice(0, max - 1)}...` : text;
 }
 
+function taskTargetLabel(item: { targetLabel?: string; payload?: unknown; createdAt: number }, currentName: string | undefined, isZh: boolean) {
+  const payload = item.payload && typeof item.payload === 'object' ? item.payload as Record<string, unknown> : null;
+  const patch = payload?.patch && typeof payload.patch === 'object' ? payload.patch as Record<string, unknown> : null;
+  return currentName || item.targetLabel
+    || (typeof payload?.targetLabel === 'string' ? payload.targetLabel : '')
+    || (typeof patch?.name === 'string' ? patch.name : '')
+    || (isZh ? `名称未记录 · ${formatTime(item.createdAt, true)}` : `Name unavailable · ${formatTime(item.createdAt, false)}`);
+}
+
+function displayConflictField(field: string, isZh: boolean) {
+  const names: Record<string, [string, string]> = {
+    runtimeEventsV2: ['会话事件', 'Conversation events'],
+    name: ['名称', 'Name'],
+    topic: ['话题', 'Topic'],
+    memberIds: ['参与角色', 'Participants'],
+  };
+  return names[field]?.[isZh ? 0 : 1] || (isZh ? '内容' : 'Content');
+}
+
+function describeConflictValue(value: unknown, isZh: boolean) {
+  if (Array.isArray(value)) return isZh ? `${value.length} 项` : `${value.length} items`;
+  if (value && typeof value === 'object') return isZh ? '有内容' : 'Has content';
+  return clipText(value, 48) || (isZh ? '空' : 'Empty');
+}
+
 function summarizePatch(patch: Record<string, unknown> | undefined, isZh: boolean) {
   const keys = Object.keys(patch || {}).filter((key) => key !== 'updatedAt');
   if (!keys.length) return isZh ? '本地操作没有可展示的字段变更' : 'No displayable field changes in this local operation';
-  return isZh ? `变更字段：${keys.slice(0, 8).join('、')}${keys.length > 8 ? '...' : ''}` : `Fields: ${keys.slice(0, 8).join(', ')}${keys.length > 8 ? '...' : ''}`;
+  return isZh ? `本地有 ${keys.length} 项内容等待同步` : `${keys.length} local changes waiting to sync`;
 }
 
 function rememberMessageSnapshot(index: Map<string, Message>, message: Message | undefined | null) {
@@ -60,6 +92,21 @@ function formatTime(value: number, isZh: boolean) {
   return new Date(value).toLocaleString();
 }
 
+function TaskTime({ value, isZh }: { value: number; isZh: boolean }) {
+  const date = new Date(value);
+  return (
+    <Tooltip title={formatTime(value, isZh)}>
+      <Typography component="time" dateTime={value ? date.toISOString() : undefined} variant="caption"
+        sx={{ color: 'text.disabled', whiteSpace: 'nowrap', textAlign: 'right', fontVariantNumeric: 'tabular-nums', pt: 0.25 }}>
+        {value ? date.toLocaleString(isZh ? 'zh-CN' : 'en-US', {
+          ...(date.getFullYear() !== new Date().getFullYear() ? { year: 'numeric' as const } : {}),
+          month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+        }) : formatTime(value, isZh)}
+      </Typography>
+    </Tooltip>
+  );
+}
+
 function summarizeSyncScopeState(state: SyncScopeSnapshot, isZh: boolean) {
   const now = Date.now();
   if (state.inflight) return { label: isZh ? '检查中' : 'Checking', color: 'primary' as const };
@@ -81,17 +128,16 @@ function syncErrorKindLabel(kind: SyncErrorKind, isZh: boolean) {
   return labels[kind];
 }
 
-function syncErrorKindColor(kind: SyncErrorKind) {
-  if (kind === 'network' || kind === 'server_unavailable') return 'warning' as const;
-  if (kind === 'conflict_ignored') return 'info' as const;
-  if (kind === 'unknown') return 'default' as const;
-  return 'error' as const;
-}
-
 function resolveDisplayErrorClassification(raw: string | null | undefined) {
   const initial = parseSyncErrorClassification(raw);
   if (initial.kind !== 'unknown' || !initial.message) return initial;
   return parseSyncErrorClassification(classifySyncError(initial.message));
+}
+
+function isUnavailableChatError(raw: string | null | undefined) {
+  const classification = parseSyncErrorClassification(raw);
+  return classification.kind === 'conflict_ignored'
+    && /(?:群聊|聊天|会话)不存在|404|not found/i.test(classification.message);
 }
 
 type SyncStatusFilterKey =
@@ -100,23 +146,12 @@ type SyncStatusFilterKey =
   | 'syncing'
   | 'failed'
   | 'conflict'
+  | 'history'
   | 'checking'
   | 'backoff'
   | 'scope_issue'
   | 'checked'
   | `error_kind:${SyncErrorKind}`;
-
-function matchesSyncStatusFilter(item: ReturnType<typeof buildLocalOutboxProjection>[number], filter: SyncStatusFilterKey) {
-  if (filter === 'all') return true;
-  if (filter === 'queued') return item.status === 'pending';
-  if (filter === 'syncing') return item.status === 'syncing';
-  if (filter === 'failed') return item.status === 'failed';
-  if (filter === 'conflict') return false;
-  if (filter.startsWith('error_kind:')) {
-    return item.lastError ? resolveDisplayErrorClassification(item.lastError).kind === filter.slice('error_kind:'.length) : false;
-  }
-  return false;
-}
 
 function matchesScopeFilter(state: SyncScopeSnapshot, filter: SyncStatusFilterKey) {
   if (filter === 'all') return true;
@@ -158,24 +193,44 @@ function countForFilter(items: { status: string; lastError: string | null }[], s
   return queueCount + scopeCount;
 }
 
-function chipVariant(active: boolean) {
-  return active ? 'filled' as const : 'outlined' as const;
+function taskStatusLabel(scopeType: string, status: string, isZh: boolean, fallback: string) {
+  if (scopeType !== 'artifact') return fallback;
+  const labels: Record<string, [string, string]> = {
+    pending: ['待生成', 'Waiting to generate'],
+    syncing: ['生成中', 'Generating'],
+    failed: ['生成失败', 'Generation failed'],
+    succeeded: ['生成完成', 'Generated'],
+  };
+  return labels[status]?.[isZh ? 0 : 1] || fallback;
 }
 
-function chipColor(active: boolean, inactive: 'default' | 'primary' | 'error' | 'warning' | 'success' | 'info') {
-  return active ? inactive : 'default' as const;
+function artifactCloudStatus(
+  record: LocalOutboxHistoryEntry,
+  localUpdatedAt: number | undefined,
+  remote: CharacterArtifactSummaryEntry | undefined,
+  summariesAvailable: boolean,
+  loading: boolean,
+  cloudEnabled: boolean,
+  isZh: boolean,
+) {
+  if (!record.resultId) return isZh ? '云端状态未记录' : 'Cloud status was not recorded';
+  if (!cloudEnabled) return isZh ? '仅保存在本机' : 'Saved on this device';
+  if (loading || !summariesAvailable) return isZh ? '正在核对云端' : 'Checking cloud';
+  if (!remote) return localUpdatedAt
+    ? (isZh ? '云端尚无此内容' : 'Not yet in cloud')
+    : (isZh ? '本机与云端均无此内容' : 'Not found on this device or in cloud');
+  if (remote.deletedAt != null) return isZh ? '云端已删除' : 'Deleted in cloud';
+  if (localUpdatedAt && remote.updatedAt < localUpdatedAt) return isZh ? '本地版本较新，待同步' : 'Newer local version pending sync';
+  if (!localUpdatedAt) return isZh ? '云端已有版本' : 'A version exists in cloud';
+  return isZh ? '云端已保存' : 'Saved in cloud';
 }
 
-function describeScopeTarget(scope: string, area: string, isZh: boolean) {
-  const [scopeType, targetId] = scope.split(':');
-  if (!targetId) return null;
-  if (scopeType === 'messages.window') {
-    return isZh ? `关联聊天：${targetId}` : `Related chat: ${targetId}`;
-  }
-  if (scopeType === 'chats.detail') {
-    return isZh ? `目标聊天：${targetId}` : `Target chat: ${targetId}`;
-  }
-  return isZh ? `${area}目标：${targetId}` : `${area} target: ${targetId}`;
+function describeScopeTarget(scope: string, isZh: boolean) {
+  const type = scope.split(':')[0];
+  if (type === 'messages.window') return isZh ? '消息检查' : 'Message check';
+  if (type === 'chats.detail') return isZh ? '聊天详情检查' : 'Chat detail check';
+  if (type === 'characters.detail') return isZh ? '角色详情检查' : 'Character detail check';
+  return isZh ? '数据检查' : 'Data check';
 }
 
 function describeScopeFailureHint(scope: string, rawError: string | null | undefined, isZh: boolean) {
@@ -199,8 +254,7 @@ function describeScopeFailureHint(scope: string, rawError: string | null | undef
 }
 
 const compactChipSx = {
-  borderRadius: 999,
-  height: 24,
+  borderRadius: 1,
   '& .MuiChip-label': {
     px: 1.1,
     fontWeight: 600,
@@ -232,13 +286,30 @@ export default function SyncStatusPage() {
   const [activeFilter, setActiveFilter] = useState<SyncStatusFilterKey>('all');
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const historyRequestSeqRef = useRef(0);
+  const [resolutionError, setResolutionError] = useState<string | null>(null);
+  const [resolvingConflictId, setResolvingConflictId] = useState<string | null>(null);
+  const [confirmClearTasks, setConfirmClearTasks] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isLoadingMoreHistory, setIsLoadingMoreHistory] = useState(false);
   const [isClearingHistory, setIsClearingHistory] = useState(false);
+  const [retryMenuAnchor, setRetryMenuAnchor] = useState<HTMLElement | null>(null);
+  const [artifactCloudSummaries, setArtifactCloudSummaries] = useState<Map<string, CharacterArtifactSummaryEntry> | null>(null);
+  const [artifactCloudCheckError, setArtifactCloudCheckError] = useState<string | null>(null);
+  const [artifactCloudCheckLoading, setArtifactCloudCheckLoading] = useState(false);
+  const [artifactCloudCheckRevision, setArtifactCloudCheckRevision] = useState(0);
+  const [retryingArtifactCloud, setRetryingArtifactCloud] = useState(false);
+  const [artifactCloudUploadError, setArtifactCloudUploadError] = useState(false);
   const recoveryImportInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     void ensureCharacterArtifactStoreHydrated();
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => setArtifactCloudCheckRevision((value) => value + 1);
+    window.addEventListener(ARTIFACT_CLOUD_SYNC_CHANGED_EVENT, refresh);
+    return () => window.removeEventListener(ARTIFACT_CLOUD_SYNC_CHANGED_EVENT, refresh);
   }, []);
 
   useEffect(() => {
@@ -267,7 +338,8 @@ export default function SyncStatusPage() {
     });
   }, [artifactStore.jobs, characterStore.pendingOperations, chatStore.pendingOperations, messageStore.pendingOperations]);
 
-  const loadHistory = async (offset = 0, append = false) => {
+  const loadHistory = useCallback(async (offset = 0, append = false) => {
+    const requestSeq = ++historyRequestSeqRef.current;
     if (append) {
       setIsLoadingMoreHistory(true);
     } else {
@@ -275,26 +347,55 @@ export default function SyncStatusPage() {
     }
     setHistoryError(null);
     try {
-      const result = await listLocalOutboxHistory({ offset, limit: SYNC_HISTORY_PAGE_SIZE });
+      const activeIds = new Set([
+        ...(characterStore.pendingOperations || []),
+        ...(chatStore.pendingOperations || []),
+        ...(messageStore.pendingOperations || []),
+        ...(artifactStore.jobs || []),
+      ].map((operation) => operation.id));
+      const result = await listLocalOutboxHistory({ offset, limit: SYNC_HISTORY_PAGE_SIZE, activeIds });
+      if (requestSeq !== historyRequestSeqRef.current) return;
       setHistoryItems((current) => append ? [...current, ...result.items] : result.items);
       setHistoryTotal(result.total);
       setHistorySucceededTotal(result.succeededTotal);
       setHistoryFailedTotal(result.failedTotal);
       setHistoryHasMore(result.hasMore);
     } catch (error) {
-      setHistoryError(error instanceof Error ? error.message : String(error));
+      if (requestSeq === historyRequestSeqRef.current) setHistoryError(error instanceof Error ? error.message : String(error));
     } finally {
-      if (append) {
-        setIsLoadingMoreHistory(false);
-      } else {
-        setIsLoadingHistory(false);
+      if (requestSeq === historyRequestSeqRef.current) {
+        if (append) {
+          setIsLoadingMoreHistory(false);
+        } else {
+          setIsLoadingHistory(false);
+        }
       }
     }
-  };
+  }, [artifactStore.jobs, characterStore.pendingOperations, chatStore.pendingOperations, messageStore.pendingOperations]);
 
   useEffect(() => {
     void loadHistory();
-  }, [artifactStore.jobs, characterStore.pendingOperations, chatStore.pendingOperations, messageStore.pendingOperations]);
+    const handleHistoryChange = () => { void loadHistory(); };
+    window.addEventListener(LOCAL_OUTBOX_HISTORY_CHANGED_EVENT, handleHistoryChange);
+    return () => window.removeEventListener(LOCAL_OUTBOX_HISTORY_CHANGED_EVENT, handleHistoryChange);
+  }, [loadHistory]);
+
+  const hasVerifiableArtifactHistory = historyItems.some((item) => item.scopeType === 'artifact' && item.status === 'succeeded' && item.resultId);
+  useEffect(() => {
+    if (activeFilter !== 'history' || authMode !== 'cloud' || !isCloudSyncEnabled() || !hasVerifiableArtifactHistory) return;
+    let cancelled = false;
+    setArtifactCloudCheckLoading(true);
+    setArtifactCloudCheckError(null);
+    setArtifactCloudSummaries(null);
+    void api.getCharacterArtifactSummaries({ includeDeleted: true }).then((response) => {
+      if (!cancelled) setArtifactCloudSummaries(new Map(response.items.map((item) => [item.id, item])));
+    }).catch((error: unknown) => {
+      if (!cancelled) setArtifactCloudCheckError(error instanceof Error ? error.message : String(error));
+    }).finally(() => {
+      if (!cancelled) setArtifactCloudCheckLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [activeFilter, artifactCloudCheckRevision, authMode, hasVerifiableArtifactHistory]);
 
   const localOutboxItems = useMemo(() => buildLocalOutboxProjection({
     characterOperations: characterStore.pendingOperations || [],
@@ -350,7 +451,7 @@ export default function SyncStatusPage() {
           attemptCount: outboxItem.attemptCount,
           lastError: outboxItem.lastError || null,
           targetCount: outboxItem.targetIds.length || 1,
-          targetLabel: localSnapshot?.name || targetId,
+          targetLabel: taskTargetLabel({ ...outboxItem, payload: operation }, localSnapshot?.name, isZh),
           summary: summarizePatch(operation?.patch, isZh),
           diffPreview: buildPatchDiffPreview(operation?.patch),
           exportPayload: {
@@ -375,7 +476,7 @@ export default function SyncStatusPage() {
           attemptCount: outboxItem.attemptCount,
           lastError: outboxItem.lastError || null,
           targetCount: outboxItem.targetIds.length || 1,
-          targetLabel: localSnapshot?.name || targetId,
+          targetLabel: taskTargetLabel({ ...outboxItem, payload: operation }, localSnapshot?.name || chatStore.remoteDeletedChats.find((chat) => chat.id === targetId)?.name, isZh),
           summary: summarizePatch(operation?.patch, isZh),
           diffPreview: buildPatchDiffPreview(operation?.patch),
           exportPayload: {
@@ -404,7 +505,7 @@ export default function SyncStatusPage() {
           attemptCount: outboxItem.attemptCount,
           lastError: outboxItem.lastError || null,
           targetCount: outboxItem.targetIds.length || 1,
-          targetLabel: chat?.name || chatId || outboxItem.targetId,
+          targetLabel: taskTargetLabel(outboxItem, chat?.name || chatStore.remoteDeletedChats.find((chat) => chat.id === chatId)?.name, isZh),
           summary: targetMessage?.content ? clipText(targetMessage.content) : (isZh ? '本地消息快照未在当前缓存窗口中找到' : 'Local message snapshot was not found in cached windows'),
           exportPayload: {
             operation: operation || outboxItem,
@@ -425,14 +526,14 @@ export default function SyncStatusPage() {
       return {
         id: outboxItem.id,
         scopeType: 'artifact' as const,
-        scope: isZh ? '信件 / 日记' : 'Letters / Diary',
+        scope: isZh ? '信件 / 日记生成' : 'Letter / diary generation',
         kind: outboxItem.kind,
         status: outboxItem.status,
         createdAt: outboxItem.createdAt,
         attemptCount: outboxItem.attemptCount,
         lastError: outboxItem.lastError || null,
         targetCount: outboxItem.targetIds.length || 1,
-        targetLabel: job?.snapshot?.name || job?.characterId || outboxItem.targetId,
+        targetLabel: job?.snapshot?.name || (isZh ? '角色经历' : 'Character artifact'),
         summary: [job?.dateKey, job?.sourceKey].filter(Boolean).join(' · ') || outboxItem.summaryKey || (isZh ? '角色经历生成任务' : 'Character artifact generation job'),
         exportPayload: {
           job: job || outboxItem,
@@ -472,25 +573,6 @@ export default function SyncStatusPage() {
         },
       }));
 
-    const chatItems = (chatStore.pendingOperations || []).map((item) => ({
-      id: item.id,
-      scopeType: 'chat' as const,
-      scope: isZh ? '聊天' : 'Chats',
-      kind: item.kind,
-      status: item.status,
-      createdAt: item.clientTimestamp,
-      attemptCount: item.attemptCount,
-      lastError: item.lastError || null,
-      targetCount: item.targetIds.length,
-      targetLabel: chatStore.chats.find((chat) => chat.id === item.entityId)?.name || item.entityId,
-      summary: summarizePatch(item.patch, isZh),
-      diffPreview: buildPatchDiffPreview(item.patch),
-      exportPayload: {
-        operation: item,
-        localSnapshot: chatStore.chats.find((chat) => chat.id === item.entityId) || null,
-      },
-    }));
-
     const chatDeleteConflicts = (chatStore.remoteDeletedChatIds || [])
       .map((id) => ({
         id,
@@ -522,7 +604,9 @@ export default function SyncStatusPage() {
       }));
 
     const characterFieldConflicts = (characterStore.fieldConflicts || [])
-      .filter((conflict) => conflict.entityType === 'character')
+      .filter((conflict) => conflict.entityType === 'character' && !conflict.accepted
+        && conflict.remoteUpdatedAt > conflict.localUpdatedAt
+        && (characterStore.pendingOperations || []).some((operation) => conflict.localOperationIds.includes(operation.id) && operation.status !== 'failed'))
       .map((conflict) => ({
         id: `character-field-conflict-${conflict.entityId}-${conflict.field}`,
         scopeType: 'character' as const,
@@ -533,11 +617,13 @@ export default function SyncStatusPage() {
         attemptCount: 0,
         lastError: null,
         targetCount: 1,
-        targetLabel: characterStore.characters.find((character) => character.id === conflict.entityId)?.name || conflict.entityId,
-        summary: isZh ? `字段“${conflict.field}”云端也有不同更新；本地待提交值继续显示，等待手动确认。` : `Field "${conflict.field}" also changed remotely. The local pending value remains visible until manually reviewed.`,
+        targetLabel: characterStore.characters.find((character) => character.id === conflict.entityId)?.name || (isZh ? '名称未记录的角色' : 'Character name unavailable'),
+        summary: isZh ? `${displayConflictField(conflict.field, true)}在其他设备也有更新，请选择保留哪一版。` : `${displayConflictField(conflict.field, false)} changed on another device. Choose which version to keep.`,
+        conflictTargetId: conflict.entityId,
+        conflictField: conflict.field,
         diffPreview: [{
           field: conflict.field,
-          value: isZh ? `本地 ${clipText(conflict.localValue, 48)} / 云端 ${clipText(conflict.remoteValue, 48)}` : `Local ${clipText(conflict.localValue, 48)} / Cloud ${clipText(conflict.remoteValue, 48)}`,
+          value: isZh ? `本地 ${describeConflictValue(conflict.localValue, true)} / 云端 ${describeConflictValue(conflict.remoteValue, true)}` : `Local ${describeConflictValue(conflict.localValue, false)} / Cloud ${describeConflictValue(conflict.remoteValue, false)}`,
         }],
         exportPayload: {
           conflict: 'remote_field_update_with_local_pending',
@@ -547,7 +633,9 @@ export default function SyncStatusPage() {
       }));
 
     const chatFieldConflicts = (chatStore.fieldConflicts || [])
-      .filter((conflict) => conflict.entityType === 'chat')
+      .filter((conflict) => conflict.entityType === 'chat' && !conflict.accepted
+        && conflict.remoteUpdatedAt > conflict.localUpdatedAt
+        && (chatStore.pendingOperations || []).some((operation) => conflict.localOperationIds.includes(operation.id) && operation.status !== 'failed'))
       .map((conflict) => ({
         id: `chat-field-conflict-${conflict.entityId}-${conflict.field}`,
         scopeType: 'chat' as const,
@@ -558,11 +646,13 @@ export default function SyncStatusPage() {
         attemptCount: 0,
         lastError: null,
         targetCount: 1,
-        targetLabel: chatStore.chats.find((chat) => chat.id === conflict.entityId)?.name || conflict.entityId,
-        summary: isZh ? `字段“${conflict.field}”云端也有不同更新；本地待提交值继续显示，等待手动确认。` : `Field "${conflict.field}" also changed remotely. The local pending value remains visible until manually reviewed.`,
+        targetLabel: chatStore.chats.find((chat) => chat.id === conflict.entityId)?.name || chatStore.remoteDeletedChats.find((chat) => chat.id === conflict.entityId)?.name || (isZh ? '名称未记录的聊天' : 'Chat name unavailable'),
+        summary: isZh ? `${displayConflictField(conflict.field, true)}在其他设备也有更新，请选择保留哪一版。` : `${displayConflictField(conflict.field, false)} changed on another device. Choose which version to keep.`,
+        conflictTargetId: conflict.entityId,
+        conflictField: conflict.field,
         diffPreview: [{
           field: conflict.field,
-          value: isZh ? `本地 ${clipText(conflict.localValue, 48)} / 云端 ${clipText(conflict.remoteValue, 48)}` : `Local ${clipText(conflict.localValue, 48)} / Cloud ${clipText(conflict.remoteValue, 48)}`,
+          value: isZh ? `本地 ${describeConflictValue(conflict.localValue, true)} / 云端 ${describeConflictValue(conflict.remoteValue, true)}` : `Local ${describeConflictValue(conflict.localValue, false)} / Cloud ${describeConflictValue(conflict.remoteValue, false)}`,
         }],
         exportPayload: {
           conflict: 'remote_field_update_with_local_pending',
@@ -596,6 +686,10 @@ export default function SyncStatusPage() {
   const visibleSyncScopes = filteredSyncScopes.slice(0, 30);
 
   const labelMap: Record<string, string> = {
+    character: isZh ? '角色' : 'Character',
+    chat: isZh ? '聊天' : 'Chat',
+    message: isZh ? '消息' : 'Message',
+    artifact: isZh ? '信件 / 日记生成' : 'Letter / diary generation',
     delete: isZh ? '删除' : 'Delete',
     restore: isZh ? '恢复' : 'Restore',
     purge: isZh ? '彻底删除' : 'Purge',
@@ -616,20 +710,54 @@ export default function SyncStatusPage() {
     running: isZh ? '准备同步中' : 'Running',
   };
 
-  const retryAll = () => {
+  const canRetrySync = localOutboxItems.some((item) => item.scopeType !== 'artifact'
+    && item.status === 'failed' && !parseSyncErrorClassification(item.lastError).terminal);
+  const retryableArtifactJobs = artifactStore.jobs.filter((job) => job.status === 'failed' && job.attempts < 3);
+  const canRetryArtifacts = retryableArtifactJobs.length > 0 && hasUsableDefaultTextAI(settingsStore.aiProfiles);
+  const canRetryPersistence = Boolean(persistenceHealth.latestFailure) && !isMaintainingPersistence;
+  const canRetryAnything = canRetrySync || canRetryArtifacts || canRetryPersistence;
+  const retryDisabledReason = canRetryAnything ? ''
+    : localOutboxItems.some((item) => item.status === 'failed')
+      ? (isZh ? '这些失败项需要手动处理，无法直接重试' : 'These failures need manual resolution before retrying')
+      : retryableArtifactJobs.length > 0
+        ? (isZh ? '请先配置可用的文本模型' : 'Configure an available text model first')
+        : (isZh ? '没有可重试的任务' : 'No tasks to retry');
+  const retrySync = () => {
     chatStore.retryFailedOperations();
     characterStore.retryFailedOperations();
     messageStore.retryFailedOperations();
     scheduleSyncWorkersByPriority(0);
-    void artifactStore.resumeProcessing();
+  };
+  const retryAll = () => {
+    if (canRetrySync) retrySync();
+    if (canRetryArtifacts) void artifactStore.resumeProcessing();
+    if (canRetryPersistence) void maintainLocalPersistence();
+  };
+  const retryArtifactCloud = async () => {
+    setRetryingArtifactCloud(true);
+    setArtifactCloudUploadError(false);
+    try {
+      await artifactStore.retryCloudSync();
+      setArtifactCloudUploadError(artifactStore.getSyncScopeStates().some((state) => state.scope === 'artifacts.summary' && Boolean(state.lastError)));
+    } catch {
+      setArtifactCloudUploadError(true);
+    } finally {
+      setRetryingArtifactCloud(false);
+      setArtifactCloudCheckRevision((value) => value + 1);
+    }
   };
 
   const discardFailed = (item: { id: string; scopeType: 'character' | 'chat' | 'message' | 'artifact'; status: string }) => {
     if (item.status !== 'failed') return;
-    if (item.scopeType === 'character') characterStore.discardFailedOperation(item.id);
-    if (item.scopeType === 'chat') chatStore.discardFailedOperation(item.id);
-    if (item.scopeType === 'message') messageStore.discardFailedOperation(item.id);
-    if (item.scopeType === 'artifact') artifactStore.discardFailedJob(item.id);
+    try {
+      setResolutionError(null);
+      if (item.scopeType === 'character') characterStore.discardFailedOperation(item.id);
+      if (item.scopeType === 'chat') chatStore.discardFailedOperation(item.id);
+      if (item.scopeType === 'message') messageStore.discardFailedOperation(item.id);
+      if (item.scopeType === 'artifact') artifactStore.discardFailedJob(item.id);
+    } catch {
+      setResolutionError(isZh ? '未能保存移除操作，请检查浏览器存储后重试。' : 'Could not save the removal. Check browser storage and try again.');
+    }
   };
 
   const resolveDeleteEditConflict = (item: typeof items[number], resolution: 'restore_local' | 'discard_local' | 'save_as_new') => {
@@ -640,54 +768,67 @@ export default function SyncStatusPage() {
     if (item.scopeType === 'chat') void chatStore.resolveRemoteDeleteConflict(targetId, resolution);
   };
 
+  const resolveFieldConflict = async (item: typeof items[number], resolution: 'keep_local' | 'use_remote') => {
+    if (item.status !== 'conflict' || !('conflictField' in item) || !('conflictTargetId' in item)) return;
+    setResolutionError(null);
+    setResolvingConflictId(item.id);
+    try {
+      if (item.scopeType === 'chat') await chatStore.resolveFieldConflict(item.conflictTargetId, item.conflictField, resolution);
+      if (item.scopeType === 'character') await characterStore.resolveFieldConflict(item.conflictTargetId, item.conflictField, resolution);
+    } catch (error) {
+      setResolutionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setResolvingConflictId(null);
+    }
+  };
+
   const failedCount = localOutboxItems.filter((item) => item.status === 'failed').length;
   const pendingCount = localOutboxItems.filter((item) => item.status === 'pending').length;
   const syncingCount = localOutboxItems.filter((item) => item.status === 'syncing').length;
   const conflictCount = items.filter((item) => item.status === 'conflict').length;
-  const checkingCount = syncScopes.filter((item) => item.state.inflight).length;
-  const backoffCount = syncScopes.filter((item) => !item.state.inflight && item.state.retryAt > Date.now()).length;
-  const scopeIssueCount = syncScopes.filter((item) => !item.state.inflight && !(item.state.retryAt > Date.now()) && Boolean(item.state.lastError)).length;
-  const checkedCount = syncScopes.filter((item) => !item.state.inflight && !(item.state.retryAt > Date.now()) && !item.state.lastError && item.state.lastCheckedAt > 0).length;
-  const errorKindCounts = useMemo(() => {
-    const counts = new Map<SyncErrorKind, number>();
-    for (const item of localOutboxItems) {
-      if (!item.lastError) continue;
-      const kind = parseSyncErrorClassification(item.lastError).kind;
-      counts.set(kind, (counts.get(kind) || 0) + 1);
-    }
-    for (const item of syncScopes) {
-      if (!item.state.lastError) continue;
-      const kind = parseSyncErrorClassification(item.state.lastError).kind;
-      counts.set(kind, (counts.get(kind) || 0) + 1);
-    }
-    const order: SyncErrorKind[] = ['auth', 'network', 'server_unavailable', 'conflict_ignored', 'validation', 'unknown'];
-    return order
-      .map((kind) => ({ kind, count: counts.get(kind) || 0 }))
-      .filter((item) => item.count > 0);
-  }, [localOutboxItems, syncScopes]);
   const filteredItems = useMemo(() => items.filter((item) => matchesQueueItemFilter(item, activeFilter)), [activeFilter, items]);
+  const selectedTaskIds = new Set(filteredItems.map((item) => item.id));
+  for (const item of filteredItems) {
+    if (item.status !== 'conflict' || !('conflictTargetId' in item)) continue;
+    if ('conflictField' in item) {
+      const conflicts = item.scopeType === 'chat' ? chatStore.fieldConflicts : characterStore.fieldConflicts;
+      const conflict = conflicts.find((entry) => entry.entityId === item.conflictTargetId && entry.field === item.conflictField);
+      conflict?.localOperationIds.forEach((id) => selectedTaskIds.add(id));
+    } else {
+      localOutboxItems.filter((entry) => entry.scopeType === item.scopeType && entry.targetIds.includes(item.conflictTargetId))
+        .forEach((entry) => selectedTaskIds.add(entry.id));
+    }
+  }
+  const selectedTasks = localOutboxItems.filter((item) => selectedTaskIds.has(item.id));
+  const hasSelectedRunningTasks = selectedTasks.some((item) => item.status === 'syncing');
+  const clearSelectedTasks = () => {
+    const idsForScope = (scope: string) => selectedTasks.filter((item) => item.scopeType === scope).map((item) => item.id);
+    try {
+      setResolutionError(null);
+      characterStore.clearSyncTasks(idsForScope('character'));
+      chatStore.clearSyncTasks(idsForScope('chat'));
+      messageStore.clearSyncTasks(idsForScope('message'));
+      artifactStore.clearSyncTasks(idsForScope('artifact'));
+    } catch {
+      setResolutionError(isZh ? '部分任务未能清空，请检查浏览器存储后重试。' : 'Some tasks could not be cleared. Check browser storage and try again.');
+    }
+    setConfirmClearTasks(false);
+  };
   const failedItems = filteredItems.filter((item) => item.status === 'failed');
   const historyShownCount = historyItems.length;
   const filterChipItems = useMemo(() => {
     const base = [
-      { key: 'all' as const, label: isZh ? `全部 ${items.length + syncScopes.length}` : `All ${items.length + syncScopes.length}`, color: 'default' as const },
-      { key: 'queued' as const, label: isZh ? `待处理队列 ${pendingCount}` : `Queued ${pendingCount}`, color: 'default' as const },
-      { key: 'syncing' as const, label: isZh ? `同步执行中 ${syncingCount}` : `Syncing ${syncingCount}`, color: 'primary' as const },
-      { key: 'failed' as const, label: isZh ? `同步失败 ${failedCount}` : `Sync failed ${failedCount}`, color: 'error' as const },
-      { key: 'conflict' as const, label: isZh ? `冲突待处理 ${conflictCount}` : `Conflicts ${conflictCount}`, color: 'warning' as const },
-      { key: 'checking' as const, label: isZh ? `云端检查中 ${checkingCount}` : `Checking ${checkingCount}`, color: 'primary' as const },
-      { key: 'backoff' as const, label: isZh ? `检查退避 ${backoffCount}` : `Backoff ${backoffCount}`, color: 'warning' as const },
-      { key: 'scope_issue' as const, label: isZh ? `检查异常 ${scopeIssueCount}` : `Check issues ${scopeIssueCount}`, color: 'error' as const },
-      { key: 'checked' as const, label: isZh ? `已有检查记录 ${checkedCount}` : `Checked scopes ${checkedCount}`, color: 'success' as const },
+      { key: 'all' as const, label: isZh ? `全部 ${items.length}` : `All ${items.length}`, color: 'default' as const },
+      { key: 'queued' as const, label: isZh ? `待同步 ${pendingCount}` : `Pending ${pendingCount}`, color: 'info' as const },
+      { key: 'syncing' as const, label: isZh ? `同步中 ${syncingCount}` : `Syncing ${syncingCount}`, color: 'primary' as const },
+      { key: 'failed' as const, label: isZh ? `需处理 ${failedCount}` : `Needs attention ${failedCount}`, color: 'error' as const },
+      { key: 'conflict' as const, label: isZh ? `冲突 ${conflictCount}` : `Conflicts ${conflictCount}`, color: 'warning' as const },
     ];
-    const errorKinds = errorKindCounts.map((item) => ({
-      key: `error_kind:${item.kind}` as const,
-      label: `${syncErrorKindLabel(item.kind, isZh)} ${item.count}`,
-      color: syncErrorKindColor(item.kind),
-    }));
-    return [...base, ...errorKinds].filter((item) => item.key === 'all' || countForFilter(items, syncScopes.map((entry) => entry.state), item.key) > 0);
-  }, [checkedCount, checkingCount, conflictCount, errorKindCounts, failedCount, isZh, items, pendingCount, scopeIssueCount, syncScopes, syncingCount, backoffCount]);
-  const activeFilterCount = useMemo(() => countForFilter(items, syncScopes.map((entry) => entry.state), activeFilter), [activeFilter, items, syncScopes]);
+    return [
+      ...base.filter((item) => item.key === 'all' || countForFilter(items, syncScopes.map((entry) => entry.state), item.key) > 0),
+      { key: 'history' as const, label: isZh ? `历史 ${historyTotal}` : `History ${historyTotal}`, color: 'success' as const },
+    ];
+  }, [conflictCount, failedCount, historyTotal, isZh, items, pendingCount, syncScopes, syncingCount]);
   const exportFailed = () => downloadJson(`pneumata-sync-failed-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, {
     exportedAt: Date.now(),
     authMode,
@@ -763,6 +904,9 @@ export default function SyncStatusPage() {
   };
 
   const clearHistory = async () => {
+    ++historyRequestSeqRef.current;
+    setIsLoadingHistory(false);
+    setIsLoadingMoreHistory(false);
     setIsClearingHistory(true);
     setHistoryError(null);
     try {
@@ -780,67 +924,91 @@ export default function SyncStatusPage() {
   };
 
   return (
-    <Box sx={{ p: 3, pt: { xs: 1, sm: 1, md: 3 }, pb: { xs: 15, sm: 12 }, maxWidth: 960, mx: 'auto' }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1.5, alignItems: 'flex-start', flexWrap: 'wrap', mb: 2 }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-          <Typography variant="h6" sx={{ fontWeight: 700, lineHeight: 1.5 }}>
-            {isZh ? '同步详情' : 'Sync details'}
-          </Typography>
-          <Tooltip
-            title={isZh
-              ? '这里显示本地优先的创建、编辑、消息发送和信件/日记生成队列；临时网络失败会自动重试，校验失败会停在失败状态等待处理。放弃失败项只会移除对应同步任务；已经保存在本地的内容不会因此自动删除。'
-              : 'This page shows local-first create, edit, message, and artifact queues. Temporary network failures retry automatically; validation failures stay failed for review. Discarding a failed item only removes that sync task, and content already saved locally is not deleted automatically.'}
-            arrow
-          >
-            <IconButton size="small" sx={{ color: 'text.secondary', p: 0.25, alignSelf: 'center' }}>
-              <HelpOutlineIcon sx={{ fontSize: 18 }} />
-            </IconButton>
+    <Box sx={{ p: 3, pt: { xs: 1, sm: 1, md: 3 }, pb: 0, width: '100%', maxWidth: 960, mx: 'auto', flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+      {settingsStore.developerMode ? (
+        <Box component="details" sx={{ mb: 2, minWidth: 0, '& > summary': { cursor: 'pointer', fontSize: 14, color: 'text.secondary', py: 0.5 } }}>
+          <Typography component="summary" variant="body2">{isZh ? '数据与维护' : 'Data and maintenance'}</Typography>
+          <Stack direction="row" spacing={1} useFlexGap sx={{ mt: 1, flexWrap: 'wrap' }}>
+            <Button size="small" variant="outlined" onClick={exportFailed} disabled={failedItems.length === 0}>
+              {isZh ? '导出失败项' : 'Export failed'}
+            </Button>
+            <input
+              ref={recoveryImportInputRef}
+              type="file"
+              accept="application/json,.json"
+              onChange={handleRecoveryImport}
+              style={{ display: 'none' }}
+            />
+            <Button size="small" variant="outlined" onClick={() => recoveryImportInputRef.current?.click()}>
+              {isZh ? '导入本地恢复快照' : 'Import local recovery snapshot'}
+            </Button>
+            <Button size="small" variant="outlined" onClick={maintainLocalPersistence} disabled={isMaintainingPersistence}>
+              {isZh ? '整理并重试本地保存' : 'Clean up and retry local persistence'}
+            </Button>
+          </Stack>
+        </Box>
+      ) : null}
+
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, minWidth: 0 }}>
+        <Tabs
+          value={activeFilter}
+          onChange={(_, value: SyncStatusFilterKey) => setActiveFilter(value)}
+          variant="scrollable"
+          scrollButtons="auto"
+          aria-label={isZh ? '任务筛选' : 'Task filters'}
+          sx={{ flex: 1, minWidth: 0, minHeight: 40, '& .MuiTab-root': { minHeight: 40, px: 1.5, minWidth: 0 }, '& .MuiTabs-indicator': { height: 2 } }}
+        >
+          {filterChipItems.map((item) => <Tab key={item.key} value={item.key} label={item.label} />)}
+        </Tabs>
+        <Box sx={{ ml: 'auto', display: 'flex', gap: 1, flexShrink: 0, alignItems: 'center' }}>
+          <Tooltip title={retryDisabledReason || (isZh ? '重试可恢复任务' : 'Retry recoverable tasks')}>
+            <Box component="span" sx={{ display: 'inline-flex' }}>
+              <ButtonGroup size="small" variant="outlined" sx={{ '& .MuiButton-root': { minHeight: 30, py: 0.25 } }}>
+                <Button onClick={retryAll} disabled={!canRetryAnything} aria-label={isZh ? '重试可恢复任务' : 'Retry recoverable tasks'}>
+                  <RefreshIcon fontSize="small" sx={{ display: { xs: 'block', sm: 'none' } }} />
+                  <Box component="span" sx={{ display: { xs: 'none', sm: 'inline' } }}>{isZh ? '重试' : 'Retry'}</Box>
+                </Button>
+                <Button
+                  aria-label={isZh ? '重试选项' : 'Retry options'}
+                  aria-haspopup="menu"
+                  aria-controls={retryMenuAnchor ? 'sync-retry-menu' : undefined}
+                  aria-expanded={Boolean(retryMenuAnchor)}
+                  disabled={!canRetryAnything}
+                  onClick={(event) => setRetryMenuAnchor(event.currentTarget)}
+                  sx={{ px: 0.5, minWidth: 30 }}
+                >
+                  <ArrowDropDownIcon fontSize="small" />
+                </Button>
+              </ButtonGroup>
+            </Box>
+          </Tooltip>
+          <Menu id="sync-retry-menu" anchorEl={retryMenuAnchor} open={Boolean(retryMenuAnchor)} onClose={() => setRetryMenuAnchor(null)}>
+            <MenuItem disabled={!canRetrySync} onClick={() => { setRetryMenuAnchor(null); retrySync(); }}>
+              {isZh ? '重试同步' : 'Retry sync'}
+            </MenuItem>
+            <MenuItem disabled={!canRetryArtifacts} onClick={() => { setRetryMenuAnchor(null); void artifactStore.resumeProcessing(); }}>
+              {isZh ? '重试信件与日记生成' : 'Retry letter and diary generation'}
+            </MenuItem>
+            {persistenceHealth.latestFailure || settingsStore.developerMode ? (
+              <MenuItem disabled={isMaintainingPersistence} onClick={() => { setRetryMenuAnchor(null); void maintainLocalPersistence(); }}>
+                {isZh ? '重试本地保存' : 'Retry local saving'}
+              </MenuItem>
+            ) : null}
+          </Menu>
+          <Tooltip title={hasSelectedRunningTasks && activeFilter !== 'history' ? (isZh ? '请等待当前同步完成' : 'Wait for current sync to finish') : (isZh ? '清空当前筛选' : 'Clear current filter')}>
+            <span>
+              <Button size="small" color="inherit" variant="outlined" sx={{ minHeight: 30, py: 0.25 }}
+                aria-label={isZh ? '清空当前筛选' : 'Clear current filter'}
+                disabled={activeFilter === 'history' ? isClearingHistory || historyTotal === 0 : selectedTasks.length === 0 || hasSelectedRunningTasks}
+                onClick={() => activeFilter === 'history' ? void clearHistory() : setConfirmClearTasks(true)}>
+                <DeleteOutlineIcon fontSize="small" sx={{ display: { xs: 'block', sm: 'none' } }} />
+                <Box component="span" sx={{ display: { xs: 'none', sm: 'inline' } }}>{isZh ? '清空' : 'Clear'}</Box>
+              </Button>
+            </span>
           </Tooltip>
         </Box>
-        <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, flexWrap: 'wrap', flex: 1, minWidth: 280 }}>
-          <Button size="small" variant="outlined" onClick={retryAll} disabled={localOutboxItems.length === 0}>
-            {isZh ? '重试全部' : 'Retry all'}
-          </Button>
-          <Button size="small" variant="outlined" onClick={exportFailed} disabled={failedItems.length === 0}>
-            {isZh ? '导出失败项' : 'Export failed'}
-          </Button>
-          <input
-            ref={recoveryImportInputRef}
-            type="file"
-            accept="application/json,.json"
-            onChange={handleRecoveryImport}
-            style={{ display: 'none' }}
-          />
-          <Button size="small" variant="outlined" onClick={() => recoveryImportInputRef.current?.click()}>
-            {isZh ? '导入本地恢复快照' : 'Import local recovery snapshot'}
-          </Button>
-          <Button size="small" variant="outlined" onClick={maintainLocalPersistence} disabled={isMaintainingPersistence}>
-            {isZh ? '整理并重试本地保存' : 'Clean up and retry local persistence'}
-          </Button>
-        </Box>
       </Box>
-
-      <Stack direction="row" spacing={1} useFlexGap sx={{ mb: 1, flexWrap: 'wrap' }}>
-        {filterChipItems.map((item) => (
-          <Chip
-            key={item.key}
-            size="small"
-            clickable
-            onClick={() => setActiveFilter(item.key)}
-            label={item.label}
-            variant={chipVariant(activeFilter === item.key)}
-            color={chipColor(activeFilter === item.key, item.color)}
-            sx={{ ...compactChipSx, cursor: 'pointer' }}
-          />
-        ))}
-      </Stack>
-      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
-        {activeFilter === 'all'
-          ? (isZh ? '当前显示全部同步队列与云端检查项。' : 'Showing all sync queue and cloud check items.')
-          : (isZh ? `当前筛选结果 ${activeFilterCount} 项。` : `Showing ${activeFilterCount} filtered items.`)}
-      </Typography>
-
-
+      <Box data-pneumata-scroll-region="sync-tasks" sx={{ flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehaviorY: 'contain', display: 'flex', flexDirection: 'column', pb: { xs: 15, sm: 12, md: 3 }, '& > *': { flexShrink: 0 } }}>
       {authMode === 'local' ? (
         <Alert severity="info" sx={{ mb: 2 }}>
           {isZh ? '当前为离线本地模式：云同步已关闭，登录后会自动尝试上传本地数据。' : 'You are in local-only offline mode. Cloud sync is disabled and local data will be uploaded automatically after login.'}
@@ -855,14 +1023,16 @@ export default function SyncStatusPage() {
             </Typography>
             <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
               {isZh
-                ? `最近失败：${persistenceHealth.latestFailure.name} · ${persistenceHealth.latestFailure.reason === 'quota_exceeded' ? '存储空间不足' : '写入失败'} · ${formatTime(persistenceHealth.latestFailure.at, isZh)}`
-                : `Latest failure: ${persistenceHealth.latestFailure.name} · ${persistenceHealth.latestFailure.reason === 'quota_exceeded' ? 'quota exceeded' : 'write failed'} · ${formatTime(persistenceHealth.latestFailure.at, isZh)}`}
-              {persistenceHealth.latestFailure.sizeBytes ? ` · ${Math.round(persistenceHealth.latestFailure.sizeBytes / 1024)} KiB` : ''}
+                ? `${persistenceHealth.latestFailure.reason === 'quota_exceeded' ? '存储空间不足' : '写入失败'} · ${formatTime(persistenceHealth.latestFailure.at, isZh)}`
+                : `${persistenceHealth.latestFailure.reason === 'quota_exceeded' ? 'Storage full' : 'Write failed'} · ${formatTime(persistenceHealth.latestFailure.at, isZh)}`}
+              {settingsStore.developerMode ? ` · ${persistenceHealth.latestFailure.name}${persistenceHealth.latestFailure.sizeBytes ? ` · ${Math.round(persistenceHealth.latestFailure.sizeBytes / 1024)} KiB` : ''}` : ''}
             </Typography>
             <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap' }}>
-              <Button size="small" variant="outlined" color="error" onClick={exportPersistenceHealth}>
-                {isZh ? '导出本地恢复快照' : 'Export local recovery snapshot'}
-              </Button>
+              {settingsStore.developerMode ? (
+                <Button size="small" variant="outlined" color="error" onClick={exportPersistenceHealth}>
+                  {isZh ? '导出本地恢复快照' : 'Export local recovery snapshot'}
+                </Button>
+              ) : null}
               <Button size="small" variant="outlined" color="error" onClick={maintainLocalPersistence} disabled={isMaintainingPersistence}>
                 {isZh ? '整理并重试' : 'Clean up and retry'}
               </Button>
@@ -874,7 +1044,7 @@ export default function SyncStatusPage() {
         </Alert>
       ) : null}
 
-      {maintenanceResult ? (
+      {settingsStore.developerMode && maintenanceResult ? (
         <Alert severity="success" sx={{ mb: 2 }}>
           {isZh
             ? `本地保存维护完成：迁移旧副本 ${maintenanceResult.migratedFallbacks.migrated} 个，清理旧副本 ${maintenanceResult.migratedFallbacks.removed} 个，跳过 ${maintenanceResult.migratedFallbacks.skipped} 个，失败 ${maintenanceResult.migratedFallbacks.failed} 个；已重试 ${maintenanceResult.retriedStores.length} 个本地 store 的保存。IndexedDB 当前约 ${Math.round(maintenanceResult.diagnostics.totalBytes / 1024)} KiB。`
@@ -903,7 +1073,8 @@ export default function SyncStatusPage() {
         </Alert>
       ) : null}
 
-      {bootstrapStatus ? (
+      {activeFilter === 'history' ? <Box>
+      {settingsStore.developerMode && bootstrapStatus ? (
         <Card variant="outlined" sx={{ mb: 2 }}>
           <CardContent sx={{ display: 'grid', gap: 1 }}>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -950,9 +1121,6 @@ export default function SyncStatusPage() {
                       <Typography variant="body2" sx={{ fontWeight: 600 }}>
                         {item.localName || item.remoteName}
                       </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {isZh ? `本地 ${item.localId} / 云端 ${item.remoteId}` : `Local ${item.localId} / Cloud ${item.remoteId}`}
-                      </Typography>
                     </Box>
                   ))}
                 </Stack>
@@ -981,7 +1149,7 @@ export default function SyncStatusPage() {
         </Card>
       ) : null}
 
-      <Card variant="outlined" sx={{ mb: 2 }}>
+      {settingsStore.developerMode ? <Card variant="outlined" sx={{ mb: 2 }}>
         <CardContent sx={{ display: 'grid', gap: 1 }}>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
@@ -1002,7 +1170,7 @@ export default function SyncStatusPage() {
               {visibleSyncScopes.map((item) => {
                 const health = summarizeSyncScopeState(item.state, isZh);
                 const errorInfo = resolveDisplayErrorClassification(item.state.lastError);
-                const targetInfo = describeScopeTarget(item.state.scope, item.area, isZh);
+                const targetInfo = describeScopeTarget(item.state.scope, isZh);
                 const failureHint = describeScopeFailureHint(item.state.scope, item.state.lastError, isZh);
                 return (
                   <Box
@@ -1023,7 +1191,7 @@ export default function SyncStatusPage() {
                         {item.state.errorCount > 0 ? <Chip size="small" label={isZh ? `失败 ${item.state.errorCount}` : `Errors ${item.state.errorCount}`} color="error" variant="outlined" sx={compactChipSx} /> : null}
                       </Stack>
                       <Typography variant="caption" color="text.secondary">
-                        {item.state.scope}
+                        {targetInfo}
                       </Typography>
                     </Box>
                     <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
@@ -1034,16 +1202,6 @@ export default function SyncStatusPage() {
                         ? (isZh ? ` · 重试：${formatTime(item.state.retryAt, isZh)}` : ` · Retry: ${formatTime(item.state.retryAt, isZh)}`)
                         : ''}
                     </Typography>
-                    <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
-                      {isZh
-                        ? `cursor：${item.state.cursor || '未记录'} · revision：${item.state.revision || '未记录'}`
-                        : `cursor: ${item.state.cursor || 'none'} · revision: ${item.state.revision || 'none'}`}
-                    </Typography>
-                    {targetInfo ? (
-                      <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
-                        {targetInfo}
-                      </Typography>
-                    ) : null}
                     {item.state.lastError ? (
                       <Box sx={{ display: 'grid', gap: 0.35 }}>
                         <Typography variant="caption" color="error.main" sx={{ fontWeight: 700 }}>
@@ -1079,49 +1237,75 @@ export default function SyncStatusPage() {
             </Stack>
           )}
         </CardContent>
-      </Card>
+      </Card> : null}
 
-      <Card variant="outlined" sx={{ mb: 2 }}>
-        <CardContent sx={{ display: 'grid', gap: 1 }}>
+      <Box sx={{ py: 1.5 }}>
+        <Box sx={{ display: 'grid', gap: 1 }}>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-              {isZh ? '同步历史' : 'Sync history'}
+              {isZh ? '任务历史' : 'Task history'}
             </Typography>
             <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
               <Chip size="small" label={isZh ? `已展示 ${historyShownCount} / 共 ${historyTotal}` : `Shown ${historyShownCount} / ${historyTotal}`} variant="outlined" sx={compactChipSx} />
               <Chip size="small" label={isZh ? `成功 ${historySucceededTotal}` : `Succeeded ${historySucceededTotal}`} variant="outlined" color={historySucceededTotal > 0 ? 'success' : 'default'} sx={compactChipSx} />
               <Chip size="small" label={isZh ? `失败 ${historyFailedTotal}` : `Failed ${historyFailedTotal}`} variant="outlined" color={historyFailedTotal > 0 ? 'error' : 'default'} sx={compactChipSx} />
-              <Button size="small" variant="outlined" onClick={clearHistory} disabled={isClearingHistory || historyTotal === 0}>
-                {isZh ? '清空历史' : 'Clear history'}
-              </Button>
             </Box>
           </Box>
-          <Typography variant="caption" color="text.secondary">
-            {isZh ? '历史最多保留 1000 条已完成或失败的同步记录，新的记录会顶掉更早记录。' : 'History keeps up to 1000 finished or failed sync records. Newer records evict older ones.'}
-          </Typography>
+          {artifactCloudCheckError ? <Alert severity="warning" action={<Button color="inherit" size="small" onClick={() => setArtifactCloudCheckRevision((value) => value + 1)}>{isZh ? '重新核对' : 'Check again'}</Button>}>
+            {isZh ? '信件和日记的云端状态暂时无法核对。' : 'Could not check cloud status for letters and diaries.'}
+          </Alert> : null}
+          {artifactCloudUploadError ? <Alert severity="warning">{isZh ? '信件或日记尚未保存到云端，请稍后重试。' : 'Letters or diaries were not saved in cloud. Try again later.'}</Alert> : null}
           {historyError ? <Alert severity="error">{isZh ? `历史读取失败：${historyError}` : `Failed to load history: ${historyError}`}</Alert> : null}
           {isLoadingHistory ? (
-            <Typography variant="body2" color="text.secondary">{isZh ? '正在加载同步历史…' : 'Loading sync history...'}</Typography>
+            <Typography variant="body2" color="text.secondary">{isZh ? '正在加载任务历史…' : 'Loading task history...'}</Typography>
           ) : historyItems.length === 0 ? (
             <Typography variant="body2" color="text.secondary">{isZh ? '还没有历史记录。' : 'No history yet.'}</Typography>
           ) : (
-            <Stack spacing={1}>
-              {historyItems.map((item) => (
-                <Box key={`history-${item.id}`} sx={{ p: 1, border: '1px solid', borderColor: 'divider', borderRadius: 1, display: 'grid', gap: 0.5 }}>
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
-                    <Stack direction="row" spacing={0.75} useFlexGap sx={{ flexWrap: 'wrap' }}>
-                      <Chip size="small" label={labelMap[item.scopeType] || item.scopeType} variant="outlined" sx={compactChipSx} />
-                      <Chip size="small" label={labelMap[item.kind] || item.kind} variant="outlined" sx={compactChipSx} />
-                      <Chip size="small" label={labelMap[item.status] || item.status} color={item.status === 'failed' ? 'error' : 'success'} variant="outlined" sx={compactChipSx} />
-                    </Stack>
-                    <Typography variant="caption" color="text.secondary">{formatTime(item.updatedAt || item.createdAt, isZh)}</Typography>
+            <Stack divider={<Divider />}>
+              {historyItems.map((item) => {
+                const localArtifact = item.resultId ? artifactStore.items.find((entry) => entry.id === item.resultId) : undefined;
+                const remoteArtifact = item.resultId ? artifactCloudSummaries?.get(item.resultId) : undefined;
+                const canUploadArtifact = item.scopeType === 'artifact' && item.status === 'succeeded'
+                  && localArtifact?.deletedAt == null && Boolean(localArtifact)
+                  && artifactCloudSummaries !== null && !artifactCloudCheckLoading && !artifactCloudCheckError
+                  && authMode === 'cloud' && isCloudSyncEnabled()
+                  && (!remoteArtifact || remoteArtifact.deletedAt == null && remoteArtifact.updatedAt < (localArtifact?.updatedAt || 0));
+                return (
+                <Box key={`history-${item.id}`} sx={{ px: 1, py: 1.25, display: 'grid', gap: 0.5 }}>
+                  <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', alignItems: 'start', gap: 1.5 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 600, overflowWrap: 'anywhere', minWidth: 0 }}>
+                      {taskTargetLabel(item,
+                        item.scopeType === 'chat' || item.scopeType === 'message'
+                          ? [...chatStore.chats, ...chatStore.remoteDeletedChats].find((chat) => chat.id === (item.scopeType === 'message' ? item.summaryKey : item.targetId))?.name
+                          : characterStore.characters.find((character) => character.id === item.targetId)?.name,
+                        isZh)}
+                    </Typography>
+                    <TaskTime value={item.updatedAt || item.createdAt} isZh={isZh} />
                   </Box>
-                  <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
-                    {isZh ? `目标：${item.targetId || '未记录'} · 重试 ${item.attemptCount}` : `Target: ${item.targetId || 'none'} · Retries ${item.attemptCount}`}
-                  </Typography>
-                  {item.lastError ? <Typography variant="body2" color="error.main" sx={{ overflowWrap: 'anywhere' }}>{item.lastError}</Typography> : null}
+                  <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <Typography variant="caption" color="text.secondary">{labelMap[item.scopeType] || item.scopeType} · {labelMap[item.kind] || item.kind}</Typography>
+                    <Chip size="small" label={taskStatusLabel(item.scopeType, item.status, isZh, labelMap[item.status] || item.status)} color={item.status === 'failed' ? 'error' : 'success'} variant="outlined" sx={compactChipSx} />
+                    {settingsStore.developerMode ? <Typography variant="caption" color="text.secondary">
+                      {isZh ? `尝试 ${item.attemptCount} 次` : `${item.attemptCount} attempts`}
+                    </Typography> : null}
+                  </Box>
+                  {item.scopeType === 'artifact' && item.status === 'succeeded' ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                      <Typography variant="caption" color={canUploadArtifact || artifactCloudCheckError ? 'warning.main' : 'text.secondary'}>
+                        {artifactCloudCheckError && item.resultId
+                          ? (isZh ? '云端核对失败' : 'Cloud check failed')
+                          : artifactCloudStatus(item, localArtifact?.updatedAt, remoteArtifact,
+                              artifactCloudSummaries !== null, artifactCloudCheckLoading,
+                              authMode === 'cloud' && isCloudSyncEnabled(), isZh)}
+                      </Typography>
+                      {canUploadArtifact ? <Button size="small" variant="text" disabled={retryingArtifactCloud} onClick={() => void retryArtifactCloud()}>
+                        {retryingArtifactCloud ? (isZh ? '同步中…' : 'Syncing...') : (isZh ? '同步到云端' : 'Sync to cloud')}
+                      </Button> : null}
+                    </Box>
+                  ) : null}
+                  {item.lastError ? <Typography variant="body2" color="error.main" sx={{ overflowWrap: 'anywhere' }}>{resolveDisplayErrorClassification(item.lastError).message}</Typography> : null}
                 </Box>
-              ))}
+              );})}
               {historyHasMore ? (
                 <Box sx={{ display: 'flex', justifyContent: 'center' }}>
                   <Button size="small" variant="outlined" onClick={loadMoreHistory} disabled={isLoadingMoreHistory}>
@@ -1131,36 +1315,36 @@ export default function SyncStatusPage() {
               ) : null}
             </Stack>
           )}
-        </CardContent>
-      </Card>
+        </Box>
+      </Box>
+      </Box> : null}
 
+      {resolutionError ? <Alert severity="error" sx={{ order: 1, mb: 1 }}>{resolutionError}</Alert> : null}
+      {activeFilter !== 'history' ? <Box sx={{ order: 1 }}>
       {filteredItems.length === 0 ? (
         <EmptyState variant="plain" message={isQueueFilter(activeFilter) ? (isZh ? '当前筛选下没有匹配的同步队列' : 'No sync queue item matches the current filter') : (isZh ? '当前筛选不显示同步队列' : 'Sync queue items are hidden by the current filter')} />
       ) : (
-        <Stack spacing={1.5}>
+        <Stack divider={<Divider />}>
           {filteredItems.map((item) => (
-            <Card key={item.id} variant="outlined">
-              <CardContent sx={{ display: 'grid', gap: 1 }}>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                    <Chip size="small" label={item.scope} variant="outlined" sx={compactChipSx} />
-                    <Chip size="small" label={labelMap[item.kind] || item.kind} color="primary" variant="outlined" sx={compactChipSx} />
-                    <Chip size="small" label={labelMap[item.status] || item.status} color={item.status === 'conflict' ? 'warning' : item.status === 'syncing' ? 'primary' : 'default'} variant="outlined" sx={compactChipSx} />
-                  </Box>
-                  <Typography variant="caption" color="text.secondary">
-                    {new Date(item.createdAt).toLocaleString()}
+            <Box key={item.id} sx={{ px: 1, py: 1.5 }}>
+              <Box sx={{ display: 'grid', gap: 0.75 }}>
+                <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', alignItems: 'start', gap: 1.5 }}>
+                  <Typography variant="body2" sx={{ fontWeight: 600, overflowWrap: 'anywhere', minWidth: 0 }}>
+                    {item.targetLabel}
                   </Typography>
+                  <TaskTime value={item.createdAt} isZh={isZh} />
                 </Box>
-                <Typography variant="body2" color="text.secondary">
-                  {isZh ? `目标数量：${item.targetCount}，重试次数：${item.attemptCount}` : `Targets: ${item.targetCount}, Retries: ${item.attemptCount}`}
-                </Typography>
-                <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                  {item.targetLabel}
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
+                <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <Typography variant="caption" color="text.secondary">{item.scope} · {labelMap[item.kind] || item.kind}</Typography>
+                  <Chip size="small" label={taskStatusLabel(item.scopeType, item.status, isZh, labelMap[item.status] || item.status)} color={item.status === 'conflict' ? 'warning' : item.status === 'failed' ? 'error' : item.status === 'syncing' ? 'primary' : 'info'} variant="outlined" sx={compactChipSx} />
+                  {settingsStore.developerMode ? <Typography variant="caption" color="text.secondary">
+                    {isZh ? `尝试 ${item.attemptCount} 次` : `${item.attemptCount} attempts`}
+                  </Typography> : null}
+                </Box>
+                {item.status === 'conflict' || item.scopeType === 'message' && item.exportPayload.localSnapshot?.content ? <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>
                   {item.summary}
-                </Typography>
-                {'diffPreview' in item && item.diffPreview?.length ? (
+                </Typography> : null}
+                {item.status === 'conflict' && 'diffPreview' in item && item.diffPreview?.length ? (
                   <Box sx={{ display: 'grid', gap: 0.5 }}>
                     <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
                       {isZh ? '本地待提交字段' : 'Local pending fields'}
@@ -1171,7 +1355,7 @@ export default function SyncStatusPage() {
                           key={`${item.id}:${diff.field}`}
                           size="small"
                           variant="outlined"
-                          label={`${diff.field}: ${diff.value}`}
+                          label={`${displayConflictField(diff.field, isZh)}: ${diff.value}`}
                           sx={{ ...compactChipSx, maxWidth: '100%', '& .MuiChip-label': { px: 1.1, overflow: 'hidden', textOverflow: 'ellipsis', fontWeight: 600 } }}
                         />
                       ))}
@@ -1179,34 +1363,42 @@ export default function SyncStatusPage() {
                   </Box>
                 ) : null}
                 {item.lastError ? (
-                  <Box sx={{ display: 'flex', gap: 0.75, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-                    <Chip
-                      size="small"
-                      label={syncErrorKindLabel(parseSyncErrorClassification(item.lastError).kind, isZh)}
-                      color={syncErrorKindColor(parseSyncErrorClassification(item.lastError).kind)}
-                      variant="outlined"
-                      sx={compactChipSx}
-                    />
-                    <Typography variant="body2" color="error.main" sx={{ overflowWrap: 'anywhere', minWidth: 0, flex: 1 }}>
-                      {item.lastError}
-                    </Typography>
-                  </Box>
-                ) : (
-                  <Typography variant="body2" color="text.secondary">
-                    {item.status === 'conflict'
-                      ? (isZh ? '需要选择恢复本地编辑或放弃本地改动；选择前本地投影会保留。' : 'Choose whether to restore local edits or discard them. Local projection is preserved until then.')
-                      : (isZh ? '暂无错误，队列中的本地操作通常会很快完成。' : 'No error recorded. Queued local operations usually finish quickly.')}
+                  <Typography variant="body2" color="error.main" sx={{ overflowWrap: 'anywhere', minWidth: 0 }}>
+                    {item.scopeType === 'chat' && isUnavailableChatError(item.lastError)
+                      ? (isZh ? '云端缺少这段聊天。本机仍有内容时，可重新上传。' : 'This chat is missing from the cloud. Upload it again if local content remains.')
+                      : resolveDisplayErrorClassification(item.lastError).message}
                   </Typography>
-                )}
+                ) : null}
                 {item.status === 'failed' || item.status === 'conflict' ? (
                   <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, flexWrap: 'wrap' }}>
-                    <Button size="small" variant="outlined" onClick={() => exportItem(item)}>
+                    {settingsStore.developerMode ? <Button size="small" variant="outlined" onClick={() => exportItem(item)}>
                       {isZh ? '导出此项' : 'Export item'}
-                    </Button>
+                    </Button> : null}
+                    {item.status === 'failed' && item.scopeType === 'chat' && isUnavailableChatError(item.lastError)
+                      && item.exportPayload.localSnapshot ? (
+                      <Button size="small" variant="contained" onClick={() => {
+                        setResolutionError(null);
+                        if (!chatStore.queueMissingCloudChat(item.exportPayload.localSnapshot?.id || '')) {
+                          setResolutionError(isZh ? '无法重新上传。请确认已开启云同步，且聊天及参与角色没有删除冲突。' : 'Cannot upload. Enable cloud sync and resolve any deletion conflicts for this chat or its characters.');
+                        }
+                      }}>
+                        {isZh ? '重新上传' : 'Upload again'}
+                      </Button>
+                    ) : null}
                     {item.status === 'failed' ? (
                       <Button size="small" color="warning" onClick={() => discardFailed(item)}>
-                        {isZh ? '放弃此同步任务' : 'Discard this sync task'}
+                        {isZh ? '移除' : 'Remove'}
                       </Button>
+                    ) : null}
+                    {item.status === 'conflict' && item.kind === 'field_update_conflict' ? (
+                      <>
+                        <Button size="small" variant="outlined" disabled={resolvingConflictId === item.id} onClick={() => void resolveFieldConflict(item, 'use_remote')}>
+                          {isZh ? '采用云端' : 'Use cloud'}
+                        </Button>
+                        <Button size="small" variant="contained" disabled={resolvingConflictId === item.id} onClick={() => void resolveFieldConflict(item, 'keep_local')}>
+                          {isZh ? '保留本地并同步' : 'Keep local and sync'}
+                        </Button>
+                      </>
                     ) : null}
                     {item.status === 'conflict' && item.kind === 'delete_edit_conflict' && (item.scopeType === 'character' || item.scopeType === 'chat') ? (
                       <>
@@ -1223,11 +1415,23 @@ export default function SyncStatusPage() {
                     ) : null}
                   </Box>
                 ) : null}
-              </CardContent>
-            </Card>
+              </Box>
+            </Box>
           ))}
         </Stack>
       )}
+      </Box> : null}
+      </Box>
+      <ConfirmDialog
+        open={confirmClearTasks}
+        title={isZh ? '清空当前任务' : 'Clear current tasks'}
+        message={isZh
+          ? `清空当前筛选中的 ${selectedTasks.length} 个任务。本地内容保留，未上传的改动将停止同步。${hasSelectedRunningTasks ? '仍有任务正在同步，请完成后再清空。' : ''}`
+          : `Clear ${selectedTasks.length} tasks in this filter. Local content stays, and unsent changes stop syncing.${hasSelectedRunningTasks ? ' Wait for running tasks to finish.' : ''}`}
+        onCancel={() => setConfirmClearTasks(false)}
+        onConfirm={() => { if (!hasSelectedRunningTasks) clearSelectedTasks(); }}
+        destructive
+      />
     </Box>
   );
 }

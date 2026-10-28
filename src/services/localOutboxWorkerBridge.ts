@@ -7,6 +7,20 @@ import type {
   LocalOutboxScopeType,
   LocalOutboxStatus,
 } from './localOutboxProjection';
+import { buildLocalOutboxProjection } from './localOutboxProjection';
+import { filterCancelledSyncTasks, syncTaskQueueStorageKey } from './syncTaskCancellation';
+
+export const LOCAL_OUTBOX_HISTORY_CHANGED_EVENT = 'pneumata-local-outbox-history-changed';
+
+function historyStorageKey(storageKey: string) {
+  return `${storageKey}:history`;
+}
+
+function notifyHistoryChanged() {
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new Event(LOCAL_OUTBOX_HISTORY_CHANGED_EVENT));
+  }
+}
 
 export interface LocalOutboxWorkerOperationLike {
   id: string;
@@ -17,7 +31,7 @@ export interface LocalOutboxWorkerOperationLike {
   lockedAt?: number;
 }
 
-export interface LocalOutboxHistoryEntry extends LocalOutboxRecord {}
+export type LocalOutboxHistoryEntry = LocalOutboxRecord;
 
 function sourceInput(sourceType: LocalOutboxScopeType, operations: unknown[]) {
   if (sourceType === 'character') return { characterOperations: operations as LocalOutboxPatchOperationLike[] };
@@ -40,15 +54,27 @@ export function removeLocalOutboxWorkerOperation(operationId: string) {
   });
 }
 
-export function completeLocalOutboxWorkerOperation(operationId: string) {
-  void localOutboxRepository.markStatus(localOutboxStorageKey(), operationId, {
-    status: 'succeeded',
-    lastError: null,
-    retryAt: 0,
-    lockedAt: 0,
-  }).then(() => trimLocalOutboxHistory()).catch((error) => {
+export async function completeLocalOutboxWorkerOperation(
+  sourceType: LocalOutboxScopeType,
+  operation: LocalOutboxPatchOperationLike | LocalOutboxMessageOperationLike | LocalOutboxArtifactJobLike,
+  resultId?: string,
+) {
+  // Completed history has its own namespace: mirroring a live queue must never
+  // delete an acknowledgement or race with its removal from the source store.
+  const storageKey = localOutboxStorageKey();
+  if (!filterCancelledSyncTasks(syncTaskQueueStorageKey(sourceType), [operation]).length) return;
+  const [item] = buildLocalOutboxProjection(sourceInput(sourceType, [{ ...operation, status: 'succeeded' }]));
+  if (!item) throw new Error('Cannot archive an invalid sync operation');
+  try {
+    await localOutboxRepository.upsertMany(historyStorageKey(storageKey), [{
+      ...item, sourceType, sourceId: operation.id, resultId, updatedAt: Date.now(),
+      lastError: null, retryAt: 0, lockedAt: 0,
+    }]);
+    await trimLocalOutboxHistory(storageKey);
+    notifyHistoryChanged();
+  } catch (error) {
     console.warn('[local-outbox] failed to complete operation', error);
-  });
+  }
 }
 
 export function markLocalOutboxWorkerOperation(operation: LocalOutboxWorkerOperationLike) {
@@ -59,17 +85,21 @@ export function markLocalOutboxWorkerOperation(operation: LocalOutboxWorkerOpera
     retryAt: operation.retryAt || 0,
     lockedAt: operation.lockedAt || 0,
   }).then(() => {
-    if (operation.status === 'failed') return trimLocalOutboxHistory();
+    if (operation.status === 'failed') notifyHistoryChanged();
     return null;
   }).catch((error) => {
     console.warn('[local-outbox] failed to mark operation', error);
   });
 }
 
-export async function listLocalOutboxHistory(options: { limit?: number; offset?: number } = {}) {
-  const records = await localOutboxRepository.list(localOutboxStorageKey());
-  const history = records
-    .filter((record) => record.status === 'failed' || record.status === 'succeeded')
+export async function listLocalOutboxHistory(options: { limit?: number; offset?: number; activeIds?: Set<string> } = {}) {
+  const storageKey = localOutboxStorageKey();
+  const [records, archived] = await Promise.all([
+    localOutboxRepository.list(storageKey), localOutboxRepository.list(historyStorageKey(storageKey)),
+  ]);
+  const history = [...new Map([...records, ...archived].map((record) => [record.id, record])).values()]
+    .filter((record) => (record.status === 'failed' || record.status === 'succeeded') && !options.activeIds?.has(record.id))
+    .filter((record) => filterCancelledSyncTasks(syncTaskQueueStorageKey(record.sourceType), [record]).length > 0)
     .sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id));
   const offset = Math.max(0, options.offset || 0);
   const limit = Math.max(1, options.limit || 50);
@@ -82,23 +112,29 @@ export async function listLocalOutboxHistory(options: { limit?: number; offset?:
   };
 }
 
-async function trimLocalOutboxHistory(limit = 1000) {
-  const records = await localOutboxRepository.list(localOutboxStorageKey());
+async function trimLocalOutboxHistory(storageKey: string, limit = 1000) {
+  const records = await localOutboxRepository.list(historyStorageKey(storageKey));
   const overflow = records
     .filter((record) => record.status === 'failed' || record.status === 'succeeded')
     .sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id))
     .slice(limit);
   if (!overflow.length) return 0;
-  await localOutboxRepository.remove(localOutboxStorageKey(), overflow.map((record) => record.id));
+  await localOutboxRepository.remove(historyStorageKey(storageKey), overflow.map((record) => record.id));
   return overflow.length;
 }
 
 export async function clearLocalOutboxHistory() {
-  const records = await localOutboxRepository.list(localOutboxStorageKey());
+  const storageKey = localOutboxStorageKey();
+  const [records, archived] = await Promise.all([
+    localOutboxRepository.list(storageKey), localOutboxRepository.list(historyStorageKey(storageKey)),
+  ]);
   const ids = records
     .filter((record) => record.status === 'failed' || record.status === 'succeeded')
     .map((record) => record.id);
-  if (!ids.length) return 0;
-  await localOutboxRepository.remove(localOutboxStorageKey(), ids);
-  return ids.length;
+  await Promise.all([
+    localOutboxRepository.remove(storageKey, ids),
+    localOutboxRepository.clear(historyStorageKey(storageKey)),
+  ]);
+  notifyHistoryChanged();
+  return new Set([...ids, ...archived.map((record) => record.id)]).size;
 }

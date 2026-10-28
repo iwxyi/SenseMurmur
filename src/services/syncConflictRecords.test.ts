@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clearResolvedFieldConflicts, detectPendingFieldConflicts } from './syncConflictRecords';
+import { clearResolvedFieldConflicts, detectPendingFieldConflicts, removePendingConflictField } from './syncConflictRecords';
 
 describe('syncConflictRecords', () => {
   it('records remote field updates that collide with local pending fields', () => {
@@ -46,6 +46,30 @@ describe('syncConflictRecords', () => {
     expect(conflicts).toEqual([]);
   });
 
+  it('does not report an older cloud field as a concurrent local update', () => {
+    const pendingOperations = [{ id: 'op-1', entityId: 'chat-1', clientTimestamp: 300, patch: { runtimeEventsV2: [{ id: 'event' }] }, status: 'pending' as const, attemptCount: 0 }];
+    const params = {
+      entityType: 'chat' as const,
+      localEntities: [{ id: 'chat-1', runtimeEventsV2: [{ id: 'event' }], updatedAt: 300 }],
+      remoteEntities: [{ id: 'chat-1', runtimeEventsV2: [], updatedAt: 200, fieldVersions: { runtimeEventsV2: 100 } }],
+      pendingOperations,
+    };
+    const stale = [{ id: 'chat:chat-1:runtimeEventsV2', entityType: 'chat' as const, entityId: 'chat-1', field: 'runtimeEventsV2', localValue: [], remoteValue: [], localOperationIds: ['op-1'], localUpdatedAt: 300, remoteUpdatedAt: 200, detectedAt: 350 }];
+    expect(detectPendingFieldConflicts({ ...params, existingConflicts: stale })).toEqual([]);
+  });
+
+  it('retains a detail-field conflict when a summary refresh omits that field', () => {
+    const record = { id: 'chat:chat-1:runtimeEventsV2', entityType: 'chat' as const, entityId: 'chat-1', field: 'runtimeEventsV2', localValue: [{ id: 'a' }], remoteValue: [], localOperationIds: ['op-1'], localUpdatedAt: 200, remoteUpdatedAt: 300, detectedAt: 310 };
+    const conflicts = detectPendingFieldConflicts({
+      entityType: 'chat',
+      localEntities: [{ id: 'chat-1', name: '本地', runtimeEventsV2: [{ id: 'a' }] }],
+      remoteEntities: [{ id: 'chat-1', name: '本地', updatedAt: 350 }],
+      pendingOperations: [{ id: 'op-1', entityId: 'chat-1', clientTimestamp: 200, patch: { runtimeEventsV2: [{ id: 'a' }] }, status: 'pending', attemptCount: 0 }],
+      existingConflicts: [record],
+    });
+    expect(conflicts).toEqual([record]);
+  });
+
   it('clears conflicts by entity or operation id', () => {
     const records = detectPendingFieldConflicts({
       entityType: 'chat',
@@ -78,6 +102,7 @@ describe('syncConflictRecords', () => {
       }],
       remoteEntities: [{
         id: 'chat-1',
+        updatedAt: 300,
         runtimeEventsV2: [{
           payload: {
             media: [{ url: `data:image/png;base64,${'b'.repeat(500)}` }],
@@ -99,5 +124,12 @@ describe('syncConflictRecords', () => {
     expect(serialized.length).toBeLessThan(800);
     expect(serialized).not.toContain('a'.repeat(100));
     expect(serialized).not.toContain('b'.repeat(100));
+  });
+
+  it('removes only the chosen field from a pending patch', () => {
+    const operations = [{ id: 'op-1', entityId: 'chat-1', clientTimestamp: 200, patch: { name: '本地', topic: '保留' }, status: 'pending' as const, attemptCount: 0 }];
+    expect(removePendingConflictField(operations, 'chat-1', 'name')).toEqual([{ ...operations[0], patch: { topic: '保留' } }]);
+    expect(removePendingConflictField(operations, 'chat-1', 'topic')[0].patch).toEqual({ name: '本地' });
+    expect(operations[0].patch).toEqual({ name: '本地', topic: '保留' });
   });
 });

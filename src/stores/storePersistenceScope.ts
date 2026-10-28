@@ -1,10 +1,12 @@
 import type { PersistStorage, StateStorage, StorageValue } from 'zustand/middleware';
 import { recordPersistenceFailure } from '../services/persistenceHealth';
 import { isWorkspaceActive } from '../services/workspaceLifecycle';
+import { filterCancelledSyncTaskState, type SyncTaskQueueField } from '../services/syncTaskCancellation';
 
 interface ScopedStorageParams {
   getScopedKey: () => string;
   storageName: string;
+  syncTaskField?: SyncTaskQueueField;
 }
 
 interface BufferedJsonStorageOptions {
@@ -27,6 +29,7 @@ interface BufferedStorageTarget {
   key: string;
   assertWritable?: () => void;
   canReadPending?: () => boolean;
+  transformState?: (state: unknown) => unknown;
   getItem: () => string | Promise<string | null> | null;
   setItem: (value: string) => void | Promise<void> | unknown;
   removeItem: () => void | Promise<void> | unknown;
@@ -474,7 +477,7 @@ export function createBufferedJsonStorage<T>(
   options: BufferedJsonStorageOptions = {},
 ): PersistStorage<T, void> {
   const pendingWrites = new Map<string, PendingBufferedWrite<T>>();
-  const inFlightWrites = new Set<string>();
+  const inFlightWrites = new Map<string, PendingBufferedWrite<T>>();
   const flushDelayMs = options.flushDelayMs ?? 96;
 
   const resolveStorageTarget = (name: string): BufferedStorageTarget => {
@@ -496,12 +499,12 @@ export function createBufferedJsonStorage<T>(
     cancelBufferedFlush(pending.handle);
     let serializedValue = '';
     try {
-      if (pending.value != null) serializedValue = JSON.stringify(pending.value, options.replacer);
+      if (pending.value != null) serializedValue = JSON.stringify(prepareValue(pending.target, pending.value), options.replacer);
       const setResult = pending.value == null
         ? pending.target.removeItem()
         : pending.target.setItem(serializedValue);
       if (setResult instanceof Promise) {
-        inFlightWrites.add(key);
+        inFlightWrites.set(key, pending);
         setResult.catch((error) => {
           recordPersistenceFailure({ name: pending.name, reason: 'write_failed', error, serializedValue });
           console.warn('[storage] persistence async write failed', { name: pending.name, error });
@@ -537,16 +540,23 @@ export function createBufferedJsonStorage<T>(
   ensureBufferedStorageLifecycle();
   bufferedFlushers.add(flushAll);
 
+  function prepareValue(target: BufferedStorageTarget, value: StorageValue<T> | null) {
+    return value && target.transformState
+      ? { ...value, state: target.transformState(value.state) as T }
+      : value;
+  }
+
   return {
     getItem: (name: string) => {
       const target = resolveStorageTarget(name);
-      const pending = pendingWrites.get(target.key);
-      if (pending && (target.canReadPending?.() ?? true)) return pending.value;
+      // A dispatched write remains the latest snapshot until its transaction commits.
+      const pending = pendingWrites.get(target.key) ?? inFlightWrites.get(target.key);
+      if (pending && (target.canReadPending?.() ?? true)) return prepareValue(target, pending.value);
       const raw = target.getItem();
       if (raw instanceof Promise) {
-        return raw.then((value) => parsePersistedValue<T>(value, options.reviver));
+        return raw.then((value) => prepareValue(target, parsePersistedValue<T>(value, options.reviver)));
       }
-      return parsePersistedValue<T>(raw, options.reviver);
+      return prepareValue(target, parsePersistedValue<T>(raw, options.reviver));
     },
     setItem: (name: string, value: StorageValue<T>) => {
       if (!isWorkspaceActive()) return;
@@ -619,6 +629,9 @@ export function createScopedIndexedDbBufferedJsonStorage<T>(
       const scopedName = params.getScopedKey();
       return {
         key: scopedName,
+        transformState: params.syncTaskField
+          ? (state) => filterCancelledSyncTaskState(scopedName, state, params.syncTaskField!)
+          : undefined,
         assertWritable: () => assertIndexedDbWritable(scopedName),
         canReadPending: () => !protectedIndexedDbKeys.has(scopedName),
         getItem: () => readScopedIndexedDbItem(scopedName),

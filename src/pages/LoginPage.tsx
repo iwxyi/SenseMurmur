@@ -13,7 +13,7 @@ import {
 import PhoneIcon from '@mui/icons-material/Phone';
 import LockIcon from '@mui/icons-material/Lock';
 import { useAuthStore } from '../stores/useAuthStore';
-import { Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { getLastCloudPhone } from '../services/authSession';
 import { getSmsCaptchaToken } from '../services/captcha';
 
@@ -33,7 +33,7 @@ function resolveLoginRedirect(state: LoginLocationState) {
 export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { login, loginWithPassword, sendCode, enterLocalMode, isLoggedIn, isLoading, token, authMode } = useAuthStore();
+  const { login, loginWithPassword, sendCode, enterLocalMode, logout, isLoggedIn, isLoading, token, authMode, user } = useAuthStore();
   const [loginMethod, setLoginMethod] = useState<'code' | 'password'>(() => (localStorage.getItem('pneumata-login-method') as 'code' | 'password') || 'code');
   const [password, setPassword] = useState('');
 
@@ -134,7 +134,22 @@ export default function LoginPage() {
   );
 
   if (isLoggedIn || (authMode === 'cloud' && Boolean(token))) {
-    return <Navigate to={redirectTarget} replace />;
+    return (
+      <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center', bgcolor: (theme) => theme.palette.mode === 'dark' ? '#0A0A0F' : '#F5F5F7', p: 2 }}>
+        <Paper elevation={0} sx={{ width: '100%', maxWidth: 420, p: 3, borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
+          <Typography variant="h6" sx={{ mb: 1 }}>当前已登录</Typography>
+          <Typography color="text.secondary" sx={{ mb: 3 }}>
+            {user?.phone ? `账号：${user.phone}` : '当前会话仍然有效'}
+          </Typography>
+          <Button fullWidth variant="contained" onClick={() => navigate(redirectTarget, { replace: true })} sx={{ mb: 1 }}>
+            返回应用
+          </Button>
+          <Button fullWidth variant="outlined" disabled={isLoading} onClick={() => void logout()}>
+            退出并切换账号
+          </Button>
+        </Paper>
+      </Box>
+    );
   }
 
   return (

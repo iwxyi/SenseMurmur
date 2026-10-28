@@ -1,6 +1,7 @@
 import { scopedStorageKey } from '../constants/brand';
 import { getLocalDataUserId } from './authStorageScope';
 import { localOutboxRepository, type LocalOutboxRecord } from './localOutboxDb';
+import { filterCancelledSyncTasks, syncTaskQueueStorageKey } from './syncTaskCancellation';
 import {
   buildLocalOutboxProjection,
   type LocalOutboxArtifactJobLike,
@@ -44,7 +45,8 @@ function buildSourceRecords(
   const payloadsById = new Map(payloads
     .filter((payload): payload is { id: string } => Boolean(payload && typeof payload === 'object' && typeof (payload as { id?: unknown }).id === 'string'))
     .map((payload) => [payload.id, payload]));
-  return items.map((item) => toRecord(item, sourceType, payloadsById.get(item.id) || null, updatedAt));
+  return filterCancelledSyncTasks(syncTaskQueueStorageKey(sourceType), items)
+    .map((item) => toRecord(item, sourceType, payloadsById.get(item.id) || null, updatedAt));
 }
 
 function buildRecordsForSource(

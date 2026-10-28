@@ -63,7 +63,7 @@ function isMasterDetailPath(pathname: string) {
 const SIDEBAR_WIDTH = 280;
 const SIDEBAR_COLLAPSED_WIDTH = 72;
 
-export default function AppLayout() {
+export default function AppLayout({ children }: { children?: ReactNode }) {
   useApplicationSocialFlow();
   usePrivateSocialIntentFlow();
   const artifactChats = useChatStore((state) => state.chats);
@@ -113,14 +113,19 @@ export default function AppLayout() {
     severity: 'error',
   });
   const scrollContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const savedScrollTopRef = React.useRef(0);
+  const scrollPositionsRef = React.useRef(new Map<string, number>());
+  const restoringScrollRef = React.useRef(false);
   const suppressHeaderScrollRef = React.useRef(false);
   const releaseHeaderScrollFrameRef = React.useRef<number | null>(null);
   const effectiveHeaderTitle = headerTitle ?? currentTitle;
+  const scrollKey = `${location.pathname}${location.search}`;
   const mainPaddingBottom = 0;
   const isChatDetailRoute = /^\/chats\/[^/]+$/.test(location.pathname) && location.pathname !== '/chats/create';
   const isIntroRoute = location.pathname.startsWith('/intro');
   const supportsMasterDetail = isMasterDetailPath(location.pathname);
   const isMasterDetailRoute = supportsMasterDetail && isThreeColumn && !detailCollapsed;
+  const hasInternalScroll = isChatDetailRoute || isMasterDetailRoute || location.pathname === '/account/sync-status';
   const showMobileTopBar = shouldShowMenuButton && !isMasterDetailRoute && !isChatDetailRoute;
   const showDesktopTopBar = !shouldShowMenuButton && !isMasterDetailRoute && !isChatDetailRoute;
   const headerOffset = isChatDetailRoute && !isMasterDetailRoute
@@ -174,10 +179,42 @@ export default function AppLayout() {
   }, []);
 
   React.useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (container) container.scrollTop = 0;
     resetHeaderHidden();
   }, [location.pathname, resetHeaderHidden]);
+
+  React.useLayoutEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return undefined;
+    const scrollPositions = scrollPositionsRef.current;
+    const savedTop = scrollPositions.get(scrollKey) || 0;
+    savedScrollTopRef.current = savedTop;
+    restoringScrollRef.current = savedTop > 0;
+    let observer: ResizeObserver | null = null;
+    const restore = () => {
+      if (!restoringScrollRef.current) return;
+      const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
+      container.scrollTop = Math.min(savedTop, maxTop);
+      syncHeaderScrollTop(container.scrollTop);
+      if (maxTop >= savedTop) {
+        restoringScrollRef.current = false;
+        observer?.disconnect();
+      }
+    };
+    if (savedTop > 0 && typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(restore);
+      observer.observe(container);
+      const content = container.lastElementChild;
+      if (content) observer.observe(content);
+    }
+    restore();
+    const frame = savedTop > 0 ? window.requestAnimationFrame(restore) : null;
+    return () => {
+      scrollPositions.set(scrollKey, savedScrollTopRef.current);
+      restoringScrollRef.current = false;
+      observer?.disconnect();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [scrollKey, syncHeaderScrollTop]);
 
   React.useEffect(() => {
     const container = scrollContainerRef.current;
@@ -216,6 +253,9 @@ export default function AppLayout() {
 
   const handleMainScroll = (event: React.UIEvent<HTMLDivElement>) => {
     const { currentTarget } = event;
+    if (!restoringScrollRef.current && currentTarget.getClientRects().length > 0) {
+      savedScrollTopRef.current = currentTarget.scrollTop;
+    }
     if (suppressHeaderScrollRef.current) {
       syncHeaderScrollTop(currentTarget.scrollTop);
       return;
@@ -344,18 +384,18 @@ export default function AppLayout() {
               minHeight: 0,
               display: 'flex',
               flexDirection: 'column',
-              overflow: isChatDetailRoute || isMasterDetailRoute ? 'hidden' : 'auto',
-              scrollbarGutter: isChatDetailRoute || isMasterDetailRoute ? 'auto' : 'stable',
+              overflow: hasInternalScroll ? 'hidden' : 'auto',
+              scrollbarGutter: hasInternalScroll ? 'auto' : 'stable',
               '--app-floating-tab-top': `${floatingTabTopOffset}px`,
             }}
           >
             {headerOffset ? <Box aria-hidden sx={{ height: headerOffset, flexShrink: 0, pointerEvents: 'none' }} /> : null}
             <Box
-              sx={isChatDetailRoute || isMasterDetailRoute
+              sx={hasInternalScroll
                 ? { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }
                 : { flex: '0 0 auto' }}
             >
-              <Outlet />
+              {children ?? <Outlet />}
             </Box>
           </Box>
 

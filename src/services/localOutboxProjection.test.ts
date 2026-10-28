@@ -2,6 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { buildLocalOutboxProjection, projectLocalOutboxRecords, summarizeLocalOutbox } from './localOutboxProjection';
 
 describe('localOutboxProjection', () => {
+  it('preserves names independently of the current entity cache', () => {
+    const items = buildLocalOutboxProjection({
+      chatOperations: [{ id: 'chat-edit', entityId: 'chat-1', targetLabel: '离线聊天', patch: { topic: '更新' }, status: 'failed' }],
+      messageOperations: [{ id: 'message-create', chatId: 'chat-1', targetLabel: '离线聊天', status: 'pending' }],
+      characterOperations: [{ id: 'character-rename', entityId: 'character-1', patch: { name: '角色新名称' }, status: 'pending' }],
+    });
+    expect(items.find((item) => item.id === 'chat-edit')?.targetLabel).toBe('离线聊天');
+    expect(items.find((item) => item.id === 'message-create')?.targetLabel).toBe('离线聊天');
+    expect(items.find((item) => item.id === 'character-rename')?.targetLabel).toBe('角色新名称');
+  });
   it('normalizes character, chat, message, and artifact queues into one local outbox view', () => {
     const items = buildLocalOutboxProjection({
       characterOperations: [{
