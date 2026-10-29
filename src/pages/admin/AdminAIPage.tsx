@@ -344,10 +344,14 @@ export default function AdminAIPage() {
       const result = await adminApi.getAiProviders();
       const nextItems = sortProviders(result.items || []);
       setItems(nextItems);
-      setBalances(Object.fromEntries(nextItems.map((item) => [String(item.code || ''), { loading: true, value: '', error: null }])));
+      setBalances(Object.fromEntries(nextItems.map((item) => [String(item.code || ''), {
+        loading: item.accountBalanceSupported !== false,
+        value: item.accountBalanceSupported === false ? '不支持查询' : '',
+        error: null,
+      }])));
       void Promise.all(nextItems.map(async (item) => {
         const code = String(item.code || '');
-        if (!code) return;
+        if (!code || item.accountBalanceSupported === false) return;
         try {
           const balance = await adminApi.getAiProviderAccountBalance(code);
           setBalances((prev) => ({ ...prev, [code]: { loading: false, value: formatBalance(balance, code), error: null } }));
