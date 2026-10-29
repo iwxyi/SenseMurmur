@@ -101,7 +101,7 @@ interface CharacterArtifactStore extends ArtifactSnapshot {
   syncCloud: (query?: CharacterArtifactQuery) => Promise<void>;
   retryCloudSync: () => Promise<void>;
   getSyncScopeStates: () => SyncScopeSnapshot[];
-  resumeProcessing: () => Promise<void>;
+  resumeProcessing: (options?: { retryFailed?: boolean }) => Promise<void>;
   discardFailedJob: (jobId: string) => void;
   clearSyncTasks: (jobIds: string[]) => void;
 }
@@ -1394,7 +1394,7 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
           await get().syncCloud();
         },
         getSyncScopeStates: () => artifactSyncScopes.listStates(),
-        resumeProcessing: async () => {
+        resumeProcessing: async (options) => {
           const storageScope = getArtifactStorageKey();
           await ensureCharacterArtifactStoreHydrated();
           if (!isWorkspaceActive() || getArtifactStorageKey() !== storageScope) return;
@@ -1403,7 +1403,7 @@ export const useCharacterArtifactStore = create<CharacterArtifactStore>()(
           set((state) => ({
             jobs: state.jobs.map((job) => {
               if (job.status === 'running') return { ...job, status: 'pending' as const, updatedAt: now() };
-              if (job.status === 'failed' && job.attempts < 3 && hasTextModel) {
+              if (job.status === 'failed' && (job.attempts < 3 || options?.retryFailed) && hasTextModel) {
                 return { ...job, status: 'pending' as const, error: null, updatedAt: now() };
               }
               return job;

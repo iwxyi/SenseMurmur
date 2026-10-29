@@ -279,6 +279,42 @@ describe('useCharacterArtifactStore', () => {
     expect(artifactStore.getState().unreadLetterCount).toBe(0);
   });
 
+  it('allows an explicit retry of an exhausted birth letter after its quota is raised', async () => {
+    const generate = vi.mocked((await import('../services/characterExperienceArtifacts')).generateCharacterExperienceArtifact);
+    generate.mockClear();
+    artifactStore.setState({ jobs: [{
+      id: 'exhausted-letter', key: 'birth:c1', kind: 'birth_letter', characterId: 'c1',
+      snapshot: buildCharacter(), relatedCharacters: [], status: 'failed',
+      error: '今日 AI 生成次数已达当前会员上限', attempts: 3, createdAt: 1, updatedAt: 1,
+    }] });
+
+    await artifactStore.getState().resumeProcessing();
+    expect(generate).not.toHaveBeenCalled();
+    expect(artifactStore.getState().jobs[0]?.status).toBe('failed');
+
+    await artifactStore.getState().resumeProcessing({ retryFailed: true });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(artifactStore.getState().getLetterEntries()).toHaveLength(1);
+    expect(artifactStore.getState().jobs.some((job) => job.status === 'failed')).toBe(false);
+  });
+
+  it('keeps the automatic retry limit when an explicit retry still fails', async () => {
+    const generate = vi.mocked((await import('../services/characterExperienceArtifacts')).generateCharacterExperienceArtifact);
+    generate.mockClear();
+    generate.mockRejectedValueOnce(new Error('今日 AI 生成次数已达当前会员上限'));
+    artifactStore.setState({ jobs: [{
+      id: 'still-exhausted-letter', key: 'birth:c1', kind: 'birth_letter', characterId: 'c1',
+      snapshot: buildCharacter(), relatedCharacters: [], status: 'failed',
+      error: '今日 AI 生成次数已达当前会员上限', attempts: 3, createdAt: 1, updatedAt: 1,
+    }] });
+
+    await artifactStore.getState().resumeProcessing({ retryFailed: true });
+    expect(artifactStore.getState().jobs[0]).toMatchObject({ status: 'failed', attempts: 4 });
+    await artifactStore.getState().resumeProcessing();
+    expect(generate).toHaveBeenCalledOnce();
+    expect(artifactStore.getState().jobs[0]).toMatchObject({ status: 'failed', attempts: 4 });
+  });
+
   it('persists a declined diary decision and reconsiders only changed material', async () => {
     const character = { ...buildCharacter(), isPreset: true };
     generateDailyDiaryMock.mockResolvedValueOnce(null);

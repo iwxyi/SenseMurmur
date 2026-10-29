@@ -71,6 +71,27 @@ describe('aiClient multimodal requests', () => {
     )).rejects.toThrow('今日 AI 生成次数已达当前会员上限');
   });
 
+  it.each([
+    ['AI_IMAGE_SERVICE_UNCONFIGURED', '图片服务的模型或价格配置不完整'],
+    ['AI_IMAGE_UPSTREAM_AUTH_FAILED', '图片供应商认证或权限校验失败'],
+    ['AI_IMAGE_UPSTREAM_BALANCE_INSUFFICIENT', '图片供应商账户余额不足'],
+    ['AI_IMAGE_UPSTREAM_RATE_LIMITED', '图片供应商请求限流'],
+    ['AI_IMAGE_UPSTREAM_TIMEOUT', '图片生成请求超时'],
+    ['AI_IMAGE_EMPTY_RESPONSE', '图片供应商未返回图片'],
+  ])('shows the safe image failure reason for %s', async (code, message) => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      code, error: 'secret-token private upstream error', detail: { prompt: 'private prompt' },
+    }), { status: 502, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+
+    const error = await generateImage(
+      { provider: 'official-ace-nanobanana', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-pro' },
+      { prompt: '一盏台灯' },
+    ).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(message);
+    expect((error as Error).message).not.toMatch(/secret-token|private|Gemini/);
+  });
+
   it('builds Anthropic image content with base64 source', async () => {
     const calls: RequestInit[] = [];
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {

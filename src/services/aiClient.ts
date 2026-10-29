@@ -594,6 +594,21 @@ async function createPublicAiRequestError(response: Response, fallbackPrefix: st
   // details. They are useful for local diagnostics but must never become chat text.
   const rawBody = await response.text().catch(() => '');
   const diagnostic = parseAiErrorDiagnostic(rawBody, response);
+  const imageErrorMessages: Record<string, string> = {
+    AI_IMAGE_SERVICE_UNCONFIGURED: '图片服务的模型或价格配置不完整，请管理员检查配置。',
+    AI_IMAGE_COUNT_UNSUPPORTED: '当前图片模型每次请求仅支持一张图片。',
+    AI_IMAGE_UPSTREAM_AUTH_FAILED: '图片供应商认证或权限校验失败，请管理员检查服务配置。',
+    AI_IMAGE_UPSTREAM_BALANCE_INSUFFICIENT: '图片供应商账户余额不足，请管理员检查供应商额度。',
+    AI_IMAGE_UPSTREAM_RATE_LIMITED: '图片供应商请求限流，请稍后重试。',
+    AI_IMAGE_UPSTREAM_INVALID_REQUEST: '图片供应商拒绝了生成参数，请检查模型、图片尺寸和参考图。',
+    AI_IMAGE_UPSTREAM_MODEL_UNAVAILABLE: '图片供应商未找到请求的模型或接口，请管理员检查模型配置。',
+    AI_IMAGE_UPSTREAM_TIMEOUT: '图片生成请求超时，请检查生成结果后再重试，避免重复扣费。',
+    AI_IMAGE_UPSTREAM_UNAVAILABLE: '图片供应商连接失败或服务异常，请稍后重试。',
+    AI_IMAGE_UPSTREAM_ERROR: '图片供应商未能完成生成请求，请管理员检查供应商服务状态。',
+    AI_IMAGE_INVALID_RESPONSE: '图片供应商返回了无效响应，请稍后重试。',
+    AI_IMAGE_EMPTY_RESPONSE: '图片供应商未返回图片，请调整提示词后重试。',
+    AI_IMAGE_SIZE_UNSUPPORTED: '当前模型不支持所选图片尺寸，请调整后重试。',
+  };
   const knownBusinessErrorMessages: Record<string, string> = {
     VIP_LIMIT_EXCEEDED: '已达到当前会员权益上限。',
     AI_POINTS_INSUFFICIENT: 'AI 点数不足，暂时无法继续生成。',
@@ -608,7 +623,8 @@ async function createPublicAiRequestError(response: Response, fallbackPrefix: st
     NANOBANANA_USER_ID_MISSING: '图片服务的账户配置不完整。',
   };
   let message: string;
-  if (response.status === 401) message = 'AI 服务认证已失效，请重新登录后重试。';
+  if (diagnostic.code && imageErrorMessages[diagnostic.code]) message = imageErrorMessages[diagnostic.code];
+  else if (response.status === 401) message = 'AI 服务认证已失效，请重新登录后重试。';
   else if (diagnostic.code && knownBusinessErrorMessages[diagnostic.code]) message = diagnostic.error || knownBusinessErrorMessages[diagnostic.code];
   else if (response.status === 402) message = diagnostic.error || 'AI 点数不足，暂时无法继续生成。';
   else if (response.status === 403) message = diagnostic.error || '当前账号无权使用该 AI 服务或模型。';

@@ -712,7 +712,7 @@ export default function SyncStatusPage() {
 
   const canRetrySync = localOutboxItems.some((item) => item.scopeType !== 'artifact'
     && item.status === 'failed' && !parseSyncErrorClassification(item.lastError).terminal);
-  const retryableArtifactJobs = artifactStore.jobs.filter((job) => job.status === 'failed' && job.attempts < 3);
+  const retryableArtifactJobs = artifactStore.jobs.filter((job) => job.status === 'failed');
   const canRetryArtifacts = retryableArtifactJobs.length > 0 && hasUsableDefaultTextAI(settingsStore.aiProfiles);
   const canRetryPersistence = Boolean(persistenceHealth.latestFailure) && !isMaintainingPersistence;
   const canRetryAnything = canRetrySync || canRetryArtifacts || canRetryPersistence;
@@ -730,7 +730,7 @@ export default function SyncStatusPage() {
   };
   const retryAll = () => {
     if (canRetrySync) retrySync();
-    if (canRetryArtifacts) void artifactStore.resumeProcessing();
+    if (canRetryArtifacts) void artifactStore.resumeProcessing({ retryFailed: true });
     if (canRetryPersistence) void maintainLocalPersistence();
   };
   const retryArtifactCloud = async () => {
@@ -986,7 +986,7 @@ export default function SyncStatusPage() {
             <MenuItem disabled={!canRetrySync} onClick={() => { setRetryMenuAnchor(null); retrySync(); }}>
               {isZh ? '重试同步' : 'Retry sync'}
             </MenuItem>
-            <MenuItem disabled={!canRetryArtifacts} onClick={() => { setRetryMenuAnchor(null); void artifactStore.resumeProcessing(); }}>
+            <MenuItem disabled={!canRetryArtifacts} onClick={() => { setRetryMenuAnchor(null); void artifactStore.resumeProcessing({ retryFailed: true }); }}>
               {isZh ? '重试信件与日记生成' : 'Retry letter and diary generation'}
             </MenuItem>
             {persistenceHealth.latestFailure || settingsStore.developerMode ? (
