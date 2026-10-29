@@ -2,7 +2,7 @@ import type { APIConfig, AIModelProfile } from '../types/settings';
 import { normalizeAIModelAdvancedOptions, normalizeMaxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS } from '../types/settings';
 import { api } from './api';
 import { backendUrl } from './backendUrl';
-import { redactAiDiagnosticText } from './aiDiagnosticText';
+import { redactAiDiagnosticText, redactAiDiagnosticValue } from './aiDiagnosticText';
 import { assertWorkspaceActive, getResponseWorkspaceSignal, workspaceFetch as fetch } from './workspaceLifecycle';
 
 type ChatRole = 'user' | 'assistant' | 'system';
@@ -562,6 +562,7 @@ async function parseJsonResponse<T>(response: Response, fallbackPrefix: string):
 export interface AiRequestDiagnostic {
   status: number;
   statusText: string;
+  upstreamStatus?: number;
   code?: string;
   detail?: unknown;
   error?: string;
@@ -579,10 +580,17 @@ function parseAiErrorDiagnostic(rawBody: string, response: Response): AiRequestD
   const body = redactAiDiagnosticText(rawBody);
   if (!body) return diagnostic;
   try {
-    const parsed = JSON.parse(body) as Record<string, unknown>;
+    const parsed = redactAiDiagnosticValue(JSON.parse(rawBody)) as Record<string, unknown>;
     if (typeof parsed.code === 'string') diagnostic.code = parsed.code;
     if (typeof parsed.error === 'string') diagnostic.error = parsed.error;
     if ('detail' in parsed) diagnostic.detail = parsed.detail;
+    let detail = parsed.detail;
+    if (typeof detail === 'string') {
+      try { detail = JSON.parse(detail) as unknown; } catch { /* Some upstreams return plain text diagnostics. */ }
+    }
+    if (detail && typeof detail === 'object' && 'upstreamStatus' in detail && typeof detail.upstreamStatus === 'number') {
+      diagnostic.upstreamStatus = detail.upstreamStatus;
+    }
   } catch {
     diagnostic.detail = body;
   }
@@ -621,6 +629,21 @@ async function createPublicAiRequestError(response: Response, fallbackPrefix: st
     AI_MODEL_NOT_AVAILABLE: '所选模型当前不可用，请切换模型后重试。',
     NANOBANANA_SESSION_MISSING: '图片服务尚未完成服务端配置。',
     NANOBANANA_USER_ID_MISSING: '图片服务的账户配置不完整。',
+    AI_UPSTREAM_TIMEOUT: 'AI 上游请求超时，请稍后重试。',
+    AI_UPSTREAM_CONNECTION_FAILED: '无法连接 AI 上游服务，请管理员检查网络或服务配置。',
+  };
+  const upstreamMessages: Record<number, string> = {
+    400: 'AI 上游拒绝了请求参数，请检查模型配置或输入内容。',
+    401: 'AI 上游认证失败，请管理员检查服务密钥。',
+    402: 'AI 上游账户额度不足，请管理员检查供应商余额。',
+    403: 'AI 上游拒绝访问，请管理员检查账户权限或模型权限。',
+    404: 'AI 上游未找到模型或接口，请管理员检查模型配置。',
+    408: 'AI 上游请求超时，请稍后重试。',
+    422: 'AI 上游无法处理请求参数，请检查模型配置或输入内容。',
+    429: 'AI 上游请求限流或额度耗尽，请稍后重试或联系管理员检查额度。',
+    502: 'AI 上游网关异常，请稍后重试。',
+    503: 'AI 上游服务不可用，请稍后重试。',
+    504: 'AI 上游网关等待超时，请稍后重试。',
   };
   let message: string;
   if (diagnostic.code && imageErrorMessages[diagnostic.code]) message = imageErrorMessages[diagnostic.code];
@@ -629,11 +652,16 @@ async function createPublicAiRequestError(response: Response, fallbackPrefix: st
   else if (response.status === 402) message = diagnostic.error || 'AI 点数不足，暂时无法继续生成。';
   else if (response.status === 403) message = diagnostic.error || '当前账号无权使用该 AI 服务或模型。';
   else if (response.status === 429) message = 'AI 服务请求过于频繁，请稍后重试。';
+  else if (diagnostic.upstreamStatus) message = upstreamMessages[diagnostic.upstreamStatus]
+    || `AI 上游请求失败（HTTP ${diagnostic.upstreamStatus}），请管理员检查服务状态。`;
+  else if (response.status === 504) message = 'AI 请求经过网关时超时，请稍后重试。';
+  else if (response.status === 502) message = 'AI 服务网关或上游请求失败，请管理员查看诊断信息。';
   else if (response.status >= 400 && response.status < 500) message = '所选模型当前不可用，请切换模型后重试。';
   else message = `${fallbackPrefix}：AI 服务暂时不可用，请稍后重试。`;
 
   const error = new Error(message) as PublicAiRequestError;
   error.diagnostic = diagnostic;
+  console.error('[ai-request:failed]', diagnostic);
   return error;
 }
 
@@ -1480,12 +1508,25 @@ async function withTextRequestDeadline<T>(
 ): Promise<T> {
   const timeoutMs = 300_000;
   const timed = withTimeoutSignal(options.signal, timeoutMs, 'AI 请求超过五分钟未完成，已停止，请重试');
+  const startedAt = Date.now();
   try {
     return await task({ ...options, signal: timed.signal });
   } catch (error) {
     if (timed.signal?.aborted && !options.signal?.aborted) {
       console.error('[ai-request:timeout]', { provider: config.provider, model: config.model, timeoutMs });
       throw timed.signal.reason;
+    }
+    if (!options.signal?.aborted) {
+      console.error('[ai-request:context]', {
+        provider: config.provider,
+        model: config.model,
+        stage: options.aiUsage?.label,
+        maxTokens: options.maxTokens,
+        responseFormat: options.responseFormat,
+        elapsedMs: Date.now() - startedAt,
+        diagnostic: error instanceof Error ? (error as PublicAiRequestError).diagnostic : undefined,
+        message: error instanceof Error ? redactAiDiagnosticText(error.message) : 'Unknown AI request failure',
+      });
     }
     throw error;
   } finally {

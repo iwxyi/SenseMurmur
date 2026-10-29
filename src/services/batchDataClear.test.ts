@@ -27,13 +27,14 @@ beforeEach(() => {
 describe('batch data clearing', () => {
   it('clears only selected character fields, including bubble references and visual projections', () => {
     expect(buildCharacterClearPatch(['avatar', 'bubble', 'visual'])).toEqual({ avatar: '', bubbleStyle: null, bubbleStyleId: null, visualIdentity: null, visualReferenceImages: [] });
-    expect(buildCharacterClearPatch(['base'])).toEqual({ background: '', speakingStyle: '', expertise: [] });
+    expect(buildCharacterClearPatch(['base'])).toMatchObject({ background: '', speakingStyle: '', expertise: [], speechProfile: { catchphrases: [] } });
   });
 
   it('uses serializable empty values for voice, personality and profile', () => {
     const patch = JSON.parse(JSON.stringify(buildCharacterClearPatch(['voice', 'personality', 'profile'])));
     expect(patch.voiceConfig).toEqual({ enabled: false, voiceName: '' });
     expect(Object.values(patch.personality).every((value) => value === 0)).toBe(true);
+    expect(Object.values(patch.behavior).every((value) => value === 50)).toBe(true);
     expect(patch.coreProfile.coreDesire).toBe('');
   });
 

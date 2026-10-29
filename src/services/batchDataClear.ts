@@ -1,4 +1,4 @@
-import { DEFAULT_CORE_PROFILE, type AICharacter } from '../types/character';
+import { DEFAULT_CORE_PROFILE, DEFAULT_CHARACTER_BEHAVIOR, DEFAULT_SPEECH_PROFILE, type AICharacter } from '../types/character';
 import type { GroupChat } from '../types/chat';
 import { useCharacterStore } from '../stores/useCharacterStore';
 import { useChatStore } from '../stores/useChatStore';
@@ -19,13 +19,13 @@ function hasImageTask(target: string) {
 
 export function buildCharacterClearPatch(fields: CharacterCompletionField[]): Partial<AICharacter> {
   return {
-    ...(fields.includes('base') ? { background: '', speakingStyle: '', expertise: [] } : {}),
+    ...(fields.includes('base') ? { background: '', speakingStyle: '', expertise: [], speechProfile: { ...DEFAULT_SPEECH_PROFILE } } : {}),
     ...(fields.includes('avatar') ? { avatar: '' } : {}),
     ...(fields.includes('visual') ? { visualIdentity: null, visualReferenceImages: [] } : {}),
     ...(fields.includes('bubble') ? { bubbleStyle: null, bubbleStyleId: null } : {}),
     ...(fields.includes('voice') ? { voiceConfig: { enabled: false, voiceName: '' } } : {}),
     ...(fields.includes('profile') ? { coreProfile: { ...DEFAULT_CORE_PROFILE } } : {}),
-    ...(fields.includes('personality') ? { personality: { openness: 0, extroversion: 0, agreeableness: 0, neuroticism: 0, humor: 0, creativity: 0, assertiveness: 0, empathy: 0 }, personalityDrift: {} } : {}),
+    ...(fields.includes('personality') ? { personality: { openness: 0, extroversion: 0, agreeableness: 0, neuroticism: 0, humor: 0, creativity: 0, assertiveness: 0, empathy: 0 }, behavior: { ...DEFAULT_CHARACTER_BEHAVIOR }, personalityDrift: {} } : {}),
   };
 }
 

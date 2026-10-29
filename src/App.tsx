@@ -16,7 +16,9 @@ import { api, type SystemAnnouncementItem } from './services/api';
 import { AUTH_SESSION_EXPIRED_EVENT, type AuthSessionExpiredDetail } from './services/authSession';
 import { APP_DESCRIPTION, APP_TITLE } from './constants/brand';
 import { buildSettingsPath } from './routes/settingsRoute';
-import { advanceRouteCache, createRouteCache } from './routes/routeCache';
+import { advanceRouteCache, createRouteCache, type CachedRoute } from './routes/routeCache';
+import { getMasterDetailSection, type MasterDetailSection } from './routes/masterDetailRoutes';
+import { useDetailCollapsedState } from './components/layout/masterDetailState';
 import DevUpdatePrompt from './components/common/DevUpdatePrompt';
 import PwaUpdatePrompt from './components/common/PwaUpdatePrompt';
 import {
@@ -631,10 +633,44 @@ function AppUsageSessionBootstrap() {
   return null;
 }
 
+function SplitSectionRoutes({ section, entries, activeId }: { section: MasterDetailSection; entries: CachedRoute[]; activeId: string }) {
+  const activeEntry = entries.find((entry) => entry.id === activeId) ?? entries[entries.length - 1];
+  const isChat = section === 'chats';
+  const isList = activeEntry.location.pathname === `/${section}`;
+  const title = isChat ? '聊天' : '角色库';
+  const detailTitle = isChat ? (/^\/chats\/[^/]+$/.test(activeEntry.location.pathname) && activeEntry.location.pathname !== '/chats/create' ? null : '会话') : '角色';
+  return (
+    <UNSAFE_LocationContext.Provider value={{ location: activeEntry.location, navigationType: activeEntry.navigationType }}>
+      <MasterDetailLayout
+        master={<RouteElement>{isChat ? <ChatListPage /> : <CharacterLibraryPage />}</RouteElement>}
+        masterTitle={title}
+        detailTitle={isList ? null : detailTitle}
+        detail={entries.filter((entry) => entry.location.pathname !== `/${section}`).map((entry) => (
+          <Activity key={entry.id} mode={entry.id === activeId ? 'visible' : 'hidden'}>
+            <UNSAFE_LocationContext.Provider value={{ location: entry.location, navigationType: entry.navigationType }}>
+              <Routes location={entry.location}>
+                <Route path="/chats/create" element={<RouteElement><CreateChatPage /></RouteElement>} />
+                <Route path="/direct/create" element={<RouteElement><CreateDirectChatPage /></RouteElement>} />
+                <Route path="/chats/:id/edit" element={<RouteElement><CreateChatPage /></RouteElement>} />
+                <Route path="/chats/:id" element={<ChatDetailRouteElement />} />
+                <Route path="/characters/create" element={<RouteElement><CharacterEditorPage /></RouteElement>} />
+                <Route path="/characters/:id/edit" element={<RouteElement><CharacterEditorPage /></RouteElement>} />
+              </Routes>
+            </UNSAFE_LocationContext.Provider>
+          </Activity>
+        ))}
+      />
+    </UNSAFE_LocationContext.Provider>
+  );
+}
+
 function CachedAppRoutes() {
   const location = useLocation();
   const navigationType = useNavigationType();
   const accountScope = useAuthStore((state) => `${state.authMode}:${state.user?.id || 'anonymous'}`);
+  const isWide = useMediaQuery('(min-width:1280px)');
+  const detailCollapsed = useDetailCollapsedState();
+  const split = isWide && !detailCollapsed;
   const [routeCache, setRouteCache] = useState(() => createRouteCache(location, navigationType, accountScope));
   const previousAccountScopeRef = useRef(accountScope);
   let resolvedCache = routeCache;
@@ -651,7 +687,16 @@ function CachedAppRoutes() {
 
   return (
     <>
-      {resolvedCache.entries.map((entry) => (
+      {split ? (['chats', 'characters'] as const).map((section) => {
+        const entries = resolvedCache.entries.filter((entry) => getMasterDetailSection(entry.location.pathname) === section);
+        if (!entries.length) return null;
+        return (
+          <Activity key={`${accountScope}:${section}`} mode={entries.some((entry) => entry.id === resolvedCache.activeId) ? 'visible' : 'hidden'}>
+            <SplitSectionRoutes section={section} entries={entries} activeId={resolvedCache.activeId} />
+          </Activity>
+        );
+      }) : null}
+      {resolvedCache.entries.filter((entry) => !split || getMasterDetailSection(entry.location.pathname) === null).map((entry) => (
         <Activity
           key={entry.id}
           mode={entry.id === resolvedCache.activeId ? 'visible' : 'hidden'}

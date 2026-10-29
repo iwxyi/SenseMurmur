@@ -27,7 +27,7 @@ import AnimatedTabContent from '../components/common/AnimatedTabContent';
 import { resolveTabTransitionDirection } from '../components/common/tabTransition';
 import ExpandableFab from '../components/common/ExpandableFab';
 import { usePaneLayout } from '../components/layout/PaneLayoutContext';
-import { DETAIL_COLLAPSED_CHANGE_EVENT, DETAIL_COLLAPSED_STORAGE_KEY, readDetailCollapsedState, writeDetailCollapsedState } from '../components/layout/masterDetailState';
+import { useDetailCollapsedState, writeDetailCollapsedState } from '../components/layout/masterDetailState';
 import { readPersistentUiValue, writePersistentUiValue } from '../utils/persistentUiState';
 import { motion, transition } from '../styles/motion';
 import { buildListGridSx } from '../styles/interaction';
@@ -105,7 +105,7 @@ export default function ChatListPage() {
   const messageWindowsByChatId = useMessageStore((state) => state.messageWindowsByChatId);
   const [search, setSearch] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
-  const [detailCollapsed, setDetailCollapsed] = useState(readDetailCollapsedState);
+  const detailCollapsed = useDetailCollapsedState();
   const [creatingAssistant, setCreatingAssistant] = useState(false);
   const initialTab = useMemo(() => {
     const params = new URLSearchParams(location.search);
@@ -173,19 +173,6 @@ export default function ChatListPage() {
     });
   };
 
-
-  useEffect(() => {
-    const syncDetailCollapsed = () => setDetailCollapsed(readDetailCollapsedState());
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key === DETAIL_COLLAPSED_STORAGE_KEY) syncDetailCollapsed();
-    };
-    window.addEventListener(DETAIL_COLLAPSED_CHANGE_EVENT, syncDetailCollapsed);
-    window.addEventListener('storage', handleStorage);
-    return () => {
-      window.removeEventListener(DETAIL_COLLAPSED_CHANGE_EVENT, syncDetailCollapsed);
-      window.removeEventListener('storage', handleStorage);
-    };
-  }, []);
 
   useEffect(() => {
     setHeaderBackAction(null);

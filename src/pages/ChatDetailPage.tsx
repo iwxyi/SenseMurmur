@@ -4605,26 +4605,6 @@ export default function ChatDetailPage() {
                     onHtmlAutosave={handleHtmlAutosave}
                     onHtmlSubmit={handleHtmlSubmit}
                     onHtmlRepair={handleHtmlRepair}
-                    onAgentEnabledChange={agentEntitled ? (enabled) => {
-                      writeAssistantAgentDefaultEnabled(enabled);
-                      const aiSearchAvailable = authMode === 'cloud' && currentUser?.aiSearchEntitled === true;
-                      void updateChat(chat.id, {
-                        modeState: {
-                          ...chat.modeState,
-                          agentCapabilities: {
-                            ...(chat.modeState.agentCapabilities || {}), enabled, chatArtifactRead: enabled, chatArtifactWrite: enabled, fileUpload: enabled, fileDownload: enabled, workspaceRead: enabled, webSearch: enabled && aiSearchAvailable, updatedAt: Date.now(),
-                          },
-                          assistantCapabilities: {
-                            ...(chat.modeState.assistantCapabilities || {}),
-                            agent: enabled,
-                            artifacts: enabled,
-                            webSearch: enabled && aiSearchAvailable ? true : false,
-                            webSearchUserDisabled: false,
-                            updatedAt: Date.now(),
-                          },
-                        },
-                      });
-                    } : undefined}
                   />
                 </Suspense>
               ) : runtimePanelLoading ? <LoadingState title="正在加载" compact /> : <ChatSidebarPanel

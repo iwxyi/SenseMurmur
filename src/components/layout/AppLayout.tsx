@@ -18,7 +18,8 @@ import BottomNav from './BottomNav';
 import { LayoutHeaderActionsContext } from './AppLayoutContext';
 import GlassHeader, { GLASS_HEADER_HEIGHT } from './GlassHeader';
 import { useAutoHideHeader } from '../../hooks/useAutoHideHeader';
-import { DETAIL_COLLAPSED_CHANGE_EVENT, DETAIL_COLLAPSED_STORAGE_KEY, readDetailCollapsedState } from './masterDetailState';
+import { useDetailCollapsedState } from './masterDetailState';
+import { getMasterDetailSection } from '../../routes/masterDetailRoutes';
 import { motion } from '../../styles/motion';
 import AppSnackbar from '../common/AppSnackbar';
 import { APP_DIAGNOSTIC_TOAST_EVENT, type DiagnosticToastDetail } from '../../services/diagnostics';
@@ -50,14 +51,6 @@ const routeMeta = [
 
 function getRouteMeta(pathname: string) {
   return routeMeta.find((item) => item.match(pathname)) ?? routeMeta[0];
-}
-
-function isMasterDetailPath(pathname: string) {
-  return pathname === '/chats'
-    || pathname === '/characters'
-    || /^\/chats\/(create|[^/]+|[^/]+\/edit)$/.test(pathname)
-    || /^\/characters\/(create|[^/]+\/edit)$/.test(pathname)
-    || pathname === '/direct/create';
 }
 
 const SIDEBAR_WIDTH = 280;
@@ -94,7 +87,7 @@ export default function AppLayout({ children }: { children?: ReactNode }) {
   const location = useLocation();
   const { isMobile, isTablet, isDesktop } = useResponsive();
   const isThreeColumn = useMediaQuery('(min-width:1280px)');
-  const [detailCollapsed, setDetailCollapsed] = React.useState(readDetailCollapsedState);
+  const detailCollapsed = useDetailCollapsedState();
   const { sidebarOpen, setSidebarOpen } = useUIStore(useShallow((state) => ({
     sidebarOpen: state.sidebarOpen,
     setSidebarOpen: state.setSidebarOpen,
@@ -123,7 +116,7 @@ export default function AppLayout({ children }: { children?: ReactNode }) {
   const mainPaddingBottom = 0;
   const isChatDetailRoute = /^\/chats\/[^/]+$/.test(location.pathname) && location.pathname !== '/chats/create';
   const isIntroRoute = location.pathname.startsWith('/intro');
-  const supportsMasterDetail = isMasterDetailPath(location.pathname);
+  const supportsMasterDetail = getMasterDetailSection(location.pathname) !== null;
   const isMasterDetailRoute = supportsMasterDetail && isThreeColumn && !detailCollapsed;
   const hasInternalScroll = isChatDetailRoute || isMasterDetailRoute || location.pathname === '/account/sync-status';
   const showMobileTopBar = shouldShowMenuButton && !isMasterDetailRoute && !isChatDetailRoute;
@@ -150,19 +143,6 @@ export default function AppLayout({ children }: { children?: ReactNode }) {
     }
     setSidebarOpen(true);
   };
-
-  React.useEffect(() => {
-    const syncDetailCollapsed = () => setDetailCollapsed(readDetailCollapsedState());
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key === DETAIL_COLLAPSED_STORAGE_KEY) syncDetailCollapsed();
-    };
-    window.addEventListener(DETAIL_COLLAPSED_CHANGE_EVENT, syncDetailCollapsed);
-    window.addEventListener('storage', handleStorage);
-    return () => {
-      window.removeEventListener(DETAIL_COLLAPSED_CHANGE_EVENT, syncDetailCollapsed);
-      window.removeEventListener('storage', handleStorage);
-    };
-  }, []);
 
   React.useEffect(() => {
     const handleDiagnosticToast = (event: Event) => {

@@ -7,11 +7,12 @@ import { PaneLayoutProvider } from './PaneLayoutContext';
 import { LayoutHeaderActionsContext } from './AppLayoutContext';
 import GlassHeader, { GLASS_HEADER_HEIGHT } from './GlassHeader';
 import { useAutoHideHeader } from '../../hooks/useAutoHideHeader';
-import { DETAIL_COLLAPSED_CHANGE_EVENT, DETAIL_COLLAPSED_STORAGE_KEY, readDetailCollapsedState, writeDetailCollapsedState } from './masterDetailState';
+import { useDetailCollapsedState, writeDetailCollapsedState } from './masterDetailState';
 import PaneResizeDivider, { PANE_RESIZE_DIVIDER_LAYOUT_WIDTH } from './PaneResizeDivider';
 import { CONTENT_SCROLL_TO_TOP_EVENT, type ContentScrollToTopDetail } from '../../services/contentScrollRegion';
 import { motion } from '../../styles/motion';
 import { useLocation } from 'react-router-dom';
+import { getMasterDetailSection } from '../../routes/masterDetailRoutes';
 
 const MIN_MASTER_WIDTH = 320;
 const DEFAULT_MASTER_WIDTH = 430;
@@ -27,9 +28,8 @@ export function clearPaneScrollPositions() {
 
 function paneScrollKey(role: 'master' | 'detail', pathname: string) {
   if (role === 'detail') return `${role}:${pathname}`;
-  const section = pathname.startsWith('/characters') ? '/characters'
-    : pathname.startsWith('/chats') ? '/chats'
-      : pathname;
+  const owner = getMasterDetailSection(pathname);
+  const section = owner ? `/${owner}` : pathname;
   return `${role}:${section}`;
 }
 
@@ -218,7 +218,7 @@ export default function MasterDetailLayout({
   const isThreeColumn = useMediaQuery('(min-width:1280px)');
   const isPhone = useMediaQuery('(max-width:599px)');
   const [masterWidth, setMasterWidth] = useState(getInitialMasterWidth);
-  const [detailCollapsed, setDetailCollapsed] = useState(readDetailCollapsedState);
+  const detailCollapsed = useDetailCollapsedState();
   const [resizing, setResizing] = useState(false);
   const [containerWidth, setContainerWidth] = useState<number | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -232,19 +232,6 @@ export default function MasterDetailLayout({
     const observer = new ResizeObserver(updateWidth);
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const syncDetailCollapsed = () => setDetailCollapsed(readDetailCollapsedState());
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key === DETAIL_COLLAPSED_STORAGE_KEY) syncDetailCollapsed();
-    };
-    window.addEventListener(DETAIL_COLLAPSED_CHANGE_EVENT, syncDetailCollapsed);
-    window.addEventListener('storage', handleStorage);
-    return () => {
-      window.removeEventListener(DETAIL_COLLAPSED_CHANGE_EVENT, syncDetailCollapsed);
-      window.removeEventListener('storage', handleStorage);
-    };
   }, []);
 
   const finishResize = useCallback(() => {
@@ -261,12 +248,10 @@ export default function MasterDetailLayout({
     const rawWidth = Math.max(MIN_MASTER_WIDTH, Math.min(availableWidth, state.startWidth + event.clientX - state.startX));
     const nextDetailWidth = availableWidth - rawWidth;
     if (nextDetailWidth < MIN_DETAIL_WIDTH) {
-      setDetailCollapsed(true);
       writeDetailCollapsedState(true);
       return;
     }
     const nextWidth = clampMasterWidth(rawWidth, state.containerWidth);
-    setDetailCollapsed(false);
     setMasterWidth(nextWidth);
     localStorage.setItem(MASTER_WIDTH_STORAGE_KEY, String(nextWidth));
     writeDetailCollapsedState(false);
@@ -291,7 +276,6 @@ export default function MasterDetailLayout({
     const width = containerWidth || rootRef.current?.getBoundingClientRect().width || window.innerWidth;
     const nextWidth = clampMasterWidth(DEFAULT_MASTER_WIDTH, width);
     setMasterWidth(nextWidth);
-    setDetailCollapsed(false);
     localStorage.setItem(MASTER_WIDTH_STORAGE_KEY, String(nextWidth));
     writeDetailCollapsedState(false);
   }, [containerWidth]);

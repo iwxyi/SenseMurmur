@@ -26,7 +26,7 @@ import { canDeleteCharacterGroup, getCharacterGroupList, getCharactersInGroup, n
 import { enqueueAvatarGenerationForCharacter } from '../services/avatarGeneration';
 import { avatarGenerationQueue } from '../services/avatarGenerationQueue';
 import { buildFallbackCharacterVisualGenerationPlan, generateCharacterBasicProfileDraft, generateCharacterProfileDraft, generateCharacterVisualGenerationPlan, generateCharacterVisualIdentityDraft, generateCharacterVoiceProfileDraft } from '../services/characterGenerator';
-import { getCharacterBasicProfileMissing } from '../services/characterBasicProfile';
+import { buildCharacterProfileCompletionPatch, isCharacterProfileCompletionMissing } from '../services/characterProfileCompletion';
 import { assignGeneratedVoiceProfile } from '../services/speechVoiceAssignment';
 import { enqueueCharacterCompletionTask, type CharacterCompletionKind } from '../services/characterCompletionQueue';
 import { isImageAvatar } from '../utils/avatar';
@@ -656,9 +656,7 @@ export default function CharacterLibraryPage() {
     if (field === 'visual') return !(character.visualIdentity?.referenceImages?.length);
     if (field === 'bubble') return !character.bubbleStyle && !character.bubbleStyleId;
     if (field === 'voice') return !character.voiceConfig?.voiceName;
-    if (field === 'profile') return !character.coreProfile || !Object.values(character.coreProfile).some((value) => Array.isArray(value) ? value.length > 0 : Boolean(value));
-    if (field === 'personality') return !character.personality || Object.values(character.personality).every((value) => !value);
-    return Object.values(getCharacterBasicProfileMissing(character)).some(Boolean);
+    return isCharacterProfileCompletionMissing(character, field);
   };
 
   const isCompletionFieldDisabled = (field: CharacterCompletionField) => (
@@ -706,16 +704,12 @@ export default function CharacterLibraryPage() {
             if (!current) throw new Error('角色已不存在');
             const generated = await (field === 'base' ? generateCharacterBasicProfileDraft : generateCharacterProfileDraft)(profile, current.name, i18n.language.startsWith('zh') ? 'zh' : 'en', {
               theme: current.group,
-              description: JSON.stringify({ background: current.background, speakingStyle: current.speakingStyle, expertise: current.expertise, coreProfile: current.coreProfile }),
-            });
+              description: JSON.stringify({ background: current.background, speakingStyle: current.speakingStyle, expertise: current.expertise, coreProfile: current.coreProfile, personality: current.personality, behavior: current.behavior, speechProfile: current.speechProfile }),
+            }, field === 'base' ? undefined : field);
             const latest = useCharacterStore.getState().characters.find((item) => item.id === character.id);
             if (!latest) throw new Error('角色已不存在');
-            const missing = getCharacterBasicProfileMissing(latest);
-            await useCharacterStore.getState().updateCharacter(character.id, {
-              ...(field === 'base' ? { background: completionMode === 'complete' && !missing.background ? latest.background : generated.background, speakingStyle: completionMode === 'complete' && !missing.speakingStyle ? latest.speakingStyle : generated.speakingStyle, expertise: completionMode === 'complete' && !missing.expertise ? latest.expertise : generated.expertise } : {}),
-              ...(field === 'personality' ? { personality: completionMode === 'complete' && character.personality ? character.personality : generated.personality } : {}),
-              ...(field === 'profile' ? { coreProfile: completionMode === 'complete' && character.coreProfile ? character.coreProfile : generated.coreProfile } : {}),
-            });
+            await useCharacterStore.getState().updateCharacter(character.id,
+              buildCharacterProfileCompletionPatch(latest, generated, field, completionMode === 'regenerate'));
             return;
           }
           if (field === 'bubble') {

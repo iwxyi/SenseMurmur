@@ -183,6 +183,7 @@ Return strict JSON only, with this shape:
     "sensitivities": ["0-5 sensitive points"],
     "perceptionBiases": ["0-5 likely misreadings or attention filters"],
     "interactionHabits": ["0-5 interaction habits"],
+    "expressionHabits": ["0-5 characteristic expression habits"],
     "attachmentStyle": "relationship or attachment tendency",
     "conflictStyle": "how they handle conflict",
     "unmetNeeds": ["0-5 unmet emotional needs"],
@@ -224,7 +225,7 @@ Rules:
 - Output valid JSON only.`;
 
 function clampScore(value: unknown, fallback: number) {
-  if (typeof value !== 'number' || Number.isNaN(value)) return fallback;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
   return Math.max(0, Math.min(100, Math.round(value)));
 }
 
@@ -330,8 +331,8 @@ export function normalizeGeneratedProfile(raw: GeneratedCharacterProfile) {
   };
 
   const rawCoreProfile = raw.coreProfile || {};
-  const values = normalizeStringList(rawCoreProfile.values || rawCoreProfile.valuePriority, 6);
-  const perceptionBiases = normalizeStringList(rawCoreProfile.perceptionBiases || rawCoreProfile.biases, 6);
+  const values = normalizeStringList(rawCoreProfile.values?.length ? rawCoreProfile.values : rawCoreProfile.valuePriority, 6);
+  const perceptionBiases = normalizeStringList(rawCoreProfile.perceptionBiases?.length ? rawCoreProfile.perceptionBiases : rawCoreProfile.biases, 6);
   const coreProfile: CharacterCoreProfile = {
     ...DEFAULT_CORE_PROFILE,
     coreDesire: normalizeShortText(rawCoreProfile.coreDesire),
@@ -343,6 +344,7 @@ export function normalizeGeneratedProfile(raw: GeneratedCharacterProfile) {
     perceptionBiases,
     biases: perceptionBiases,
     interactionHabits: normalizeStringList(rawCoreProfile.interactionHabits, 6),
+    expressionHabits: normalizeStringList(rawCoreProfile.expressionHabits, 6),
     attachmentStyle: normalizeShortText(rawCoreProfile.attachmentStyle),
     conflictStyle: normalizeShortText(rawCoreProfile.conflictStyle),
     unmetNeeds: normalizeStringList(rawCoreProfile.unmetNeeds, 6),
@@ -527,7 +529,29 @@ export async function generateCharacterProfiles(config: APIConfig, names: string
   return profiles.map((item) => ({ ...item, profile: { ...item.profile, voiceConfig: { ...assignmentMap.get(item.name), voiceProfile: item.profile.voiceProfile } } }));
 }
 
-async function generateCharacterProfileBase(config: APIConfig, name: string, language: 'zh' | 'en', context?: CharacterGenerationContext) {
+type RequiredCompletionField = 'personality' | 'profile';
+
+class IncompleteCharacterProfileError extends Error {}
+
+function validateCompletionProfile(raw: GeneratedCharacterProfile, field: RequiredCompletionField) {
+  if (field === 'personality') {
+    for (const [value, defaults] of [[raw.personality, DEFAULT_PERSONALITY], [raw.behavior, DEFAULT_CHARACTER_BEHAVIOR]] as const) {
+      const entries = Object.entries(value || {});
+      if (Object.keys(defaults).some((key) => !entries.some(([name, score]) => name === key && typeof score === 'number' && Number.isFinite(score) && score >= 0 && score <= 100))
+        || entries.every(([, score]) => score === 50) || entries.every(([, score]) => score === 0)) {
+        throw new IncompleteCharacterProfileError('AI 未生成有效的人格参数或社交表达、讨论风格，不能用默认值冒充补全结果。');
+      }
+    }
+  } else {
+    const core = raw.coreProfile;
+    if (['coreDesire', 'coreFear', 'socialMask', 'attachmentStyle', 'conflictStyle', 'selfImage'].some((key) => !normalizeShortText(core?.[key as keyof CharacterCoreProfile]))
+      || !normalizeStringList(core?.values?.length ? core.values : core?.valuePriority, 6).length) {
+      throw new IncompleteCharacterProfileError('AI 未生成完整的核心画像，不能保存空白画像。');
+    }
+  }
+}
+
+async function generateCharacterProfileBase(config: APIConfig, name: string, language: 'zh' | 'en', context?: CharacterGenerationContext, requiredField?: RequiredCompletionField) {
   const response = await generateResponse(
     config,
     `${CHARACTER_GENERATOR_SYSTEM_PROMPT}\nOutput exactly one valid JSON object. Do not include trailing commas. Do not truncate. Do not add explanations before or after the JSON.`,
@@ -535,7 +559,9 @@ async function generateCharacterProfileBase(config: APIConfig, name: string, lan
     undefined,
     { maxTokens: 2400, aiUsage: { type: 'character_generation', label: '生成角色', scope: 'character' } },
   );
-  return parseGeneratedProfile(response);
+  const raw = parseGeneratedJsonPayload<GeneratedCharacterProfile>(response);
+  if (requiredField) validateCompletionProfile(raw, requiredField);
+  return normalizeGeneratedProfile(raw);
 }
 
 export async function generateCharacterProfile(config: APIConfig, name: string, language: 'zh' | 'en', context?: CharacterGenerationContext) {
@@ -544,8 +570,19 @@ export async function generateCharacterProfile(config: APIConfig, name: string, 
   return { ...profile, voiceConfig: { ...assignment.voiceConfig, voiceProfile: profile.voiceProfile } };
 }
 
-export async function generateCharacterProfileDraft(config: APIConfig, name: string, language: 'zh' | 'en', context?: CharacterGenerationContext) {
-  return generateCharacterProfileBase(config, name, language, context);
+export async function generateCharacterProfileDraft(config: APIConfig, name: string, language: 'zh' | 'en', context?: CharacterGenerationContext, requiredField?: RequiredCompletionField) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await generateCharacterProfileBase(config, name, language, attempt === 0 ? context : {
+        ...normalizeGenerationContext(context),
+        description: `${normalizeGenerationContext(context).description}\n${language === 'zh'
+          ? '上次输出缺少有效的人格或核心画像。personality 和 behavior 的所有参数都必须按角色特征提供有效且有区分度的数值，禁止全填 50 或 0；coreProfile 必须包含核心欲望、恐惧、社交面具、价值观、依恋倾向、冲突方式和自我认知。'
+          : 'The previous personality or core profile was incomplete. Fill every personality and behavior axis with character-specific values, not all 50 or 0. Include core desire, fear, social mask, values, attachment style, conflict style and self image.'}`,
+      }, requiredField);
+    } catch (error) {
+      if (!(error instanceof IncompleteCharacterProfileError) || attempt >= 1) throw error;
+    }
+  }
 }
 
 export async function generateCharacterBasicProfileDraft(config: APIConfig, name: string, language: 'zh' | 'en', context?: CharacterGenerationContext) {
@@ -554,14 +591,18 @@ export async function generateCharacterBasicProfileDraft(config: APIConfig, name
     const profile = await generateCharacterProfileBase(config, name, language, attempt === 0 ? context : {
       ...normalizedContext,
       description: `${normalizedContext.description}\n${language === 'zh'
-        ? '上次基本信息不合格：说话风格与背景必须均有内容且不能相同。说话风格写语气、措辞、节奏和语言习惯，背景写身份、经历和人物关系；不能只重复职业标签。'
-        : 'The previous basic profile was invalid. Provide distinct, nonempty speakingStyle (tone, diction, rhythm, verbal habits) and background (identity, history, relationships), not repeated job labels.'}`,
+        ? '上次基本信息不合格：说话风格与背景必须均有内容且不能相同。说话风格写语气、措辞、节奏和语言习惯，背景写身份、经历和人物关系；不能只重复职业标签。speechProfile 必须提供贴合角色的口头习惯或表达偏好，不能省略或全部使用默认值。'
+        : 'The previous basic profile was invalid. Provide distinct, nonempty speakingStyle (tone, diction, rhythm, verbal habits) and background (identity, history, relationships), not repeated job labels. Include character-specific speechProfile habits or preferences instead of omitting them or using only defaults.'}`,
     });
-    if (profile.background && profile.speakingStyle && profile.background !== profile.speakingStyle && profile.expertise.length) return profile;
+    const hasSpeechProfile = Object.entries(DEFAULT_SPEECH_PROFILE).some(([key, fallback]) => {
+      const value = profile.speechProfile[key as keyof CharacterSpeechProfile];
+      return Array.isArray(value) ? value.length > 0 : value !== fallback;
+    });
+    if (profile.background && profile.speakingStyle && profile.background !== profile.speakingStyle && profile.expertise.length && hasSpeechProfile) return profile;
   }
   throw new Error(language === 'zh'
-    ? 'AI 未生成有效的基本信息：背景、说话风格必须分别描述，专业领域不能为空。请重试。'
-    : 'AI returned an invalid basic profile. Background, speaking style, and expertise must be provided, with distinct descriptions. Please retry.');
+    ? 'AI 未生成有效的基本信息：背景、说话风格必须分别描述，专业领域和说话习惯不能为空。请重试。'
+    : 'AI returned an invalid basic profile. Provide distinct background and speaking style, expertise, and character-specific speech habits. Please retry.');
 }
 
 export async function generateCharacterVisualIdentityDraft(config: APIConfig, input: CharacterVisualIdentityDraftInput, language: 'zh' | 'en') {

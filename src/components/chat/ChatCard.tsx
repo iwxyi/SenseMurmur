@@ -1,4 +1,5 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { Attributes, ComponentProps } from 'react';
 import { Card, CardContent, CardActionArea, Box, Typography, Avatar, Chip, Checkbox, CircularProgress, Tooltip } from '@mui/material';
 import type { SxProps, Theme } from '@mui/material/styles';
 import { isImageAvatar } from '../../utils/avatar';
@@ -83,6 +84,12 @@ function ExpandableMemberAvatars({ members, onMemberClick }: { members: AICharac
 }
 
 function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, selectable = false, multiSelected = false, onToggleSelection, onMemberClick: onEditMember, onAvatarClick: onEditAvatar, onLongPress, displayMode = 'card', compactCard = false, showGroupBackground = false, showListDivider = false }: ChatCardProps) {
+  const [rippleEpoch, setRippleEpoch] = useState(0);
+  useLayoutEffect(() => () => {
+    // Activity retains unfinished MUI ripples. Invalidate only press feedback when hidden.
+    setRippleEpoch((epoch) => epoch + 1);
+  }, []);
+  const touchRippleProps: Attributes & ComponentProps<typeof CardActionArea>['TouchRippleProps'] = { key: rippleEpoch };
   const authMode = useAuthStore((state) => state.authMode);
   const onMemberClick = selectable ? undefined : onEditMember;
   const onAvatarClick = selectable ? undefined : onEditAvatar;
@@ -299,6 +306,7 @@ function ChatCard({ chat, characters, onClick, onPrefetch, selected = false, sel
     >
       <ChatBackground url={backgroundUrl} opacity={backgroundOpacity} />
       <CardActionArea
+        TouchRippleProps={touchRippleProps}
         component="div"
         role="button"
         tabIndex={0}

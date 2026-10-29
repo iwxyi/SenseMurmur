@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Box, Button, Checkbox, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, IconButton, MenuItem, Select, Stack, Switch, Tooltip, Typography } from '@mui/material';
+import { Box, Button, Checkbox, Chip, CircularProgress, Dialog, DialogContent, DialogTitle, IconButton, MenuItem, Select, Stack, Tooltip, Typography } from '@mui/material';
 import ArticleOutlinedIcon from '@mui/icons-material/ArticleOutlined';
 import AccountTreeOutlinedIcon from '@mui/icons-material/AccountTreeOutlined';
 import CloseOutlinedIcon from '@mui/icons-material/CloseOutlined';
@@ -9,7 +9,6 @@ import DataObjectOutlinedIcon from '@mui/icons-material/DataObjectOutlined';
 import DeleteOutlineOutlinedIcon from '@mui/icons-material/DeleteOutlineOutlined';
 import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
 import DownloadOutlinedIcon from '@mui/icons-material/DownloadOutlined';
-import FolderOutlinedIcon from '@mui/icons-material/FolderOutlined';
 import GridViewOutlinedIcon from '@mui/icons-material/GridViewOutlined';
 import InsertDriveFileOutlinedIcon from '@mui/icons-material/InsertDriveFileOutlined';
 import ImageOutlinedIcon from '@mui/icons-material/ImageOutlined';
@@ -45,7 +44,6 @@ interface AssistantAgentPanelProps {
   chat: GroupChat;
   selectedArtifactId?: string | null;
   onSelectedArtifactChange?: (artifactId: string | null) => void;
-  onAgentEnabledChange?: (enabled: boolean) => void;
   onHtmlAutosave?: (input: AssistantHtmlInteractionPayload) => void | Promise<void>;
   onHtmlSubmit?: (input: AssistantHtmlInteractionPayload) => void | Promise<void>;
   onHtmlRepair?: (error: AssistantHtmlRuntimeError) => void | Promise<void>;
@@ -315,7 +313,7 @@ function ThumbnailFade() {
 
 const EMPTY_SELECTED_LOCAL_WORKSPACE_FILE_PATHS: string[] = [];
 
-function AssistantLocalWorkspaceFiles({ chatId }: { chatId: string }) {
+function AssistantLocalWorkspaceFiles({ chatId, onHasFilesChange }: { chatId: string; onHasFilesChange: (hasFiles: boolean) => void }) {
   const directories = useLocalWorkspaceStore((state) => state.directories);
   const defaultDirectoryId = useLocalWorkspaceStore((state) => state.defaultDirectoryId);
   const selectedFilePaths = useLocalWorkspaceStore((state) => state.selectedFilePathsByChatId[chatId] || EMPTY_SELECTED_LOCAL_WORKSPACE_FILE_PATHS);
@@ -325,30 +323,44 @@ function AssistantLocalWorkspaceFiles({ chatId }: { chatId: string }) {
   const [files, setFiles] = useState<LocalWorkspaceFileEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const refreshGeneration = useRef(0);
   const defaultDirectory = useMemo(() => {
     const id = defaultDirectoryId;
     return id ? directories.find((item) => item.id === id) || null : null;
   }, [defaultDirectoryId, directories]);
   const selectedSet = useMemo(() => new Set(selectedFilePaths), [selectedFilePaths]);
-  const selectableFiles = useMemo(() => files.filter(isSelectableLocalWorkspaceFile).slice(0, 80), [files]);
+  const selectableFiles = useMemo(() => files.filter(isSelectableLocalWorkspaceFile)
+    .sort((a, b) => a.path.localeCompare(b.path)).slice(0, 80), [files]);
 
   const refreshFiles = useCallback(async () => {
-    if (!defaultDirectory) return;
+    const generation = ++refreshGeneration.current;
+    if (!defaultDirectoryId) {
+      setFiles([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
       const next = await listDefaultDirectoryFiles();
+      if (refreshGeneration.current !== generation) return;
       setFiles(next);
+      onHasFilesChange(next.some((entry) => entry.kind === 'file'));
     } catch (err) {
+      if (refreshGeneration.current !== generation) return;
       setError(err instanceof Error ? err.message : '读取本地文件列表失败');
     } finally {
-      setLoading(false);
+      if (refreshGeneration.current === generation) setLoading(false);
     }
-  }, [defaultDirectory, listDefaultDirectoryFiles]);
+  }, [defaultDirectoryId, listDefaultDirectoryFiles, onHasFilesChange]);
 
   useEffect(() => {
+    setFiles([]);
+    onHasFilesChange(false);
     void refreshFiles();
-  }, [refreshFiles]);
+    return () => { refreshGeneration.current += 1; };
+  }, [refreshFiles, onHasFilesChange]);
 
   if (!defaultDirectory) return null;
 
@@ -378,7 +390,7 @@ function AssistantLocalWorkspaceFiles({ chatId }: { chatId: string }) {
             ) : null}
             <Tooltip title="刷新">
               <span>
-                <IconButton size="small" disabled={loading} onClick={() => void refreshFiles()}>
+                <IconButton size="small" disabled={loading} onClick={() => void refreshFiles()} sx={{ width: 30, height: 30 }}>
                   {loading ? <CircularProgress size={16} /> : <RefreshOutlinedIcon fontSize="small" />}
                 </IconButton>
               </span>
@@ -434,12 +446,6 @@ function AssistantLocalWorkspaceFiles({ chatId }: { chatId: string }) {
             })}
           </Box>
         )}
-        {files.some((file) => file.kind === 'directory') ? (
-          <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', color: 'text.secondary' }}>
-            <FolderOutlinedIcon sx={{ fontSize: 16 }} />
-            <Typography variant="caption">目录只用于定位文件，不会直接作为正文读取。</Typography>
-          </Stack>
-        ) : null}
       </Stack>
     </Box>
   );
@@ -595,6 +601,7 @@ function ArtifactPreview({ item, version, expanded = false, fullscreen = false, 
 
 function AssistantArtifactList({
   chatId,
+  hideEmptyState = false,
   selectedArtifactId,
   onSelectedArtifactChange,
   onHtmlAutosave,
@@ -602,6 +609,7 @@ function AssistantArtifactList({
   onHtmlRepair,
 }: {
   chatId: string;
+  hideEmptyState?: boolean;
   selectedArtifactId?: string | null;
   onSelectedArtifactChange?: (artifactId: string | null) => void;
   onHtmlAutosave?: (input: AssistantHtmlInteractionPayload) => void | Promise<void>;
@@ -747,6 +755,7 @@ function AssistantArtifactList({
   };
 
   if (!artifacts.length) {
+    if (hideEmptyState) return null;
     return (
       <Box sx={{
         minHeight: 180,
@@ -1182,11 +1191,11 @@ export default function AssistantAgentPanel({
   chat,
   selectedArtifactId = null,
   onSelectedArtifactChange,
-  onAgentEnabledChange,
   onHtmlAutosave,
   onHtmlSubmit,
   onHtmlRepair,
 }: AssistantAgentPanelProps) {
+  const [hasWorkspaceFiles, setHasWorkspaceFiles] = useState(false);
   const capabilities = chat.modeState.assistantCapabilities || {};
   const genericCapabilities = chat.modeState.agentCapabilities || {};
   const isStudyRoom = Boolean(chat.scenarioState?.learning || chat.sessionKind?.family === 'study' || chat.sessionKind?.scenarioId === 'learning-progress' || chat.sessionKind?.scenarioId === 'ielts-coach');
@@ -1197,37 +1206,12 @@ export default function AssistantAgentPanel({
       <Box sx={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', pr: { xs: 0.25, md: 0.5 }, ...buildScrollableRegionSx() }}>
         <Stack spacing={2}>
           <LearningProgressSummary chat={chat} />
-          {!isStudyRoom ? <Box
-            sx={{
-              p: 1.25,
-              border: '1px solid',
-              borderColor: (theme) => theme.palette.mode === 'light' ? 'rgba(15,23,42,0.08)' : 'rgba(226,232,240,0.12)',
-              borderRadius: 1,
-              bgcolor: (theme) => theme.palette.mode === 'light' ? 'rgba(255,255,255,0.72)' : 'rgba(15,23,42,0.36)',
-            }}
-          >
-            <Stack direction="row" spacing={1.25} sx={{ alignItems: 'center', justifyContent: 'space-between', minWidth: 0 }}>
-              <Box sx={{ minWidth: 0 }}>
-                <Typography variant="body2" sx={{ fontWeight: 800 }}>{chat.scenarioState?.learning ? '学习资料与记录' : 'Agent'}</Typography>
-                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', lineHeight: 1.55 }}>
-                  {chat.scenarioState?.learning
-                    ? (agentEnabled ? '可生成资料、试卷、HTML 练习，并查询或修改 CSV/JSON 学习记录。' : '开启后可沉淀学习资料和记录。')
-                    : (agentEnabled ? '已开启产物整理与修改能力。' : '开启后可生成并管理文档、代码、图表、网页等产物。')}
-                </Typography>
-              </Box>
-              <Switch
-                checked={agentEnabled}
-                disabled={!onAgentEnabledChange}
-                onChange={(event) => onAgentEnabledChange?.(event.target.checked)}
-                slotProps={{ input: { 'aria-label': '开启 Agent 能力' } }}
-              />
-            </Stack>
-          </Box> : null}
           {agentEnabled ? (
             <>
-              <AssistantLocalWorkspaceFiles chatId={chat.id} />
+              <AssistantLocalWorkspaceFiles chatId={chat.id} onHasFilesChange={setHasWorkspaceFiles} />
               <AssistantArtifactList
                 chatId={chat.id}
+                hideEmptyState={hasWorkspaceFiles}
                 selectedArtifactId={selectedArtifactId}
                 onSelectedArtifactChange={onSelectedArtifactChange}
                 onHtmlAutosave={onHtmlAutosave}
