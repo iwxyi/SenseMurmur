@@ -762,6 +762,7 @@ export default function AdminAIProviderPage() {
   const [aceModelSaving, setAceModelSaving] = useState<string | null>(null);
   const [aceConnection, setAceConnection] = useState({ status: 'inactive', apiBaseUrl: '', apiKey: '', apiKeyConfigured: false });
   const [aceConnectionLoading, setAceConnectionLoading] = useState(false);
+  const [aceConnectionLoaded, setAceConnectionLoaded] = useState(false);
   const [aceConnectionError, setAceConnectionError] = useState<string | null>(null);
   const [aceConnectionSaved, setAceConnectionSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -832,31 +833,14 @@ export default function AdminAIProviderPage() {
 
   const loadAceConnection = async () => {
     setAceConnectionLoading(true);
+    setAceConnectionLoaded(false);
     setAceConnectionError(null);
     try {
       const result = await adminApi.getAceConnection();
       setAceConnection({ ...result, apiKey: '' });
+      setAceConnectionLoaded(true);
     } catch (loadError) {
       setAceConnectionError(getAdminErrorMessage(loadError));
-    } finally {
-      setAceConnectionLoading(false);
-    }
-  };
-
-  const saveAceConnection = async () => {
-    setAceConnectionLoading(true);
-    setAceConnectionError(null);
-    setAceConnectionSaved(false);
-    try {
-      const result = await adminApi.updateAceConnection({
-        status: aceConnection.status,
-        apiBaseUrl: aceConnection.apiBaseUrl,
-        ...(aceConnection.apiKey.trim() ? { apiKey: aceConnection.apiKey.trim() } : {}),
-      });
-      setAceConnection({ ...result, apiKey: '' });
-      setAceConnectionSaved(true);
-    } catch (saveError) {
-      setAceConnectionError(getAdminErrorMessage(saveError));
     } finally {
       setAceConnectionLoading(false);
     }
@@ -971,6 +955,9 @@ export default function AdminAIProviderPage() {
     setSaving(true);
     setError(null);
     setSaveWarning(null);
+    setAceConnectionSaved(false);
+    let aceConnectionPersisted = false;
+    let savingAceConnection = false;
     try {
       const payload: Record<string, unknown> = {
         name: form.name,
@@ -1016,6 +1003,19 @@ export default function AdminAIProviderPage() {
       const nextForwardKey = form.forwardKey.trim();
       if (nextAdminToken !== loadedSecrets.adminToken) payload.adminToken = nextAdminToken;
       if (nextForwardKey !== loadedSecrets.forwardKey) payload.forwardKey = nextForwardKey;
+      if (isAce) {
+        if (!aceConnectionLoaded) throw new Error('请先成功加载 ACE 连接配置');
+        savingAceConnection = true;
+        const connection = await adminApi.updateAceConnection({
+          status: aceConnection.status,
+          apiBaseUrl: aceConnection.apiBaseUrl,
+          ...(aceConnection.apiKey.trim() ? { apiKey: aceConnection.apiKey.trim() } : {}),
+        });
+        setAceConnection({ ...connection, apiKey: '' });
+        setAceConnectionError(null);
+        aceConnectionPersisted = true;
+        savingAceConnection = false;
+      }
       const updated = await adminApi.updateAiProviderConfig(providerCode, payload);
       const pricingRefresh = updated.pricingRefresh && typeof updated.pricingRefresh === 'object'
         ? updated.pricingRefresh as Record<string, unknown>
@@ -1043,8 +1043,16 @@ export default function AdminAIProviderPage() {
         moacodeImageModelsEnabled: getRecord(updated.metadata).moacodeImageModelsEnabled === true,
         nanobananaPricing: toNanoBananaPricingForm(updated.tokenPricing),
       }));
+      if (isAce) setAceConnectionSaved(true);
     } catch (saveError) {
-      setError(getAdminErrorMessage(saveError));
+      const message = getAdminErrorMessage(saveError);
+      setError(isAce
+        ? savingAceConnection
+          ? `ACE 连接保存失败，其他配置尚未保存：${message}`
+          : aceConnectionPersisted
+            ? `ACE 连接已保存，其他配置保存失败，请重试：${message}`
+            : message
+        : message);
     } finally {
       setSaving(false);
     }
@@ -1309,7 +1317,8 @@ export default function AdminAIProviderPage() {
       {tab === 0 ? (
         <Stack spacing={1.25}>
           {saveWarning ? <Alert severity="warning">{saveWarning}</Alert> : null}
-          <AdminSection title="主账号配置">
+          {isAce && aceConnectionSaved ? <Alert severity="success">配置已保存</Alert> : null}
+          <AdminSection title={isAce ? '供应商配置' : '主账号配置'}>
             <Stack spacing={1.25}>
               <Box sx={configGridSx}>
                 <TextField label="名称" value={form.name} onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))} sx={compactTextFieldSx} />
@@ -1658,13 +1667,12 @@ export default function AdminAIProviderPage() {
             <AdminSection title="ACE 连接">
               <Stack spacing={1.25}>
                 {aceConnectionError ? <Alert severity="error" action={<Button color="inherit" size="small" onClick={() => void loadAceConnection()} disabled={aceConnectionLoading}>重新加载</Button>}>{aceConnectionError}</Alert> : null}
-                {aceConnectionSaved ? <Alert severity="success">连接配置已保存</Alert> : null}
                 <Box sx={endpointGridSx}>
                   <TextField
                     label="API Base URL"
                     value={aceConnection.apiBaseUrl}
                     onChange={(event) => { setAceConnection((prev) => ({ ...prev, apiBaseUrl: event.target.value })); setAceConnectionSaved(false); }}
-                    disabled={aceConnectionLoading}
+                    disabled={aceConnectionLoading || saving}
                     fullWidth
                     sx={compactTextFieldSx}
                   />
@@ -1674,14 +1682,13 @@ export default function AdminAIProviderPage() {
                     value={aceConnection.apiKey}
                     onChange={(event) => { setAceConnection((prev) => ({ ...prev, apiKey: event.target.value })); setAceConnectionSaved(false); }}
                     placeholder={aceConnection.apiKeyConfigured ? '已配置，留空则保持原密钥' : '填写 ACE API Key'}
-                    disabled={aceConnectionLoading}
+                    disabled={aceConnectionLoading || saving}
                     fullWidth
                     sx={compactTextFieldSx}
                   />
                 </Box>
                 <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-                  <FormControlLabel control={<Switch checked={aceConnection.status === 'active'} onChange={(event) => { setAceConnection((prev) => ({ ...prev, status: event.target.checked ? 'active' : 'inactive' })); setAceConnectionSaved(false); }} disabled={aceConnectionLoading} />} label="启用连接" />
-                  <Button variant="outlined" onClick={() => void saveAceConnection()} disabled={aceConnectionLoading || !aceConnection.apiBaseUrl.trim() || (aceConnection.status === 'active' && !aceConnection.apiKeyConfigured && !aceConnection.apiKey.trim())}>保存连接</Button>
+                  <FormControlLabel control={<Switch checked={aceConnection.status === 'active'} onChange={(event) => { setAceConnection((prev) => ({ ...prev, status: event.target.checked ? 'active' : 'inactive' })); setAceConnectionSaved(false); }} disabled={aceConnectionLoading || saving} />} label="启用连接" />
                 </Stack>
               </Stack>
             </AdminSection>
@@ -2288,7 +2295,7 @@ export default function AdminAIProviderPage() {
       {tab === 0 ? (
         <Button
           variant="contained"
-          disabled={saving}
+          disabled={saving || (isAce && (aceConnectionLoading || !aceConnectionLoaded || !aceConnection.apiBaseUrl.trim() || (aceConnection.status === 'active' && !aceConnection.apiKeyConfigured && !aceConnection.apiKey.trim())))}
           onClick={() => void saveConfig()}
           sx={{
             position: 'fixed',
