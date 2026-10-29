@@ -25,7 +25,8 @@ import { usePaneLayout } from '../components/layout/PaneLayoutContext';
 import { canDeleteCharacterGroup, getCharacterGroupList, getCharactersInGroup, normalizeCharacter, normalizeCharacterGroup, normalizeCharacterName, getDuplicateCharacterBannerText, getDuplicateCharacterCount, getDuplicateCharacters } from '../types/character';
 import { enqueueAvatarGenerationForCharacter } from '../services/avatarGeneration';
 import { avatarGenerationQueue } from '../services/avatarGenerationQueue';
-import { buildFallbackCharacterVisualGenerationPlan, generateCharacterProfileDraft, generateCharacterVisualGenerationPlan, generateCharacterVisualIdentityDraft, generateCharacterVoiceProfileDraft } from '../services/characterGenerator';
+import { buildFallbackCharacterVisualGenerationPlan, generateCharacterBasicProfileDraft, generateCharacterProfileDraft, generateCharacterVisualGenerationPlan, generateCharacterVisualIdentityDraft, generateCharacterVoiceProfileDraft } from '../services/characterGenerator';
+import { getCharacterBasicProfileMissing } from '../services/characterBasicProfile';
 import { assignGeneratedVoiceProfile } from '../services/speechVoiceAssignment';
 import { enqueueCharacterCompletionTask, type CharacterCompletionKind } from '../services/characterCompletionQueue';
 import { isImageAvatar } from '../utils/avatar';
@@ -657,7 +658,7 @@ export default function CharacterLibraryPage() {
     if (field === 'voice') return !character.voiceConfig?.voiceName;
     if (field === 'profile') return !character.coreProfile || !Object.values(character.coreProfile).some((value) => Array.isArray(value) ? value.length > 0 : Boolean(value));
     if (field === 'personality') return !character.personality || Object.values(character.personality).every((value) => !value);
-    return !character.background?.trim() || !character.speakingStyle?.trim() || !character.expertise?.length;
+    return Object.values(getCharacterBasicProfileMissing(character)).some(Boolean);
   };
 
   const isCompletionFieldDisabled = (field: CharacterCompletionField) => (
@@ -701,9 +702,17 @@ export default function CharacterLibraryPage() {
           if (field === 'base' || field === 'personality' || field === 'profile') {
             const profile = getPreferredAIProfile(aiProfiles, 'text');
             if (!isAIProfileUsable(profile)) throw new Error('请先配置文本 AI 模型');
-            const generated = await generateCharacterProfileDraft(profile, character.name, i18n.language.startsWith('zh') ? 'zh' : 'en', character.group || null);
+            const current = useCharacterStore.getState().characters.find((item) => item.id === character.id);
+            if (!current) throw new Error('角色已不存在');
+            const generated = await (field === 'base' ? generateCharacterBasicProfileDraft : generateCharacterProfileDraft)(profile, current.name, i18n.language.startsWith('zh') ? 'zh' : 'en', {
+              theme: current.group,
+              description: JSON.stringify({ background: current.background, speakingStyle: current.speakingStyle, expertise: current.expertise, coreProfile: current.coreProfile }),
+            });
+            const latest = useCharacterStore.getState().characters.find((item) => item.id === character.id);
+            if (!latest) throw new Error('角色已不存在');
+            const missing = getCharacterBasicProfileMissing(latest);
             await useCharacterStore.getState().updateCharacter(character.id, {
-              ...(field === 'base' ? { background: completionMode === 'complete' ? (character.background || generated.background) : generated.background, speakingStyle: completionMode === 'complete' ? (character.speakingStyle || generated.speakingStyle) : generated.speakingStyle, expertise: completionMode === 'complete' && character.expertise?.length ? character.expertise : generated.expertise } : {}),
+              ...(field === 'base' ? { background: completionMode === 'complete' && !missing.background ? latest.background : generated.background, speakingStyle: completionMode === 'complete' && !missing.speakingStyle ? latest.speakingStyle : generated.speakingStyle, expertise: completionMode === 'complete' && !missing.expertise ? latest.expertise : generated.expertise } : {}),
               ...(field === 'personality' ? { personality: completionMode === 'complete' && character.personality ? character.personality : generated.personality } : {}),
               ...(field === 'profile' ? { coreProfile: completionMode === 'complete' && character.coreProfile ? character.coreProfile : generated.coreProfile } : {}),
             });

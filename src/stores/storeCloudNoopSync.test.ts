@@ -183,7 +183,197 @@ describe('cloud no-op sync', () => {
     apiMocks.syncCharacterPatch.mockResolvedValue({ success: true, accepted: true, revision: 1 });
   });
 
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(async () => {
+    const { stopWorkspace } = await import('../services/workspaceLifecycle');
+    stopWorkspace();
+    const { flushBufferedPersistenceWrites } = await import('./storePersistenceScope');
+    flushBufferedPersistenceWrites();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    vi.unstubAllGlobals();
+  });
+
+  it.each(['character', 'chat'] as const)('applies another device\'s %s deletion even when the local clock is ahead', async (kind) => {
+    const { useCharacterStore } = await import('./useCharacterStore');
+    const { useChatStore } = await import('./useChatStore');
+    await Promise.all([useCharacterStore.persist.rehydrate(), useChatStore.persist.rehydrate()]);
+    useCharacterStore.setState({ characters: [character({ updatedAt: 999 })], pendingOperations: [] });
+    useChatStore.setState({ chats: [chat({ updatedAt: 999 })], pendingOperations: [] });
+    const deleted = kind === 'character' ? character({ updatedAt: 2, deletedAt: 2 }) : chat({ updatedAt: 2, deletedAt: 2 });
+    apiMocks.getSyncChanges.mockResolvedValueOnce({
+      status: 'modified', cursor: 'log:2', revision: 'log:2',
+      changes: [{ op: 'delete', entity: `${kind}_summary`, id: `${kind}-1`, revision: 2, patch: deleted }],
+    });
+    if (kind === 'character') {
+      await useCharacterStore.getState().loadCharacters();
+      expect(useCharacterStore.getState().characters).toEqual([]);
+      expect(useCharacterStore.getState().remoteDeletedCharacterIds).toContain('character-1');
+      useCharacterStore.getState().hydrateCharacterSummaries([character({ updatedAt: 1000 })]);
+      expect(useCharacterStore.getState().characters).toEqual([]);
+    } else {
+      await useChatStore.getState().loadChats({ waitForCloud: true });
+      expect(useChatStore.getState().chats).toEqual([]);
+      expect(useChatStore.getState().remoteDeletedChatIds).toContain('chat-1');
+    }
+  });
+
+  it.each(['character', 'chat'] as const)('persists an account %s deletion while cloud sync is disabled', async (kind) => {
+    const { useAuthStore } = await import('./useAuthStore');
+    const { setCloudSyncEnabled } = await import('../services/cloudSyncPreference');
+    useAuthStore.setState({ authMode: 'cloud', isLoggedIn: true, user: { id: 'local-user', cloudSyncEntitled: false } as NonNullable<ReturnType<typeof useAuthStore.getState>['user']> });
+    setCloudSyncEnabled(false, { source: 'entitlement' });
+    const { useCharacterStore } = await import('./useCharacterStore');
+    const { useChatStore } = await import('./useChatStore');
+    await Promise.all([useCharacterStore.persist.rehydrate(), useChatStore.persist.rehydrate()]);
+    useCharacterStore.setState({ characters: [character()], pendingOperations: [] });
+    useChatStore.setState({ chats: [chat()], pendingOperations: [] });
+    if (kind === 'character') {
+      await useCharacterStore.getState().deleteCharacter('character-1');
+      await useCharacterStore.persist.rehydrate();
+      expect(useCharacterStore.getState().characters).toEqual([]);
+      expect(useCharacterStore.getState().pendingOperations).toEqual([expect.objectContaining({ entityId: 'character-1', patch: expect.objectContaining({ deletedAt: expect.any(Number) }) })]);
+    } else {
+      await useChatStore.getState().deleteChat('chat-1');
+      await useChatStore.persist.rehydrate();
+      expect(useChatStore.getState().chats).toEqual([]);
+      expect(useChatStore.getState().pendingOperations).toEqual([expect.objectContaining({ entityId: 'chat-1', patch: expect.objectContaining({ deletedAt: expect.any(Number) }) })]);
+    }
+    expect(apiMocks.syncCharacterPatch).not.toHaveBeenCalled();
+    expect(apiMocks.syncChatPatch).not.toHaveBeenCalled();
+  });
+
+  it('keeps guest and account snapshots separate through account switches and relogin', async () => {
+    const accountA = `scope-a-${Date.now()}`;
+    const accountB = `scope-b-${Date.now()}`;
+    for (const id of ['guest', accountA, accountB]) {
+      localStorage.setItem(storageKey(`characters-${id}`), JSON.stringify({
+        state: { characters: [character({ id: `character-${id}` })], pendingOperations: [], remoteDeletedCharacterIds: [`deleted-${id}`] },
+        version: 5,
+      }));
+      localStorage.setItem(storageKey(`chats-${id}`), JSON.stringify({
+        state: { chats: [chat({ id: `chat-${id}` })], pendingOperations: [] }, version: 5,
+      }));
+    }
+    const { useCharacterStore, resetCharacterStoreForAccountBoundary } = await import('./useCharacterStore');
+    const { useChatStore, resetChatStoreForAccountBoundary } = await import('./useChatStore');
+    const { getLocalDataUserId } = await import('../services/authStorageScope');
+    for (const id of [accountA, accountB, accountA, 'guest', accountB]) {
+      if (id === 'guest') {
+        localStorage.removeItem(storageKey('user'));
+        localStorage.removeItem(storageKey('token'));
+        localStorage.setItem(storageKey('auth-mode'), 'local');
+      } else {
+        localStorage.setItem(storageKey('user'), JSON.stringify({ id }));
+        seedCloudAuth();
+      }
+      expect(getLocalDataUserId()).toBe(id);
+      await resetCharacterStoreForAccountBoundary();
+      await resetChatStoreForAccountBoundary();
+      await useCharacterStore.persist.rehydrate();
+      await useChatStore.persist.rehydrate();
+      expect(useCharacterStore.getState().characters.map((item) => item.id)).toEqual([`character-${id}`]);
+      expect(useCharacterStore.getState().remoteDeletedCharacterIds).toEqual([`deleted-${id}`]);
+      expect(useChatStore.getState().chats.map((item) => item.id)).toEqual([`chat-${id}`]);
+    }
+  });
+
+  it.each(['character', 'chat'] as const)('still applies a confirmed cloud deletion to a local %s', async (kind) => {
+    const { useCharacterStore } = await import('./useCharacterStore');
+    const { useChatStore } = await import('./useChatStore');
+    await Promise.all([useCharacterStore.persist.rehydrate(), useChatStore.persist.rehydrate()]);
+    useCharacterStore.setState({ characters: [character({ characterDetailLoaded: true })], pendingOperations: [] });
+    useChatStore.setState({ chats: [chat({ runtimeDetailLoaded: true })], pendingOperations: [] });
+    apiMocks.getSyncChanges.mockResolvedValueOnce({
+      status: 'modified', cursor: 'log:2', revision: 'log:2',
+      changes: [{ op: 'delete', entity: `${kind}_detail`, id: `${kind}-1`, revision: 2, patch: { updatedAt: 2, deletedAt: 2 } }],
+    });
+    if (kind === 'character') await useCharacterStore.getState().loadCharacter('character-1');
+    else await useChatStore.getState().loadChat('chat-1');
+    await vi.waitFor(() => {
+      const items = kind === 'character' ? useCharacterStore.getState().characters : useChatStore.getState().chats;
+      expect(items).toEqual([]);
+    });
+  });
+
+  it.each(['character', 'chat'] as const)('uses the final detail change when a %s was deleted then restored', async (kind) => {
+    const { useCharacterStore } = await import('./useCharacterStore');
+    const { useChatStore } = await import('./useChatStore');
+    await Promise.all([useCharacterStore.persist.rehydrate(), useChatStore.persist.rehydrate()]);
+    useCharacterStore.setState({ characters: [character({ characterDetailLoaded: true })], pendingOperations: [] });
+    useChatStore.setState({ chats: [chat({ runtimeDetailLoaded: true })], pendingOperations: [] });
+    const restored = kind === 'character' ? character({ updatedAt: 2 }) : chat({ updatedAt: 2 });
+    apiMocks.getSyncChanges.mockResolvedValueOnce({
+      status: 'modified', cursor: 'log:3', revision: 'log:3',
+      changes: [
+        { op: 'delete', entity: `${kind}_detail`, id: `${kind}-1`, revision: 2, patch: { ...restored, deletedAt: 2 } },
+        { op: 'upsert', entity: `${kind}_detail`, id: `${kind}-1`, revision: 2, patch: { ...restored, deletedAt: null } },
+      ],
+    });
+    if (kind === 'character') await useCharacterStore.getState().loadCharacter('character-1');
+    else await useChatStore.getState().loadChat('chat-1');
+    await vi.waitFor(() => {
+      const items = kind === 'character' ? useCharacterStore.getState().characters : useChatStore.getState().chats;
+      expect(items).toHaveLength(1);
+      expect(items[0].updatedAt).toBe(2);
+      expect(items[0].deletedAt).toBeNull();
+    });
+  });
+
+  it.each(['character', 'chat'] as const)('keeps a local %s when cloud detail only reports a missing record', async (kind) => {
+    const { useCharacterStore } = await import('./useCharacterStore');
+    const { useChatStore } = await import('./useChatStore');
+    await Promise.all([useCharacterStore.persist.rehydrate(), useChatStore.persist.rehydrate()]);
+    useCharacterStore.setState({ characters: [character({ characterDetailLoaded: true })] });
+    useChatStore.setState({ chats: [chat({ runtimeDetailLoaded: true })] });
+    apiMocks.getSyncChanges.mockResolvedValueOnce({
+      status: 'modified', cursor: 'log:0', revision: 'log:0',
+      changes: [{ op: 'delete', entity: `${kind}_detail`, id: `${kind}-1`, revision: 0 }],
+    });
+    const missing = Object.assign(new Error('not found'), { status: 404 });
+    apiMocks.getCharacter.mockRejectedValue(missing);
+    apiMocks.getChat.mockRejectedValue(missing);
+    if (kind === 'character') await useCharacterStore.getState().loadCharacter('character-1');
+    else await useChatStore.getState().loadChat('chat-1');
+    await vi.waitFor(() => {
+      expect(kind === 'character' ? apiMocks.getCharacter : apiMocks.getChat).toHaveBeenCalled();
+      expect(useCharacterStore.getState().characters).toHaveLength(1);
+      expect(useChatStore.getState().chats).toHaveLength(1);
+    });
+  });
+
+  it('uses the last chat summary change when a deleted chat was restored', async () => {
+    const { useChatStore } = await import('./useChatStore');
+    await useChatStore.persist.rehydrate();
+    useChatStore.setState({ chats: [chat()], pendingOperations: [] });
+    apiMocks.getSyncChanges.mockResolvedValueOnce({
+      status: 'modified', cursor: 'log:3', revision: 'log:3',
+      changes: [
+        { op: 'delete', entity: 'chat_summary', id: 'chat-1', revision: 2, patch: chat({ updatedAt: 2, deletedAt: 2 }) },
+        { op: 'upsert', entity: 'chat_summary', id: 'chat-1', revision: 2, patch: chat({ updatedAt: 2, deletedAt: null }) },
+      ],
+    });
+    await useChatStore.getState().loadChats();
+    expect(useChatStore.getState().chats.map((item) => item.id)).toEqual(['chat-1']);
+    expect(useChatStore.getState().remoteDeletedChatIds).toEqual([]);
+  });
+
+  it('does not resurrect deleted characters from cached chat member summaries after tasks finish or hydration', async () => {
+    const { useCharacterStore } = await import('./useCharacterStore');
+    await useCharacterStore.persist.rehydrate();
+    useCharacterStore.setState({ characters: [character()] });
+    await useCharacterStore.getState().deleteCharacter('character-1');
+    useCharacterStore.setState({ pendingOperations: [] });
+    await useCharacterStore.persist.rehydrate();
+    useCharacterStore.getState().hydrateCharacterSummaries([character({ updatedAt: 100 })]);
+    expect(useCharacterStore.getState().characters).toEqual([]);
+  });
+
+  it('preserves deletion markers in chat member summaries', async () => {
+    const { useCharacterStore } = await import('./useCharacterStore');
+    await useCharacterStore.persist.rehydrate();
+    useCharacterStore.setState({ characters: [] });
+    useCharacterStore.getState().hydrateCharacterSummaries([character({ deletedAt: 2, updatedAt: 2 })]);
+    expect(useCharacterStore.getState().characters).toEqual([]);
+  });
 
   it('clears selected chat and character tasks while retaining content, other tasks, and running requests', async () => {
     const { useChatStore } = await import('./useChatStore');
@@ -404,6 +594,8 @@ describe('cloud no-op sync', () => {
 
   it('shows local chats and characters first when cloud sync is enabled but remote sync is pending', async () => {
     const accountId = `local-first-user-${Date.now()}-${Math.random()}`;
+    const { markAccountCloudBootstrapReady } = await import('../services/accountCloudBootstrap');
+    markAccountCloudBootstrapReady(accountId);
     apiMocks.getMe.mockResolvedValueOnce({
       id: accountId,
       phone: '13500000000',
@@ -1802,7 +1994,9 @@ describe('cloud no-op sync', () => {
 
     expect(useCharacterStore.getState().characters.some((item) => item.id === 'character-2')).toBe(false);
     expect(useCharacterStore.getState().pendingOperations.some((operation) => operation.entityId === 'character-2')).toBe(false);
-    expect(useCharacterStore.getState().remoteDeletedCharacterIds).toEqual([]);
+    expect(useCharacterStore.getState().remoteDeletedCharacterIds).toEqual(['character-2']);
+    useCharacterStore.getState().hydrateCharacterSummaries([character({ id: 'character-2', updatedAt: 200 })]);
+    expect(useCharacterStore.getState().characters.some((item) => item.id === 'character-2')).toBe(false);
 
     useCharacterStore.setState({
       characters: [character({ id: 'character-3', name: '本地另存角色', background: '本地背景' })],
@@ -1830,7 +2024,9 @@ describe('cloud no-op sync', () => {
     expect(copiedCharacter?.name).toContain('本地另存角色');
     expect(characterState.pendingOperations.some((operation) => operation.entityId === 'character-3')).toBe(false);
     expect(characterState.pendingOperations.some((operation) => operation.kind === 'create' && operation.entityId === copiedCharacter?.id)).toBe(true);
-    expect(characterState.remoteDeletedCharacterIds).toEqual([]);
+    expect(characterState.remoteDeletedCharacterIds).toEqual(['character-3']);
+    characterState.hydrateCharacterSummaries([character({ id: 'character-3', updatedAt: 200 })]);
+    expect(useCharacterStore.getState().characters.some((item) => item.id === 'character-3')).toBe(false);
   });
 
   it('does not rewrite artifacts or fetch artifact summaries when the remote scope is not modified', async () => {

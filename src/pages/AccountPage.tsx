@@ -18,6 +18,7 @@ import WorkspacePremiumIcon from '@mui/icons-material/WorkspacePremium';
 import { isCloudSyncEnabled, setCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { bootstrapLocalDataToCloud, captureLocalCloudBootstrapSnapshot } from '../services/localToCloudBootstrap';
 import { runWithCloudSyncBootstrapLock } from '../services/cloudSyncBootstrapLock';
+import { markAccountCloudBootstrapPending, markAccountCloudBootstrapReady } from '../services/accountCloudBootstrap';
 import { api, type BillingMembershipResponse } from '../services/api';
 import { getSmsCaptchaToken } from '../services/captcha';
 import { formatAiBalanceAmount } from '../utils/aiPoints';
@@ -574,6 +575,7 @@ export default function AccountPage() {
       return;
     }
     const previousEnabled = cloudSyncEnabled;
+    if (user?.id) markAccountCloudBootstrapPending(user.id);
     setCloudSyncEnabled(enabled);
     setCloudSyncEnabledState(enabled);
     if (!enabled) {
@@ -587,8 +589,11 @@ export default function AccountPage() {
 
     setSyncingAll(true);
     try {
-      const snapshot = await captureLocalCloudBootstrapSnapshot();
-      await runWithCloudSyncBootstrapLock(() => bootstrapLocalDataToCloud(snapshot));
+      await runWithCloudSyncBootstrapLock(async () => {
+        const snapshot = await captureLocalCloudBootstrapSnapshot();
+        await bootstrapLocalDataToCloud(snapshot);
+        if (user?.id) markAccountCloudBootstrapReady(user.id);
+      });
       markChatsWarm();
       markCharactersWarm();
       void prefetchChats();

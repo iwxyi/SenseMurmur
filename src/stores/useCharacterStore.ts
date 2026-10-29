@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { latestEntityChanges } from '../services/syncChanges';
 import { persist } from 'zustand/middleware';
 import type { AICharacter, CharacterVisualReferenceImage } from '../types/character';
 import { normalizeCharacter, normalizeCharacterGroup } from '../types/character';
@@ -23,6 +24,7 @@ import {
   createPendingOperation,
   getPendingQueueWorkerPriority,
   isTerminalSyncError,
+  isLocalOnlyMode,
   latestSyncError,
   recoverInterruptedOperations,
   removePendingOperation,
@@ -563,6 +565,7 @@ interface PersistedCharacterState {
   lastSyncedAt: number;
   pendingOperations: PendingCharacterOperation[];
   fieldConflicts?: FieldConflictRecord[];
+  remoteDeletedCharacterIds?: string[];
 }
 
 function compactCharacterRuntimeFieldsForPersistence<T extends Partial<AICharacter>>(character: T): T {
@@ -627,6 +630,7 @@ function buildPersistedCharacterState(state: PersistedCharacterState): Persisted
       updatedAt: character.updatedAt,
     } as AICharacter)),
     lastSyncedAt: state.lastSyncedAt,
+    remoteDeletedCharacterIds: state.remoteDeletedCharacterIds || [],
     pendingOperations: recoverInterruptedOperations(state.pendingOperations)
       .map((operation) => ({
         ...operation,
@@ -657,6 +661,7 @@ interface CharacterStore extends PersistedCharacterState {
   getPendingEditCount: () => number;
   clearPendingOperations: () => void;
   confirmCreateOperationsSynced: (entityIds: string[]) => void;
+  confirmOperationsSynced: (operationIds: string[]) => void;
   discardFailedOperation: (operationId: string) => void;
   clearSyncTasks: (operationIds: string[]) => void;
   resolveRemoteDeleteConflict: (id: string, resolution: 'restore_local' | 'discard_local' | 'save_as_new') => Promise<void>;
@@ -896,7 +901,7 @@ async function probeCharacterSummaryChanges(options: { forceFull?: boolean } = {
 
 function characterSummariesFromChanges(changes: Array<Record<string, unknown>> | undefined) {
   const items: AICharacter[] = [];
-  for (const change of changes || []) {
+  for (const change of latestEntityChanges(changes || [])) {
     if (change.entity !== 'character_summary' || typeof change.patch !== 'object' || !change.patch) continue;
     items.push(normalizeCharacter({
       ...(change.patch as unknown as AICharacter),
@@ -908,12 +913,14 @@ function characterSummariesFromChanges(changes: Array<Record<string, unknown>> |
 
 function characterDetailFromChanges(changes: Array<Record<string, unknown>> | undefined, id: string) {
   if (!changes?.length) return null;
-  const change = changes.find((item) => item.entity === 'character_detail' && item.id === id);
+  const change = changes.slice().reverse().find((item) => item.entity === 'character_detail' && item.id === id);
   if (!change) return null;
   const patch = (change.patch && typeof change.patch === 'object' && !Array.isArray(change.patch))
     ? change.patch as Record<string, unknown>
     : {};
   if (change.op === 'delete') {
+    // A missing server row has no deletion evidence; it may not have uploaded yet.
+    if (!Object.keys(patch).length && !Number(change.revision)) return null;
     return normalizeCharacter({
       ...patch,
       id,
@@ -1098,7 +1105,8 @@ export const useCharacterStore = create<CharacterStore>()(
                     existingConflicts: state.fieldConflicts,
                   });
                   const nextCharacters = mergeCharacters(state.characters, applicableSummaries, state.pendingOperations);
-                  const nextVisible = nextCharacters.filter((item) => item.deletedAt == null);
+                  const deletedIds = new Set(applicableSummaries.filter((item) => item.deletedAt != null).map((item) => item.id));
+                  const nextVisible = nextCharacters.filter((item) => item.deletedAt == null && !deletedIds.has(item.id));
                   const changed = buildCharacterListSignature(nextVisible) !== buildCharacterListSignature(state.characters);
                   characterSyncScopes.markChecked(CHARACTER_SUMMARY_SCOPE, {
                     cursor: changeProbe.cursor,
@@ -1173,6 +1181,9 @@ export const useCharacterStore = create<CharacterStore>()(
                 return cached || null;
               }
               const detail = characterDetailFromChanges(changeProbe?.changes, id) || await fetchCharacterDetail(id);
+              if (detail.deletedAt == null && get().remoteDeletedCharacterIds.includes(id)) {
+                return get().characters.find((character) => character.id === id) || null;
+              }
               if (detail.deletedAt != null) {
                 const hasPendingConflict = hasNonDeletePendingCharacterOperation(get().pendingOperations, id);
                 characterSyncScopes.markChecked(scope, {
@@ -1310,6 +1321,11 @@ export const useCharacterStore = create<CharacterStore>()(
             return {
               ...queued,
               characters: nextCharacters,
+              ...(Object.prototype.hasOwnProperty.call(patch, 'deletedAt') ? {
+                remoteDeletedCharacterIds: patch.deletedAt == null
+                  ? state.remoteDeletedCharacterIds.filter((id) => id !== entityId)
+                  : Array.from(new Set([...state.remoteDeletedCharacterIds, entityId])),
+              } : {}),
             };
           });
           if (operation) scheduleCharacterFlush(flushPendingOperations, 120);
@@ -1329,6 +1345,16 @@ export const useCharacterStore = create<CharacterStore>()(
         getPendingEditError: () => latestCharacterError(get().pendingOperations),
         getPendingEditCount: () => get().pendingOperations.length,
         clearPendingOperations: () => set({ pendingOperations: [], pendingEditSyncCount: 0, pendingEditSyncError: null, fieldConflicts: [] }),
+        confirmOperationsSynced: (operationIds) => set((state) => {
+          const ids = new Set(operationIds);
+          const pendingOperations = state.pendingOperations.filter((operation) => !ids.has(operation.id));
+          return {
+            pendingOperations,
+            pendingEditSyncCount: pendingOperations.length,
+            pendingEditSyncError: latestCharacterError(pendingOperations),
+            fieldConflicts: clearResolvedFieldConflicts(state.fieldConflicts, { entityType: 'character', operationIds }),
+          };
+        }),
         confirmCreateOperationsSynced: (entityIds) => set((state) => {
           const normalizedIds = new Set(entityIds.filter(Boolean));
           if (!normalizedIds.size) return {};
@@ -1397,7 +1423,7 @@ export const useCharacterStore = create<CharacterStore>()(
               fieldConflicts: clearResolvedFieldConflicts(state.fieldConflicts, { entityType: 'character', entityIds: [id] }),
               pendingEditSyncCount: pendingOperations.length,
               pendingEditSyncError: latestCharacterError(pendingOperations),
-              remoteDeletedCharacterIds: state.remoteDeletedCharacterIds.filter((characterId) => characterId !== id),
+              remoteDeletedCharacterIds: Array.from(new Set([...state.remoteDeletedCharacterIds, id])),
             };
           });
         },
@@ -1564,11 +1590,11 @@ export const useCharacterStore = create<CharacterStore>()(
           if (!normalizedIds.length) return;
           enqueueFinalLettersForDeletion(get().characters, normalizedIds);
           const deletedAt = Date.now();
-          if (shouldSkipCloudSync()) {
+          if (shouldSkipCloudSync() && isLocalOnlyMode()) {
             set((state) => {
               const characters = deleteCharactersLocally(state, normalizedIds);
               syncCharacterArtifacts(characters);
-              return { characters };
+              return { characters, remoteDeletedCharacterIds: Array.from(new Set([...state.remoteDeletedCharacterIds, ...normalizedIds])) };
             });
             return;
           }
@@ -1579,11 +1605,11 @@ export const useCharacterStore = create<CharacterStore>()(
           const normalizedIds = Array.from(new Set(ids.filter(Boolean)));
           if (!normalizedIds.length) return;
           enqueueFinalLettersForDeletion(get().characters, normalizedIds);
-          if (shouldSkipCloudSync()) {
+          if (shouldSkipCloudSync() && isLocalOnlyMode()) {
             set((state) => {
               const characters = deleteCharactersLocally(state, normalizedIds);
               syncCharacterArtifacts(characters);
-              return { characters };
+              return { characters, remoteDeletedCharacterIds: Array.from(new Set([...state.remoteDeletedCharacterIds, ...normalizedIds])) };
             });
             return;
           }
@@ -1594,11 +1620,11 @@ export const useCharacterStore = create<CharacterStore>()(
         restoreCharacters: async (ids) => {
           const normalizedIds = Array.from(new Set(ids.filter(Boolean)));
           if (!normalizedIds.length) return;
-          if (shouldSkipCloudSync()) {
+          if (shouldSkipCloudSync() && isLocalOnlyMode()) {
             set((state) => {
               const characters = restoreCharactersLocally(state, normalizedIds);
               syncCharacterArtifacts(characters);
-              return { characters };
+              return { characters, remoteDeletedCharacterIds: state.remoteDeletedCharacterIds.filter((id) => !normalizedIds.includes(id)) };
             });
             return;
           }
@@ -1685,7 +1711,7 @@ export const useCharacterStore = create<CharacterStore>()(
           set((state) => {
             const nextCharacters = mergeVisibleCharacters(
               state.characters,
-              summaries.map((summary) => normalizeCharacter({
+              summaries.filter((summary) => !state.remoteDeletedCharacterIds.includes(summary.id)).map((summary) => normalizeCharacter({
                 id: summary.id,
                 name: summary.name,
                 avatar: summary.avatar,
@@ -1696,6 +1722,7 @@ export const useCharacterStore = create<CharacterStore>()(
                 isPreset: summary.isPreset,
                 createdAt: summary.createdAt,
                 updatedAt: summary.updatedAt,
+                deletedAt: summary.deletedAt,
                 visualIdentity: summary.visualIdentity,
                 speechProfile: summary.speechProfile,
                 bubbleStyleId: summary.bubbleStyleId,
@@ -1749,6 +1776,7 @@ export const useCharacterStore = create<CharacterStore>()(
         characters: state.characters,
         lastSyncedAt: state.lastSyncedAt,
         pendingOperations: state.pendingOperations,
+        remoteDeletedCharacterIds: state.remoteDeletedCharacterIds,
       }),
       skipHydration: true,
     }

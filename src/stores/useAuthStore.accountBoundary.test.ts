@@ -8,11 +8,12 @@ const mocks = vi.hoisted(() => ({
   login: vi.fn(), passwordLogin: vi.fn(), resetSettings: vi.fn(), bootstrap: vi.fn(),
   resetChats: vi.fn(), resetCharacters: vi.fn(), resetMessages: vi.fn(), resetArtifacts: vi.fn(),
   hydrate: vi.fn(), revoke: vi.fn(), capture: vi.fn(), refresh: vi.fn(),
+  getMe: vi.fn(),
 }));
 
 vi.mock('../services/api', () => ({
   ApiError: class ApiError extends Error {},
-  api: { login: mocks.login, passwordLogin: mocks.passwordLogin, revokeAuthSession: mocks.revoke },
+  api: { login: mocks.login, passwordLogin: mocks.passwordLogin, getMe: mocks.getMe, revokeAuthSession: mocks.revoke },
 }));
 vi.mock('./useSettingsStore', () => ({
   resetSettingsStoreForAccountBoundary: mocks.resetSettings,
@@ -20,11 +21,11 @@ vi.mock('./useSettingsStore', () => ({
 }));
 vi.mock('./useChatStore', () => ({
   resetChatStoreForAccountBoundary: mocks.resetChats,
-  useChatStore: { persist: { rehydrate: mocks.hydrate }, getState: () => ({ markChatsWarm: vi.fn(), refreshChatSummaryFromCloud: mocks.refresh }) },
+  useChatStore: { persist: { rehydrate: mocks.hydrate }, getState: () => ({ markChatsWarm: vi.fn(), prefetchChats: mocks.refresh, refreshChatSummaryFromCloud: mocks.refresh }) },
 }));
 vi.mock('./useCharacterStore', () => ({
   resetCharacterStoreForAccountBoundary: mocks.resetCharacters,
-  useCharacterStore: { persist: { rehydrate: mocks.hydrate }, getState: () => ({ markCharactersWarm: vi.fn(), refreshCharacterSummaryFromCloud: mocks.refresh }) },
+  useCharacterStore: { persist: { rehydrate: mocks.hydrate }, getState: () => ({ markCharactersWarm: vi.fn(), prefetchCharacters: mocks.refresh, refreshCharacterSummaryFromCloud: mocks.refresh }) },
 }));
 vi.mock('./useMessageStore', () => ({ resetMessageStoreForAccountBoundary: mocks.resetMessages }));
 vi.mock('./useCharacterArtifactStore', () => ({
@@ -73,6 +74,43 @@ describe('login initialization account boundaries', () => {
   function replaceWithB() {
     localStorage.setItem(AUTH_SNAPSHOT_KEY, JSON.stringify({ version: 1, generation: 'b', mode: 'cloud', ...result('b') }));
   }
+
+  it('uploads the current account snapshot before refreshing after the server enables cloud sync', async () => {
+    mocks.passwordLogin.mockResolvedValueOnce({ ...result('a'), user: { ...result('a').user, cloudSyncEntitled: false } });
+    await useAuthStore.getState().loginWithPassword('phone', 'password');
+    mocks.capture.mockClear();
+    mocks.bootstrap.mockClear();
+    mocks.refresh.mockClear();
+    mocks.getMe.mockResolvedValue({ ...result('a').user, cloudSyncEntitled: true });
+    const bootstrap = deferred<void>();
+    mocks.bootstrap.mockReturnValueOnce(bootstrap.promise);
+    const checking = useAuthStore.getState().checkAuth();
+    await vi.waitFor(() => expect(mocks.bootstrap).toHaveBeenCalledOnce());
+    expect(mocks.capture).toHaveBeenCalledOnce();
+    expect(mocks.refresh).not.toHaveBeenCalled();
+    bootstrap.resolve();
+    expect(await checking).toBe(true);
+    expect(mocks.refresh).toHaveBeenCalled();
+    mocks.capture.mockClear();
+    await useAuthStore.getState().checkAuth();
+    expect(mocks.capture).not.toHaveBeenCalled();
+  });
+
+  it('keeps failed account preparation pending and retries it before the next remote refresh', async () => {
+    await useAuthStore.getState().loginWithPassword('phone', 'password');
+    const { markAccountCloudBootstrapPending, isAccountCloudBootstrapPending } = await import('../services/accountCloudBootstrap');
+    markAccountCloudBootstrapPending('a');
+    mocks.getMe.mockResolvedValue({ ...result('a').user, cloudSyncEntitled: true });
+    mocks.bootstrap.mockRejectedValueOnce(new Error('upload unavailable'));
+    mocks.refresh.mockClear();
+    expect(await useAuthStore.getState().checkAuth()).toBe(false);
+    expect(isAccountCloudBootstrapPending('a')).toBe(true);
+    expect(mocks.refresh).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().user?.id).toBe('a');
+    expect(await useAuthStore.getState().checkAuth()).toBe(true);
+    expect(isAccountCloudBootstrapPending('a')).toBe(false);
+    expect(mocks.refresh).toHaveBeenCalled();
+  });
 
   it('does not clear B credentials when A bootstrap rejects after another tab logs in', async () => {
     const bootstrap = deferred<void>();

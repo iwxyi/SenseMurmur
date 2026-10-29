@@ -3,6 +3,7 @@ import type { SyncPatchOperation } from '../services/syncProjector';
 import { isCloudSyncEnabled, isCloudSyncUserDisabled, setCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { isCloudSyncBootstrapLocked } from '../services/cloudSyncBootstrapLock';
 import { isWorkspaceActive } from '../services/workspaceLifecycle';
+import { isAccountCloudBootstrapPending, markAccountCloudBootstrapPending } from '../services/accountCloudBootstrap';
 
 export function isLocalOnlyMode() {
   return useAuthStore.getState().authMode === 'local';
@@ -15,6 +16,9 @@ function getCloudSyncGateState() {
   const userDisabled = isCloudSyncUserDisabled();
   const entitlementDisabled = authState.user?.cloudSyncEntitled === false;
   let cloudSyncEnabled = isCloudSyncEnabled();
+  if (authState.user?.id && (!cloudSyncEnabled || entitlementDisabled)) {
+    markAccountCloudBootstrapPending(authState.user.id);
+  }
 
   if (
     authMode === 'cloud'
@@ -35,6 +39,7 @@ function getCloudSyncGateState() {
     !cloudSyncEnabled && entitlementDisabled ? 'cloud-sync-not-entitled' : '',
     !cloudSyncEnabled && !userDisabled && !entitlementDisabled ? 'cloud-sync-disabled' : '',
     bootstrapLocked ? 'bootstrap-locked' : '',
+    authState.user?.id && isAccountCloudBootstrapPending(authState.user.id) ? 'account-bootstrap-pending' : '',
   ].filter(Boolean);
 
   return {

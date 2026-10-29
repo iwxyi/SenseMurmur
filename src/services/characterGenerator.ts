@@ -127,6 +127,11 @@ export interface CharacterVoiceProfileDraftInput {
 }
 
 export const CHARACTER_GENERATOR_SYSTEM_PROMPT = `You generate structured AI role profiles for a group chat app.
+Keep profile fields semantically distinct:
+- speakingStyle describes HOW the character talks: rhythm, word choice, tone, humor, verbal habits, and how these change under pressure. A job title or identity summary is not a speaking style.
+- background describes WHO they are and WHY: setting, identity, formative experiences, important relationships, and current circumstances. Expand short identity hints into a coherent background; do not simply repeat them.
+- expertise lists concrete skills or knowledge domains.
+Never copy the same text into speakingStyle and background. For established fictional characters, use the requested work/group to identify the character and preserve their recognizable traits; do not invent unsupported canonical events.
 Return strict JSON only, with this shape:
 {
   "avatar": "single emoji from common emoji only",
@@ -541,6 +546,22 @@ export async function generateCharacterProfile(config: APIConfig, name: string, 
 
 export async function generateCharacterProfileDraft(config: APIConfig, name: string, language: 'zh' | 'en', context?: CharacterGenerationContext) {
   return generateCharacterProfileBase(config, name, language, context);
+}
+
+export async function generateCharacterBasicProfileDraft(config: APIConfig, name: string, language: 'zh' | 'en', context?: CharacterGenerationContext) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const normalizedContext = normalizeGenerationContext(context);
+    const profile = await generateCharacterProfileBase(config, name, language, attempt === 0 ? context : {
+      ...normalizedContext,
+      description: `${normalizedContext.description}\n${language === 'zh'
+        ? '上次基本信息不合格：说话风格与背景必须均有内容且不能相同。说话风格写语气、措辞、节奏和语言习惯，背景写身份、经历和人物关系；不能只重复职业标签。'
+        : 'The previous basic profile was invalid. Provide distinct, nonempty speakingStyle (tone, diction, rhythm, verbal habits) and background (identity, history, relationships), not repeated job labels.'}`,
+    });
+    if (profile.background && profile.speakingStyle && profile.background !== profile.speakingStyle && profile.expertise.length) return profile;
+  }
+  throw new Error(language === 'zh'
+    ? 'AI 未生成有效的基本信息：背景、说话风格必须分别描述，专业领域不能为空。请重试。'
+    : 'AI returned an invalid basic profile. Background, speaking style, and expertise must be provided, with distinct descriptions. Please retry.');
 }
 
 export async function generateCharacterVisualIdentityDraft(config: APIConfig, input: CharacterVisualIdentityDraftInput, language: 'zh' | 'en') {

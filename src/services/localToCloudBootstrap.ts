@@ -10,6 +10,7 @@ import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { buildSettingsPayload, useSettingsStore } from '../stores/useSettingsStore';
 import { DEFAULT_SETTINGS } from '../types/settings';
+import { latestEntityChanges } from './syncChanges';
 import {
   BOOTSTRAP_STATUS_CONFLICT_DETAIL_LIMIT,
   readCloudSyncBootstrapStatus,
@@ -25,6 +26,8 @@ interface BootstrapPendingEntityOperation {
   entityId: string;
   targetIds?: string[];
   status: 'pending' | 'syncing' | 'failed';
+  patch?: Record<string, unknown>;
+  clientTimestamp?: number;
 }
 
 interface BootstrapPendingMessageOperation {
@@ -121,7 +124,20 @@ function hasBootstrapData(snapshot: LocalCloudBootstrapSnapshot) {
   return snapshot.settingsShouldUpload || hasBootstrapEntityData(snapshot);
 }
 
+function pendingDeletions(operations: BootstrapPendingEntityOperation[] = []) {
+  const latest = new Map<string, BootstrapPendingEntityOperation>();
+  for (const operation of operations) {
+    if (operation.patch && Object.prototype.hasOwnProperty.call(operation.patch, 'deletedAt')) {
+      latest.set(operation.entityId, operation);
+    }
+  }
+  return [...latest.values()].filter((operation): operation is BootstrapPendingEntityOperation & { patch: Record<string, unknown> & { deletedAt: number } } => (
+    typeof operation.patch?.deletedAt === 'number'
+  ));
+}
+
 export function hasBootstrapEntityData(snapshot: LocalCloudBootstrapSnapshot) {
+  if (pendingDeletions(snapshot.pendingCharacterOperations).length || pendingDeletions(snapshot.pendingChatOperations).length) return true;
   const hasCharacters = snapshot.characters.some((character) => !character.isPreset && character.deletedAt == null);
   const hasChats = snapshot.chats.some((chat) => chat.deletedAt == null);
   const hasMessages = Object.values(snapshot.messageWindowsByChatId).some((window) =>
@@ -172,8 +188,12 @@ export function createBootstrapReconcilePlan(
   const remoteCharacterIds = activeRemoteIds(remote.characters);
   const remoteChatIds = activeRemoteIds(remote.chats);
   const remoteCharacterNames = activeRemoteNameMap(remote.characters);
-  const localCharacters = snapshot.characters.filter((character) => !character.isPreset && character.deletedAt == null);
-  const localChats = snapshot.chats.filter((chat) => chat.deletedAt == null);
+  const deletedCharacterIds = new Set(remote.characters.filter((character) => character.deletedAt != null).map((character) => character.id));
+  const deletedChatIds = new Set(remote.chats.filter((chat) => chat.deletedAt != null).map((chat) => chat.id));
+  pendingDeletions(snapshot.pendingCharacterOperations).forEach((operation) => deletedCharacterIds.add(operation.entityId));
+  pendingDeletions(snapshot.pendingChatOperations).forEach((operation) => deletedChatIds.add(operation.entityId));
+  const localCharacters = snapshot.characters.filter((character) => !character.isPreset && character.deletedAt == null && !deletedCharacterIds.has(character.id));
+  const localChats = snapshot.chats.filter((chat) => chat.deletedAt == null && !deletedChatIds.has(chat.id));
   const charactersToCreate = localCharacters.filter((character) => !remoteCharacterIds.has(character.id));
   const pendingCharacterCreates = (snapshot.pendingCharacterOperations || []).filter((operation) => operation.kind === 'create');
   const pendingChatCreates = (snapshot.pendingChatOperations || []).filter((operation) => operation.kind === 'create');
@@ -258,7 +278,7 @@ function failedBootstrapStatusFromPrevious(error: unknown): CloudSyncBootstrapSt
 
 function summaryEntriesFromChanges<T>(changes: Array<Record<string, unknown>> | undefined, entity: string, normalize: (value: unknown) => T) {
   const entries: T[] = [];
-  for (const change of changes || []) {
+  for (const change of latestEntityChanges(changes || [])) {
     if (change.entity !== entity || typeof change.patch !== 'object' || !change.patch) continue;
     entries.push(normalize(change.patch));
   }
@@ -275,11 +295,11 @@ async function fetchRemoteBootstrapSummary(signal: AbortSignal): Promise<Bootstr
 
   const characters = characterChanges.status === 'fulfilled'
     ? summaryEntriesFromChanges(characterChanges.value.changes, 'character_summary', (value) => normalizeCharacter(value as AICharacter))
-    : (await api.getCharacters() as unknown as AICharacter[]).map((character) => normalizeCharacter(character));
+    : (await Promise.all([api.getCharacters(), api.getDeletedCharacters()])).flat().map((character) => normalizeCharacter(character as unknown as AICharacter));
   assertWorkspaceActive(signal);
   const chats = chatChanges.status === 'fulfilled'
     ? summaryEntriesFromChanges(chatChanges.value.changes, 'chat_summary', (value) => normalizeConversation(value as GroupChat))
-    : (await api.getChats() as unknown as GroupChat[]).map((chat) => normalizeConversation(chat));
+    : (await Promise.all([api.getChats(), api.getDeletedChats()])).flat().map((chat) => normalizeConversation(chat as unknown as GroupChat));
 
   assertWorkspaceActive(signal);
   return { characters, chats };
@@ -603,6 +623,31 @@ export async function bootstrapLocalDataToCloud(snapshot: LocalCloudBootstrapSna
       pendingMessageCreates: plan.pendingMessageCreates.length,
     });
     writeCloudSyncBootstrapStatus(buildBootstrapStatus('running', plan));
+    // Apply deletions recorded while sync was disabled before any remote list can reappear.
+    for (const kind of ['character', 'chat'] as const) {
+      const operations = (kind === 'character' ? snapshot.pendingCharacterOperations : snapshot.pendingChatOperations) || [];
+      const remote = kind === 'character' ? plan.remote.characters : plan.remote.chats;
+      for (const operation of pendingDeletions(operations)) {
+        assertWorkspaceActive(signal);
+        if (remote.some((entity) => entity.id === operation.entityId && entity.deletedAt == null)) {
+          const data = {
+            operationId: operation.id,
+            clientTimestamp: operation.clientTimestamp ?? operation.patch.deletedAt,
+            patch: kind === 'chat'
+              ? { deletedAt: operation.patch.deletedAt, isActive: false }
+              : { deletedAt: operation.patch.deletedAt },
+          };
+          const deleted = kind === 'character'
+            ? (await api.syncCharacterPatch(operation.entityId, data)).character
+            : (await api.syncChatPatch(operation.entityId, data)).chat;
+          assertWorkspaceActive(signal);
+          if (deleted.deletedAt == null) throw new Error('云端未接受本地删除，已保留待同步操作，请检查同步冲突。');
+        }
+        const confirmedIds = operations.filter((item) => item.entityId === operation.entityId).map((item) => item.id);
+        if (kind === 'character') useCharacterStore.getState().confirmOperationsSynced(confirmedIds);
+        else useChatStore.getState().confirmOperationsSynced(confirmedIds);
+      }
+    }
     if (plan.settingsShouldUpload) {
       await uploadSettings();
       assertWorkspaceActive(signal);

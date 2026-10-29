@@ -5,7 +5,8 @@ import { resetSettingsStoreForAccountBoundary, useSettingsStore } from './useSet
 import { reportRecoverableError } from '../services/diagnostics';
 import { rememberCloudUserId } from '../services/authStorageScope';
 import { rememberLastCloudPhone } from '../services/authSession';
-import { isCloudSyncBootstrapLocked, runWithCloudSyncBootstrapLock } from '../services/cloudSyncBootstrapLock';
+import { beginCloudSyncBootstrapLock, endCloudSyncBootstrapLock, isCloudSyncBootstrapLocked, runWithCloudSyncBootstrapLock } from '../services/cloudSyncBootstrapLock';
+import { isAccountCloudBootstrapPending, markAccountCloudBootstrapPending, markAccountCloudBootstrapReady, needsAccountCloudBootstrap } from '../services/accountCloudBootstrap';
 import { isCloudSyncEnabled, isCloudSyncUserDisabled, setCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { setAssistantArtifactCloudSyncEnabled } from '../services/assistantArtifactCloudSyncPreference';
 import { adoptWorkspaceSession, assertWorkspaceActive, getWorkspaceSignal, isWorkspaceActive, reloadWorkspaceAtLogin, stopWorkspace } from '../services/workspaceLifecycle';
@@ -79,7 +80,18 @@ async function loadWorkspaceStores(signal: AbortSignal) {
 }
 
 function canRefreshRemoteAfterAuth(user: User | null) {
-  return user?.cloudSyncEntitled !== false && isCloudSyncEnabled() && !isCloudSyncBootstrapLocked();
+  return user?.cloudSyncEntitled !== false && isCloudSyncEnabled() && !isCloudSyncBootstrapLocked()
+    && !(user?.id && isAccountCloudBootstrapPending(user.id));
+}
+
+function lockCloudAuthInitialization() {
+  beginCloudSyncBootstrapLock();
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    endCloudSyncBootstrapLock();
+  };
 }
 
 async function hydrateWorkspaceStoresFromCurrentScope(signal: AbortSignal) {
@@ -106,7 +118,18 @@ async function refreshStoresAfterCloudAuth(user: User | null, signal: AbortSigna
   const characterStore = useCharacterStore.getState();
   chatStore.markChatsWarm();
   characterStore.markCharactersWarm();
-  if (options.deferRemoteRefresh) return;
+  if (user?.id && user.cloudSyncEntitled !== false && isCloudSyncEnabled() && needsAccountCloudBootstrap(user.id)) {
+    markAccountCloudBootstrapPending(user.id);
+    const bootstrap = await import('../services/localToCloudBootstrap');
+    assertWorkspaceActive(signal);
+    await runWithCloudSyncBootstrapLock(async () => {
+      const snapshot = await bootstrap.captureLocalCloudBootstrapSnapshot(signal);
+      await bootstrap.bootstrapLocalDataToCloud(snapshot, signal);
+      assertWorkspaceActive(signal);
+      markAccountCloudBootstrapReady(user.id);
+    });
+  }
+  if (options.deferRemoteRefresh || isCloudSyncBootstrapLocked()) return;
   if (canRefreshRemoteAfterAuth(user)) {
     void Promise.allSettled([
       settingsStore.refreshSettingsFromCloud(),
@@ -177,6 +200,7 @@ async function persistUser(user: User, signal: AbortSignal) {
 
 function applyCloudSyncEntitlement(user: User | null) {
   if (user?.cloudSyncEntitled === false) {
+    if (user.id) markAccountCloudBootstrapPending(user.id);
     setCloudSyncEnabled(false, { source: 'entitlement' });
   }
   if (user?.assistantArtifactCloudSyncEntitled === false) {
@@ -229,6 +253,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     assertWorkspaceActive(signal);
     const expected = readAuthSnapshot();
     set({ isLoading: true });
+    const releaseSyncLock = lockCloudAuthInitialization();
     try {
       const shouldBootstrapLocalData = get().authMode === 'local' && isCloudSyncEnabled();
       const bootstrapModule = shouldBootstrapLocalData ? await import('../services/localToCloudBootstrap') : null;
@@ -279,11 +304,15 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         && guestImportModule.hasPendingGuestImportForUser(result.user.id, guestImportSnapshot),
       );
       await refreshStoresAfterCloudAuth(result.user, signal, { deferRemoteRefresh: shouldDeferRemoteRefresh });
+      releaseSyncLock();
+      if (!shouldDeferRemoteRefresh) await refreshRemoteStoresAfterCloudAuth(result.user, signal);
       assertWorkspaceActive(signal);
       set({ isLoading: false, isWorkspaceReady: true });
     } catch (error) {
       if (!signal.aborted && isWorkspaceActive()) set({ isLoading: false, isWorkspaceReady: true });
       throw error;
+    } finally {
+      releaseSyncLock();
     }
   },
 
@@ -294,6 +323,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     assertWorkspaceActive(signal);
     const expected = readAuthSnapshot();
     set({ isLoading: true });
+    const releaseSyncLock = lockCloudAuthInitialization();
     try {
       const result = await api.passwordLogin(phone, password);
       assertWorkspaceActive(signal);
@@ -313,9 +343,12 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       set({ token: result.token, user: result.user, isLoggedIn: true, isLoading: true, isWorkspaceReady: false, authMode: 'cloud' });
       await resetLocalWorkspaceStoresForAccountBoundary(signal);
       await refreshStoresAfterCloudAuth(result.user, signal);
+      releaseSyncLock();
+      await refreshRemoteStoresAfterCloudAuth(result.user, signal);
       assertWorkspaceActive(signal);
       set({ isLoading: false, isWorkspaceReady: true });
     } catch (error) { if (!signal.aborted && isWorkspaceActive()) set({ isLoading: false, isWorkspaceReady: true }); throw error; }
+    finally { releaseSyncLock(); }
   },
 
   enterLocalMode: async () => {
@@ -405,6 +438,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     if (!token) return false;
 
     set({ isLoading: true, isWorkspaceReady: false });
+    const releaseSyncLock = lockCloudAuthInitialization();
     try {
       const user = await api.getMe();
       assertWorkspaceActive(signal);
@@ -415,6 +449,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       // guards do not continue to reason about the expired token.
       set({ token: readAuthSnapshot().token, user, isLoggedIn: true, authMode: 'cloud' });
       await refreshStoresAfterCloudAuth(user, signal, { deferRemoteRefresh: true });
+      releaseSyncLock();
       if (!isCloudSyncUserDisabled()) await refreshRemoteStoresAfterCloudAuth(user, signal);
       assertWorkspaceActive(signal);
       set({ isLoading: false, isWorkspaceReady: true });
@@ -428,6 +463,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       console.warn('[cloud-sync] auth check unavailable; keeping cloud-local cache active', { error });
       set({ isLoggedIn: true, isLoading: false, isWorkspaceReady: true, authMode: 'cloud' });
       return false;
+    } finally {
+      releaseSyncLock();
     }
   },
 

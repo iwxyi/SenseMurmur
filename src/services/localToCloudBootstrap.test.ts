@@ -67,6 +67,63 @@ function snapshot(overrides: Partial<LocalCloudBootstrapSnapshot> = {}): LocalCl
 }
 
 describe('localToCloudBootstrap', () => {
+  it.each(['active', 'deleted', 'missing', 'rejected'] as const)('reconciles offline deletions against %s cloud records before enabling sync', async (state) => {
+    const { api } = await import('./api');
+    const { useCharacterStore } = await import('../stores/useCharacterStore');
+    const { useChatStore } = await import('../stores/useChatStore');
+    const changes = vi.spyOn(api, 'getSyncChanges').mockImplementation(async ({ scope }) => ({
+      status: 'modified', scope, cursor: 'log:1', revision: 'log:1',
+      changes: state === 'missing' ? [] : [{
+        entity: scope === 'characters.summary' ? 'character_summary' : 'chat_summary',
+        id: scope === 'characters.summary' ? 'offline-character' : 'offline-chat',
+        op: state === 'deleted' ? 'delete' : 'upsert',
+        patch: { id: scope === 'characters.summary' ? 'offline-character' : 'offline-chat', name: '已删内容', deletedAt: state === 'deleted' ? 1 : null },
+      }],
+    }) as Awaited<ReturnType<typeof api.getSyncChanges>>);
+    const deleteCharacter = vi.spyOn(api, 'syncCharacterPatch').mockResolvedValue({ success: true, character: { deletedAt: state === 'rejected' ? null : 2 } });
+    const deleteChat = vi.spyOn(api, 'syncChatPatch').mockResolvedValue({ success: true, chat: { deletedAt: 2 } });
+    const createCharacter = vi.spyOn(api, 'createCharacter');
+    const createChat = vi.spyOn(api, 'createChat');
+    const confirmCharacter = vi.spyOn(useCharacterStore.getState(), 'confirmOperationsSynced');
+    const confirmChat = vi.spyOn(useChatStore.getState(), 'confirmOperationsSynced');
+    try {
+      const uploading = bootstrap.bootstrapLocalDataToCloud(snapshot({
+        settingsShouldUpload: false,
+        pendingCharacterOperations: [{ id: 'delete-character', entityId: 'offline-character', kind: 'patch', status: 'pending', clientTimestamp: 2, patch: { deletedAt: 2 } }],
+        pendingChatOperations: [{ id: 'delete-chat', entityId: 'offline-chat', kind: 'patch', status: 'pending', clientTimestamp: 2, patch: { deletedAt: 2 } }],
+      }));
+      if (state === 'rejected') {
+        await expect(uploading).rejects.toThrow('云端未接受本地删除');
+        expect(confirmCharacter).not.toHaveBeenCalled();
+        expect(confirmChat).not.toHaveBeenCalled();
+      } else {
+        await uploading;
+        expect(confirmCharacter).toHaveBeenCalledWith(['delete-character']);
+        expect(confirmChat).toHaveBeenCalledWith(['delete-chat']);
+      }
+      expect(changes).toHaveBeenCalledTimes(2);
+      expect(deleteCharacter).toHaveBeenCalledTimes(state === 'active' || state === 'rejected' ? 1 : 0);
+      expect(deleteChat).toHaveBeenCalledTimes(state === 'active' ? 1 : 0);
+      expect(createCharacter).not.toHaveBeenCalled();
+      expect(createChat).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('uploads only never-uploaded records and does not recreate another device\'s deletions', () => {
+    const plan = bootstrap.createBootstrapReconcilePlan(snapshot({
+      characters: [character('offline-character', '本地角色'), character('deleted-character', '另一设备已删', { updatedAt: 999 })],
+      chats: [chat('offline-chat', '本地会话'), chat('deleted-chat', '另一设备已删', { updatedAt: 999 })],
+    }), {
+      characters: [{ id: 'deleted-character', name: '另一设备已删', deletedAt: 2 }],
+      chats: [{ id: 'deleted-chat', name: '另一设备已删', deletedAt: 2 }],
+    });
+    expect(plan.charactersToCreate.map((item) => item.id)).toEqual(['offline-character']);
+    expect(plan.chatsToCreate.map((item) => item.id)).toEqual(['offline-chat']);
+    expect(plan.chatsAlreadyRemote).toEqual([]);
+    expect(plan.chatsToPatchRuntime).toEqual([]);
+  });
   it('does not start fallback requests or write bootstrap status after its session ends', async () => {
     const { api } = await import('./api');
     const controller = new AbortController();

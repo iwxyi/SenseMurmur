@@ -503,6 +503,7 @@ export default function HomePage() {
   // Persisted local chat summaries render immediately; cloud prefetch below
   // only merges fresher data and may update this ordering afterwards.
   const recentChats = useMemo(() => chats
+    .filter((chat) => chat.deletedAt == null)
     .slice()
     .sort((left, right) => (
       Number(right.lastMessageAt || right.updatedAt || right.createdAt || 0)
@@ -604,7 +605,7 @@ export default function HomePage() {
     };
   }, []);
 
-  const customCharacters = characters.filter((character) => !character.isPreset && !character.deletedAt);
+  const customCharacters = characters.filter((character) => !character.isPreset && character.deletedAt == null);
   const recentCharacters = useMemo(() => {
     const recentChatActivityByMemberId = new Map<string, number>();
     recentChats.forEach((chat) => {
@@ -614,7 +615,7 @@ export default function HomePage() {
       });
     });
     return characters
-      .filter((character) => !character.deletedAt)
+      .filter((character) => character.deletedAt == null)
       .slice()
       .sort((left, right) => (
         Math.max(Number(right.updatedAt || 0), recentChatActivityByMemberId.get(right.id) || 0)

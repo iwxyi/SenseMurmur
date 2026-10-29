@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { latestEntityChanges } from '../services/syncChanges';
 import { persist } from 'zustand/middleware';
 import type { GroupChat } from '../types/chat';
 import { normalizeConversation } from '../types/chat';
@@ -27,6 +28,7 @@ import {
   createPendingOperation,
   getPendingQueueWorkerPriority,
   isTerminalSyncError,
+  isLocalOnlyMode,
   latestSyncError,
   getCloudSyncSkipDiagnostics,
   recoverInterruptedOperations,
@@ -552,6 +554,7 @@ interface ChatStore extends PersistedChatState {
   clearPendingOperations: () => void;
   clearPendingOperationsForChat: (chatId: string) => void;
   confirmCreateOperationsSynced: (entityIds: string[]) => void;
+  confirmOperationsSynced: (operationIds: string[]) => void;
   discardFailedOperation: (operationId: string) => void;
   clearSyncTasks: (operationIds: string[]) => void;
   resolveRemoteDeleteConflict: (id: string, resolution: 'restore_local' | 'discard_local' | 'save_as_new') => Promise<void>;
@@ -861,8 +864,9 @@ function normalizeChatSummaryChange(change: Record<string, unknown>) {
 }
 
 function chatSummariesFromChanges(changes: Array<Record<string, unknown>>) {
-  const parsed = changes.map(normalizeChatSummaryChange).filter(Boolean) as Array<ReturnType<typeof normalizeChatSummaryChange> & {}>;
-  if (parsed.length !== changes.length) return null;
+  const latest = latestEntityChanges(changes);
+  const parsed = latest.map(normalizeChatSummaryChange).filter(Boolean) as Array<ReturnType<typeof normalizeChatSummaryChange> & {}>;
+  if (parsed.length !== latest.length) return null;
   return {
     upserts: parsed.filter((item) => item.op === 'upsert').map((item) => item.chat),
     deletes: parsed.filter((item) => item.op === 'delete').map((item) => item.chat),
@@ -873,7 +877,7 @@ function worldRuntimeChatsFromChanges(changes: Array<Record<string, unknown>> | 
   if (!changes?.length) return null;
   const upserts: GroupChat[] = [];
   const deletes: GroupChat[] = [];
-  for (const change of changes) {
+  for (const change of latestEntityChanges(changes)) {
     if (change.entity !== 'world_runtime_chat' || typeof change.id !== 'string') {
       return null;
     }
@@ -897,9 +901,10 @@ function worldRuntimeChatsFromChanges(changes: Array<Record<string, unknown>> | 
 
 function chatDetailFromChanges(changes: Array<Record<string, unknown>> | undefined, id: string) {
   if (!changes?.length) return null;
-  const change = changes.find((item) => item.entity === 'chat_detail' && item.id === id);
+  const change = changes.slice().reverse().find((item) => item.entity === 'chat_detail' && item.id === id);
   if (!change) return null;
   if (change.op === 'delete') {
+    if ((!isRecord(change.patch) || !Object.keys(change.patch).length) && !Number(change.revision)) return null;
     return markChatRuntimeDetailLoaded(normalizeConversation({
       id,
       ...(isRecord(change.patch) ? change.patch : {}),
@@ -1334,9 +1339,12 @@ export const useChatStore = create<ChatStore>()(
                     existingConflicts: state.fieldConflicts,
                   });
                   const merged = mergeChats(state.chats, changedChats, state.pendingOperations);
-                  const nextChats = merged.filter((chat) => chat.deletedAt == null);
                   const deletedIds = new Set(applicableDeletes.map((chat) => chat.id));
-                  const deletedSnapshots = merged.filter((chat) => deletedIds.has(chat.id) && chat.deletedAt != null);
+                  const nextChats = merged.filter((chat) => chat.deletedAt == null && !deletedIds.has(chat.id));
+                  const deletedSnapshots = applicableDeletes.map((remote) => normalizeConversation({
+                    ...merged.find((chat) => chat.id === remote.id),
+                    ...remote,
+                  }));
                   const conflictSnapshots = deleteConflicts.map((remote) => state.chats.find((chat) => chat.id === remote.id) || remote);
                   const changed = buildChatListSignature(nextChats) !== buildChatListSignature(state.chats);
                   chatSyncScopes.markChecked(CHAT_SUMMARY_SCOPE, {
@@ -1792,6 +1800,16 @@ export const useChatStore = create<ChatStore>()(
         getPendingEditError: () => latestChatError(get().pendingOperations),
         getPendingEditCount: () => get().pendingOperations.length,
         clearPendingOperations: () => set({ pendingOperations: [], pendingEditSyncCount: 0, pendingEditSyncError: null, fieldConflicts: [] }),
+        confirmOperationsSynced: (operationIds) => set((state) => {
+          const ids = new Set(operationIds);
+          const pendingOperations = state.pendingOperations.filter((operation) => !ids.has(operation.id));
+          return {
+            pendingOperations,
+            pendingEditSyncCount: pendingOperations.length,
+            pendingEditSyncError: latestChatError(pendingOperations),
+            fieldConflicts: clearResolvedFieldConflicts(state.fieldConflicts, { entityType: 'chat', operationIds }),
+          };
+        }),
         clearPendingOperationsForChat: (chatId) => set((state) => {
           const pendingOperations = state.pendingOperations.filter((operation) => operation.entityId !== chatId && !operation.targetIds.includes(chatId));
           if (pendingOperations.length === state.pendingOperations.length) return {};
@@ -2007,7 +2025,7 @@ export const useChatStore = create<ChatStore>()(
         deleteChat: async (id) => {
           if (!id) return;
           const deletedAt = Date.now();
-          if (shouldSkipCloudSync()) {
+          if (shouldSkipCloudSync() && isLocalOnlyMode()) {
             set((state) => ({
               chats: state.chats.map((chat) => chat.id === id ? applyLocalChatDelete(chat) : chat).filter((chat) => chat.deletedAt == null),
               currentChatId: state.currentChatId === id ? null : state.currentChatId,
@@ -2021,7 +2039,7 @@ export const useChatStore = create<ChatStore>()(
         restoreChats: async (ids) => {
           const normalizedIds = Array.from(new Set(ids.filter(Boolean)));
           if (!normalizedIds.length) return;
-          if (shouldSkipCloudSync()) {
+          if (shouldSkipCloudSync() && isLocalOnlyMode()) {
             set((state) => ({
               chats: state.chats.map((chat) => normalizedIds.includes(chat.id) ? applyLocalChatRestore(chat) : chat).filter((chat) => chat.deletedAt == null),
             }));
