@@ -799,7 +799,7 @@ function PrivateThreadScheduleDiagnosticsPanel({
   return (
     <Stack spacing={0.75} sx={{ mt: 1.1 }}>
       <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>
-        AI 私聊调度诊断
+        角色私聊调度诊断
       </Typography>
       {items.slice(0, 8).map(({ chatName, diagnostic }) => {
         const partnerId = diagnostic.participantIds.find((id) => id !== currentCharacterId) || diagnostic.targetId || diagnostic.actorId;

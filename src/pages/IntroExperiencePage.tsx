@@ -101,7 +101,7 @@ const capabilities = [
 const channelModes = [
   ['公开群聊', 'PUBLIC ROOM', '看见房间态势、公开关系、阵营压力和当前主线。', <PublicIcon key="public" />],
   ['用户单聊', 'USER DIRECT', '保留更细的用户偏好、称呼、照顾方式和共同约定。', <PsychologyIcon key="direct" />],
-  ['AI 私聊', 'PAIR THREAD', '角色之间可以形成独立关系、秘密、误会和未完成张力。', <LockOutlinedIcon key="pair" />],
+  ['角色私聊', 'PRIVATE CHAT', '角色之间可以形成独立关系、秘密、误会和未完成张力。', <LockOutlinedIcon key="pair" />],
 ] as const;
 
 const controlItems = [
@@ -541,7 +541,7 @@ function ChannelProjectionSection({ tokens }: { tokens: IntroTokens }) {
       <SectionTitle
         kicker="SCENE PROJECTION"
         title="同一个角色，不同的可见世界。"
-        description="生息不是把所有记忆一股脑塞进回复里。公开房间、用户单聊和 AI 私聊，会各自投影不同的边界、关系和可见信息。"
+        description="生息不是把所有记忆一股脑塞进回复里。公开房间、用户单聊和角色私聊，会各自投影不同的边界、关系和可见信息。"
         tokens={tokens}
       />
       <Box sx={{ mt: 4.4, display: 'grid', gridTemplateColumns: { xs: '1fr', lg: '0.82fr 1.18fr' }, gap: { xs: 2.2, lg: 4.2 }, alignItems: 'stretch' }}>
@@ -570,7 +570,7 @@ function ChannelProjectionSection({ tokens }: { tokens: IntroTokens }) {
             {[
               [116, 74, tokens.primary, '公开房间', '主线 / 压力'],
               [510, 92, tokens.amber, '用户单聊', '偏好 / 约定'],
-              [498, 270, tokens.violet, 'AI 私聊', '秘密 / 张力'],
+              [498, 270, tokens.violet, '角色私聊', '秘密 / 张力'],
               [120, 258, tokens.faint, '世界事件', '日记 / 活动'],
             ].map(([x, y, color, title, subtitle]) => (
               <g key={String(title)}>

@@ -195,7 +195,7 @@ const ROOM_TEMPLATE_KERNELS: RoomTemplateDefinition[] = [
         key: 'social-advanced',
         label: '互动规则',
         fields: [
-          { key: 'allowPrivateThreads', label: '允许私下线程', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
+          { key: 'allowPrivateThreads', label: '允许角色私聊', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
           { key: 'allowCliques', label: '允许小圈子', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
           { key: 'allowMockery', label: '允许冲突和嘲讽', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
         ],
@@ -260,9 +260,9 @@ const ROOM_TEMPLATE_KERNELS: RoomTemplateDefinition[] = [
       {
         key: 'deliberation-advanced',
         label: '审议规则',
-        description: '这些开关会写入底层能力：私下线程控制角色能否派生 AI 私聊；小圈子和尖锐表达会影响立场、质询和关系冲突。',
+        description: '这些开关会写入底层能力：角色私聊控制角色能否私下交换信息；小圈子和尖锐表达会影响立场、质询和关系冲突。',
         fields: [
-          { key: 'allowPrivateThreads', label: '允许私下线程', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
+          { key: 'allowPrivateThreads', label: '允许角色私聊', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
           { key: 'allowCliques', label: '允许结盟与小圈子', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
           { key: 'allowMockery', label: '允许尖锐或嘲讽', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
         ],
@@ -286,9 +286,9 @@ const ROOM_TEMPLATE_KERNELS: RoomTemplateDefinition[] = [
       {
         key: 'roundtable-advanced',
         label: '圆桌审议规则',
-        description: '圆桌默认更克制；需要角色私下交换观点时可以打开私下线程。',
+        description: '圆桌默认更克制；需要角色私下交换观点时可以打开角色私聊。',
         fields: [
-          { key: 'allowPrivateThreads', label: '允许私下线程', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
+          { key: 'allowPrivateThreads', label: '允许角色私聊', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
         ],
       },
     ],
@@ -801,7 +801,7 @@ const ROOM_TEMPLATE_KERNELS: RoomTemplateDefinition[] = [
         key: 'simulation-advanced',
         label: '世界互动规则',
         fields: [
-          { key: 'allowPrivateThreads', label: '允许私下线程', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
+          { key: 'allowPrivateThreads', label: '允许角色私聊', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
           { key: 'allowCliques', label: '允许结盟和派系', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
           { key: 'allowMockery', label: '允许冲突和嘲讽', kind: 'single_select', advanced: true, options: [{ label: '允许', value: 'true' }, { label: '关闭', value: 'false' }] },
         ],

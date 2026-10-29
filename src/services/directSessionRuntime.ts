@@ -1849,7 +1849,7 @@ function resolvePrivateThreadParticipantName(characters: AICharacter[] | undefin
 export function buildStartPrivateThreadExecutionResult(chat: GroupChat, actorId: string, targetId: string, prompt = '', characters: AICharacter[] = []): SessionActionExecutionResult {
   const actorName = resolvePrivateThreadParticipantName(characters, actorId, '发起者');
   const targetName = resolvePrivateThreadParticipantName(characters, targetId, '对象');
-  const summary = `发起AI私聊：${actorName} → ${targetName}${prompt ? ` · ${prompt.slice(0, 32)}` : ''}`;
+  const summary = `发起角色私聊：${actorName} → ${targetName}${prompt ? ` · ${prompt.slice(0, 32)}` : ''}`;
   return {
     chatPatch: withFrameworkPatch(chat, {
       worldState: {
@@ -1859,7 +1859,7 @@ export function buildStartPrivateThreadExecutionResult(chat: GroupChat, actorId:
     }),
     runtimeEvents: [{
       eventType: 'start_private_thread',
-      title: '执行了AI私聊派生动作',
+      title: '执行了角色私聊动作',
       summary,
       metrics: { actorId, targetId, actorName, targetName, prompt },
     }],
@@ -1902,7 +1902,7 @@ export async function createAiPrivateThread(params: {
     type: 'system',
     senderId: 'system',
     senderName: 'System',
-    content: `${initiator.name} 和 ${target.name} 从群聊 ${params.sourceChat.name} 派生出一个AI私聊。`,
+    content: `${initiator.name} 和 ${target.name} 从群聊 ${params.sourceChat.name} 开启了一段角色私聊。`,
     emotion: 0,
   });
 
@@ -1920,7 +1920,7 @@ export async function createAiPrivateThread(params: {
 
   await params.appendEventMessage(params.sourceChat.id, {
     eventType: 'private_chat_started',
-    title: `${initiator.name} 与 ${target.name} 开启了AI私聊`,
+    title: `${initiator.name} 与 ${target.name} 开启了角色私聊`,
     summary: params.triggerReason || '群聊将跟踪这段私下互动带来的关系变化。',
     pair: [initiator.name, target.name],
     metrics: {
@@ -1956,7 +1956,7 @@ export function buildAiPrivateChatDraft(sourceChat: GroupChat, starter: AICharac
     scenarioMemorySummary: frameworkPatch.scenarioMemorySummary,
     topologySummary: frameworkPatch.topologySummary,
     name: `${starter.name} × ${target.name}`,
-    topic: `${starter.name} 和 ${target.name} 的AI私聊`,
+    topic: `${starter.name} 和 ${target.name} 的角色私聊`,
     style: 'free' as const,
     runtimeEvolutionIntensity: sourceChat.runtimeEvolutionIntensity,
     memberIds: [starter.id, target.id],

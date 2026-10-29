@@ -63,7 +63,7 @@ const FIVE_MINUTES_MS = FIVE_MINUTES_SECONDS * 1000;
 const CHAT_TYPE_TABS = [
   { value: 0, type: 'group' as const, zh: '群聊', en: 'Groups' },
   { value: 1, type: 'direct' as const, zh: '单聊', en: 'Direct' },
-  { value: 2, type: 'ai_direct' as const, zh: 'AI私聊', en: 'AI private' },
+  { value: 2, type: 'ai_direct' as const, zh: '角色私聊', en: 'Character private chat' },
 ];
 
 function pad2(value: number) {
@@ -216,7 +216,7 @@ function buildSummary(form: FormState, participantNames: string[], startAt: numb
 
 function getChatTypeLabel(chat: GroupChat, isZh: boolean) {
   if (chat.type === 'direct') return isZh ? '单聊' : 'Direct';
-  if (chat.type === 'ai_direct') return isZh ? 'AI私聊' : 'AI private';
+  if (chat.type === 'ai_direct') return isZh ? '角色私聊' : 'Character private chat';
   return isZh ? '群聊' : 'Group';
 }
 

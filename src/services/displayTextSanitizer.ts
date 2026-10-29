@@ -31,7 +31,7 @@ const ENGLISH_REASON_LABELS: Array<[RegExp, string]> = [
   [/topic drift is high/gi, '当前话题漂移较高'],
   [/continue the current live thread/gi, '延续当前正在进行的话题'],
   [/scenario structure is shaping/gi, '当前场景结构正在影响互动'],
-  [/hidden or private thread is creating mystery pressure/gi, '未公开线索正在形成悬念压力'],
+  [/hidden or private chat is creating mystery pressure/gi, '未公开线索正在形成悬念压力'],
   [/has a recent growth signal/gi, '角色成长信号正在影响互动'],
 ];
 

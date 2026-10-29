@@ -345,7 +345,7 @@ export default function CreateChatPage() {
   const runtimeTabIndex = showRuntimeTab ? (showManagementTab ? managementTabIndex + 1 : managementTabIndex) : managementTabIndex;
   const directorTabIndex = showDirectorTab ? (showRuntimeTab ? runtimeTabIndex + 1 : managementTabIndex + (showManagementTab ? 1 : 0)) : runtimeTabIndex;
   const conversationNoun = isZh
-    ? (conversationKind === 'group' ? '群聊' : conversationKind === 'ai_direct' ? 'AI私聊' : '单聊')
+    ? (conversationKind === 'group' ? '群聊' : conversationKind === 'ai_direct' ? '角色私聊' : '单聊')
     : (conversationKind === 'group' ? 'group chat' : conversationKind === 'ai_direct' ? 'AI direct chat' : 'direct chat');
   const minRequiredMembers = isGroupConversation ? MIN_MEMBERS : 1;
   const roomTemplateMemberLimit = getRoomTemplate(roomTemplate).maxMembers;

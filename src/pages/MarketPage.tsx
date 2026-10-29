@@ -32,7 +32,7 @@ const kindFilterOptions: Array<{ value: MarketItemKind | ''; label: string }> = 
 const chatTypeLabels: Record<string, string> = {
   group: '普通群聊',
   direct: '私聊',
-  ai_direct: 'AI 私聊',
+  ai_direct: '角色私聊',
 };
 
 const chatModeLabels: Record<string, string> = {
@@ -48,7 +48,7 @@ const chatModeLabels: Record<string, string> = {
 const scenarioLabels: Record<string, string> = {
   'open-chat': '普通群聊',
   'direct-chat': '私聊',
-  'ai-private-thread': 'AI 私聊',
+  'ai-private-thread': '角色私聊',
   'story-reader': '故事房',
   'opinion-review': '观点讨论',
   'roundtable-review': '圆桌讨论',

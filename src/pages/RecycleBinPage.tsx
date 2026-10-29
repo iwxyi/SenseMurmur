@@ -196,7 +196,7 @@ export default function RecycleBinPage() {
             { value: 0, label: `${i18n.language.startsWith('zh') ? '角色' : 'Characters'} (${deletedCharacters.length})` },
             { value: 1, label: `${i18n.language.startsWith('zh') ? '群聊' : 'Group chats'} (${chatCounts.group})` },
             { value: 2, label: `${i18n.language.startsWith('zh') ? '单聊' : 'Direct chats'} (${chatCounts.direct})` },
-            { value: 3, label: `${i18n.language.startsWith('zh') ? 'AI私聊' : 'AI direct'} (${chatCounts.aiDirect})` },
+            { value: 3, label: `${i18n.language.startsWith('zh') ? '角色私聊' : 'Character private chat'} (${chatCounts.aiDirect})` },
             { value: 4, label: `${i18n.language.startsWith('zh') ? '助手' : 'Assistants'} (${chatCounts.assistant})` },
           ]}
         />

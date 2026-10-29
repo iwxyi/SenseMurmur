@@ -33,8 +33,8 @@ const EXPERIENCE_LENS_LABELS: Record<string, { zh: string; en: string }> = {
   message_generated: { zh: '消息生成', en: 'Message generated' },
   inner_life_repair: { zh: '内心找补', en: 'Inner repair' },
   inner_life_attention: { zh: '想被看见', en: 'Attention seeking' },
-  ai_direct_starter_message: { zh: 'AI私聊', en: 'AI direct chat' },
-  ai_direct_target_message: { zh: 'AI私聊', en: 'AI direct chat' },
+  ai_direct_starter_message: { zh: '角色私聊', en: 'Character private chat' },
+  ai_direct_target_message: { zh: '角色私聊', en: 'Character private chat' },
 };
 
 const MEMORY_SCOPE_LABELS: Record<MemoryItem['scope'], string> = {

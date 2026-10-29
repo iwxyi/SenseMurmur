@@ -4633,7 +4633,7 @@ describe('chatEngine streaming preview', () => {
     const prompt = String(generateResponseMock.mock.calls[0]?.[1] || '');
     expect(prompt).toContain('Mode: direct_private');
     expect(prompt).toContain('## Private Turn Priority');
-    expect(prompt).toContain('This is an AI private thread');
+    expect(prompt).toContain('This is a private chat between these two characters');
     expect(prompt).toContain('the exchange determines what it means');
     expect(prompt).toContain('When the user requests a deliverable');
     expect(prompt).not.toContain('complete that job first');

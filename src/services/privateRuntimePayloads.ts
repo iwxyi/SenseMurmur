@@ -135,7 +135,7 @@ export function buildDirectPrivatePayload(chat: GroupChat): RolePrivateRuntimePa
   if (chat.type !== 'direct' && chat.type !== 'ai_direct') return null;
   return {
     key: 'private-thread-context',
-    title: chat.type === 'direct' ? '单聊上下文' : 'AI私聊上下文',
+    title: chat.type === 'direct' ? '单聊上下文' : '角色私聊上下文',
     text: chat.type === 'direct' ? '该单聊仅对当前用户与目标角色可见。' : '该会话只对当前私聊双方可见，主群只看摘要回流。',
     visibilityScope: 'pair_private',
     channelId: getRoleChannelId(chat.type === 'direct' ? 'user' : 'pair'),
@@ -172,8 +172,8 @@ export function buildRolePrivateParticipantState(chat: GroupChat, participant: P
       ...participant,
       roleKey: 'private_party',
       privateState: {
-        roleCard: buildWerewolfRoleCard('私聊上下文卡', '你拥有该 AI 私聊的完整上下文。', ['这段私聊的细节不会完整广播回主群。'], ['private-thread', 'sample']),
-        notes: ['AI私聊的完整上下文只对当前私聊双方可见。'],
+        roleCard: buildWerewolfRoleCard('私聊上下文卡', '你拥有该角色私聊的完整上下文。', ['这段私聊的细节不会完整广播回主群。'], ['private-chat', 'sample']),
+        notes: ['角色私聊的完整上下文只对当前私聊双方可见。'],
       },
     };
   }

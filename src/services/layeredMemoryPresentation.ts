@@ -137,7 +137,7 @@ export function buildLayeredMemoryFilters(groups: ReturnType<typeof buildLayered
     includeDebugDetails ? { key: 'working', label: zh ? '运行证据' : 'Runtime', items: groups.working, hint: zh ? '当前几轮的原始运行证据，不属于长期、片段或关系沉淀。' : 'Raw current-turn runtime evidence, separate from settled memories.' } : null,
     { key: 'relationship', label: zh ? '关系' : 'Relationships', items: groups.relationship, hint: zh ? '围绕具体对象形成的关系印象。' : 'Relationship impressions formed around specific people.' },
     { key: 'self', label: zh ? '自我' : 'Self', items: groups.self, hint: zh ? '角色如何理解自己、偏好、创伤或成长。' : 'How the character understands itself, preferences, wounds, or growth.' },
-    { key: 'conversation', label: zh ? '会话/线程' : 'Conversation', items: groups.conversation, hint: zh ? '群聊、单聊或私聊线程里的共同记忆。' : 'Shared memory from group, direct, or private threads.' },
+    { key: 'conversation', label: zh ? '会话/私聊' : 'Conversation', items: groups.conversation, hint: zh ? '群聊、单聊或角色私聊里的共同记忆。' : 'Shared memory from group, direct, or character private chats.' },
     includeDebugDetails ? { key: 'expressionFeedback', label: zh ? '表达反馈' : 'Feedback', items: groups.expressionFeedback, hint: zh ? '用户对表达风格的纠偏记忆。' : 'User corrections about the character expression style.' } : null,
     groups.archived.length ? { key: 'archived', label: zh ? '旧档' : 'Archive', items: groups.archived, hint: zh ? '已归档或沉下去的记忆，只有被人物、话题或旧梗唤醒时才会回到上下文。' : 'Archived memories that return only when cues reactivate them.' } : null,
   ].filter(Boolean)) as LayeredMemoryFilter[];

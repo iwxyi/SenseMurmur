@@ -409,7 +409,7 @@ export default function ChatListPage() {
   const [noCharactersDialogOpen, setNoCharactersDialogOpen] = useState(false);
   const [noCharactersReturnTo, setNoCharactersReturnTo] = useState('/chats/create');
   const [noCharactersRequiredCount, setNoCharactersRequiredCount] = useState(MIN_MEMBERS);
-  const emptyMessage = tab === ASSISTANT_TAB ? '还没有助手会话' : tab === 0 ? t('chat.noGroups') : tab === 1 ? '还没有单聊' : '还没有 AI私聊';
+  const emptyMessage = tab === ASSISTANT_TAB ? '还没有助手会话' : tab === 0 ? t('chat.noGroups') : tab === 1 ? '还没有单聊' : '还没有角色私聊';
   const createPath = tab === 0 ? '/chats/create' : '/direct/create';
   const createLabel = tab === ASSISTANT_TAB ? '创建助手' : tab === 0 ? t('chat.create') : '创建单聊';
   const showCreateFab = tab !== 2;
@@ -517,7 +517,7 @@ export default function ChatListPage() {
             { value: ASSISTANT_TAB, label: `助手 ${assistantChats.length}` },
             { value: 0, label: `群聊 ${groupedChats.length}` },
             { value: 1, label: `单聊 ${userDirectChats.length}` },
-            { value: 2, label: `AI私聊 ${privateChats.length}` },
+            { value: 2, label: `角色私聊 ${privateChats.length}` },
           ]}
         />
       </Stack>

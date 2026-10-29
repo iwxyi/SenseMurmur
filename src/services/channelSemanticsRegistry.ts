@@ -55,7 +55,7 @@ const registry = new Map<ChannelSemanticKey, ChannelSemanticDefinition>([
   }],
   ['ai_direct', {
     key: 'ai_direct',
-    label: 'Pair-private thread',
+    label: 'Character private chat',
     promptPrefix: 'This is a private AI side-thread. Treat it as a two-party channel with reciprocal carry-over, not as a public room.',
     transcriptInstruction: 'Recent transcript is pair-private relationship context, not a generic room script.',
     targetPriority: 'counterpart',

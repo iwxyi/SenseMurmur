@@ -23,7 +23,7 @@ Prompt generation should only see constrained cues. If candidate memories exist 
 Memory settings are intentionally split by user intent:
 
 - `聊天-记忆` controls production memory recall during chat generation: enabled state, visible recall style, max cues per turn, and recent-use cooldown.
-- `聊天-陪伴` controls proactive companionship such as check-ins, rituals, private threads, and quiet hours. It must not be used as the memory recall switch.
+- `聊天-陪伴` controls proactive companionship such as check-ins, rituals, private chats between characters, and quiet hours. It must not be used as the memory recall switch.
 - Developer options expose memory evidence, metrics, and distillation events for debugging only.
 - Plugin experiments are reserved for high-cost or not-yet-stable enhancements such as a synchronous LLM memory gate or vector recall. Those experiments must not bypass this selector.
 

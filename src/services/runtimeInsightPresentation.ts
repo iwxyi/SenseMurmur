@@ -120,7 +120,7 @@ export function formatKnownReason(reason: string) {
     [/topic drift is high/i, '当前话题漂移较高，需要有人收束。'],
     [/has become a salient faction pressure/i, '阵营靠拢已经形成可感知的压力。'],
     [/has a recent growth signal/i, '角色成长信号正在影响下一轮走向。'],
-    [/hidden or private thread is creating mystery pressure/i, '未公开线索正在形成悬念压力。'],
+    [/hidden or private chat is creating mystery pressure/i, '未公开线索正在形成悬念压力。'],
     [/scenario structure is shaping/i, '当前场景结构正在影响下一步互动。'],
     [/continue the current live thread/i, '延续当前正在进行的话题。'],
     [/director goal is steering/i, '导演目标正在影响下一轮走向。'],

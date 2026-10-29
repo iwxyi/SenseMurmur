@@ -1771,8 +1771,8 @@ export function createDefaultConversationActionSchema(context: SessionEngineActi
   if (canUsePrivateThreads(context.conversation) && options.length >= 2) {
     actions.push({
       type: 'start_private_thread',
-      label: '发起 AI 私聊',
-      description: '从主群中派生一条仅私聊双方可见的 AI 线程。',
+      label: '发起角色私聊',
+      description: '从主群中开启一段仅双方可见的角色私聊。',
       fields: [
         { key: 'actorId', label: '发起者', type: 'single_select', required: true, options, targetSource: 'participants' },
         { key: 'targetId', label: '对象', type: 'single_select', required: true, options, targetSource: 'participants' },

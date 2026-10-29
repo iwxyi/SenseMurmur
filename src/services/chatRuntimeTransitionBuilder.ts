@@ -722,7 +722,7 @@ export function buildRelationshipTransition(params: {
         layeredMemories: speakerLayeredResult.layeredMemories,
         runtimeTimeline: accumulateCharacterRuntime(speaker, {
           type: 'memory',
-          text: `在${params.conversation.type === 'group' ? '群聊' : params.conversation.type === 'ai_direct' ? 'AI私聊' : '单聊'}中表达了新状态：${truncateWithEllipsis(params.message.content, 48)}`,
+          text: `在${params.conversation.type === 'group' ? '群聊' : params.conversation.type === 'ai_direct' ? '角色私聊' : '单聊'}中表达了新状态：${truncateWithEllipsis(params.message.content, 48)}`,
         }).concat(driftEntries).slice(-Math.max(20, config.maxTimeline)),
       },
     });

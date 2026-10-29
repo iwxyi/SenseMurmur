@@ -8,6 +8,14 @@ Shared experiences enter layered memory and influence relationships, emotion, an
 
 [Try It Online](https://sense.lyixi.com) · QQ community: 571886312 · [简体中文](./README.md)
 
+### Start Here
+
+1. Open the online app and choose local mode or sign in.
+2. Choose an available text model in Settings. Without a model, you can still browse the interface, character library, and example content.
+3. Start with a private chat. To see what makes Sense Murmur different from a general AI chat, bring that character into a group with others and watch what they remember, disagree about, and continue later.
+
+Characters, rooms, and conversations are local first; sign-in and cloud sync are optional. AI generation needs an available model and network access. Voice, images, and Agent tools depend on your account and settings.
+
 ## At a Glance
 
 | Capability | What you can experience |
@@ -77,7 +85,7 @@ The runtime supports restraint, bias, care, hesitation, and disagreement while r
 
 ### From Working Memory to Lasting Knowledge
 
-Memory has three layers, with separate ownership for the character, particular relationships, rooms, and private threads:
+Memory has three layers, with separate ownership for the character, particular relationships, rooms, and private chats between characters:
 
 | Layer | Purpose |
 |---|---|
@@ -122,12 +130,12 @@ Diaries, social events, and new experiences can contribute to later companionshi
 ## Rooms and Ways to Participate
 
 - **Group chat:** Bring a cast into one conversation. They can follow the topic, respond to one another, or hold back. Pause, direct a reply, speak as a character, or introduce an event.
-- **One-to-one and character threads:** Talk privately with a character; characters can also have separate private threads. Each channel has its own visibility rules.
+- **One-to-one and character chats:** Talk privately with a character; characters can also have separate private chats with one another. Each channel has its own visibility rules.
 - **Story rooms:** Set the opening, follow narration and dialogue, and make branching choices with characters who already have history together.
 - **Deliberation:** Let different viewpoints examine, challenge, and summarize a question.
 - **Learning:** Set a goal and teaching style. Topics, exercises, answers, evidence, and review records accumulate over time.
 
-These four group-room families and their presets are available from the standard creation flow. Other training scenarios, deduction games, and world simulation are being validated in developer mode.
+Available rooms and presets depend on the current version. Some scenarios are still being refined.
 
 ### Keep the Paths You Explore
 
@@ -185,14 +193,14 @@ Character templates preserve identity and presentation resources. Chat templates
 
 ## Data, Models, and Access
 
-Characters, rooms, and conversations load from local data first. Configure your own models in local mode or sign in to use available platform models. Current models, pricing, and permissions are shown in the app. An AI gateway and Key management are also available for compatible external tools.
+Characters, rooms, and conversations load from local data first. Configure your own models in local mode or sign in to use available platform models. Current models, pricing, and permissions are shown in the app.
 
 Account sync is optional. Importing guest data into an account requires confirmation, and account data remains separate. Artifact content is local by default; eligible text artifacts can sync when the account has permission and you enable it. Cached content remains viewable offline, while AI generation needs network access.
 
-Use Sense Murmur in a browser or install the PWA. The project also includes desktop and Android packaging.
+Use Sense Murmur in a browser or install the PWA.
 
 - **Manage your data:** Select categories for backup and restore, import/export character profiles, manage deleted characters and conversations in the recycle bin, and inspect sync status and errors.
-- **Combine models:** Configure text, images, speech recognition, and speech synthesis separately, with character-level overrides. Platform models include usage and cost views; the AI gateway and Key management support compatible external tools.
+- **Combine models:** Configure text, images, speech recognition, and speech synthesis separately, with character-level overrides. Platform models include usage and cost views.
 - **Personalize the interface:** Chinese and English, light/dark/system modes, color presets, character bubbles, and letter-paper styles. Wide screens use list/detail panes, with corresponding page access on mobile.
 
 ## Get Started
@@ -211,5 +219,3 @@ Sense Murmur is under active development. Cast creation, relationship graphs, di
 Ongoing work focuses on how these mechanisms hold up over time: consistent characters who can change, timely recall, natural group conversation, accurate follow-through on promises, and smooth artifact revision. Models can still repeat themselves, miss a memory, or misunderstand context. The app shows the current availability and requirements of each capability.
 
 Share feedback and reproducible scenarios in QQ group 571886312. Remove private conversations and credentials before posting.
-
-Developers can read the [full project's technical README](https://github.com/lyixi/Pneumata#readme). The frontend uses React, TypeScript, MUI, and Vite. Run this directory with `npm install` and `npm run dev`; local mode needs a configured model.

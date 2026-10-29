@@ -451,7 +451,7 @@ function buildInfluenceModePrompt(chat: GroupChat, target: AICharacter | undefin
     return '\n## Influence Mode\n- In this user-private chat, let your own long-term self-model, relationship stance, and recent personal drift outweigh room-level context.';
   }
   if (chat.type === 'ai_direct') {
-    return `\n## Influence Mode\n- In this AI private thread, prioritize your evolving stance toward ${target?.name || 'the other AI'}, reciprocal relationship memory, and pair-specific carryover over generic room balance.`;
+    return `\n## Influence Mode\n- In this character private chat, prioritize your evolving stance toward ${target?.name || 'the other AI'}, reciprocal relationship memory, and pair-specific carryover over generic room balance.`;
   }
   return '\n## Influence Mode\n- In group chat, balance room context with your own biases: react locally to the latest exchange, but let long-term relationship and self-memory bend your tone and alliances.';
 }
@@ -588,7 +588,7 @@ function buildSharedSecretPromptBlock(chat: GroupChat, character: AICharacter, t
       .filter((secret) => secret.participantIds.includes(target.id))
       .slice(0, 2);
     if (!privateSecrets.length) return '';
-    return `\n## Pair-Private Shared Secrets\n${privateSecrets.map((secret) => `- With ${target.name}: ${cleanPromptText(secret.privateText, members, 180)}${secret.leakState !== 'sealed' ? ` (state: ${secret.leakState})` : ''}`).join('\n')}\n- This is a pair-private thread: you may use these as subtext or recall them directly if it feels natural, but do not turn them into exposition.`;
+    return `\n## Pair-Private Shared Secrets\n${privateSecrets.map((secret) => `- With ${target.name}: ${cleanPromptText(secret.privateText, members, 180)}${secret.leakState !== 'sealed' ? ` (state: ${secret.leakState})` : ''}`).join('\n')}\n- This is a private chat between two characters: you may use these as subtext or recall them directly if it feels natural, but do not turn them into exposition.`;
   }
 
   if (chat.type !== 'group') return '';
@@ -623,7 +623,7 @@ function buildSharedSecretTraceLines(chat: GroupChat, character: AICharacter, ta
     return secrets
       .filter((secret) => secret.participantIds.includes(target.id))
       .slice(0, 2)
-      .map((secret) => `AI私聊可召回：${target.name} · ${cleanPromptText(secret.publicMask, members, 120)} · ${secret.leakState}`);
+      .map((secret) => `角色私聊可召回：${target.name} · ${cleanPromptText(secret.publicMask, members, 120)} · ${secret.leakState}`);
   }
   if (chat.type !== 'group') return [];
   const visibleMemberIds = new Set(chat.memberIds || []);

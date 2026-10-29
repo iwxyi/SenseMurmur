@@ -2529,7 +2529,7 @@ export default function SettingsPage() {
                   );
                 })}
               </Box>
-              <FormControlLabel control={<Switch checked={settings.companionship.enableCharacterPrivateThreads} onChange={(e) => settings.setCompanionship({ enableCharacterPrivateThreads: e.target.checked })} />} label={i18n.language.startsWith('zh') ? '启用角色陪伴 AI 私聊' : 'Enable character companionship AI private threads'} />
+              <FormControlLabel control={<Switch checked={settings.companionship.enableCharacterPrivateThreads} onChange={(e) => settings.setCompanionship({ enableCharacterPrivateThreads: e.target.checked })} />} label={i18n.language.startsWith('zh') ? '启用角色陪伴私聊' : 'Enable character companionship private chats'} />
               <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' }, gap: 1 }}>
                 <Box>
                   <Typography variant="body2" sx={{ fontWeight: 500 }} gutterBottom>{i18n.language.startsWith('zh') ? '陪伴敏感边界' : 'Companionship sensitivity boundary'}</Typography>
@@ -2564,7 +2564,7 @@ export default function SettingsPage() {
               <TextField
                 type="number"
                 size="small"
-                label={i18n.language.startsWith('zh') ? 'AI 私聊冷却（小时）' : 'AI private thread cooldown (h)'}
+                label={i18n.language.startsWith('zh') ? '角色私聊冷却（小时）' : 'Character private chat cooldown (h)'}
                 value={settings.companionship.privateThreadCooldownHours}
                 onChange={(e) => {
                   const value = Number(e.target.value);

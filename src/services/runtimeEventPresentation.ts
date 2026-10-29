@@ -55,7 +55,7 @@ export function formatSocialEventKindLabel(kind: SocialEventKind | string | unde
     custom: '自定义事件',
   };
   const en: Record<string, string> = {
-    pair_private_thread: 'Pair private thread',
+    pair_private_thread: 'Character private chat',
     social_outing: 'Social outing',
     post_moment: 'Post moment',
     status_update: 'Status update',

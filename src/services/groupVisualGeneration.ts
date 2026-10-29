@@ -58,7 +58,7 @@ function buildSource(chat: GroupChat, members: AICharacter[], requirement: strin
 
 function fallbackPlan(chat: GroupChat, kind: GroupVisualKind, language: 'zh' | 'en'): GroupVisualPlan {
   const subject = compact(chat.type === 'assistant' ? (chat.name || chat.topic || chat.latestMessage?.content) : (chat.topic || chat.name), 260);
-  const conversationLabel = chat.type === 'group' ? (language === 'zh' ? '群聊' : 'group chat') : chat.type === 'ai_direct' ? (language === 'zh' ? 'AI私聊' : 'AI direct chat') : chat.type === 'assistant' ? (language === 'zh' ? '助手会话' : 'assistant chat') : (language === 'zh' ? '单聊' : 'direct chat');
+  const conversationLabel = chat.type === 'group' ? (language === 'zh' ? '群聊' : 'group chat') : chat.type === 'ai_direct' ? (language === 'zh' ? '角色私聊' : 'character private chat') : chat.type === 'assistant' ? (language === 'zh' ? '助手会话' : 'assistant chat') : (language === 'zh' ? '单聊' : 'direct chat');
   const style = '';
   if (kind === 'avatar') return {
     prompt: language === 'zh'

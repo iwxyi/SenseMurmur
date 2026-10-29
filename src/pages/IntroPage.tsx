@@ -125,7 +125,7 @@ const mockChatBubbleStyles: Record<'阿晚' | '老李' | '涩涩', {
 const metrics = [
   {
     label: '会话形态',
-    value: '群聊、用户单聊、AI 私聊',
+    value: '群聊、用户单聊、角色私聊',
     detail: '不同视角共享同一个角色本体，公开与私密各自留下痕迹。',
     mode: 'channels',
   },
@@ -219,8 +219,8 @@ const runtimeSystemNodes = [
   {
     title: '私密投影',
     kicker: '不同视角看到不同世界',
-    summary: '群聊、用户单聊、AI 私聊共享同一个角色本体，但事件会按公开、私有、双边和公开投影裁剪。',
-    points: ['公开房间', '用户私有', '双边线程', '公开投影'],
+    summary: '群聊、用户单聊、角色私聊共享同一个角色本体，但事件会按公开、私有、双边和公开投影裁剪。',
+    points: ['公开房间', '用户私有', '角色私聊', '公开投影'],
     mode: 'visibility',
   },
   {
@@ -576,7 +576,7 @@ function RuntimeSystemGlyph({ mode }: { mode: (typeof runtimeSystemNodes)[number
         {[
           ['群聊公开', 108, 'rgba(229,192,123,0.16)'],
           ['用户私有', 78, 'rgba(229,192,123,0.14)'],
-          ['双边线程', 50, 'rgba(255,255,255,0.10)'],
+          ['角色私聊', 50, 'rgba(255,255,255,0.10)'],
         ].map(([label, size, color], index) => (
           <Box key={label} sx={{ position: 'absolute', width: Number(size) * 2, height: Number(size) * 2, borderRadius: '50%', border: '1px solid rgba(255,255,255,0.12)', bgcolor: color, display: 'grid', placeItems: index === 2 ? 'center' : 'start center', pt: index === 2 ? 0 : 1.3, color: 'rgba(255,255,255,0.68)', fontSize: 12, animation: 'systemBreath 6s ease-in-out infinite', animationDelay: `${index * 360}ms` }}>{label}</Box>
         ))}
@@ -683,7 +683,7 @@ function RuntimeSystemSection() {
           让它继续成为<Box component="span" sx={{ color: accent }}>自己</Box>。
         </Typography>
         <Typography sx={{ mt: 2, color: 'rgba(255,255,255,0.58)', lineHeight: 1.8, fontSize: 16 }}>
-          如果一个角色没有身体，它还能凭什么像一个存在？Sense Murmur 用同一套角色本体承载群聊、单聊、AI 私聊和未来的故事房，让不同房间里的经历继续汇到同一个它身上。
+          如果一个角色没有身体，它还能凭什么像一个存在？Sense Murmur 用同一套角色本体承载群聊、单聊、角色私聊和未来的故事房，让不同房间里的经历继续汇到同一个它身上。
         </Typography>
       </Box>
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', lg: '0.92fr 1.08fr' }, gap: { xs: 1.5, md: 2 }, alignItems: 'stretch', ...revealSx(120) }}>
@@ -1707,7 +1707,7 @@ const editorialRuntimeFlow = [
 const editorialRuntimeOutcomes = [
   ['发言节奏', '谁先接、谁补刀、谁旁观'],
   ['关系连续', '一次维护，会影响之后的语气'],
-  ['场景边界', '群聊、单聊、AI 私聊各有范围'],
+  ['场景边界', '群聊、单聊、角色私聊各有范围'],
 ] as const;
 
 const editorialMessages = [
@@ -2500,7 +2500,7 @@ export function IntroConceptPage() {
           <Reveal>
             <Box sx={{ minWidth: 0 }}>
               <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap', gap: 1, mb: { xs: 3, md: 3.5, lg: 4 } }}>
-                {['AI 多角色互动房间', '长期记忆与关系连续性', '群聊 / 单聊 / AI 私聊'].map((label) => (
+                {['AI 多角色互动房间', '长期记忆与关系连续性', '群聊 / 单聊 / 角色私聊'].map((label) => (
                   <Chip
                     key={label}
                     label={label}
@@ -2573,7 +2573,7 @@ export function IntroConceptPage() {
                     所有复杂度，都在<Box component="span" sx={{ color: accent }}>守护</Box>这种延续。
                   </Typography>
                   <Typography sx={{ mt: 2, color: 'rgba(255,255,255,0.58)', lineHeight: 1.85 }}>
-                    角色不该每次都从零开始。线程、账本、记忆、事件和房间规则，最后都指向同一件事：让你创建的角色能被带进新的场景，并仍然知道“我是我”。
+                    角色不该每次都从零开始。私聊、关系账本、记忆、事件和房间规则，最后都指向同一件事：让你创建的角色能被带进新的场景，并仍然知道“我是我”。
                   </Typography>
                 </Box>
                 <CraftContinuityPanel />

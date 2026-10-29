@@ -155,7 +155,7 @@ export async function runSessionActionImpl(
   }
   if (action.type === 'start_private_thread') {
     const actorId = typeof payload.actorId === 'string' ? payload.actorId : action.actorId || '';
-    if (!assertActorPermission(action.type, actorId, '当前身份不能发起 AI 私聊。')) return;
+    if (!assertActorPermission(action.type, actorId, '当前身份不能发起角色私聊。')) return;
     const targetId = typeof payload.targetId === 'string' ? payload.targetId : '';
     if (!canStartPrivateThread(actorId, targetId)) {
       context.setSnackbar({

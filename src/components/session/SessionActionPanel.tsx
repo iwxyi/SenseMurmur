@@ -22,7 +22,7 @@ function getActionSurfaceSx() {
 }
 
 function getActionButtonLabel(action: SessionActionDefinition) {
-  if (action.type === 'start_private_thread') return '创建AI私聊';
+  if (action.type === 'start_private_thread') return '创建角色私聊';
   if (action.type === 'apply_calendar_patch_drafts') return '应用草案';
   if (action.type === 'question_member') return '发起质询';
   if (action.type === 'submit_evidence') return '提交证据';
@@ -62,7 +62,7 @@ function buildActionSectionTitle(title: string) {
 }
 
 function buildActionSectionSubtitle(actions: SessionActionDefinition[]) {
-  return actions.length ? '在当前阶段执行派生、投票、干预或AI私聊动作。' : undefined;
+  return actions.length ? '在当前阶段执行派生、投票、干预或角色私聊动作。' : undefined;
 }
 
 function isActionDisabled(action: SessionActionDefinition, payloads: Record<string, Record<string, string>>) {
@@ -1019,7 +1019,7 @@ function getActionLabel(action: SessionActionDefinition) {
   if (action.type === 'apply_calendar_patch_drafts') return '应用日历草案';
   if (action.type === 'ask_question') return '提问动作';
   if (action.type === 'director_intervention') return '导演干预';
-  if (action.type === 'start_private_thread') return '发起AI私聊';
+  if (action.type === 'start_private_thread') return '发起角色私聊';
   if (action.type === 'mute_member') return '禁言成员';
   if (action.type === 'unmute_member') return '解除禁言';
   if (action.type === 'question_member') return '质询成员';
@@ -1038,7 +1038,7 @@ function getActionHint(action: SessionActionDefinition) {
   if (action.type === 'apply_calendar_patch_drafts') return '把会话中的日历冲突修正草案一次性写入运行时事件。';
   if (action.type === 'ask_question') return '验证非聊天动作流：推进一个问题/环节，而不是直接发消息。';
   if (action.type === 'director_intervention') return '主持/导演对房间状态做一次明确干预。';
-  if (action.type === 'start_private_thread') return '派生AI私聊或双边互动。';
+  if (action.type === 'start_private_thread') return '发起角色私聊或双方互动。';
   if (action.type === 'mute_member') return '暂时禁止指定成员被自动调度发言。';
   if (action.type === 'unmute_member') return '恢复指定成员的自动发言资格。';
   if (action.type === 'question_member') return '指定成员回应漏洞、证据或责任问题。';

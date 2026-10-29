@@ -1145,8 +1145,8 @@ export function buildProjectedSessionActions(chat: GroupChat, actions: SessionAc
   }
   const startPrivateThread: SessionActionDefinition = {
     type: 'start_private_thread',
-    label: '发起 AI 私聊',
-    description: '从群聊中手动选择两名成员，派生一条独立 AI 私聊。',
+    label: '发起角色私聊',
+    description: '从群聊中手动选择两名成员，开启一段独立的角色私聊。',
     fields: [
       { key: 'actorId', label: '发起者', type: 'single_select', required: true, options: scopedMembers.map((member) => ({ value: member.id, label: member.name })) },
       { key: 'targetId', label: '对象', type: 'single_select', required: true, options: scopedMembers.map((member) => ({ value: member.id, label: member.name })) },

@@ -1761,12 +1761,12 @@ function buildPrivateTurnPriorityPrompt(chat: GroupChat) {
   if (chat.type !== 'direct' && chat.type !== 'ai_direct') return '';
   if (shouldUseUnifiedTurnDirective(chat)) {
     return `\n## Private Turn Priority
-${chat.type === 'ai_direct' ? '- This is an AI private thread between these two people.' : '- This is a user direct chat with this person.'}
+${chat.type === 'ai_direct' ? '- This is a private chat between these two characters.' : '- This is a user direct chat with this person.'}
 - Interpret the counterpart's words in this relationship and moment. A question can be curiosity, teasing, a bid for care, a challenge, or an actual request for work; the exchange determines what it means.
 - When the user requests a deliverable, honor its substance and format in this character's voice. Otherwise this is an ongoing exchange, not a job to complete.`;
   }
   const counterpartLine = chat.type === 'ai_direct'
-    ? '- This is an AI private thread: respond to the counterpart as a situated private partner, not as a group performer.'
+    ? '- This is a character private chat: respond to the counterpart as a situated private partner, not as a group performer.'
     : '- This is a user direct chat: answer or care for the user-facing need before drifting into ambient companionship.';
   const companionshipRule = shouldUseUnifiedTurnDirective(chat)
     ? ''

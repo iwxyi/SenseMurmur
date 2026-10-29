@@ -80,7 +80,7 @@ const chatModeLabels: Record<string, string> = {
   murder_mystery: '剧本杀',
   'open-chat': '开放聊天',
   'direct-chat': '单聊',
-  'ai-private-thread': 'AI私聊线程',
+  'ai-private-thread': '角色私聊',
   'opinion-review': '观点审议',
   'roundtable-review': '圆桌审议',
   'role-debate': '角色辩论',
