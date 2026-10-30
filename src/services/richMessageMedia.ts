@@ -167,6 +167,7 @@ type RichMediaQueueEntry = {
 
 const pendingRichMediaQueue: RichMediaQueueEntry[] = [];
 const activeRichMediaQueueEntriesById = new Map<string, RichMediaQueueEntry>();
+const longRunningRichMediaEntriesById = new Map<string, RichMediaQueueEntry>();
 const richMediaQueueListeners = new Set<() => void>();
 let runningRichMediaQueueEntry: RichMediaQueueEntry | null = null;
 let richMediaQueueSnapshotCache: RichMediaQueueSnapshotEntry[] = [];
@@ -192,8 +193,9 @@ function isRecoverableGenerativeAttachment(item: MessageAttachment): item is Gen
 function buildRichMediaQueueSnapshot(): RichMediaQueueSnapshotEntry[] {
   const entries = [
     ...(runningRichMediaQueueEntry ? [runningRichMediaQueueEntry] : []),
+    ...longRunningRichMediaEntriesById.values(),
     ...pendingRichMediaQueue,
-  ];
+  ].filter((entry, index, all) => all.findIndex((candidate) => candidate.id === entry.id) === index);
   return entries.map((entry, index) => ({
     messageId: entry.messageId,
     attachmentId: entry.attachmentId,
@@ -238,6 +240,7 @@ export function resetRichMediaQueueForTests() {
   if (!import.meta.env?.MODE?.includes('test')) return;
   pendingRichMediaQueue.splice(0, pendingRichMediaQueue.length);
   activeRichMediaQueueEntriesById.clear();
+  longRunningRichMediaEntriesById.clear();
   runningRichMediaQueueEntry = null;
   richMediaQueueSnapshotCache = [];
   latestRichMediaMessageById.clear();
@@ -612,15 +615,21 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
       });
       // The server owns the long-running task. Poll independently so other
       // media kinds can continue through their own queue work.
-      void pollVideoTask({ entry, message: workingMessage, attachment, generationJobId, taskId }).catch((error) => {
-        const latestMessage = getLatestRichMediaMessage(entry.messageId, workingMessage);
-        const latestAttachment = latestMessage.metadata?.attachments?.find((item) => item.id === attachment.id);
-        if (latestAttachment?.generationJobId !== generationJobId) return;
-        const errorText = toMediaGenerationErrorText(error, 'video');
-        richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '聊天视频生成', message: errorText, createdAt: Date.now() });
-        publishRichMediaQueueSnapshot();
-        updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id, patch: { status: 'failed', error: errorText, mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
-      });
+      longRunningRichMediaEntriesById.set(entry.id, entry);
+      publishRichMediaQueueSnapshot();
+      void pollVideoTask({ entry, message: workingMessage, attachment, generationJobId, taskId })
+        .catch((error) => {
+          const latestMessage = getLatestRichMediaMessage(entry.messageId, workingMessage);
+          const latestAttachment = latestMessage.metadata?.attachments?.find((item) => item.id === attachment.id);
+          if (latestAttachment?.generationJobId !== generationJobId) return;
+          const errorText = toMediaGenerationErrorText(error, 'video');
+          richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '聊天视频生成', message: errorText, createdAt: Date.now() });
+          updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id, patch: { status: 'failed', error: errorText, mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
+        })
+        .finally(() => {
+          longRunningRichMediaEntriesById.delete(entry.id);
+          publishRichMediaQueueSnapshot();
+        });
       return;
     }
 

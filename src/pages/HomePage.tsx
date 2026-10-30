@@ -499,6 +499,8 @@ export default function HomePage() {
   const [companionshipSnapshot, setCompanionshipSnapshot] = useState<HomeCompanionshipSnapshot | null>(null);
   const [calendarNow, setCalendarNow] = useState(() => Date.now());
   const richMediaQueue = useSyncExternalStore(subscribeRichMediaQueue, getRichMediaQueueSnapshot, getRichMediaQueueSnapshot);
+  const richMediaVideoQueue = useMemo(() => richMediaQueue.filter((entry) => entry.kind === 'video'), [richMediaQueue]);
+  const richMediaNonVideoQueue = useMemo(() => richMediaQueue.filter((entry) => entry.kind !== 'video'), [richMediaQueue]);
   const inAppNotifications = useInAppNotificationStore((state) => state.items);
   // Persisted local chat summaries render immediately; cloud prefetch below
   // only merges fresher data and may update this ordering afterwards.
@@ -980,11 +982,19 @@ export default function HomePage() {
       onOpen: () => navigate('/characters'),
       attention: true,
     }] : []),
-    ...(richMediaQueue.length ? [{
-      label: richMediaQueue[0]?.kind === 'audio' ? '正在生成语音' : '正在生成图片',
-      value: richMediaQueue.length > 1 ? `${richMediaQueue[0]?.position || 1}/${richMediaQueue[0]?.total || richMediaQueue.length}` : 1,
+    ...(richMediaVideoQueue.length ? [{
+      label: '正在生成视频',
+      value: richMediaVideoQueue.length > 1 ? `${richMediaVideoQueue.length} 个任务` : 1,
       icon: <AutoAwesomeIcon />,
-      color: richMediaQueue[0]?.kind === 'audio' ? 'primary.main' : 'secondary.main',
+      color: 'secondary.main',
+      onOpen: () => navigate('/chats'),
+      attention: true,
+    }] : []),
+    ...(richMediaNonVideoQueue.length ? [{
+      label: richMediaNonVideoQueue[0]?.kind === 'audio' ? '正在生成语音' : '正在生成图片',
+      value: richMediaNonVideoQueue.length > 1 ? `${richMediaNonVideoQueue[0]?.position || 1}/${richMediaNonVideoQueue[0]?.total || richMediaNonVideoQueue.length}` : 1,
+      icon: <AutoAwesomeIcon />,
+      color: richMediaNonVideoQueue[0]?.kind === 'audio' ? 'primary.main' : 'secondary.main',
       onOpen: () => navigate('/chats'),
       attention: true,
     }] : []),
