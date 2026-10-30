@@ -43,6 +43,7 @@ export type AiUsageType =
   | 'character_artifact'
   | 'moment_generation'
   | 'image_generation'
+  | 'video_generation'
   | 'web_search'
   | 'model_test'
   | 'other';
@@ -139,6 +140,55 @@ export interface AudioTranscriptionOptions {
 export interface AudioTranscriptionResult {
   text: string;
   raw?: JSONValue;
+}
+
+export type AiMediaTaskStatus = 'submitting' | 'running' | 'submission_unknown' | 'billing_pending' | 'succeeded' | 'failed';
+
+export interface AiMediaTask {
+  task_id: string;
+  model: string;
+  status: AiMediaTaskStatus;
+  result: unknown;
+  chargedAmount: number | null;
+  reservedAmount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Submit an ACE media task through the authenticated backend proxy. */
+export async function submitAiMediaTask(options: {
+  profile: Pick<APIConfig, 'provider' | 'model'>;
+  prompt: string;
+  parameters?: Record<string, unknown>;
+  signal?: AbortSignal;
+  aiUsage?: AiUsageMetadata;
+}) {
+  const result = await api.generateAiMedia({
+    provider: options.profile.provider,
+    model: options.profile.model,
+    prompt: options.prompt,
+    async: true,
+    ...(options.parameters || {}),
+    ...(options.aiUsage ? { metadata: { aiUsage: options.aiUsage } } : {}),
+  });
+  return result;
+}
+
+export function extractAiMediaResultUrl(result: unknown): string | undefined {
+  const seen = new Set<unknown>();
+  const visit = (value: unknown): string | undefined => {
+    if (typeof value === 'string' && /^https?:\/\//i.test(value)) return value;
+    if (!value || typeof value !== 'object' || seen.has(value)) return undefined;
+    seen.add(value);
+    if (Array.isArray(value)) return value.reduce<string | undefined>((found, item) => found || visit(item), undefined);
+    const record = value as Record<string, unknown>;
+    for (const key of ['url', 'video_url', 'videoUrl', 'output_url', 'outputUrl', 'file_url', 'fileUrl', 'download_url', 'downloadUrl']) {
+      const found = visit(record[key]);
+      if (found) return found;
+    }
+    return Object.values(record).reduce<string | undefined>((found, item) => found || visit(item), undefined);
+  };
+  return visit(result);
 }
 
 function trimTrailingSlashes(value: string) {

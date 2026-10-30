@@ -7,6 +7,7 @@ import {
   generateResponse,
   synthesizeSpeech,
   transcribeAudio,
+  submitAiMediaTask,
   type AudioTranscriptionOptions,
   type AudioTranscriptionResult,
   type AiUsageMetadata,
@@ -24,6 +25,7 @@ export type GenerationIntent =
   | 'chat-json'
   | 'chat-image'
   | 'chat-audio'
+  | 'chat-video'
   | 'character-reference'
   | 'avatar'
   | 'audio-transcription';
@@ -72,6 +74,17 @@ export interface SpeechGenerationAdapterOptions extends SpeechSynthesisOptions {
 export interface AudioTranscriptionAdapterOptions extends AudioTranscriptionOptions {
   profile: AIModelProfile | APIConfig;
   intent?: GenerationIntent;
+}
+
+export interface VideoGenerationAdapterOptions {
+  profile: AIModelProfile;
+  prompt: string;
+  aspectRatio?: string;
+  duration?: number;
+  resolution?: string;
+  referenceImages?: ImageReferenceInput[];
+  signal?: AbortSignal;
+  aiUsage?: AiUsageMetadata;
 }
 
 function profileToApi(profile: AIModelProfile | APIConfig): APIConfig {
@@ -183,6 +196,21 @@ function defaultImageGenerationUsage(intent: GenerationIntent): AiUsageMetadata 
 
 export async function generateImageWithAdapter(params: ImageGenerationAdapterOptions): Promise<GeneratedImage[]> {
   return generateImage(profileToApi(params.profile), resolveImageGenerationRequest(params));
+}
+
+export async function generateVideoWithAdapter(params: VideoGenerationAdapterOptions) {
+  return submitAiMediaTask({
+    profile: profileToApi(params.profile),
+    prompt: params.prompt,
+    parameters: {
+      ...(params.aspectRatio ? { aspect_ratio: params.aspectRatio } : {}),
+      ...(params.duration ? { duration: params.duration } : {}),
+      ...(params.resolution ? { resolution: params.resolution } : {}),
+      ...(params.referenceImages?.length ? { image_urls: params.referenceImages.map((item) => item.url) } : {}),
+    },
+    signal: params.signal,
+    aiUsage: params.aiUsage || { type: 'video_generation', label: '聊天视频生成' },
+  });
 }
 
 export async function generateTextWithAdapter(params: TextGenerationAdapterOptions): Promise<string> {

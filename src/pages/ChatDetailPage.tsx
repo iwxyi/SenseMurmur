@@ -111,7 +111,7 @@ const STORY_READING_POSITION_SAVE_MS = 700;
 
 function isRecoverableRichMediaAttachment(attachment: Pick<MessageAttachment, 'kind' | 'status'>) {
   return (
-    (attachment.kind === 'image' || attachment.kind === 'audio' || attachment.kind === 'sticker')
+    (attachment.kind === 'image' || attachment.kind === 'audio' || attachment.kind === 'video' || attachment.kind === 'sticker')
     && (attachment.status === 'queued' || attachment.status === 'generating')
   );
 }

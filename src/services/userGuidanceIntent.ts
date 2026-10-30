@@ -5,7 +5,7 @@ import type { DirectorBeatType } from './directorIntent';
 export type UserGuidanceIntentKind = 'topic_shift' | 'direct_reply' | 'media_request';
 
 export interface UserGuidanceMediaRequest {
-  kind: 'image';
+  kind: 'image' | 'video';
   subjectActorIds: string[];
   subjectText: string;
   actionText: string;
@@ -83,9 +83,9 @@ export function normalizeUserGuidanceIntent(value: unknown, rawText: string, cha
     ? source.beatType as DirectorBeatType
     : kind === 'direct_reply' || kind === 'media_request' ? 'answer' : 'invite';
   const mediaSource = source.mediaRequest && typeof source.mediaRequest === 'object' ? source.mediaRequest as Record<string, unknown> : null;
-  const mediaRequest = kind === 'media_request' && mediaSource?.kind === 'image'
+  const mediaRequest = kind === 'media_request' && (mediaSource?.kind === 'image' || mediaSource?.kind === 'video')
     ? {
-        kind: 'image' as const,
+        kind: mediaSource.kind as 'image' | 'video',
         subjectActorIds: knownUniqueIds(mediaSource.subjectActorIds, characters),
         subjectText: compactText(mediaSource.subjectText, 160),
         actionText: compactText(mediaSource.actionText, 240) || fallback.rawText,

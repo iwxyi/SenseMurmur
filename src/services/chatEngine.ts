@@ -2352,13 +2352,15 @@ ${phaseLine[state.phase]}
 - Some real chat turns mainly change social temperature, attention, consent, resistance, or timing. Those are valid when they fit the room and do not dodge a direct user task.${suppressedLine}${deferredLine}`;
 }
 
-function buildUserGuidancePrompt(guidance: UserGuidanceIntent | null | undefined, speaker: AICharacter, characters: AICharacter[], capabilities: { image: boolean; audio: boolean }, priorGuidanceReplies = 0) {
+function buildUserGuidancePrompt(guidance: UserGuidanceIntent | null | undefined, speaker: AICharacter, characters: AICharacter[], capabilities: { image: boolean; audio: boolean; video?: boolean }, priorGuidanceReplies = 0) {
   if (!guidance) return '';
   const requestedActors = guidance.actorIds.map((id) => getCharacterNameById(characters, id));
   const isRequestedActor = guidance.actorIds.length ? guidance.actorIds.includes(speaker.id) : guidance.mentionedActorIds.includes(speaker.id);
   const subjectNames = guidance.mediaRequest?.subjectActorIds.map((id) => getCharacterNameById(characters, id)) || [];
   const mediaLine = guidance.mediaRequest
-    ? `\n- Media request: the user is asking for an image. Subject: ${subjectNames.length ? subjectNames.join('、') : guidance.mediaRequest.subjectText}. Requested visual action: ${guidance.mediaRequest.actionText}.${capabilities.image ? '\n- You have image-generation capability in this turn. If you are the requested actor, set mediaDecision.image.shouldGenerate=true and create a concrete prompt for the requested image. Your visible message should sound like you are sending or presenting that image now, not like you are merely discussing the idea.\n- This request is not optional. Do not answer with ordinary banter before the image decision. The first semantic move must complete the requested image action.' : '\n- You do not have image-generation capability in this turn. If you are the requested actor, say in character that you cannot send/generate the image now instead of pretending an image was sent.'}`
+    ? `\n- Media request: the user is asking for a ${guidance.mediaRequest.kind}. Subject: ${subjectNames.length ? subjectNames.join('、') : guidance.mediaRequest.subjectText}. Requested action: ${guidance.mediaRequest.actionText}.${guidance.mediaRequest.kind === 'video'
+      ? (capabilities.video ? '\n- You have video-generation capability in this turn. Set mediaDecision.video.shouldGenerate=true and create a concrete prompt for the requested video. Your visible message should present the video as being generated now.' : '\n- You do not have video-generation capability in this turn. Say so in character instead of pretending a video was sent.')
+      : (capabilities.image ? '\n- You have image-generation capability in this turn. If you are the requested actor, set mediaDecision.image.shouldGenerate=true and create a concrete prompt for the requested image. Your visible message should sound like you are sending or presenting that image now.' : '\n- You do not have image-generation capability in this turn. If you are the requested actor, say in character that you cannot send/generate the image now instead of pretending an image was sent.')}\n- This request is not optional. Complete the requested media action before ordinary banter.`
     : '';
   const voiceLine = guidance.voiceRequest
     ? `\n- Voice request: the user explicitly wants to hear this reply as audio. If TTS capability is available, set mediaDecision.audio.shouldGenerate=true and make audio.text the exact spoken content. Keep this as a voice-first reply rather than merely discussing the request.`
@@ -2421,18 +2423,20 @@ Guidance retry:
 
 function mergeGuidanceMediaDecision(params: {
   decision: MediaGenerationDecision | null | undefined;
-  mediaCapabilities?: { image: boolean; audio: boolean };
+  mediaCapabilities?: { image: boolean; audio: boolean; video?: boolean };
 }): MediaGenerationDecision | null | undefined {
   const supportedDecision: MediaGenerationDecision | null | undefined = params.decision ? {
     ...params.decision,
     images: params.mediaCapabilities?.image === false ? undefined : params.decision.images,
     image: params.mediaCapabilities?.image === false ? undefined : params.decision.image,
     audio: params.mediaCapabilities?.audio === false ? undefined : params.decision.audio,
+    video: params.mediaCapabilities?.video === false ? undefined : params.decision.video,
   } : params.decision;
   const hasSupportedDecision = Boolean(
     supportedDecision?.images?.some((image) => image.shouldGenerate)
     || supportedDecision?.image?.shouldGenerate
-    || supportedDecision?.audio?.shouldGenerate,
+    || supportedDecision?.audio?.shouldGenerate
+    || supportedDecision?.video?.shouldGenerate,
   );
   return hasSupportedDecision ? supportedDecision : undefined;
 }
@@ -2459,7 +2463,7 @@ function resolveApiConfigForCharacter(character: AICharacter, apiConfig: APIConf
   return apiConfig as APIConfig;
 }
 
-function resolveProfileForCharacter(character: AICharacter, profiles: AIModelProfile[] | undefined, type: 'image' | 'audio') {
+function resolveProfileForCharacter(character: AICharacter, profiles: AIModelProfile[] | undefined, type: 'image' | 'audio' | 'video') {
   if (!profiles?.length) return null;
   const profileId = type === 'audio'
     ? character.modelProfileIds?.tts || getCharacterModelProfileId(character, type)
@@ -2482,11 +2486,13 @@ function buildMediaCapabilities(chat: GroupChat | AICharacter, character: AIChar
   const resolvedProfiles = Array.isArray(character) ? character : profiles;
   const imageProfile = resolveProfileForCharacter(resolvedCharacter, resolvedProfiles, 'image');
   const audioProfile = resolveProfileForCharacter(resolvedCharacter, resolvedProfiles, 'audio');
+  const videoProfile = resolveProfileForCharacter(resolvedCharacter, resolvedProfiles, 'video');
   return {
     image: Boolean(imageProfile),
     // Learning listening material may use the configured TTS default even when
     // the teacher character has no personal voice assignment.
     audio: Boolean(audioProfile),
+    video: Boolean(videoProfile),
     sticker: Boolean(useAuthStore.getState().authMode === 'cloud'
       && useAuthStore.getState().user?.alapiDoutuEnabled === true
       && useSettingsStore.getState().enableChatStickers
@@ -2516,10 +2522,10 @@ function createAttachmentId(kind: string, now: number, seedParts: Array<string |
 
 function normalizeMediaDecision(
   decision: MediaGenerationDecision | null | undefined,
-  capabilities: { image: boolean; audio: boolean; sticker?: boolean },
+  capabilities: { image: boolean; audio: boolean; video?: boolean; sticker?: boolean },
   content: string,
   richDelivery?: RichDeliveryPolicy,
-  explicitRequests: { image?: boolean; audio?: boolean; sticker?: boolean } = {},
+  explicitRequests: { image?: boolean; audio?: boolean; video?: boolean; sticker?: boolean } = {},
 ) {
   const normalized: MediaGenerationDecision = {};
   const canInitiate = (kind: 'image' | 'audio' | 'sticker') => richDelivery?.[kind].proactivity !== 'off' || Boolean(explicitRequests[kind]);
@@ -2559,10 +2565,22 @@ function normalizeMediaDecision(
       style: decision.audio.style || undefined,
     };
   }
+  if (capabilities.video && (richDelivery?.video?.proactivity !== 'off' || explicitRequests.video) && decision?.video?.shouldGenerate) {
+    normalized.video = {
+      shouldGenerate: true,
+      reason: decision.video.reason || '',
+      prompt: decision.video.prompt || content,
+      altText: decision.video.altText || content.slice(0, 80) || 'AI 生成视频',
+      aspectRatio: decision.video.aspectRatio,
+      resolution: decision.video.resolution,
+      duration: decision.video.duration,
+      referenceImageIds: decision.video.referenceImageIds?.filter(Boolean),
+    };
+  }
   if (capabilities.sticker && canInitiate('sticker') && decision?.sticker?.shouldSend) {
     normalized.sticker = { shouldSend: true, keyword: decision.sticker.keyword || content, altText: decision.sticker.altText || '表情包' };
   }
-  return normalized.images?.length || normalized.audio || normalized.sticker ? normalized : null;
+  return normalized.images?.length || normalized.audio || normalized.video || normalized.sticker ? normalized : null;
 }
 
 function latestUserReferenceImages(messages: Message[]) {
@@ -2617,7 +2635,7 @@ function selectedDecisionReferenceImages(decision: MediaGenerationDecision['imag
 
 function buildMessageMetadata(params: {
   decision: MediaGenerationDecision | null | undefined;
-  capabilities: { image: boolean; audio: boolean; sticker?: boolean };
+  capabilities: { image: boolean; audio: boolean; video?: boolean; sticker?: boolean };
   richDelivery?: RichDeliveryPolicy;
   explicitMediaRequests?: { image?: boolean; audio?: boolean; sticker?: boolean };
   content: string;
@@ -2689,6 +2707,30 @@ function buildMessageMetadata(params: {
       ttsSpeed: decision.audio.speed,
       ttsPitch: decision.audio.pitch,
       ttsStyle: decision.audio.style,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+  if (decision?.video?.shouldGenerate) {
+    const videoPrompt = decision.video.prompt || params.content;
+    const referenceImages = decision.video.referenceImageIds?.length
+      ? imageReferenceMap(params.activeMessages || [])
+      : new Map();
+    const resolvedReferences = (decision.video.referenceImageIds || []).flatMap((id) => {
+      const reference = referenceImages.get(id);
+      return reference ? [reference] : [];
+    });
+    attachments.push({
+      id: createAttachmentId('video', now, [videoPrompt, params.content]),
+      kind: 'video',
+      status: 'queued',
+      altText: decision.video.altText || 'AI 生成视频',
+      promptText: videoPrompt,
+      aspectRatio: decision.video.aspectRatio,
+      videoResolution: decision.video.resolution,
+      videoDuration: decision.video.duration,
+      referenceImages: resolvedReferences.length ? resolvedReferences : undefined,
+      referenceImageIds: decision.video.referenceImageIds?.filter(Boolean),
       createdAt: now,
       updatedAt: now,
     });

@@ -13,6 +13,7 @@ export interface GuidanceExecutionEvaluation {
 export interface GuidanceExecutionOptions {
   mediaCapabilities?: {
     image?: boolean;
+    video?: boolean;
     audio?: boolean;
   };
   /** Structured media decisions returned for individual message segments. */
@@ -87,7 +88,8 @@ function evaluateMediaGuidanceContent(guidance: UserGuidanceIntent, options?: Gu
   ));
   if (hasStructuredImageDecision) return 'matched';
   if (request.kind === 'image' && options?.mediaCapabilities?.image === false) return 'matched';
-  return 'missing_requested_image';
+  if (request.kind === 'video' && options?.mediaCapabilities?.video === false) return 'matched';
+  return request.kind === 'video' ? 'missing_requested_video' : 'missing_requested_image';
 }
 
 export function evaluateGuidanceGeneratedContent(

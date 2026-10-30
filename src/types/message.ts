@@ -38,6 +38,8 @@ export interface MessageAttachment {
   width?: number;
   height?: number;
   generationJobId?: string;
+  /** Server-side persisted async media task. Used to resume polling after reload. */
+  mediaTaskId?: string;
   promptText?: string;
   /** Distinguishes generated learning audio from ordinary character voice messages. */
   audioPurpose?: 'chat_voice' | 'listening_exercise';
@@ -51,6 +53,8 @@ export interface MessageAttachment {
   semanticSummary?: string;
   aspectRatio?: string;
   imageSize?: string;
+  videoResolution?: string;
+  videoDuration?: number;
   targetArtifactId?: string;
   targetImageIds?: string[];
   referenceImageIds?: string[];
@@ -92,6 +96,16 @@ export interface MediaGenerationDecision {
     targetImageIds?: string[];
     referenceImageIds?: string[];
     styleImageIds?: string[];
+  } | null;
+  video?: {
+    shouldGenerate: boolean;
+    reason?: string;
+    prompt?: string;
+    altText?: string;
+    aspectRatio?: string;
+    duration?: number;
+    resolution?: string;
+    referenceImageIds?: string[];
   } | null;
   audio?: {
     shouldGenerate: boolean;
@@ -482,8 +496,8 @@ export interface MessageMetadata {
       validated: boolean;
       retryCount: number;
       rejectedDraftCount: number;
-      rejectedReasons?: Array<'wrong_speaker' | 'missing_requested_image' | 'missing_requested_subject' | 'missing_topic_focus' | 'missing_question_answer' | 'missing_direct_reply_focus' | 'suppression_handoff_required' | 'empty_content'>;
-      finalReason?: 'matched' | 'wrong_speaker' | 'missing_requested_image' | 'missing_requested_subject' | 'missing_topic_focus' | 'missing_question_answer' | 'missing_direct_reply_focus' | 'suppression_handoff_required' | 'empty_content';
+      rejectedReasons?: Array<'wrong_speaker' | 'missing_requested_image' | 'missing_requested_video' | 'missing_requested_subject' | 'missing_topic_focus' | 'missing_question_answer' | 'missing_direct_reply_focus' | 'suppression_handoff_required' | 'empty_content'>;
+      finalReason?: 'matched' | 'wrong_speaker' | 'missing_requested_image' | 'missing_requested_video' | 'missing_requested_subject' | 'missing_topic_focus' | 'missing_question_answer' | 'missing_direct_reply_focus' | 'suppression_handoff_required' | 'empty_content';
       forcedMediaQueued?: boolean;
     };
     worldInfluence?: {

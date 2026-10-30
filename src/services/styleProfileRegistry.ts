@@ -14,6 +14,7 @@ export interface RichDeliveryPolicy {
   };
   image: { proactivity: RichDeliveryProactivity; explicitRequest: boolean };
   audio: { proactivity: RichDeliveryProactivity; explicitRequest: boolean };
+  video?: { proactivity: RichDeliveryProactivity; explicitRequest: boolean };
   sticker: { proactivity: RichDeliveryProactivity; explicitRequest: boolean };
 }
 

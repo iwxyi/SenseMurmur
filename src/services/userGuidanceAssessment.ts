@@ -43,11 +43,11 @@ export async function assessUserGuidance(params: {
     '只要 actorIds 非空，就表示这些角色拥有下一轮发言或执行的优先权，不因 kind 或 beatType 改成随机选人。',
     'suppressedActorIds 是明确不应插话或被否定为执行者的角色；deferredActorIds 是暂缓发言的角色。只能填写成员 id。',
     '普通聊天也要返回 topic_shift，但只持续 1 轮。只有明确需要跨轮完成的要求才提高 maxTurns；不得擅自把短句扩大为长期命令。',
-    'kind 只能是 topic_shift、direct_reply、media_request。图片生成/发送才是 media_request；看图、评论图片不是。',
+    'kind 只能是 topic_shift、direct_reply、media_request。图片或视频生成/发送才是 media_request；看图、评论媒体不是。',
     'beatType 只能是 answer、challenge、defend、escalate、cool_down、reveal、deflect、summarize、invite；invite 只表示交流动作，不等于必须安排线下或社交活动。',
     'pressure 为 0 到 1；maxTurns 为 1 到 8；minTargetTurns 为每个目标最低回应轮数，通常为 1。',
     'hasHardConstraints 仅表示用户明确要求后续必须持续遵守的边界或条件。voiceRequest、stickerRequest 仅在明确请求语音、表情/贴纸时为 true。',
-    'mediaRequest 仅在 kind=media_request 时填写：{"kind":"image","subjectActorIds":[],"subjectText":"","actionText":""}。',
+    'mediaRequest 仅在 kind=media_request 时填写：{"kind":"image|video","subjectActorIds":[],"subjectText":"","actionText":""}。',
     '返回且仅返回：{"kind":"...","actorIds":[],"mentionedActorIds":[],"hardConstraintActorIds":[],"suppressedActorIds":[],"deferredActorIds":[],"hasHardConstraints":false,"voiceRequest":false,"stickerRequest":false,"focusText":"","beatType":"...","pressure":0.5,"maxTurns":1,"minTargetTurns":1,"reason":"","mediaRequest":null}',
   ].join('\n');
   const payload = {

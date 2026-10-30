@@ -3,7 +3,8 @@ import type { Message, MessageAttachment, MessageAttachmentKind, MessageMetadata
 import { isAIProfileUsable, type AIModelProfile } from '../types/settings';
 import { api } from './api';
 import { workspaceFetch as fetch } from './workspaceLifecycle';
-import { generateImageWithAdapter, synthesizeSpeechWithAdapter } from './aiGenerationAdapter';
+import { generateImageWithAdapter, generateVideoWithAdapter, synthesizeSpeechWithAdapter } from './aiGenerationAdapter';
+import { extractAiMediaResultUrl } from './aiClient';
 import { readAuthSnapshot } from './authSnapshot';
 import { logRecoverableError, reportRecoverableError } from './diagnostics';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
@@ -15,7 +16,7 @@ function findProfile(profiles: AIModelProfile[], id?: string | null) {
   return isAIProfileUsable(profile) ? profile : null;
 }
 
-function findGenerationProfile(profiles: AIModelProfile[], type: 'image' | 'audio', id?: string | null) {
+function findGenerationProfile(profiles: AIModelProfile[], type: 'image' | 'audio' | 'video', id?: string | null) {
   const profile = findProfile(profiles, id)
     || (type === 'audio' ? profiles.find((item) => item.type === 'tts' && item.isDefault && isAIProfileUsable(item)) : null)
     || profiles.find((item) => item.type === type && item.isDefault && isAIProfileUsable(item))
@@ -107,22 +108,24 @@ function isAbortError(error: unknown) {
     : error instanceof Error && (error.name === 'AbortError' || /aborted/i.test(error.message));
 }
 
-type GenerativeAttachmentKind = Extract<MessageAttachmentKind, 'image' | 'audio' | 'sticker'>;
+type GenerativeAttachmentKind = Extract<MessageAttachmentKind, 'image' | 'audio' | 'video' | 'sticker'>;
 type GenerativeAttachment = MessageAttachment & { kind: GenerativeAttachmentKind };
 
 function isGenerativeAttachment(attachment: MessageAttachment): attachment is GenerativeAttachment {
-  return attachment.kind === 'image' || attachment.kind === 'audio' || attachment.kind === 'sticker';
+  return attachment.kind === 'image' || attachment.kind === 'audio' || attachment.kind === 'video' || attachment.kind === 'sticker';
 }
 
 function toMediaGenerationErrorText(error: unknown, kind: GenerativeAttachmentKind) {
   if (isAbortError(error)) {
     if (kind === 'audio') return '语音生成超时，请稍后重试。';
     if (kind === 'sticker') return '表情包搜索超时，请稍后重试。';
+    if (kind === 'video') return '视频生成超时，请稍后重试。';
     return '图片生成超时，请稍后重试。';
   }
   if (error instanceof Error) return error.message;
   if (kind === 'audio') return String(error || '语音生成失败');
   if (kind === 'sticker') return String(error || '表情包搜索失败');
+  if (kind === 'video') return String(error || '视频生成失败');
   return String(error || '图片生成失败');
 }
 
@@ -425,6 +428,57 @@ async function attachAssistantImageArtifact(params: {
   return nextMessage;
 }
 
+async function downloadMediaUrlAsDataUrl(url: string) {
+  if (url.startsWith('data:')) return url;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`视频结果下载失败 (${response.status})`);
+  return blobToDataUrl(await response.blob());
+}
+
+async function pollVideoTask(params: {
+  entry: RichMediaQueueEntry;
+  message: Message;
+  attachment: GenerativeAttachment;
+  generationJobId: string;
+  taskId: string;
+}) {
+  let delay = 5_000;
+  for (let attempt = 0; attempt < 720; attempt += 1) {
+    const task = await api.getAiMediaTask(params.taskId);
+    const latestMessage = getLatestRichMediaMessage(params.entry.messageId, params.message);
+    const latestAttachment = latestMessage.metadata?.attachments?.find((item) => item.id === params.attachment.id);
+    if (latestAttachment?.generationJobId !== params.generationJobId) return;
+    if (task.status === 'failed') throw new Error('视频生成失败');
+    if (task.status === 'succeeded') {
+      const url = extractAiMediaResultUrl(task.result);
+      if (!url) throw new Error('视频任务已完成，但未返回视频地址');
+      const dataUrl = await downloadMediaUrlAsDataUrl(url);
+      const asset = isLocalOnlyMediaMode()
+        ? { id: undefined, url: dataUrl, mimeType: 'video/mp4', sizeBytes: dataUrl.length, checksum: undefined }
+        : await api.createMediaAsset({
+            chatId: latestMessage.chatId,
+            messageId: latestMessage.serverId || latestMessage.id,
+            attachmentId: params.attachment.id,
+            kind: 'video',
+            dataUrl,
+            description: params.attachment.caption || params.attachment.altText,
+            promptText: params.attachment.promptText,
+            sourceType: 'chat-video',
+          });
+      updateRichMediaMessage({
+        message: latestMessage,
+        attachmentId: params.attachment.id,
+        patch: { status: 'ready', mediaTaskId: undefined, assetId: asset.id, url: asset.url || dataUrl, mimeType: asset.mimeType, sizeBytes: asset.sizeBytes, checksum: asset.checksum, generationJobId: params.generationJobId },
+        upsertMessage: params.entry.upsertMessage,
+      });
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(30_000, Math.round(delay * 1.25));
+  }
+  throw new Error('视频生成超时，请稍后重试。');
+}
+
 async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
   const messageId = entry.messageId;
   const currentMessage = getLatestRichMediaMessage(messageId, entry.message);
@@ -532,6 +586,46 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
         upsertMessage: entry.upsertMessage,
       });
       rememberRichMediaMessage(workingMessage);
+      return;
+    }
+
+    if (attachment.kind === 'video') {
+      const profile = findGenerationProfile(entry.aiProfiles, 'video', entry.character?.modelProfileIds?.video);
+      if (!profile || !attachment.promptText) throw new Error('视频模型未配置');
+      const referenceImages = resolveAttachmentReferenceImages(attachment, [
+        ...(entry.messages || []),
+        currentMessage,
+      ]);
+      const task = attachment.mediaTaskId
+        ? { task_id: attachment.mediaTaskId }
+        : await generateVideoWithAdapter({
+            profile,
+            prompt: attachment.promptText,
+            aspectRatio: attachment.aspectRatio,
+            duration: attachment.videoDuration,
+            resolution: attachment.videoResolution || '720p',
+            referenceImages,
+            aiUsage: { type: 'video_generation', label: '聊天视频生成', scope: 'chat', resourceId: workingMessage.chatId },
+          });
+      const taskId = task.task_id;
+      if (!taskId) throw new Error('视频任务提交失败：未返回任务 ID');
+      workingMessage = updateRichMediaMessage({
+        message: workingMessage,
+        attachmentId: attachment.id,
+        patch: { status: 'generating', mediaTaskId: taskId, generationJobId },
+        upsertMessage: entry.upsertMessage,
+      });
+      // The server owns the long-running task. Poll independently so other
+      // media kinds can continue through their own queue work.
+      void pollVideoTask({ entry, message: workingMessage, attachment, generationJobId, taskId }).catch((error) => {
+        const latestMessage = getLatestRichMediaMessage(entry.messageId, workingMessage);
+        const latestAttachment = latestMessage.metadata?.attachments?.find((item) => item.id === attachment.id);
+        if (latestAttachment?.generationJobId !== generationJobId) return;
+        const errorText = toMediaGenerationErrorText(error, 'video');
+        richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '聊天视频生成', message: errorText, createdAt: Date.now() });
+        publishRichMediaQueueSnapshot();
+        updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id, patch: { status: 'failed', error: errorText, mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
+      });
       return;
     }
 
