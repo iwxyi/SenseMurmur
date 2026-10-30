@@ -191,6 +191,32 @@ export function extractAiMediaResultUrl(result: unknown): string | undefined {
   return visit(result);
 }
 
+export async function waitForAiMediaTask(taskId: string, options: {
+  signal?: AbortSignal;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  maxAttempts?: number;
+  onUpdate?: (task: AiMediaTask) => void;
+} = {}) {
+  let delay = options.initialDelayMs ?? 5_000;
+  const maxDelay = options.maxDelayMs ?? 30_000;
+  const maxAttempts = options.maxAttempts ?? 720;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    options.signal?.throwIfAborted();
+    const task = await api.getAiMediaTask(taskId);
+    options.onUpdate?.(task);
+    if (task.status === 'succeeded' || task.status === 'failed') return task;
+    await new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const abort = () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); reject(options.signal?.reason || new DOMException('Aborted', 'AbortError')); };
+      timer = setTimeout(() => { options.signal?.removeEventListener('abort', abort); resolve(); }, delay);
+      options.signal?.addEventListener('abort', abort, { once: true });
+    });
+    delay = Math.min(maxDelay, Math.round(delay * 1.25));
+  }
+  throw new Error('媒体生成超时，请稍后重试。');
+}
+
 function trimTrailingSlashes(value: string) {
   return value.replace(/\/+$/, '');
 }

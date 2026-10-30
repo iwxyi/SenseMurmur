@@ -4,7 +4,7 @@ import { isAIProfileUsable, type AIModelProfile } from '../types/settings';
 import { api } from './api';
 import { workspaceFetch as fetch } from './workspaceLifecycle';
 import { generateImageWithAdapter, generateVideoWithAdapter, synthesizeSpeechWithAdapter } from './aiGenerationAdapter';
-import { extractAiMediaResultUrl } from './aiClient';
+import { extractAiMediaResultUrl, waitForAiMediaTask } from './aiClient';
 import { readAuthSnapshot } from './authSnapshot';
 import { logRecoverableError, reportRecoverableError } from './diagnostics';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
@@ -442,14 +442,12 @@ async function pollVideoTask(params: {
   generationJobId: string;
   taskId: string;
 }) {
-  let delay = 5_000;
-  for (let attempt = 0; attempt < 720; attempt += 1) {
-    const task = await api.getAiMediaTask(params.taskId);
-    const latestMessage = getLatestRichMediaMessage(params.entry.messageId, params.message);
-    const latestAttachment = latestMessage.metadata?.attachments?.find((item) => item.id === params.attachment.id);
-    if (latestAttachment?.generationJobId !== params.generationJobId) return;
-    if (task.status === 'failed') throw new Error('视频生成失败');
-    if (task.status === 'succeeded') {
+  const task = await waitForAiMediaTask(params.taskId);
+  const latestMessage = getLatestRichMediaMessage(params.entry.messageId, params.message);
+  const latestAttachment = latestMessage.metadata?.attachments?.find((item) => item.id === params.attachment.id);
+  if (latestAttachment?.generationJobId !== params.generationJobId) return;
+  if (task.status === 'failed') throw new Error('视频生成失败');
+  if (task.status === 'succeeded') {
       const url = extractAiMediaResultUrl(task.result);
       if (!url) throw new Error('视频任务已完成，但未返回视频地址');
       const dataUrl = await downloadMediaUrlAsDataUrl(url);
@@ -471,12 +469,9 @@ async function pollVideoTask(params: {
         patch: { status: 'ready', mediaTaskId: undefined, assetId: asset.id, url: asset.url || dataUrl, mimeType: asset.mimeType, sizeBytes: asset.sizeBytes, checksum: asset.checksum, generationJobId: params.generationJobId },
         upsertMessage: params.entry.upsertMessage,
       });
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, delay));
-    delay = Math.min(30_000, Math.round(delay * 1.25));
+    return;
   }
-  throw new Error('视频生成超时，请稍后重试。');
+  throw new Error('媒体任务未完成');
 }
 
 async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
