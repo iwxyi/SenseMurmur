@@ -148,10 +148,12 @@ export const AI_PROVIDER_CATALOG: AIProviderCatalogEntry[] = [
     family: '官方模型',
     hidden: true,
     defaults: {
-      image: { baseUrl: '/api/ai', model: 'nano-banana-pro' },
+      image: { baseUrl: '/api/ai', model: 'nano-banana-2' },
+      video: { baseUrl: '/api/ai', model: 'doubao-seedance-2-0-fast-260128' },
     },
     popularModels: {
-      image: ['nano-banana-pro'],
+      image: ['nano-banana-2'],
+      video: ['doubao-seedance-2-0-fast-260128'],
     },
   },
   {

@@ -74,6 +74,8 @@ export interface OfficialAiProviderInfo {
   family: string;
   defaultModel: string;
   imageDefaultModel?: string;
+  videoDefaultModel?: string;
+  defaultModels?: Partial<Record<'chat' | 'image' | 'audio' | 'video', string>>;
   hidden?: boolean;
   sortOrder?: number;
   defaultForAssignment?: boolean;
@@ -1060,7 +1062,7 @@ class ApiClient {
       visualReferenceImages?: CharacterVisualReferenceImage[];
       personalityDrift?: object; emotionalState?: object; soulState?: object; coreProfile?: object;
       speechProfile?: object; voiceConfig?: object; relationships?: object[]; memory?: object; layeredMemories?: object[]; intervention?: object; runtimeTimeline?: Array<{ type: string; text: string; createdAt: number }>;
-      modelProfileId?: string | null; modelProfileIds?: Partial<Record<'text' | 'image' | 'audio' | 'document', string | null>>; bubbleStyle?: BubbleStyleDefinition | null; bubbleStyleId?: string | null;
+      modelProfileId?: string | null; modelProfileIds?: Partial<Record<'text' | 'image' | 'video' | 'audio' | 'document', string | null>>; bubbleStyle?: BubbleStyleDefinition | null; bubbleStyleId?: string | null;
       generationPreferences?: { moments?: 'follow_global' | 'on' | 'off'; diaries?: 'follow_global' | 'on' | 'off'; companionship?: 'follow_global' | 'on' | 'off' };
       isPreset: boolean; deletedAt?: number | null; fieldVersions?: Record<string, number>; createdAt: number; updatedAt: number;
     }>>('GET', '/characters');
@@ -1090,7 +1092,7 @@ class ApiClient {
     visualIdentity?: CharacterVisualIdentity | null;
     visualReferenceImages?: CharacterVisualReferenceImage[];
     speechProfile?: object; voiceConfig?: object; relationships?: object[]; memory?: object; layeredMemories?: object[]; intervention?: object; runtimeTimeline?: Array<{ type: string; text: string; createdAt: number }>;
-    modelProfileId?: string | null; modelProfileIds?: Partial<Record<'text' | 'image' | 'audio' | 'document', string | null>>; bubbleStyle?: BubbleStyleDefinition | null; bubbleStyleId?: string | null;
+    modelProfileId?: string | null; modelProfileIds?: Partial<Record<'text' | 'image' | 'video' | 'audio' | 'document', string | null>>; bubbleStyle?: BubbleStyleDefinition | null; bubbleStyleId?: string | null;
     generationPreferences?: { moments?: 'follow_global' | 'on' | 'off'; diaries?: 'follow_global' | 'on' | 'off'; companionship?: 'follow_global' | 'on' | 'off' };
   }) {
     return this.request<Record<string, unknown>>('POST', '/characters', data);
@@ -1102,7 +1104,7 @@ class ApiClient {
     visualIdentity?: CharacterVisualIdentity | null;
     visualReferenceImages?: CharacterVisualReferenceImage[];
     speechProfile?: object; voiceConfig?: object; relationships?: object[]; memory?: object; layeredMemories?: object[]; intervention?: object; runtimeTimeline?: Array<{ type: string; text: string; createdAt: number }>;
-    modelProfileId?: string | null; modelProfileIds?: Partial<Record<'text' | 'image' | 'audio' | 'document', string | null>>; bubbleStyleId?: string | null;
+    modelProfileId?: string | null; modelProfileIds?: Partial<Record<'text' | 'image' | 'video' | 'audio' | 'document', string | null>>; bubbleStyleId?: string | null;
     generationPreferences?: { moments?: 'follow_global' | 'on' | 'off'; diaries?: 'follow_global' | 'on' | 'off'; companionship?: 'follow_global' | 'on' | 'off' };
   }>) {
     return this.request<{ characters: Record<string, unknown>[] }>('POST', '/characters/batch', { items });
@@ -1291,7 +1293,7 @@ class ApiClient {
   }
 
   async createMediaAsset(data: {
-    chatId: string; messageId: string; attachmentId: string; kind: 'image' | 'audio' | 'sticker' | 'thumbnail'; dataUrl: string; description?: string; promptText?: string; sourceType?: string; characterId?: string;
+    chatId: string; messageId: string; attachmentId: string; kind: 'image' | 'audio' | 'video' | 'sticker' | 'thumbnail'; dataUrl: string; description?: string; promptText?: string; sourceType?: string; characterId?: string;
   }) {
     return this.request<{ id: string; url: string; mimeType: string; sizeBytes: number; checksum?: string }>('POST', '/media-assets', data);
   }

@@ -37,6 +37,7 @@ function formatKind(kind: MessageAttachment['kind']) {
   const labels: Record<MessageAttachment['kind'], string> = {
     image: '图片',
     audio: '语音',
+    video: '视频',
     sticker: '表情',
     file: '文件',
   };

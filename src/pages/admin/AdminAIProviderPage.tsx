@@ -51,6 +51,10 @@ const ACE_MODEL_TABS = [
   { value: 'embedding', label: '向量' },
   { value: 'search', label: '搜索' },
 ] as const;
+const DEFAULT_ACE_VIDEO_MODEL = 'doubao-seedance-2-0-fast-260128';
+const DEFAULT_ACE_IMAGE_MODEL = 'nano-banana-2';
+type AceDefaultModelsForm = { chat: string; image: string; audio: string; video: string };
+type AceVideoDefaultsForm = { aspectRatio: string; duration: string; resolution: string };
 
 function formatAcePrice(row: Record<string, unknown>) {
   const pricing = getRecord(row.pricing);
@@ -695,6 +699,7 @@ export default function AdminAIProviderPage() {
     publicDefaultModel: '',
     publicSortOrder: '100',
     publicHidden: false,
+    modelFamilyOverrides: '{}',
     baseUrl: '',
     adminBaseUrl: '',
     status: 'active',
@@ -709,6 +714,8 @@ export default function AdminAIProviderPage() {
     nanobananaImageSize: '1K',
     nanobananaAccountUserId: '',
     acedataModels: toAceImageModelsForm({}),
+    aceDefaultModels: { chat: '', image: DEFAULT_ACE_IMAGE_MODEL, audio: '', video: DEFAULT_ACE_VIDEO_MODEL } as AceDefaultModelsForm,
+    aceVideoDefaults: { aspectRatio: '', duration: '', resolution: '720p' } as AceVideoDefaultsForm,
     moacodeImageModelsEnabled: false,
     nanobananaPricing: {
       pointValue: DEFAULT_NANOBANANA_POINT_VALUE,
@@ -880,6 +887,7 @@ export default function AdminAIProviderPage() {
           ? 'nano-banana-pro' : String(config.publicDefaultModel || ''),
         publicSortOrder: String(config.publicSortOrder ?? 100),
         publicHidden: Boolean(config.publicHidden),
+        modelFamilyOverrides: JSON.stringify(getRecord(providerMetadata.modelFamilyOverrides), null, 2),
         baseUrl: String(config.baseUrl || ''),
         adminBaseUrl: String(config.adminBaseUrl || ''),
         status: String(config.status || 'active'),
@@ -896,6 +904,17 @@ export default function AdminAIProviderPage() {
         nanobananaImageSize: nanobananaDefaults.imageSize,
         nanobananaAccountUserId: nanobananaDefaults.accountUserId,
         acedataModels: toAceImageModelsForm(providerMetadata),
+        aceDefaultModels: {
+          chat: String(getRecord(providerMetadata.aceDefaultModels).chat || config.publicDefaultModel || ''),
+          image: String(getRecord(providerMetadata.aceDefaultModels).image || DEFAULT_ACE_IMAGE_MODEL),
+          audio: String(getRecord(providerMetadata.aceDefaultModels).audio || ''),
+          video: String(getRecord(providerMetadata.aceDefaultModels).video || DEFAULT_ACE_VIDEO_MODEL),
+        },
+        aceVideoDefaults: {
+          aspectRatio: String(getRecord(providerMetadata.aceVideoDefaults).aspectRatio || ''),
+          duration: String(getRecord(providerMetadata.aceVideoDefaults).duration || ''),
+          resolution: String(getRecord(providerMetadata.aceVideoDefaults).resolution || '720p'),
+        },
         moacodeImageModelsEnabled: providerMetadata.moacodeImageModelsEnabled === true,
         nanobananaPricing: toNanoBananaPricingForm(config.tokenPricing),
       });
@@ -967,6 +986,10 @@ export default function AdminAIProviderPage() {
         publicDefaultModel: form.publicDefaultModel,
         publicSortOrder: Number(form.publicSortOrder || 100),
         publicHidden: form.publicHidden,
+        metadata: {
+          ...getRecord(providerConfig?.metadata),
+          modelFamilyOverrides: form.modelFamilyOverrides.trim() ? JSON.parse(form.modelFamilyOverrides) : {},
+        },
         baseUrl: form.baseUrl,
         adminBaseUrl: form.adminBaseUrl,
         status: form.status,
@@ -985,7 +1008,7 @@ export default function AdminAIProviderPage() {
       else if (usesInternalLedger) payload.tokenPricing = buildInternalLedgerTokenPricing(providerCode, form.deepseekPricing);
       if (isMoacode) {
         payload.metadata = {
-          ...getRecord(providerConfig?.metadata),
+          ...getRecord(payload.metadata || providerConfig?.metadata),
           moacodeImageModelsEnabled: form.moacodeImageModelsEnabled,
         };
       }
@@ -999,6 +1022,17 @@ export default function AdminAIProviderPage() {
           },
         };
       }
+      if (isAce) {
+        payload.metadata = {
+          ...getRecord(payload.metadata || providerConfig?.metadata),
+          aceDefaultModels: {
+            ...form.aceDefaultModels,
+            chat: form.aceDefaultModels.chat.trim() || form.publicDefaultModel.trim(),
+            video: form.aceDefaultModels.video.trim() || DEFAULT_ACE_VIDEO_MODEL,
+          },
+          aceVideoDefaults: form.aceVideoDefaults,
+        };
+      }
       const nextAdminToken = form.adminToken.trim();
       const nextForwardKey = form.forwardKey.trim();
       if (nextAdminToken !== loadedSecrets.adminToken) payload.adminToken = nextAdminToken;
@@ -1007,7 +1041,6 @@ export default function AdminAIProviderPage() {
         if (!aceConnectionLoaded) throw new Error('请先成功加载 ACE 连接配置');
         savingAceConnection = true;
         const connection = await adminApi.updateAceConnection({
-          status: aceConnection.status,
           apiBaseUrl: aceConnection.apiBaseUrl,
           ...(aceConnection.apiKey.trim() ? { apiKey: aceConnection.apiKey.trim() } : {}),
         });
@@ -1040,6 +1073,17 @@ export default function AdminAIProviderPage() {
         nanobananaImageSize: updatedNanoBananaDefaults.imageSize,
         nanobananaAccountUserId: updatedNanoBananaDefaults.accountUserId,
         acedataModels: toAceImageModelsForm(getRecord(updated.metadata)),
+        aceDefaultModels: {
+          chat: String(getRecord(getRecord(updated.metadata).aceDefaultModels).chat || updated.publicDefaultModel || ''),
+          image: String(getRecord(getRecord(updated.metadata).aceDefaultModels).image || DEFAULT_ACE_IMAGE_MODEL),
+          audio: String(getRecord(getRecord(updated.metadata).aceDefaultModels).audio || ''),
+          video: String(getRecord(getRecord(updated.metadata).aceDefaultModels).video || DEFAULT_ACE_VIDEO_MODEL),
+        },
+        aceVideoDefaults: {
+          aspectRatio: String(getRecord(getRecord(updated.metadata).aceVideoDefaults).aspectRatio || ''),
+          duration: String(getRecord(getRecord(updated.metadata).aceVideoDefaults).duration || ''),
+          resolution: String(getRecord(getRecord(updated.metadata).aceVideoDefaults).resolution || '720p'),
+        },
         moacodeImageModelsEnabled: getRecord(updated.metadata).moacodeImageModelsEnabled === true,
         nanobananaPricing: toNanoBananaPricingForm(updated.tokenPricing),
       }));
@@ -1376,7 +1420,7 @@ export default function AdminAIProviderPage() {
                   onChange={(e) => setForm((prev) => ({ ...prev, publicFamily: e.target.value }))}
                   sx={compactTextFieldSx}
                 />
-                <Autocomplete
+                {!isAce ? <Autocomplete
                   freeSolo
                   options={publicModelOptions}
                   value={form.publicDefaultModel}
@@ -1417,6 +1461,16 @@ export default function AdminAIProviderPage() {
                       sx={compactTextFieldSx}
                     />
                   )}
+                /> : null}
+                <TextField
+                  label="模型类型覆盖（JSON）"
+                  value={form.modelFamilyOverrides}
+                  onChange={(e) => setForm((prev) => ({ ...prev, modelFamilyOverrides: e.target.value }))}
+                  multiline
+                  minRows={2}
+                  placeholder={'{"veo-3":"video","gpt-image-1":"images"}'}
+                  helperText="用于没有类型元数据的中转站模型：chat、images、video、audio、embeddings、search"
+                  sx={{ ...compactTextFieldSx, minWidth: 280 }}
                 />
               </Box>
               {isMoacode ? (
@@ -1442,7 +1496,7 @@ export default function AdminAIProviderPage() {
                   />
                 ) : null}
               </Box> : null}
-              {isImageProvider || isAce ? (
+              {isImageProvider ? (
                 <Box sx={shortConfigGridSx}>
                   <TextField
                     select
@@ -1664,10 +1718,12 @@ export default function AdminAIProviderPage() {
           </AdminSection>
 
           {isAce ? (
-            <AdminSection title="ACE 连接">
+            <AdminSection title="ACE 模型设置">
               <Stack spacing={1.25}>
                 {aceConnectionError ? <Alert severity="error" action={<Button color="inherit" size="small" onClick={() => void loadAceConnection()} disabled={aceConnectionLoading}>重新加载</Button>}>{aceConnectionError}</Alert> : null}
-                <Box sx={endpointGridSx}>
+                <Box sx={{ display: 'grid', gap: 1, p: 1.25, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>连接信息</Typography>
+                  <Box sx={endpointGridSx}>
                   <TextField
                     label="API Base URL"
                     value={aceConnection.apiBaseUrl}
@@ -1686,10 +1742,38 @@ export default function AdminAIProviderPage() {
                     fullWidth
                     sx={compactTextFieldSx}
                   />
+                  </Box>
                 </Box>
-                <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-                  <FormControlLabel control={<Switch checked={aceConnection.status === 'active'} onChange={(event) => { setAceConnection((prev) => ({ ...prev, status: event.target.checked ? 'active' : 'inactive' })); setAceConnectionSaved(false); }} disabled={aceConnectionLoading || saving} />} label="启用连接" />
-                </Stack>
+                <Box sx={{ display: 'grid', gap: 1, p: 1.25, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>文本设置</Typography>
+                  <TextField label="默认文字模型" value={form.aceDefaultModels.chat} onChange={(event) => setForm((prev) => ({ ...prev, aceDefaultModels: { ...prev.aceDefaultModels, chat: event.target.value } }))} disabled={saving} sx={{ ...compactTextFieldSx, width: '100%', maxWidth: { xs: '100%', md: 520 } }} />
+                </Box>
+                <Box sx={{ display: 'grid', gap: 1, p: 1.25, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>图片设置</Typography>
+                  <Box sx={shortConfigGridSx}>
+                    <TextField label="默认图片模型" value={form.aceDefaultModels.image} onChange={(event) => setForm((prev) => ({ ...prev, aceDefaultModels: { ...prev.aceDefaultModels, image: event.target.value } }))} disabled={saving} fullWidth sx={compactTextFieldSx} />
+                    <TextField select label="默认宽高比" value={form.nanobananaAspectRatio} onChange={(event) => setForm((prev) => ({ ...prev, nanobananaAspectRatio: event.target.value }))} disabled={saving} sx={compactTextFieldSx}>
+                      <MenuItem value="">不指定</MenuItem>
+                      {NANOBANANA_ASPECT_RATIOS.map((value) => <MenuItem key={value} value={value}>{value}</MenuItem>)}
+                    </TextField>
+                    <TextField select label="默认图片尺寸" value={form.nanobananaImageSize} onChange={(event) => setForm((prev) => ({ ...prev, nanobananaImageSize: event.target.value }))} disabled={saving} sx={compactTextFieldSx}>
+                      {NANOBANANA_IMAGE_SIZES.map((value) => <MenuItem key={value} value={value}>{value}</MenuItem>)}
+                    </TextField>
+                  </Box>
+                </Box>
+                <Box sx={{ display: 'grid', gap: 1, p: 1.25, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>音频设置</Typography>
+                  <TextField label="默认音频模型" value={form.aceDefaultModels.audio} onChange={(event) => setForm((prev) => ({ ...prev, aceDefaultModels: { ...prev.aceDefaultModels, audio: event.target.value } }))} disabled={saving} sx={{ ...compactTextFieldSx, width: '100%', maxWidth: { xs: '100%', md: 520 } }} />
+                </Box>
+                <Box sx={{ display: 'grid', gap: 1, p: 1.25, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>视频设置</Typography>
+                  <TextField label="默认视频模型" value={form.aceDefaultModels.video} onChange={(event) => setForm((prev) => ({ ...prev, aceDefaultModels: { ...prev.aceDefaultModels, video: event.target.value } }))} disabled={saving} fullWidth sx={compactTextFieldSx} />
+                  <Box sx={shortConfigGridSx}>
+                    <TextField label="默认宽高比" placeholder="例如 16:9" value={form.aceVideoDefaults.aspectRatio} onChange={(event) => setForm((prev) => ({ ...prev, aceVideoDefaults: { ...prev.aceVideoDefaults, aspectRatio: event.target.value } }))} disabled={saving} sx={compactTextFieldSx} />
+                    <TextField label="默认时长（秒）" type="number" value={form.aceVideoDefaults.duration} onChange={(event) => setForm((prev) => ({ ...prev, aceVideoDefaults: { ...prev.aceVideoDefaults, duration: event.target.value } }))} disabled={saving} sx={compactTextFieldSx} />
+                    <TextField label="默认分辨率" placeholder="例如 720p" value={form.aceVideoDefaults.resolution} onChange={(event) => setForm((prev) => ({ ...prev, aceVideoDefaults: { ...prev.aceVideoDefaults, resolution: event.target.value } }))} disabled={saving} sx={compactTextFieldSx} />
+                  </Box>
+                </Box>
               </Stack>
             </AdminSection>
           ) : null}
@@ -2295,7 +2379,7 @@ export default function AdminAIProviderPage() {
       {tab === 0 ? (
         <Button
           variant="contained"
-          disabled={saving || (isAce && (aceConnectionLoading || !aceConnectionLoaded || !aceConnection.apiBaseUrl.trim() || (aceConnection.status === 'active' && !aceConnection.apiKeyConfigured && !aceConnection.apiKey.trim())))}
+          disabled={saving || (isAce && (aceConnectionLoading || !aceConnectionLoaded || !aceConnection.apiBaseUrl.trim() || (!aceConnection.apiKeyConfigured && !aceConnection.apiKey.trim())))}
           onClick={() => void saveConfig()}
           sx={{
             position: 'fixed',

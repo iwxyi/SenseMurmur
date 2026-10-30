@@ -1,5 +1,5 @@
 type AttachmentDisplayLike = {
-  kind?: 'image' | 'audio' | 'sticker' | string;
+  kind?: 'image' | 'audio' | 'video' | 'sticker' | string;
   status?: 'placeholder' | 'queued' | 'generating' | 'ready' | 'failed' | 'deleted' | string;
   url?: string;
   error?: string;
@@ -7,12 +7,14 @@ type AttachmentDisplayLike = {
 
 function formatKind(kind: AttachmentDisplayLike['kind']) {
   if (kind === 'audio') return '语音';
+  if (kind === 'video') return '视频';
   if (kind === 'sticker') return '表情';
   return '图片';
 }
 
 function actorAction(kind: AttachmentDisplayLike['kind']) {
   if (kind === 'audio') return '对方正在讲话';
+  if (kind === 'video') return '对方正在生成视频';
   if (kind === 'sticker') return '对方正在发送表情';
   return '对方正在发送图片';
 }

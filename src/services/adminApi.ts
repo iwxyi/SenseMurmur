@@ -419,7 +419,7 @@ class AdminApiClient {
     return this.request<{ models: string[]; enabled: boolean }>('PUT', '/ai/providers/acedata/models/enabled', { models, enabled });
   }
 
-  updateAceConnection(payload: { status: string; apiBaseUrl: string; apiKey?: string }) {
+  updateAceConnection(payload: { apiBaseUrl: string; apiKey?: string }) {
     return this.request<{ status: string; apiBaseUrl: string; apiKeyConfigured: boolean }>('PUT', '/ai/providers/acedata/connection', payload);
   }
 

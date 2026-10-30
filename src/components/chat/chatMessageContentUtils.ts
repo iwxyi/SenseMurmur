@@ -47,7 +47,7 @@ export function getAttachmentDisplayWidth(params: {
 
 export function shouldHideGeneratedMediaPlaceholderText(message: Pick<Message, 'content' | 'metadata'>) {
   const attachments = message.metadata?.attachments || [];
-  const hasMediaAttachments = attachments.some((attachment) => attachment.kind === 'image' || attachment.kind === 'sticker' || attachment.kind === 'audio');
+  const hasMediaAttachments = attachments.some((attachment) => attachment.kind === 'image' || attachment.kind === 'sticker' || attachment.kind === 'audio' || attachment.kind === 'video');
   if (!hasMediaAttachments) return false;
   return [
     '正在生成图片，完成后会自动显示。',

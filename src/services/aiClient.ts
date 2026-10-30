@@ -1,4 +1,4 @@
-import type { APIConfig, AIModelProfile } from '../types/settings';
+import type { APIConfig, AIModelProfile, AIModelType } from '../types/settings';
 import { normalizeAIModelAdvancedOptions, normalizeMaxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS } from '../types/settings';
 import { api } from './api';
 import { backendUrl } from './backendUrl';
@@ -76,6 +76,7 @@ function resolveOfficialBackendProvider(provider: APIConfig['provider']) {
   if (provider === 'official-deepseek') return 'official-1';
   if (provider === 'official-moacode-team') return 'official-team';
   if (provider === 'official-gpt') return 'official-4';
+  if (provider === 'official-ace') return 'official-acedata';
   return provider;
 }
 
@@ -1100,9 +1101,20 @@ async function listOpenAICompatibleModels(config: APIConfig) {
     .map((id) => ({ id, label: id }));
 }
 
-async function listOfficialModels(config: APIConfig): Promise<AvailableModelInfo[]> {
+function modelFamilyForType(type?: AIModelType) {
+  if (!type) return '';
+  if (type === 'text' || type === 'document') return 'chat';
+  if (type === 'image') return 'images';
+  if (type === 'tts' || type === 'stt' || type === 'audio') return 'audio';
+  return type;
+}
+
+async function listOfficialModels(config: APIConfig, type?: AIModelType): Promise<AvailableModelInfo[]> {
   const provider = resolveOfficialBackendProvider(config.provider);
-  const response = await api.fetchWithAuth(backendUrl(`/api/ai/models?provider=${encodeURIComponent(provider)}`));
+  const family = modelFamilyForType(type);
+  const query = new URLSearchParams({ provider });
+  if (family) query.set('family', family);
+  const response = await api.fetchWithAuth(backendUrl(`/api/ai/models?${query.toString()}`));
   const result = await parseJsonResponse<{ items?: Array<{ id?: string; label?: string; family?: string; tier?: string | null; metadata?: JSONValue }> }>(response, 'Official model list request failed');
   return (result.items || [])
     .filter((item): item is { id: string; label?: string; family?: string; tier?: string | null; metadata?: JSONValue } => Boolean(item.id))
@@ -1147,9 +1159,9 @@ async function listQwenModels(config: APIConfig) {
   });
 }
 
-export async function listAvailableModels(config: APIConfig): Promise<AvailableModelInfo[]> {
+export async function listAvailableModels(config: APIConfig, type?: AIModelType): Promise<AvailableModelInfo[]> {
   if (usesOfficialProxy(config)) {
-    return listOfficialModels(config);
+    return listOfficialModels(config, type);
   }
   if (config.provider === 'microsoft') {
     return [

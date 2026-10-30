@@ -87,6 +87,21 @@ function MessageAudioAttachment({ attachment, showTranscript }: { attachment: Me
   );
 }
 
+function MessageVideoAttachment({ attachment }: { attachment: MessageAttachment }) {
+  const videoSource = attachment.url?.startsWith('/') ? backendUrl(attachment.url) : attachment.url;
+  if (!videoSource) return null;
+  return (
+    <Box
+      component="video"
+      controls
+      preload="metadata"
+      src={videoSource}
+      aria-label={attachment.altText || attachment.caption || '生成的视频'}
+      sx={{ display: 'block', width: '100%', maxWidth: 520, maxHeight: 520, borderRadius: 1.5, bgcolor: 'common.black' }}
+    />
+  );
+}
+
 function MessageImageAttachment({
   message,
   attachment,
@@ -426,6 +441,28 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
               重试
             </Button>
           ) : null}
+        </Box>
+      );
+    }
+    if (attachment.kind === 'video') {
+      if (attachment.status === 'ready' && attachment.url) {
+        return <MessageVideoAttachment key={attachment.id} attachment={attachment} />;
+      }
+      return (
+        <Box key={attachment.id} sx={{ ...getMediaFrameStyle(attachment), display: 'grid', aspectRatio: attachment.status === 'failed' ? undefined : getMediaFrameStyle(attachment).aspectRatio }}>
+          <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 112, p: 1.5, textAlign: 'center' }}>
+            <Box sx={{ display: 'grid', gap: 0.75, maxWidth: '85%' }}>
+              <Typography variant="caption" color={attachment.status === 'failed' ? 'error' : 'text.secondary'}>
+                {attachment.status === 'failed' ? getAttachmentStatusDetail(attachment) : getAttachmentStatusLabel(attachment)}
+              </Typography>
+              {isAttachmentProcessing(attachment.status) ? <LinearProgress /> : null}
+              {attachment.status === 'failed' && onRetryMedia ? (
+                <Button size="small" variant="outlined" color="error" onClick={() => void onRetryMedia?.(message, attachment.id)}>
+                  重试
+                </Button>
+              ) : null}
+            </Box>
+          </Box>
         </Box>
       );
     }

@@ -184,7 +184,7 @@ function dedupeVisualAssets(assets: CharacterVisualReferenceImage[]) {
   });
 }
 
-const MODEL_TYPE_ORDER: Array<Exclude<AIModelType, 'audio'>> = ['text', 'image', 'tts', 'stt', 'document'];
+const MODEL_TYPE_ORDER: Array<Exclude<AIModelType, 'audio'>> = ['text', 'image', 'video', 'tts', 'stt', 'document'];
 
 interface CharacterFormProps {
   initial?: Partial<AICharacter>;
@@ -412,6 +412,7 @@ export default function CharacterForm({ initial, existingNames = [], saveError =
   const modelTypeLabels: Record<AIModelType, string> = {
     text: i18n.language.startsWith('zh') ? '文本' : 'Text',
     image: i18n.language.startsWith('zh') ? '图片' : 'Image',
+    video: i18n.language.startsWith('zh') ? '视频' : 'Video',
     tts: i18n.language.startsWith('zh') ? '语音（TTS）' : 'Speech (TTS)',
     stt: i18n.language.startsWith('zh') ? '语音（STT）' : 'Speech (STT)',
     audio: i18n.language.startsWith('zh') ? '语音' : 'Audio',
@@ -474,6 +475,7 @@ export default function CharacterForm({ initial, existingNames = [], saveError =
   const profilesByType = useMemo(() => ({
     text: settings.aiProfiles.filter((profile) => (profile.type || 'text') === 'text'),
     image: settings.aiProfiles.filter((profile) => profile.type === 'image'),
+    video: settings.aiProfiles.filter((profile) => profile.type === 'video'),
     tts: settings.aiProfiles.filter((profile) => profile.type === 'tts'),
     stt: settings.aiProfiles.filter((profile) => profile.type === 'stt'),
     document: settings.aiProfiles.filter((profile) => profile.type === 'document'),

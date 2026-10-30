@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Box, Typography, TextField, Button,
   FormControl, InputLabel, Select, MenuItem, ListSubheader,
@@ -243,7 +244,8 @@ const ModelAutocomplete = memo(function ModelAutocomplete({
   const selectedModelOption = options.find((item) => item.value === model) || null;
   const selectedModelLabel = selectedModelOption?.label || model;
   const [inputValue, setInputValue] = useState(selectedModelLabel);
-  const firstModelGroup = options[0]?.group || '';
+  const firstPriceGroup = normalizeModelOptionGroup(options.find((item) => Boolean(item.priceLabel))?.group || '');
+  const renderedPriceHeaderRef = useRef(false);
   const showModelPriceColumn = options.some((item) => Boolean(item.priceLabel));
   const priceTextSx = {
     color: (theme: Theme) => `${theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.32)' : 'rgba(0,0,0,0.34)'} !important`,
@@ -262,6 +264,7 @@ const ModelAutocomplete = memo(function ModelAutocomplete({
 
   useEffect(() => {
     if (!open) centeredForCurrentOpenRef.current = false;
+    if (!open) renderedPriceHeaderRef.current = false;
   }, [open]);
 
   useEffect(() => {
@@ -297,7 +300,7 @@ const ModelAutocomplete = memo(function ModelAutocomplete({
         const normalizedInput = input.toLowerCase();
         return items.filter((option) => `${option.label || option.value} ${option.value} ${option.group}`.toLowerCase().includes(normalizedInput));
       }}
-      groupBy={(option) => option.group}
+      groupBy={(option) => normalizeModelOptionGroup(option.group)}
       renderGroup={(params) => (
         <Box component="li" key={params.key} sx={{ listStyle: 'none' }}>
           <ListSubheader
@@ -322,7 +325,9 @@ const ModelAutocomplete = memo(function ModelAutocomplete({
             <Box component="span" sx={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {params.group}
             </Box>
-            {showModelPriceColumn && params.group === firstModelGroup ? (
+            {showModelPriceColumn && params.group === firstPriceGroup && !renderedPriceHeaderRef.current ? (() => {
+              renderedPriceHeaderRef.current = true;
+              return (
               <Box
                 component="span"
                 sx={{
@@ -330,7 +335,7 @@ const ModelAutocomplete = memo(function ModelAutocomplete({
                   justifyContent: 'flex-end',
                   gap: 0.5,
                   flexShrink: 0,
-                  minWidth: activeType === 'image' ? 72 : 76,
+                  minWidth: activeType === 'image' ? 72 : activeType === 'video' ? 106 : 220,
                   textAlign: 'right',
                 }}
               >
@@ -339,17 +344,23 @@ const ModelAutocomplete = memo(function ModelAutocomplete({
                     <Box component="span">价格</Box>
                     <Box component="span" sx={{ ...priceTextSx, fontWeight: 500 }}>(张)</Box>
                   </Box>
+                ) : activeType === 'video' ? (
+                  <Box component="span" sx={{ display: 'flex', alignItems: 'baseline', justifyContent: 'flex-end', gap: 0.25, minWidth: 106, whiteSpace: 'nowrap' }}>
+                    <Box component="span">价格</Box>
+                    <Box component="span" sx={{ ...priceTextSx, fontWeight: 500 }}>(秒)</Box>
+                  </Box>
                 ) : (
-                  <Box component="span" sx={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', minWidth: 76, fontSize: 11 }}>
-                    <Box component="span" sx={{ display: 'flex', justifyContent: 'flex-end', gap: 0.25 }}>
-                      <Box component="span" sx={{ width: 30 }}>输入</Box>
-                      <Box component="span" sx={{ width: 40 }}>输出</Box>
+                  <Box component="span" sx={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', minWidth: 220, fontSize: 11 }}>
+                    <Box component="span" sx={{ display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
+                      <Box component="span" sx={{ minWidth: 106, textAlign: 'right' }}>输入</Box>
+                      <Box component="span" sx={{ minWidth: 106, textAlign: 'right' }}>输出</Box>
                     </Box>
                     <Box component="span" sx={{ ...priceTextSx, fontWeight: 500, textAlign: 'right' }}>(万token)</Box>
                   </Box>
                 )}
               </Box>
-            ) : null}
+              );
+            })() : null}
           </ListSubheader>
           <Box component="ul" sx={{ m: 0, p: 0 }}>
             {params.children}
@@ -397,13 +408,17 @@ const ModelAutocomplete = memo(function ModelAutocomplete({
               <Typography component="span" variant="caption" sx={{ ...priceTextSx, flexShrink: 0, minWidth: 72, ml: 'auto', textAlign: 'right', whiteSpace: 'nowrap' }}>
                 {option.priceLabel}
               </Typography>
+            ) : activeType === 'video' ? (
+              <Typography component="span" variant="caption" sx={{ ...priceTextSx, flexShrink: 0, minWidth: 106, ml: 'auto', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                {option.outputPriceLabel || option.priceLabel}
+              </Typography>
             ) : (
-              <Box component="span" sx={{ display: 'flex', justifyContent: 'flex-end', gap: 0.25, flexShrink: 0, minWidth: 76, ml: 'auto', textAlign: 'right' }}>
-                <Typography component="span" variant="caption" sx={{ ...priceTextSx, width: 30, whiteSpace: 'nowrap' }}>
-                  {option.inputPriceLabel || '-'}
+              <Box component="span" sx={{ display: 'flex', justifyContent: 'flex-end', gap: 0.5, flexShrink: 0, minWidth: 220, ml: 'auto', textAlign: 'right' }}>
+                <Typography component="span" variant="caption" sx={{ ...priceTextSx, width: 106, whiteSpace: 'nowrap', textAlign: 'right' }}>
+                  {option.inputPriceLabel || '暂无'}
                 </Typography>
-                <Typography component="span" variant="caption" sx={{ ...priceTextSx, width: 40, whiteSpace: 'nowrap' }}>
-                  {option.outputPriceLabel || '-'}
+                <Typography component="span" variant="caption" sx={{ ...priceTextSx, width: 106, whiteSpace: 'nowrap', textAlign: 'right' }}>
+                  {option.outputPriceLabel || '暂无'}
                 </Typography>
               </Box>
             )
@@ -472,13 +487,19 @@ function isImageModelInfo(model: AvailableModelInfo) {
 function filterModelsForType(models: AvailableModelInfo[], type: AIModelType) {
   return models.filter((model) => {
     const metadata = getModelMetadata(model);
-    if (typeof metadata.aceModality === 'string') {
-      if (type === 'text') return metadata.aceModality === 'chat';
-      if (type === 'image') return metadata.aceModality === 'image';
-      if (type === 'tts' || type === 'stt' || type === 'audio') return metadata.aceModality === 'audio';
+    const catalog = metadata.aceCatalog && typeof metadata.aceCatalog === 'object' && !Array.isArray(metadata.aceCatalog)
+      ? metadata.aceCatalog as Record<string, unknown>
+      : {};
+    const aceModality = typeof metadata.aceModality === 'string' ? metadata.aceModality : catalog.modality;
+    if (typeof aceModality === 'string') {
+      if (type === 'text') return aceModality === 'chat';
+      if (type === 'image') return aceModality === 'image';
+      if (type === 'video') return aceModality === 'video';
+      if (type === 'tts' || type === 'stt' || type === 'audio') return aceModality === 'audio';
       return false;
     }
     if (type === 'image') return isImageModelInfo(model);
+    if (type === 'video') return /video|seedance|veo/i.test(model.id);
     if (type === 'text' || type === 'document') return !isImageModelInfo(model) && !isEmbeddingModelName(model.id);
     if (type === 'audio') {
       const normalized = model.id.trim().toLowerCase();
@@ -513,6 +534,83 @@ function getNanoBananaVendorGroup(model: AvailableModelInfo, isZh: boolean) {
     || (isZh ? '其他供应商' : 'Other vendors');
 }
 
+function getAceVendorGroup(model: AvailableModelInfo, isZh: boolean) {
+  const metadata = getModelMetadata(model);
+  const labels: Record<string, string> = {
+    google: 'Google', bytedance: isZh ? '字节跳动' : 'ByteDance', openai: 'OpenAI',
+    anthropic: 'Anthropic', alibaba: isZh ? '阿里云' : 'Alibaba', moonshot: 'Moonshot',
+    deepseek: 'DeepSeek', zhipu: isZh ? '智谱' : 'Zhipu', xai: 'xAI',
+    baidu: isZh ? '百度' : 'Baidu', minimax: 'MiniMax', other: isZh ? '其他供应商' : 'Other vendors',
+  };
+  const canonicalGroup = String(metadata.aceVendorGroup || '').trim().toLowerCase();
+  const canonicalLabel = Object.keys(labels).find((key) => canonicalGroup === key || canonicalGroup.startsWith(`${key} `));
+  if (canonicalLabel) return labels[canonicalLabel];
+  const catalog = metadata.aceCatalog && typeof metadata.aceCatalog === 'object' && !Array.isArray(metadata.aceCatalog)
+    ? metadata.aceCatalog as Record<string, unknown>
+    : {};
+  const source = [
+    metadata.aceProvider,
+    metadata.providerName,
+    metadata.providerDisplay,
+    metadata.aceService,
+    catalog.provider,
+    catalog.service_alias,
+    model.label,
+    model.id,
+  ]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean)
+    .join(' ');
+  const vendors: Array<[RegExp, string, string]> = [
+    [/google|谷歌|gemini|veo|imagen|vertex/, 'Google', 'Google'],
+    [/bytedance|volcengine|doubao|seedance|seedream/, 'ByteDance', '字节跳动'],
+    [/openai|gpt|dall[- ]?e/, 'OpenAI', 'OpenAI'],
+    [/anthropic|claude/, 'Anthropic', 'Anthropic'],
+    [/alibaba|qwen|tongyi/, 'Alibaba', '阿里云'],
+    [/moonshot|kimi/, 'Moonshot', '月之暗面'],
+    [/deepseek/, 'DeepSeek', 'DeepSeek'],
+    [/zhipu|glm/, 'Zhipu', '智谱'],
+    [/xai|grok/, 'xAI', 'xAI'],
+    [/baidu|ernie/, 'Baidu', '百度'],
+    [/minimax/, 'MiniMax', 'MiniMax'],
+  ];
+  const match = vendors.find(([pattern]) => pattern.test(source));
+  if (match) return isZh ? match[2] : match[1];
+  return isZh ? '其他供应商' : 'Other vendors';
+}
+
+function normalizeModelOptionGroup(group: string) {
+  const value = group.trim().replace(/\s+/g, ' ');
+  const normalized = value.toLowerCase();
+  const aliases: Array<[RegExp, string, string]> = [
+    [/^google(?:\b|\s)/, 'Google', 'Google'],
+    [/^(?:bytedance|byte dance|字节跳动|豆包)(?:\b|\s)/, 'ByteDance', '字节跳动'],
+    [/^openai(?:\b|\s)/, 'OpenAI', 'OpenAI'],
+    [/^anthropic(?:\b|\s)/, 'Anthropic', 'Anthropic'],
+    [/^(?:alibaba|阿里云)(?:\b|\s)/, 'Alibaba', '阿里云'],
+    [/^moonshot(?:\b|\s)/, 'Moonshot', 'Moonshot'],
+    [/^deepseek(?:\b|\s)/, 'DeepSeek', 'DeepSeek'],
+    [/^(?:zhipu|智谱)(?:\b|\s)/, 'Zhipu', '智谱'],
+    [/^xai(?:\b|\s)/, 'xAI', 'xAI'],
+    [/^(?:baidu|百度)(?:\b|\s)/, 'Baidu', '百度'],
+    [/^minimax(?:\b|\s)/, 'MiniMax', 'MiniMax'],
+  ];
+  const match = aliases.find(([pattern]) => pattern.test(normalized));
+  if (!match) return value;
+  return /[\u3400-\u9fff]/.test(value) ? match[2] : match[1];
+}
+
+function compareModelOptionGroups(left: string, right: string) {
+  const isOther = (value: string) => {
+    const normalized = normalizeModelOptionGroup(value).toLowerCase();
+    return normalized === 'other vendors' || normalized === '其他供应商';
+  };
+  const leftOther = isOther(left);
+  const rightOther = isOther(right);
+  if (leftOther !== rightOther) return leftOther ? 1 : -1;
+  return normalizeModelOptionGroup(left).localeCompare(normalizeModelOptionGroup(right));
+}
+
 function buildRemoteModelOption(model: AvailableModelInfo, type: AIModelType, provider: AIProvider, usesOfficialProxy: boolean, isZh: boolean): ModelDropdownOption {
   const raw = model.raw && typeof model.raw === 'object' && !Array.isArray(model.raw) ? model.raw as Record<string, unknown> : {};
   const billingDisplay = typeof raw.billingDisplay === 'string' && raw.billingDisplay.trim() ? raw.billingDisplay.trim() : '';
@@ -524,8 +622,13 @@ function buildRemoteModelOption(model: AvailableModelInfo, type: AIModelType, pr
   // Keep the model name independent from billing metadata. The autocomplete
   // renders prices in their own column; appending them here makes the price
   // look like part of the model name and also leaks into the input value.
-  const label = provider === 'official-acedata' ? model.label : model.id;
-  const aceGroup = typeof raw.aceModality === 'string' ? String(raw.aceProvider || (isZh ? 'ACE 模型' : 'ACE models')) : '';
+  const label = provider === 'official-acedata' || provider === 'official-ace' ? model.label : model.id;
+  const aceCatalog = raw.aceCatalog && typeof raw.aceCatalog === 'object' && !Array.isArray(raw.aceCatalog)
+    ? raw.aceCatalog as Record<string, unknown>
+    : {};
+  const aceGroup = typeof raw.aceModality === 'string' || typeof aceCatalog.modality === 'string'
+    ? getAceVendorGroup(model, isZh)
+    : '';
   if (type === 'image' && provider === 'official-nanobanana') {
     return {
       value: model.id,
@@ -636,28 +739,33 @@ function buildOnlineOfficialProviderOption(provider: OfficialAiProviderInfo): (A
     defaults: {
       text: fallbackDefault,
       image: fallbackDefault,
+      video: fallbackDefault,
       audio: fallbackDefault,
       document: fallbackDefault,
     },
     popularModels: {
       text: provider.defaultModel ? [provider.defaultModel] : [],
       image: provider.defaultModel ? [provider.defaultModel] : [],
+      video: provider.defaultModel ? [provider.defaultModel] : [],
       audio: provider.defaultModel ? [provider.defaultModel] : [],
       document: provider.defaultModel ? [provider.defaultModel] : [],
     },
   };
   const remoteDefaultModel = provider.defaultModel || '';
   const remoteImageDefaultModel = provider.imageDefaultModel || (isImageModelName(remoteDefaultModel) ? remoteDefaultModel : '');
-  const imageDefaultModel = remoteImageDefaultModel || catalogEntry.defaults.image?.model || '';
+  const imageDefaultModel = provider.defaultModels?.image || remoteImageDefaultModel || catalogEntry.defaults.image?.model || '';
+  const videoDefaultModel = provider.videoDefaultModel || provider.defaultModels?.video || catalogEntry.defaults.video?.model || '';
+  const aceDefaultModels = provider.defaultModels;
   const textDefaultModel = !isImageModelName(remoteDefaultModel)
     ? remoteDefaultModel
     : (catalogEntry.defaults.text?.model || '');
   const nextDefaults: AIProviderCatalogEntry['defaults'] = {
     ...catalogEntry.defaults,
-    text: textDefaultModel || catalogEntry.defaults.text?.model
-      ? { ...(catalogEntry.defaults.text || fallbackDefault), model: textDefaultModel || catalogEntry.defaults.text?.model || '' }
+    audio: aceDefaultModels?.audio || catalogEntry.defaults.audio?.model ? { ...(catalogEntry.defaults.audio || fallbackDefault), model: aceDefaultModels?.audio || catalogEntry.defaults.audio?.model || '' } : catalogEntry.defaults.audio,
+    text: aceDefaultModels?.chat || textDefaultModel || catalogEntry.defaults.text?.model
+      ? { ...(catalogEntry.defaults.text || fallbackDefault), model: aceDefaultModels?.chat || textDefaultModel || catalogEntry.defaults.text?.model || '' }
       : catalogEntry.defaults.text,
-    audio: catalogEntry.defaults.audio?.model ? { ...catalogEntry.defaults.audio, model: catalogEntry.defaults.audio.model } : catalogEntry.defaults.audio,
+    video: videoDefaultModel ? { ...(catalogEntry.defaults.video || fallbackDefault), model: videoDefaultModel } : catalogEntry.defaults.video,
     document: textDefaultModel || catalogEntry.defaults.document?.model
       ? { ...(catalogEntry.defaults.document || fallbackDefault), model: textDefaultModel || catalogEntry.defaults.document?.model || '' }
       : catalogEntry.defaults.document,
@@ -678,6 +786,7 @@ function buildOnlineOfficialProviderOption(provider: OfficialAiProviderInfo): (A
     popularModels: {
       text: textDefaultModel ? [textDefaultModel] : [],
       image: imageDefaultModel ? [imageDefaultModel] : [],
+      video: videoDefaultModel ? [videoDefaultModel] : [],
       audio: [],
       document: textDefaultModel ? [textDefaultModel] : [],
     },
@@ -762,6 +871,7 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
   const modelTypeLabels: Record<AIModelType, string> = {
     text: i18n.language.startsWith('zh') ? '文本' : 'Text',
     image: i18n.language.startsWith('zh') ? '图片' : 'Image',
+    video: i18n.language.startsWith('zh') ? '视频' : 'Video',
     tts: i18n.language.startsWith('zh') ? '语音（TTS）' : 'Speech (TTS)',
     stt: i18n.language.startsWith('zh') ? '语音（STT）' : 'Speech (STT)',
     audio: i18n.language.startsWith('zh') ? '语音' : 'Audio',
@@ -1217,13 +1327,13 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
       return next;
     });
     try {
-      const models = await listAvailableModels(effectiveProfile);
+      const models = await listAvailableModels(effectiveProfile, activeType);
       const uniqueModels = Array.from(new Map(models.filter((item) => Boolean(item.id)).map((item) => [item.id, item])).values());
       const options = filterModelsForType(uniqueModels, activeType)
         .map((item) => buildRemoteModelOption(item, activeType, effectiveProfile.provider, profileUsesOfficialProxy, i18n.language.startsWith('zh')));
       options.sort((left, right) => {
-        if (effectiveProfile.provider === 'official-acedata') {
-          const groupOrder = left.group.localeCompare(right.group);
+        if (effectiveProfile.provider === 'official-acedata' || effectiveProfile.provider === 'official-ace') {
+          const groupOrder = compareModelOptionGroups(left.group, right.group);
           if (groupOrder) return groupOrder;
           return compareModelVersionsDescending(left.value, right.value);
         }
@@ -1410,6 +1520,7 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
                         >
                           <MenuItem value="text">{modelTypeLabels.text}</MenuItem>
                           <MenuItem value="image">{modelTypeLabels.image}</MenuItem>
+                          <MenuItem value="video">{modelTypeLabels.video}</MenuItem>
                           <MenuItem value="tts">{modelTypeLabels.tts}</MenuItem>
                           <MenuItem value="stt">{modelTypeLabels.stt}</MenuItem>
                           <MenuItem value="document">{modelTypeLabels.document}</MenuItem>
@@ -1868,17 +1979,20 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
         destructive
       />
 
-      <ExpandableFab
-        icon={<AddIcon />}
-        label={i18n.language.startsWith('zh') ? '添加模型' : 'Add model'}
-        ariaLabel={i18n.language.startsWith('zh') ? '添加模型' : 'Add model'}
-        onClick={() => addAIProfile()}
-        sx={{
-          position: 'fixed',
-          right: { xs: 20, sm: 28, md: 36 },
-          bottom: { xs: 'calc(env(safe-area-inset-bottom, 0px) + 76px)', sm: 32, md: 36 },
-        }}
-      />
+      {typeof document !== 'undefined' ? createPortal(
+        <ExpandableFab
+          icon={<AddIcon />}
+          label={i18n.language.startsWith('zh') ? '添加模型' : 'Add model'}
+          ariaLabel={i18n.language.startsWith('zh') ? '添加模型' : 'Add model'}
+          onClick={() => addAIProfile()}
+          sx={{
+            position: 'fixed',
+            right: { xs: 20, sm: 28, md: 36 },
+            bottom: { xs: 'calc(env(safe-area-inset-bottom, 0px) + 76px)', sm: 32, md: 36 },
+          }}
+        />,
+        document.body,
+      ) : null}
     </Box>
   );
 }

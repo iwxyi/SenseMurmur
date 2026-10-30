@@ -6,7 +6,7 @@ import { DEFAULT_CHAT_REPLY_PREFERENCES, type ChatReplyPreferences } from './cha
 export type OfficialAIProvider = 'official' | `official-${string}`;
 export type BuiltInAIProvider = OfficialAIProvider | 'openai' | 'anthropic' | 'google' | 'xai' | 'deepseek' | 'alibaba' | 'zhipu' | 'moonshot' | 'minimax' | 'bytedance' | 'microsoft' | 'custom';
 export type AIProvider = BuiltInAIProvider | (string & {});
-export type AIModelType = 'text' | 'image' | 'tts' | 'stt' | 'audio' | 'document';
+export type AIModelType = 'text' | 'image' | 'video' | 'tts' | 'stt' | 'audio' | 'document';
 export type AudioModelCapability = 'tts' | 'stt' | 'both';
 export type ThemeMode = 'light' | 'dark' | 'system';
 export type ThemePresetId = 'rednote' | 'jade' | 'reader' | 'imperial' | 'night' | 'mirage' | 'aurora' | 'paper' | 'sakura' | 'ember' | 'graphite' | 'dopamine' | 'morandi';

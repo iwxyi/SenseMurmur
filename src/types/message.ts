@@ -3,7 +3,7 @@ import type { InteractionEventPayload } from './runtimeEvent';
 
 export type MessageType = 'ai' | 'user' | 'system' | 'god' | 'event';
 
-export type MessageAttachmentKind = 'image' | 'audio' | 'sticker' | 'file';
+export type MessageAttachmentKind = 'image' | 'audio' | 'video' | 'sticker' | 'file';
 export type ChatFileSource = 'message_upload' | 'chat_artifact' | 'workspace_file' | 'generated_file';
 
 export interface ChatFileAttachment {
