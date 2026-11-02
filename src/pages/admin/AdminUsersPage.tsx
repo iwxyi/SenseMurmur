@@ -55,6 +55,7 @@ type AccountEntitlementDraft = {
   aiProxyEnabled: boolean;
   agentEnabled: boolean;
   aiSearchEnabled: boolean;
+  multimediaGenerationEnabled: boolean;
   marketAccessEnabled: boolean;
   marketUploadEnabled: boolean;
   chatShareEnabled: boolean;
@@ -79,6 +80,7 @@ const EMPTY_ACCOUNT_ENTITLEMENT_DRAFT: AccountEntitlementDraft = {
   aiProxyEnabled: false,
   agentEnabled: false,
   aiSearchEnabled: false,
+  multimediaGenerationEnabled: false,
   marketAccessEnabled: false,
   marketUploadEnabled: false,
   chatShareEnabled: false,
@@ -209,6 +211,7 @@ function accountEntitlementToDraft(value: unknown): AccountEntitlementDraft {
     aiProxyEnabled: entitlement.aiProxyEnabled === true,
     agentEnabled: entitlement.agentEnabled === true,
     aiSearchEnabled: entitlement.aiSearchEnabled === true,
+    multimediaGenerationEnabled: entitlement.multimediaGenerationEnabled === true,
     marketAccessEnabled: entitlement.marketAccessEnabled === true,
     marketUploadEnabled: entitlement.marketUploadEnabled === true,
     chatShareEnabled: entitlement.chatShareEnabled === true,
@@ -268,6 +271,7 @@ function buildAccountEntitlementPayload(draft: AccountEntitlementDraft, allowedP
   if (draft.aiProxyEnabled) entitlement.aiProxyEnabled = true;
   if (draft.agentEnabled) entitlement.agentEnabled = true;
   if (draft.aiSearchEnabled) entitlement.aiSearchEnabled = true;
+  if (draft.multimediaGenerationEnabled) entitlement.multimediaGenerationEnabled = true;
   if (draft.marketAccessEnabled) entitlement.marketAccessEnabled = true;
   if (draft.marketUploadEnabled) entitlement.marketUploadEnabled = true;
   if (draft.chatShareEnabled) entitlement.chatShareEnabled = true;
@@ -1022,6 +1026,10 @@ export default function AdminUsersPage() {
                       <FormControlLabel
                         control={<Switch checked={accountEntitlementDraft.aiSearchEnabled} onChange={(event) => updateAccountEntitlementDraft({ aiSearchEnabled: event.target.checked })} />}
                         label="AI 搜索"
+                      />
+                      <FormControlLabel
+                        control={<Switch checked={accountEntitlementDraft.multimediaGenerationEnabled} onChange={(event) => updateAccountEntitlementDraft({ multimediaGenerationEnabled: event.target.checked })} />}
+                        label="多媒体生成"
                       />
                       <FormControlLabel
                         control={<Switch checked={accountEntitlementDraft.marketAccessEnabled} onChange={(event) => updateAccountEntitlementDraft({ marketAccessEnabled: event.target.checked })} />}

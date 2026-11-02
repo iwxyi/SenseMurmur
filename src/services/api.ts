@@ -121,6 +121,7 @@ export interface VipEntitlementInfo {
   aiProxyEnabled: boolean;
   agentEnabled: boolean;
   aiSearchEnabled: boolean;
+  multimediaGenerationEnabled: boolean;
   marketAccessEnabled: boolean;
   marketUploadEnabled: boolean;
   chatShareEnabled: boolean;

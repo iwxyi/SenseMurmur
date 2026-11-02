@@ -99,6 +99,7 @@ type VipEntitlementForm = {
   aiProxyEnabled: boolean;
   agentEnabled: boolean;
   aiSearchEnabled: boolean;
+  multimediaGenerationEnabled: boolean;
   marketAccessEnabled: boolean;
   marketUploadEnabled: boolean;
   chatShareEnabled: boolean;
@@ -232,6 +233,7 @@ const DEFAULT_VIP_ENTITLEMENTS: Record<string, VipEntitlementForm> = {
     aiProxyEnabled: false,
     agentEnabled: false,
     aiSearchEnabled: false,
+    multimediaGenerationEnabled: false,
     marketAccessEnabled: false,
     marketUploadEnabled: false,
     chatShareEnabled: false,
@@ -256,6 +258,7 @@ const DEFAULT_VIP_ENTITLEMENTS: Record<string, VipEntitlementForm> = {
     aiProxyEnabled: false,
     agentEnabled: true,
     aiSearchEnabled: false,
+    multimediaGenerationEnabled: false,
     marketAccessEnabled: false,
     marketUploadEnabled: false,
     chatShareEnabled: false,
@@ -280,6 +283,7 @@ const DEFAULT_VIP_ENTITLEMENTS: Record<string, VipEntitlementForm> = {
     aiProxyEnabled: true,
     agentEnabled: true,
     aiSearchEnabled: true,
+    multimediaGenerationEnabled: false,
     marketAccessEnabled: false,
     marketUploadEnabled: false,
     chatShareEnabled: false,
@@ -304,6 +308,7 @@ const DEFAULT_VIP_ENTITLEMENTS: Record<string, VipEntitlementForm> = {
     aiProxyEnabled: true,
     agentEnabled: true,
     aiSearchEnabled: true,
+    multimediaGenerationEnabled: false,
     marketAccessEnabled: false,
     marketUploadEnabled: false,
     chatShareEnabled: false,
@@ -566,6 +571,7 @@ function toEntitlementForm(value: unknown, fallback: VipEntitlementForm): VipEnt
     aiProxyEnabled: hasOwnRecordValue(record, 'aiProxyEnabled') ? toBoolean(record.aiProxyEnabled, fallback.aiProxyEnabled) : fallback.aiProxyEnabled,
     agentEnabled: hasOwnRecordValue(record, 'agentEnabled') ? toBoolean(record.agentEnabled, fallback.agentEnabled) : fallback.agentEnabled,
     aiSearchEnabled: hasOwnRecordValue(record, 'aiSearchEnabled') ? toBoolean(record.aiSearchEnabled, fallback.aiSearchEnabled) : fallback.aiSearchEnabled,
+    multimediaGenerationEnabled: hasOwnRecordValue(record, 'multimediaGenerationEnabled') ? toBoolean(record.multimediaGenerationEnabled, fallback.multimediaGenerationEnabled) : fallback.multimediaGenerationEnabled,
     marketAccessEnabled: hasOwnRecordValue(record, 'marketAccessEnabled') ? toBoolean(record.marketAccessEnabled, fallback.marketAccessEnabled) : fallback.marketAccessEnabled,
     marketUploadEnabled: hasOwnRecordValue(record, 'marketUploadEnabled') ? toBoolean(record.marketUploadEnabled, fallback.marketUploadEnabled) : fallback.marketUploadEnabled,
     chatShareEnabled: hasOwnRecordValue(record, 'chatShareEnabled') ? toBoolean(record.chatShareEnabled, fallback.chatShareEnabled) : fallback.chatShareEnabled,
@@ -619,6 +625,7 @@ function buildEntitlementPayload(form: VipEntitlementForm, allowedProviderIds?: 
     aiProxyEnabled: form.aiProxyEnabled,
     agentEnabled: form.agentEnabled,
     aiSearchEnabled: form.aiSearchEnabled,
+    multimediaGenerationEnabled: form.multimediaGenerationEnabled,
     marketAccessEnabled: form.marketAccessEnabled,
     marketUploadEnabled: form.marketUploadEnabled,
     chatShareEnabled: form.chatShareEnabled,
@@ -904,6 +911,7 @@ function EntitlementEditor({
         <FormControlLabel control={<Switch checked={entitlement.aiProxyEnabled} onChange={(event) => onEntitlementChange('aiProxyEnabled', event.target.checked)} />} label="允许中转站" />
         <FormControlLabel control={<Switch checked={entitlement.agentEnabled} onChange={(event) => onEntitlementChange('agentEnabled', event.target.checked)} />} label="允许 Agent" />
         <FormControlLabel control={<Switch checked={entitlement.aiSearchEnabled} onChange={(event) => onEntitlementChange('aiSearchEnabled', event.target.checked)} />} label="允许 AI 搜索" />
+        <FormControlLabel control={<Switch checked={entitlement.multimediaGenerationEnabled} onChange={(event) => onEntitlementChange('multimediaGenerationEnabled', event.target.checked)} />} label="允许多媒体生成" />
         <FormControlLabel control={<Switch checked={entitlement.marketAccessEnabled} onChange={(event) => onEntitlementChange('marketAccessEnabled', event.target.checked)} />} label="允许市场浏览/下载" />
         <FormControlLabel control={<Switch checked={entitlement.marketUploadEnabled} onChange={(event) => onEntitlementChange('marketUploadEnabled', event.target.checked)} />} label="允许上传市场" />
         <FormControlLabel control={<Switch checked={entitlement.chatShareEnabled} onChange={(event) => onEntitlementChange('chatShareEnabled', event.target.checked)} />} label="允许分享聊天" />

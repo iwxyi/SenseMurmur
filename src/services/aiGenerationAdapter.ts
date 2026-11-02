@@ -1,6 +1,7 @@
 import type { AICharacter, CharacterVisualReferenceImage } from '../types/character';
 import type { APIConfig, AIModelProfile } from '../types/settings';
 import { normalizeImageCapabilities, normalizeImageGenerationSize } from '../types/settings';
+import { assertMultimediaGenerationPermission, reportMultimediaPermissionError } from './multimediaPermission';
 import {
   generateImage,
   generateJsonResponse,
@@ -199,6 +200,7 @@ export async function generateImageWithAdapter(params: ImageGenerationAdapterOpt
 }
 
 export async function generateVideoWithAdapter(params: VideoGenerationAdapterOptions) {
+  await assertMultimediaGenerationPermission();
   return submitAiMediaTask({
     profile: profileToApi(params.profile),
     prompt: params.prompt,
@@ -210,6 +212,9 @@ export async function generateVideoWithAdapter(params: VideoGenerationAdapterOpt
     },
     signal: params.signal,
     aiUsage: params.aiUsage || { type: 'video_generation', label: '聊天视频生成' },
+  }).catch((error: unknown) => {
+    reportMultimediaPermissionError(error);
+    throw error;
   });
 }
 

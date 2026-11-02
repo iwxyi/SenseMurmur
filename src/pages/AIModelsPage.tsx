@@ -33,6 +33,7 @@ import { AI_PROVIDER_CATALOG, getPopularModels, getProviderCatalogEntry, getProv
 import { motion, transition } from '../styles/motion';
 import { formatAiAmount } from '../utils/aiPoints';
 import { compareModelVersionsDescending } from '../utils/modelOrder';
+import { assertMultimediaGenerationPermission } from '../services/multimediaPermission';
 
 type AiBalanceView =
   | { status: 'idle' | 'loading' }
@@ -1491,8 +1492,15 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
                           value={profile.type || 'text'}
                           label={i18n.language.startsWith('zh') ? '类型' : 'Type'}
                           MenuProps={{ slotProps: { paper: { sx: solidPopupPaperSx() } } }}
-                          onChange={(e) => {
+                          onChange={async (e) => {
                             const type = e.target.value as AIModelType;
+                            if (type === 'video') {
+                              try {
+                                await assertMultimediaGenerationPermission();
+                              } catch {
+                                return; // The permission dialog displays the failure.
+                              }
+                            }
                             const nextProviderOptions = getProviderOptionsForType(type, profile.provider);
                             const nextProvider = resolveSelectableProviderKey(profile.provider, type, nextProviderOptions);
                             const nextDefaults = getProviderDefaultsFromOptions(nextProvider, type, nextProviderOptions);

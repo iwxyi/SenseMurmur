@@ -21,6 +21,7 @@ import { getMasterDetailSection, type MasterDetailSection } from './routes/maste
 import { useDetailCollapsedState } from './components/layout/masterDetailState';
 import DevUpdatePrompt from './components/common/DevUpdatePrompt';
 import PwaUpdatePrompt from './components/common/PwaUpdatePrompt';
+import MultimediaPermissionDialog from './components/common/MultimediaPermissionDialog';
 import {
   hasPendingGuestImportForUser,
   importGuestDataToCurrentAccount,
@@ -817,6 +818,7 @@ export default function App() {
           <AdminAuthBootstrap />
           <GuestImportPrompt />
           <InAppNotificationBootstrap />
+          <MultimediaPermissionDialog />
           <AppUsageSessionBootstrap />
           <DataLoader>
             <RoutedApp />
