@@ -108,7 +108,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (scope() !== storageScope) throw new Error('账号已切换，任务修改已停止');
         const current = await runtime.read(runId);
         if (!current || current.tasks[0]?.kind !== 'team_plan') throw new Error('团队任务不存在');
-        if (current.run.status !== 'paused') throw new Error('请先暂停整个团队任务');
+        if (current.run.status !== 'paused' && current.run.status !== 'completed') throw new Error('请先暂停整个团队任务');
         if (current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
         if (current.tasks.some((task) => task.kind === 'team_plan_revision')) throw new Error('当前团队任务已使用追加委派机会');
         if (current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown' || task.status === 'failed')) throw new Error('请先处理未完成或待核对的步骤');
@@ -119,7 +119,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           input: { request: trimmed, sourceTaskIds } satisfies TeamRevisionInput,
           dependsOn: sourceTaskIds, status: 'waiting_dependency', attempt: 0, updatedAt: Date.now(),
         };
-        return runtime.addTasks(runId, expectedPlanVersion, [task]);
+        return current.run.status === 'completed'
+          ? runtime.reopenWithTasks(runId, expectedPlanVersion, [task])
+          : runtime.addTasks(runId, expectedPlanVersion, [task]);
       });
     },
     async instructQueuedTask(runId: string, taskId: string, expectedPlanVersion: number, instruction: string) {
@@ -212,6 +214,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (!chat || chat.type !== 'assistant') throw new Error('交付会话不可用');
       const sourceId = `team-delivery-${runId}`;
       const existing = useAssistantArtifactStore.getState().getArtifactsForChat(chat.id).find((item) => item.sourceMessageId === sourceId);
+      const existingVersion = existing?.versions.find((item) => item.id === existing.currentVersionId);
       const plan = validateAgentTeamPlan(snapshot.tasks.find((task) => task.id === 'plan')?.output);
       const delegatedPlan = snapshot.tasks.find((task) => task.kind === 'team_plan_revision')?.output;
       const delegated = delegatedPlan ? validateAgentTeamPlan(delegatedPlan) : null;
@@ -228,20 +231,22 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return `## ${task.goal}\n\n${output}`;
         }) : []),
       ].join('\n\n');
-      const artifact = existing || useAssistantArtifactStore.getState().upsertArtifactsFromMessage({
+      const artifact = existingVersion?.content === content ? existing : useAssistantArtifactStore.getState().upsertArtifactsFromMessage({
         chatId: chat.id,
         messageId: sourceId,
-        drafts: [{ kind: 'document', title: plan.summary.slice(0, 60), content, summary: plan.finalAcceptance }],
+        drafts: [{ kind: 'document', title: plan.summary.slice(0, 60), content, summary: delegated?.finalAcceptance || plan.finalAcceptance,
+          ...(existing ? { action: 'update' as const, targetArtifactId: existing.id, baseVersionId: existing.currentVersionId } : {}) }],
       })[0];
       if (!artifact) throw new Error('团队交付产物保存失败');
       if (scope() !== deliveryScope) throw new Error('账号已切换，团队交付已暂停');
       const messageStore = useMessageStore.getState();
       const known = [...messageStore.messages, ...(messageStore.messageWindowsByChatId[chat.id]?.messages || [])];
-      if (!known.some((item) => item.id === sourceId || item.clientKey === sourceId)) {
+      const previousDelivery = known.find((item) => item.id === sourceId || item.clientKey === sourceId);
+      if (!previousDelivery || previousDelivery.metadata?.assistant?.artifacts?.[0]?.versionId !== artifact.currentVersionId) {
         const draft = attachMessageToActiveBranch(chat, known, {
           id: sourceId, clientKey: sourceId, chatId: chat.id, type: 'ai' as const,
-          senderId: 'assistant', senderName: '助手', content: `团队任务已完成：${plan.summary}`,
-          emotion: 0, timestamp: Date.now(), isDeleted: false,
+          senderId: 'assistant', senderName: '助手', content: `${existing ? '团队任务已更新' : '团队任务已完成'}：${plan.summary}`,
+          emotion: 0, timestamp: previousDelivery?.timestamp || Date.now(), isDeleted: false,
           metadata: { format: 'markdown' as const, assistant: { mode: 'general' as const, artifacts: [{ id: artifact.id, kind: artifact.kind, title: artifact.title, versionId: artifact.currentVersionId }] } },
         }) as Message;
         useMessageStore.getState().upsertMessage(draft);

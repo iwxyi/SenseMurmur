@@ -107,7 +107,7 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
           {plan?.finalAcceptance && <Typography variant="body2"><strong>最终验收</strong> {plan.finalAcceptance}</Typography>}
           {summary.blocked.length > 0 && <Typography variant="body2" color="warning.main"><strong>需要处理</strong> {summary.blocked.map((item) => item.reason).join('；')}</Typography>}
           {pauseError && <Typography variant="body2" color="error.main">{pauseError}</Typography>}
-          {run.run.status === 'paused' && !run.tasks.some((item) => item.kind === 'team_plan_revision') && <Box sx={{ display: 'grid', gap: 1 }}>
+          {(run.run.status === 'paused' || run.run.status === 'completed') && !run.tasks.some((item) => item.kind === 'team_plan_revision') && <Box sx={{ display: 'grid', gap: 1 }}>
             <TextField multiline minRows={2} fullWidth size="small" label="交给主 Agent 追加任务" value={delegateRequest} onChange={(event) => { setDelegateRequest(event.target.value); setDelegateError(null); }} slotProps={{ htmlInput: { maxLength: 4000 } }} disabled={savingDelegate} />
             {delegateError && <Typography variant="caption" color="error.main">{delegateError}</Typography>}
             <Button size="small" variant="outlined" disabled={!delegateRequest.trim() || savingDelegate} onClick={() => {

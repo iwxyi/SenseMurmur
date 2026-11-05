@@ -178,6 +178,42 @@ describe('agent team workflow', () => {
     expect(generate).toHaveBeenCalledTimes(4);
   });
 
+  it('reopens a completed run for delegation and updates its existing delivery version', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `reopen-chat-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '交付', memberIds: [], deletedAt: null } as (typeof state.chats)[number]] }));
+    const basePlan = {
+      summary: '基础研究', roles: [{ id: 'researcher', name: '研究员', responsibility: '研究', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'research', roleId: 'researcher', goal: '研究问题', dependsOn: [], acceptance: '有结论' }], finalAcceptance: '研究完成',
+    };
+    const extraPlan = {
+      summary: '扩展报告', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理研究', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'report', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '成稿' }], finalAcceptance: '报告完成',
+    };
+    generate.mockResolvedValueOnce(JSON.stringify(basePlan)).mockResolvedValueOnce('第一阶段结论');
+    const scoped = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-reopen-test');
+    const completed = await scoped.start(runId, chatId, '研究问题');
+    expect(completed.snapshot.run.status).toBe('completed');
+    const first = await scoped.publish(runId);
+    const firstVersionId = first.currentVersionId;
+    const reopened = await scoped.addRevisionRequest(runId, completed.snapshot.run.planVersion, '补一份报告');
+    expect(reopened.run.status).toBe('paused');
+    expect(reopened.run.planOpen).toBe(true);
+    await expect(scoped.addRevisionRequest(runId, completed.snapshot.run.planVersion, '重复追加')).rejects.toThrow();
+    generate.mockResolvedValueOnce(JSON.stringify(extraPlan)).mockResolvedValueOnce('第二阶段报告');
+    const finished = await scoped.resume(runId);
+    expect(finished.snapshot.run.status).toBe('completed');
+    const second = await scoped.publish(runId);
+    expect(second.id).toBe(first.id);
+    expect(second.currentVersionId).not.toBe(firstVersionId);
+    expect(second.versions.find((version) => version.id === second.currentVersionId)?.content).toContain('第二阶段报告');
+    const delivered = useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.find((message) => message.id === `team-delivery-${runId}`);
+    expect(delivered?.metadata?.assistant?.artifacts?.[0]?.versionId).toBe(second.currentVersionId);
+    const repeated = await scoped.publish(runId);
+    expect(repeated.currentVersionId).toBe(second.currentVersionId);
+    expect(generate).toHaveBeenCalledTimes(4);
+  });
+
   it('keeps delegated children queued when paused during delegated planning', async () => {
     const runId = crypto.randomUUID();
     const now = Date.now();
