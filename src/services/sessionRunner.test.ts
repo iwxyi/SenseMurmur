@@ -235,6 +235,55 @@ function buildLoopParams(chat: GroupChat) {
 }
 
 describe('runSessionLoop', () => {
+  it('releases a single-turn execution slot after its committed reply', async () => {
+    const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    runSessionCommitPipelineMock.mockImplementation(async (args) => buildCommitPipelineResult(args));
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks) => {
+      await hooks.onMessageComplete({ id: 'reply', chatId: 'chat-1', type: 'ai', senderId: 'a', senderName: '甲', content: '已回复', emotion: 0 });
+    });
+
+    await runSessionLoop({ ...params, executionMode: 'single_turn' } as never);
+
+    expect(runOneRoundMock).toHaveBeenCalledTimes(1);
+    expect(runSessionCommitPipelineMock).toHaveBeenCalledTimes(1);
+    expect(params.onLoopError).not.toHaveBeenCalled();
+  });
+
+  it('releases a single-turn execution slot when the engine has no speaking turn', async () => {
+    const params = buildLoopParams(buildChat({ mode: 'werewolf', sessionKind: { topology: 'group', family: 'werewolf', scenarioId: 'werewolf-classic', surfaceProfile: 'text' } }));
+
+    await runSessionLoop({ ...params, executionMode: 'single_turn' } as never);
+
+    expect(runOneRoundMock).not.toHaveBeenCalled();
+    expect(params.onLoopError).not.toHaveBeenCalled();
+  });
+
+  it('releases a single-turn execution slot when input is temporarily held', async () => {
+    const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    params.getCurrentMessages = () => [{ id: 'draft', type: 'user', content: '新输入', timestamp: Date.now() } as Message];
+    await runSessionLoop({ ...params, executionMode: 'single_turn', getUserDraftActivity: () => ({ active: true, updatedAt: Date.now() }) } as never);
+    expect(runOneRoundMock).not.toHaveBeenCalled();
+  });
+
+  it('does not hold a single-turn slot while another commit is unsettled', async () => {
+    const params = buildLoopParams(buildChat());
+    const settled = vi.fn(() => false);
+    await runSessionLoop({ ...params, executionMode: 'single_turn', onCommitSettled: settled } as never);
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(runOneRoundMock).not.toHaveBeenCalled();
+  });
+
+  it('ends a single-turn execution after a silent round without changing the continuous loop', async () => {
+    const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks) => {
+      hooks.onQuiet();
+    });
+    await runSessionLoop({ ...params, executionMode: 'single_turn' } as never);
+    expect(runOneRoundMock).toHaveBeenCalledTimes(1);
+    expect(params.onCommit).not.toHaveBeenCalled();
+    expect(params.onLoopError).not.toHaveBeenCalled();
+  });
+
   it('reports why visible streamed text is discarded after generation fails', async () => {
     const error = Object.assign(new Error('结构化回复无效'), { protocolReason: 'missing_json_envelope' });
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);

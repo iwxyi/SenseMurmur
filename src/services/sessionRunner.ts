@@ -286,6 +286,7 @@ function resolveCommitApiConfig(api: APIConfig | AIModelProfile[]): APIConfig {
 
 export async function runSessionLoop(params: {
   loopId: string;
+  executionMode?: 'continuous' | 'single_turn';
   chatId: string;
   chat: GroupChat;
   characters: AICharacter[];
@@ -367,12 +368,14 @@ export async function runSessionLoop(params: {
       if (params.signal?.aborted) return;
       if (!isActiveLoop(params)) return;
       if (params.isPaused()) {
+        if (params.executionMode === 'single_turn') return;
         conversationRunStart = null;
         markSessionLoop(params.loopId, { phase: 'paused' });
         await sleep(120);
         continue;
       }
       if (params.onCommitSettled && !params.onCommitSettled()) {
+        if (params.executionMode === 'single_turn') return;
         markSessionLoop(params.loopId, { phase: 'waiting_commit' });
         await sleep(80);
         continue;
@@ -426,6 +429,7 @@ export async function runSessionLoop(params: {
         }, 'info', 'chat-run');
         turnWorkActive = false;
         params.onTurnWorkFinished?.();
+        if (params.executionMode === 'single_turn') return;
         markSessionLoop(params.loopId, { phase: 'sleeping' });
         await new Promise((resolve) => setTimeout(resolve, inputHold.delayMs));
         continue;
@@ -434,6 +438,7 @@ export async function runSessionLoop(params: {
         turnWorkActive = false;
         params.onTurnWorkFinished?.();
         params.onLoopError(new Error('No active character records available for this chat loop'));
+        if (params.executionMode === 'single_turn') return;
         await new Promise((resolve) => setTimeout(resolve, getLoopErrorWaitTime()));
         continue;
       }
@@ -443,6 +448,7 @@ export async function runSessionLoop(params: {
         turnWorkActive = false;
         params.onTurnWorkFinished?.();
         params.onLoopError(new Error('All selected members are missing from the active character set'));
+        if (params.executionMode === 'single_turn') return;
         await new Promise((resolve) => setTimeout(resolve, getLoopErrorWaitTime()));
         continue;
       }
@@ -515,6 +521,7 @@ export async function runSessionLoop(params: {
         if (handled) {
           turnWorkActive = false;
           params.onTurnWorkFinished?.();
+          if (params.executionMode === 'single_turn') return;
           if (params.isRunning() && !params.isPaused() && shouldWaitAfterSessionTick()) {
             await new Promise((resolve) => setTimeout(resolve, getLoopWaitTime(currentChat, random)));
           }
@@ -530,6 +537,7 @@ export async function runSessionLoop(params: {
         const sessionFamily = resolveSessionFamilyKey(currentChat);
         if (sessionFamily !== 'analysis' && sessionFamily !== 'study') params.onIdle?.('当前阶段没有需要自动执行的回合');
         params.pauseLoop?.();
+        if (params.executionMode === 'single_turn') return;
         await new Promise((resolve) => setTimeout(resolve, getLoopWaitTime(currentChat, random)));
         continue;
       }
@@ -542,6 +550,7 @@ export async function runSessionLoop(params: {
         const sessionFamily = resolveSessionFamilyKey(currentChat);
         if (sessionFamily !== 'analysis' && sessionFamily !== 'study') params.onIdle?.('当前阶段没有需要自动发言的角色');
         params.pauseLoop?.();
+        if (params.executionMode === 'single_turn') return;
         await new Promise((resolve) => setTimeout(resolve, getLoopWaitTime(currentChat, random)));
         continue;
       }
@@ -838,6 +847,8 @@ export async function runSessionLoop(params: {
           eventClass: 'phase', visibilityScope: 'public', channelId: 'public',
         });
       }
+
+      if (params.executionMode === 'single_turn') return;
 
       if (params.isRunning() && !params.isPaused() && shouldWaitAfterSessionTick()) {
         markSessionLoop(params.loopId, { phase: 'sleeping' });
