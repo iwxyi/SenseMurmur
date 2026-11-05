@@ -18,6 +18,30 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('does not start child tasks when pause was requested during planning', async () => {
+    const runId = crypto.randomUUID();
+    let finishPlan!: (value: string) => void;
+    generate.mockImplementationOnce(() => new Promise<string>((resolve) => { finishPlan = resolve; }));
+    const scoped = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-pause-planning-test');
+    const pending = scoped.start(runId, 'chat', '写报告');
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    await scoped.requestPauseAfterCurrentBatch(runId);
+    finishPlan(JSON.stringify({
+      summary: '写报告',
+      roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '成稿' }],
+      finalAcceptance: '报告可读',
+    }));
+    const paused = await pending;
+    expect(paused.snapshot.run.status).toBe('paused');
+    expect(paused.snapshot.tasks.map((task) => task.status)).toEqual(['completed', 'queued']);
+    expect(generate).toHaveBeenCalledTimes(1);
+    generate.mockResolvedValueOnce('已完成的报告');
+    const resumed = await scoped.resume(runId);
+    expect(resumed.snapshot.run.status).toBe('completed');
+    expect(generate).toHaveBeenCalledTimes(2);
+  });
+
   it('persists a plan, executes dependent roles with upstream output, then closes the run', async () => {
     const plan = {
       summary: '调研后写摘要',
