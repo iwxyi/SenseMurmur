@@ -10,6 +10,7 @@ interface Props {
   onResume: (run: WorkflowSnapshot) => void;
   onCreate: () => void;
   onInstruct: (run: WorkflowSnapshot, task: WorkflowTask, instruction: string) => Promise<void>;
+  onPause: (run: WorkflowSnapshot) => Promise<void>;
 }
 
 const taskStatus: Record<WorkflowTask['status'], string> = {
@@ -37,13 +38,14 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate, onInstruct }: Props) {
+export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate, onInstruct, onPause }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [instruction, setInstruction] = useState('');
   const [savingInstruction, setSavingInstruction] = useState(false);
   const [instructionError, setInstructionError] = useState<string | null>(null);
+  const [pauseError, setPauseError] = useState<string | null>(null);
   if (!runs.length) return null;
   const run = runs.find((item) => item.run.id === selectedRunId) || runs[0];
   const task = run.tasks.find((item) => item.id === selectedTaskId) || null;
@@ -70,7 +72,7 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
         </Stack>}
         <Box>
           <Typography variant="subtitle1" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{plan?.summary || run.run.goal}</Typography>
-          <Typography variant="body2" color="text.secondary">{running ? '运行中' : run.run.status === 'completed' ? '已完成' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '失败' : '等待执行'} · 已完成 {summary.completed.length}/{run.tasks.length} 步</Typography>
+          <Typography variant="body2" color="text.secondary">{run.run.pauseRequested ? '当前步骤完成后暂停' : running ? '运行中' : run.run.status === 'completed' ? '已完成' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '失败' : '等待执行'} · 已完成 {summary.completed.length}/{run.tasks.length} 步</Typography>
         </Box>
         <Stack direction="row" spacing={0.75} sx={{ overflowX: 'auto', pb: 0.5 }}>
           <Chip size="small" clickable color={!task ? 'primary' : 'default'} label="总览与主 Agent" onClick={() => setSelectedTaskId(null)} />
@@ -100,11 +102,13 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
           <Typography variant="body2"><strong>目标</strong> {run.run.goal}</Typography>
           {plan?.finalAcceptance && <Typography variant="body2"><strong>最终验收</strong> {plan.finalAcceptance}</Typography>}
           {summary.blocked.length > 0 && <Typography variant="body2" color="warning.main"><strong>需要处理</strong> {summary.blocked.map((item) => item.reason).join('；')}</Typography>}
+          {pauseError && <Typography variant="body2" color="error.main">{pauseError}</Typography>}
           {run.tasks.map((item, index) => <Typography key={item.id} variant="body2" color="text.secondary">{index + 1}. {item.kind === 'team_plan' ? '规划团队' : taskDetails(item)?.goal || '执行任务'} · {taskStatus[item.status]}</Typography>)}
         </Box>}
       </DialogContent>
       <DialogActions>
         <Button onClick={() => { setOpen(false); onCreate(); }}>新建团队任务</Button>
+        {running && !run.run.pauseRequested && <Button onClick={() => { void onPause(run).then(() => setPauseError(null)).catch((error: unknown) => setPauseError(error instanceof Error ? error.message : '暂停任务失败')); }}>当前步骤完成后暂停</Button>}
         {!running && !blocked && run.run.status !== 'failed' && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : '继续整个任务'}</Button>}
         <Button onClick={() => setOpen(false)}>关闭</Button>
       </DialogActions>

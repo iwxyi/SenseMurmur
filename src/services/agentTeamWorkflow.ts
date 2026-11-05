@@ -74,6 +74,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
   return {
     read: runtime.read,
     list: runtime.list,
+    requestPauseAfterCurrentBatch: runtime.requestPauseAfterCurrentBatch,
     async instructQueuedTask(runId: string, taskId: string, expectedPlanVersion: number, instruction: string) {
       const trimmed = instruction.trim();
       if (!trimmed || trimmed.length > 4000) throw new Error('补充指示应为 1 到 4000 个字符');
@@ -234,6 +235,17 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
 export function isAgentTeamRunActive(runId: string) { return activeTeamRuns.has(runId); }
 
 export function hasActiveAgentTeamRuns() { return activeTeamRuns.size > 0; }
+
+export async function pauseAgentTeamAfterCurrentBatch(runId: string) {
+  const auth = readAuthSnapshot();
+  if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
+  const workflow = currentTeamWorkflow();
+  const run = await workflow.read(runId);
+  if (!run || run.tasks[0]?.kind !== 'team_plan') throw new Error('团队任务不存在');
+  const result = await workflow.requestPauseAfterCurrentBatch(runId);
+  notifyTeam();
+  return result;
+}
 
 export async function instructAgentTeamTask(params: { runId: string; taskId: string; expectedPlanVersion: number; instruction: string }) {
   const auth = readAuthSnapshot();

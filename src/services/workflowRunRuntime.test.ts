@@ -69,6 +69,23 @@ describe('workflow run runtime', () => {
     expect(result.tasks[0].output).toBeUndefined();
   });
 
+  it('pauses after the current paid batch commits and leaves dependent work queued', async () => {
+    const id = crypto.randomUUID();
+    let finish!: (value: { output: string }) => void;
+    const execute = vi.fn(() => new Promise<{ output: string }>((resolve) => { finish = resolve; }));
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => 'pause-after-batch-test');
+    await runtime.create(snapshot(id));
+    const pending = runtime.resume(id);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    await runtime.requestPauseAfterCurrentBatch(id);
+    finish({ output: '已保存的脚本' });
+    const result = await pending;
+    expect(result.run.status).toBe('paused');
+    expect(result.run.pauseRequested).toBe(false);
+    expect(result.tasks.map((task) => task.status)).toEqual(['completed', 'waiting_dependency']);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
   it('continues independent tasks while an external result is pending', async () => {
     const id = crypto.randomUUID();
     const plan = snapshot(id);

@@ -26,6 +26,7 @@ export interface WorkflowRun {
   planVersion: number;
   resumeCommandIds?: string[];
   planOpen?: boolean;
+  pauseRequested?: boolean;
   updatedAt: number;
 }
 
@@ -300,7 +301,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
       const alreadyApplied = await mutate(storageScope, runId, (current) => {
         if (commandId && current.run.resumeCommandIds?.includes(commandId)) return { snapshot: current, value: true };
         if (current.run.status === 'completed' || current.run.status === 'cancelled') return { snapshot: current, value: true };
-        return { snapshot: { ...current, run: { ...current.run, status: 'active', generation: current.run.generation + 1, resumeCommandIds: commandId ? [...(current.run.resumeCommandIds || []).slice(-99), commandId] : current.run.resumeCommandIds, updatedAt: Date.now() }, tasks: current.tasks.map((task) => task.status === 'running' ? { ...task, status: 'result_unknown', error: '上次执行中断，需核对结果', updatedAt: Date.now() } : task) }, value: false };
+        if (current.run.pauseRequested) return { snapshot: { ...current, run: { ...current.run, status: 'paused', pauseRequested: false, updatedAt: Date.now() } }, value: true };
+        return { snapshot: { ...current, run: { ...current.run, status: 'active', pauseRequested: false, generation: current.run.generation + 1, resumeCommandIds: commandId ? [...(current.run.resumeCommandIds || []).slice(-99), commandId] : current.run.resumeCommandIds, updatedAt: Date.now() }, tasks: current.tasks.map((task) => task.status === 'running' ? { ...task, status: 'result_unknown', error: '上次执行中断，需核对结果', updatedAt: Date.now() } : task) }, value: false };
       });
       if (alreadyApplied) {
         const current = await repository.read(storageScope, runId);
@@ -310,7 +312,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
       while (!signal.aborted) {
         if (scope() !== storageScope) break;
         const snapshot = await repository.read(storageScope, runId);
-        if (!snapshot || snapshot.run.status !== 'active') break;
+        if (!snapshot || snapshot.run.status !== 'active' || snapshot.run.pauseRequested) break;
         const generation = snapshot.run.generation;
         const completed = new Set(snapshot.tasks.filter((task) => task.status === 'completed').map((task) => task.id));
         const ready = snapshot.tasks.filter((task) => (task.status === 'queued' || task.status === 'waiting_dependency') && task.dependsOn.every((id) => completed.has(id)));
@@ -318,11 +320,17 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         const batch = [...ready, ...external].slice(0, concurrency);
         if (!batch.length) break;
         const claimed = new Set(batch.filter((task) => ready.includes(task)).map((task) => task.id));
-        await mutate(storageScope, runId, (current) => ({ snapshot: {
-          ...current,
-          tasks: current.tasks.map((item) => claimed.has(item.id)
-            ? { ...item, status: 'running', attempt: item.attempt + 1, updatedAt: Date.now() } : item),
-        }, value: undefined }));
+        const dispatchAllowed = await mutate(storageScope, runId, (current) => {
+          if (scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' || current.run.pauseRequested) {
+            return { snapshot: current, value: false };
+          }
+          return { snapshot: {
+            ...current,
+            tasks: current.tasks.map((item) => claimed.has(item.id)
+              ? { ...item, status: 'running', attempt: item.attempt + 1, updatedAt: Date.now() } : item),
+          }, value: true };
+        });
+        if (!dispatchAllowed) break;
         await Promise.all(batch.map(async (task) => {
           const isReady = claimed.has(task.id);
           try {
@@ -353,7 +361,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
           : current.tasks;
         const completed = !current.run.planOpen && tasks.every((task) => task.status === 'completed');
         const failed = tasks.some((task) => task.status === 'failed');
-        const snapshot = { ...current, tasks, run: { ...current.run, status: current.run.status !== 'active' ? current.run.status : signal.aborted ? 'paused' as const : completed ? 'completed' as const : failed ? 'failed' as const : current.run.status } };
+        const snapshot = { ...current, tasks, run: { ...current.run, status: current.run.status !== 'active' ? current.run.status : signal.aborted || current.run.pauseRequested ? 'paused' as const : completed ? 'completed' as const : failed ? 'failed' as const : current.run.status, pauseRequested: false, updatedAt: Date.now() } };
         return { snapshot, value: snapshot };
       });
     }).finally(() => active.delete(activeKey));
@@ -369,5 +377,16 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, addTasks, addTasksOnce, expandPlanOnce, closePlan, resume, pause, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  async function requestPauseAfterCurrentBatch(runId: string) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.status !== 'active') return { snapshot: current, value: current };
+      const snapshot: WorkflowSnapshot = {
+        ...current,
+        run: { ...current.run, pauseRequested: true, updatedAt: Date.now() },
+      };
+      return { snapshot, value: snapshot };
+    });
+  }
+
+  return { create, addTasks, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }
