@@ -179,6 +179,7 @@ export async function runDirectUserReplyFlow(params: {
   }, 'info', 'chat-run');
 
   await generateAndCommitAiMessage({
+    directReplyToUserMessageId: params.userMessage.id,
     api: textApiConfig,
     aiProfiles: params.aiProfiles,
     chatId: params.chatId,

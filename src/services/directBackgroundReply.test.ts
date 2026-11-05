@@ -7,6 +7,7 @@ import { useCharacterStore } from '../stores/useCharacterStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { directReplyRunId, listDirectBackgroundReplies, recoverDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply } from './directBackgroundReply';
+import { currentWorkflowScope, indexedDbWorkflowRepository } from './workflowRunRuntime';
 
 const flow = vi.hoisted(() => vi.fn());
 vi.mock('./directUserReplyFlow', () => ({ runDirectUserReplyFlow: flow }));
@@ -37,7 +38,7 @@ describe('direct background reply', () => {
     const { chatId, userMessage } = setup();
     flow.mockImplementation(async (params: { upsertMessage: (message: Message) => void }) => {
       useMessageStore.setState({ activeChatId: null, messages: [] });
-      params.upsertMessage({ id: crypto.randomUUID(), chatId, type: 'ai', senderId: 'character', senderName: '角色', content: '你好', emotion: 0, timestamp: userMessage.timestamp + 1, isDeleted: false });
+      params.upsertMessage({ id: crypto.randomUUID(), chatId, type: 'ai', senderId: 'character', senderName: '角色', content: '你好', emotion: 0, timestamp: userMessage.timestamp + 1, isDeleted: false, metadata: { directReplyToUserMessageId: userMessage.id } });
     });
     const first = await startDirectBackgroundReply(chatId, userMessage.id);
     expect(first.snapshot.run.status).toBe('completed');
@@ -57,5 +58,27 @@ describe('direct background reply', () => {
     const resumed = await resumeDirectBackgroundReply(first.snapshot.run.id);
     expect(resumed.summary.blocked).toHaveLength(1);
     expect(flow).toHaveBeenCalledTimes(1);
+  });
+
+  it('recognizes a committed reply when the run checkpoint was interrupted', async () => {
+    const { chatId, userMessage } = setup();
+    const runId = directReplyRunId(chatId, userMessage.id);
+    const now = Date.now();
+    useMessageStore.getState().upsertMessage({
+      id: crypto.randomUUID(), chatId, type: 'ai', senderId: 'character', senderName: '角色',
+      content: '已回复', emotion: 0, timestamp: now + 1, isDeleted: false,
+      metadata: { directReplyToUserMessageId: userMessage.id },
+    });
+    await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, () => ({
+      snapshot: {
+        run: { id: runId, chatId, goal: '回复用户消息', status: 'active', generation: 1, planVersion: 1, updatedAt: now },
+        tasks: [{ id: userMessage.id, runId, kind: 'direct_reply', input: { chatId, userMessageId: userMessage.id }, dependsOn: [], status: 'running', attempt: 1, updatedAt: now }],
+      }, value: undefined,
+    }));
+    expect(await recoverDirectBackgroundReplies()).toBe(true);
+    const restored = (await listDirectBackgroundReplies(chatId))[0];
+    expect(restored.run.status).toBe('completed');
+    expect(restored.tasks[0].status).toBe('completed');
+    expect(flow).not.toHaveBeenCalled();
   });
 });

@@ -8,6 +8,7 @@ import { buildRuntimeEventMessageContent, normalizeRuntimeEvent } from './runtim
 import { persistLocalFirstMessage, persistLocalFirstMessages } from './chatCommitMessage';
 import { projectCurrentChatMessages } from './currentChatMessages';
 import { getWorkspaceSignal } from './workspaceLifecycle';
+import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { createWorkflowRunRuntime, currentWorkflowScope, indexedDbWorkflowRepository, summarizeWorkflowRun, workflowRunLockName, WorkflowPreflightError, type WorkflowSnapshot, type WorkflowTask } from './workflowRunRuntime';
 
 interface DirectReplyInput { chatId: string; userMessageId: string }
@@ -29,6 +30,11 @@ function messagesForDirectChat(chatId: string) {
   });
 }
 
+function committedReply(chatId: string, userMessageId: string) {
+  return messagesForDirectChat(chatId).find((item) => item.type === 'ai' && !item.isDeleted && !item.isStreaming
+    && item.metadata?.directReplyToUserMessageId === userMessageId);
+}
+
 async function executeDirectReply(task: WorkflowTask, signal: AbortSignal) {
   if (task.kind !== 'direct_reply' || !isDirectReplyInput(task.input)) throw new WorkflowPreflightError('单聊任务输入无效');
   const { chatId, userMessageId } = task.input;
@@ -45,7 +51,8 @@ async function executeDirectReply(task: WorkflowTask, signal: AbortSignal) {
     if (!useCharacterStore.getState().characters.some((item) => item.id === chat.memberIds[0])) throw new WorkflowPreflightError('单聊角色已不存在');
     const userMessage = messagesForDirectChat(chatId).find((item) => item.id === userMessageId && item.type === 'user' && !item.isDeleted);
     if (!userMessage) throw new WorkflowPreflightError('原始用户消息已不存在');
-    const before = new Set(messagesForDirectChat(chatId).map((item) => item.id));
+    const alreadyCommitted = committedReply(chatId, userMessageId);
+    if (alreadyCommitted) return { output: alreadyCommitted.id };
     const { runDirectUserReplyFlow } = await import('./directUserReplyFlow');
     const settings = useSettingsStore.getState();
     await runDirectUserReplyFlow({
@@ -79,8 +86,9 @@ async function executeDirectReply(task: WorkflowTask, signal: AbortSignal) {
       signal,
       shouldContinue: () => !signal.aborted && useChatStore.getState().chats.some((item) => item.id === chatId && item.type === 'direct' && item.deletedAt == null),
     });
-    const reply = messagesForDirectChat(chatId).find((item) => !before.has(item.id) && item.type === 'ai' && !item.isDeleted && item.timestamp >= userMessage.timestamp);
+    const reply = committedReply(chatId, userMessageId);
     if (!reply) throw new Error('单聊生成返回后未找到已提交回复，结果需要核对');
+    flushBufferedPersistenceWrites();
     return { output: reply.id };
   });
 }
@@ -130,13 +138,27 @@ export async function recoverDirectBackgroundReplies() {
   if (!navigator.locks?.request) throw new Error('此设备不支持安全的单聊任务恢复');
   const scope = currentWorkflowScope();
   const runs = await listDirectBackgroundReplies();
+  await Promise.all([
+    useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
+    useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
+  ]);
   let changed = false;
   for (const item of runs) {
     if (item.run.status !== 'active' || active.has(item.run.id)) continue;
     const recovered = await navigator.locks.request(workflowRunLockName(scope, item.run.id), { ifAvailable: true }, async (lock) => {
       if (!lock || currentWorkflowScope() !== scope) return false;
+      const chat = useChatStore.getState().chats.find((entry) => entry.id === item.run.chatId && entry.type === 'direct' && entry.deletedAt == null);
+      const reply = chat && item.tasks[0] ? committedReply(chat.id, item.tasks[0].id) : null;
       return indexedDbWorkflowRepository.transact(scope, item.run.id, (current) => {
         if (!current || current.run.status !== 'active') return { snapshot: current || item, value: false };
+        if (reply && current.tasks.length === 1) {
+          const snapshot: WorkflowSnapshot = {
+            ...current,
+            run: { ...current.run, status: 'completed', generation: current.run.generation + 1, updatedAt: Date.now() },
+            tasks: [{ ...current.tasks[0], status: 'completed', output: reply.id, error: undefined, updatedAt: Date.now() }],
+          };
+          return { snapshot, value: true };
+        }
         const snapshot: WorkflowSnapshot = {
           ...current,
           run: { ...current.run, status: 'paused', generation: current.run.generation + 1, updatedAt: Date.now() },

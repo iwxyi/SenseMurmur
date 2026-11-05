@@ -269,6 +269,7 @@ export interface CharacterMention {
 }
 
 export interface MessageMetadata {
+  directReplyToUserMessageId?: string;
   mentions?: CharacterMention[];
   conversationUpdate?: import('./conversationContinuity').ConversationUpdate;
   voice?: {

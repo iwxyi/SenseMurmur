@@ -104,6 +104,9 @@ export async function runChatCommitPipeline(params: {
         ...params.message,
         metadata: {
           ...params.message.metadata,
+          ...(params.streamingMessage?.metadata?.directReplyToUserMessageId
+            ? { directReplyToUserMessageId: params.streamingMessage.metadata.directReplyToUserMessageId }
+            : {}),
           ...(params.streamingMessage?.metadata?.branching
             ? { branching: params.streamingMessage.metadata.branching }
             : {}),

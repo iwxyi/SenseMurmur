@@ -27,6 +27,7 @@ export async function generateAndCommitAiMessage(params: {
   currentMessages: Message[];
   timestamp?: number;
   streamingMessage?: Message | null;
+  directReplyToUserMessageId?: string;
   onChunk?: (content: string) => void;
   signal?: AbortSignal;
   shouldContinue?: () => boolean;
@@ -64,6 +65,7 @@ export async function generateAndCommitAiMessage(params: {
     senderName: params.speaker.name,
     content: '',
     emotion: 0,
+    metadata: params.directReplyToUserMessageId ? { directReplyToUserMessageId: params.directReplyToUserMessageId } : undefined,
   }), { timestamp: params.timestamp });
   let streamingMessage = { ...placeholder, isStreaming: true };
   const display = createStreamingMessageDisplay({
