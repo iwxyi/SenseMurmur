@@ -46,6 +46,7 @@ export async function runDirectUserReplyFlow(params: {
   signal?: AbortSignal;
   shouldContinue?: () => boolean;
   deferRuntimePersistenceUntilCommit?: boolean;
+  historyCutoffTimestamp?: number;
 }) {
   const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
   const elapsed = () => Number(((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt).toFixed(2));
@@ -170,7 +171,9 @@ export async function runDirectUserReplyFlow(params: {
   ensureDirectReplyStillCurrent(params);
   const chatForGeneration = useChatStore.getState().chats.find((item) => item.id === params.chatId) || params.chat;
   const sessionEngine = resolveSessionEngine(chatForGeneration);
-  const projectedMessagesForGeneration = getProjectedMessages();
+  const projectedMessagesForGeneration = getProjectedMessages().filter((message) =>
+    params.historyCutoffTimestamp === undefined || message.timestamp <= params.historyCutoffTimestamp
+  );
   logDeveloperDiagnostic('direct-reply:generation-start', {
     chatId: params.chatId,
     characterId: directCharacter.id,

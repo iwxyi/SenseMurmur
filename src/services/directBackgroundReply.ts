@@ -48,7 +48,12 @@ async function executeDirectReply(task: WorkflowTask, signal: AbortSignal) {
     ]);
     const chat = useChatStore.getState().chats.find((item) => item.id === chatId);
     if (!chat || chat.type !== 'direct' || chat.deletedAt != null) throw new WorkflowPreflightError('单聊会话不可用');
-    if (!useCharacterStore.getState().characters.some((item) => item.id === chat.memberIds[0])) throw new WorkflowPreflightError('单聊角色已不存在');
+    const characterId = chat.memberIds[0];
+    if (!characterId) throw new WorkflowPreflightError('单聊角色已不存在');
+    if (!useCharacterStore.getState().characters.some((item) => item.id === characterId)) {
+      const loaded = await useCharacterStore.getState().loadCharacter(characterId);
+      if (!loaded) throw new WorkflowPreflightError('单聊角色已不存在');
+    }
     const userMessage = messagesForDirectChat(chatId).find((item) => item.id === userMessageId && item.type === 'user' && !item.isDeleted);
     if (!userMessage) throw new WorkflowPreflightError('原始用户消息已不存在');
     const alreadyCommitted = committedReply(chatId, userMessageId);
@@ -58,6 +63,7 @@ async function executeDirectReply(task: WorkflowTask, signal: AbortSignal) {
     await runDirectUserReplyFlow({
       api: settings.api, aiProfiles: settings.aiProfiles, chatId, chat, userMessage,
       content: userMessage.content, characters: useCharacterStore.getState().characters,
+      historyCutoffTimestamp: userMessage.timestamp,
       updateCharacter: (id, patch) => useCharacterStore.getState().updateCharacter(id, patch),
       updateCharacters: (patches) => useCharacterStore.getState().updateCharacters(patches),
       upsertMessage: (message) => useMessageStore.getState().upsertMessage(message),
