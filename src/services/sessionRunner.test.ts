@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GroupChat } from '../types/chat';
 import type { Message } from '../types/message';
-import { buildNoSendContextKey, runSessionLoop, shouldPauseSettledConversation } from './sessionRunner';
+import { buildNoSendContextKey, runSessionLoop, shouldPauseSettledConversation, type SessionLoopContinuation } from './sessionRunner';
 import { GenerationCancelledError } from './generationCancellation';
 
 const runOneRoundMock = vi.fn();
@@ -282,6 +282,51 @@ describe('runSessionLoop', () => {
     expect(runOneRoundMock).toHaveBeenCalledTimes(1);
     expect(params.onCommit).not.toHaveBeenCalled();
     expect(params.onLoopError).not.toHaveBeenCalled();
+  });
+
+  it('carries declined speakers into the next scheduled turn and resets for new input', async () => {
+    const chat = buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
+    const input = { id: 'input-1', type: 'user', content: '聊聊吧', timestamp: 1 } as Message;
+    let messages = [input];
+    let continuation: SessionLoopContinuation | undefined;
+    const onContinuation = vi.fn((value: SessionLoopContinuation) => { continuation = value; });
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks, _profiles, context) => {
+      const round = runOneRoundMock.mock.calls.length;
+      if (round === 1) {
+        expect([...context.consumedSpeakerIds]).toEqual([]);
+        hooks.onNoSend({ delivery: 'no_send', speakerId: 'a' });
+      } else if (round === 2) {
+        expect([...context.consumedSpeakerIds]).toEqual(['a']);
+        hooks.onNoSend({ delivery: 'no_send', speakerId: 'b' });
+      } else {
+        expect([...context.consumedSpeakerIds]).toEqual([]);
+      }
+    });
+
+    const first = buildLoopParams(chat);
+    first.getCurrentMessages = () => messages;
+    await runSessionLoop({ ...first, executionMode: 'single_turn', onContinuation } as never);
+    expect(continuation?.consumedSpeakerIds).toEqual(['a']);
+
+    const second = buildLoopParams(chat);
+    second.getCurrentMessages = () => messages;
+    await runSessionLoop({ ...second, executionMode: 'single_turn', continuation, onContinuation } as never);
+    expect(continuation?.consumedSpeakerIds).toEqual(['a', 'b']);
+
+    const waiting = buildLoopParams(chat);
+    waiting.getCurrentMessages = () => messages;
+    const onWaitingForInput = vi.fn();
+    await runSessionLoop({ ...waiting, executionMode: 'single_turn', continuation, onContinuation, onWaitingForInput } as never);
+    expect(onWaitingForInput).toHaveBeenCalledTimes(1);
+    expect(runOneRoundMock).toHaveBeenCalledTimes(2);
+
+    messages = [...messages, { id: 'input-2', type: 'user', content: '换个话题', timestamp: 2 } as Message];
+    const third = buildLoopParams(chat);
+    third.getCurrentMessages = () => messages;
+    await runSessionLoop({ ...third, executionMode: 'single_turn', continuation, onContinuation } as never);
+    expect(runOneRoundMock).toHaveBeenCalledTimes(3);
+    expect(continuation?.consumedSpeakerIds).toEqual([]);
+    expect(onContinuation).toHaveBeenCalledTimes(4);
   });
 
   it('reports why visible streamed text is discarded after generation fails', async () => {

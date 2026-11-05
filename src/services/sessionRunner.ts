@@ -21,7 +21,9 @@ import { messagesShareIdentity } from './messageIdentity';
 
 // Keep the external input anchor stable across paging and runtime writes.
 // Successful commits explicitly reopen silent members' opportunities below.
-function latestExternalInput(messages: Message[], previous: Message | null = null) {
+type ExternalInputAnchor = NonNullable<SessionLoopContinuation['externalInputAnchor']>;
+
+function latestExternalInput(messages: Message[], previous: ExternalInputAnchor | null = null): ExternalInputAnchor | null {
   const visible = messages.filter((message) => !message.isDeleted && !message.isStreaming
     && (message.type === 'user' || message.type === 'god'));
   const latest = visible.at(-1) || null;
@@ -30,7 +32,7 @@ function latestExternalInput(messages: Message[], previous: Message | null = nul
   return latest;
 }
 
-export function buildNoSendContextKey(chat: GroupChat, messages: Message[], previousExternalInput: Message | null = null) {
+export function buildNoSendContextKey(chat: GroupChat, messages: Message[], previousExternalInput: ExternalInputAnchor | null = null) {
   const branchName = chat.messageBranchState?.activeBranchName;
   const input = latestExternalInput(messages, previousExternalInput);
   return JSON.stringify({
@@ -265,6 +267,15 @@ function getSessionMessages(getCurrentMessages: () => Message[]) {
   return getCurrentMessages();
 }
 
+export interface SessionLoopContinuation {
+  noSendContextKey: string | null;
+  externalInputAnchor: Pick<Message, 'id' | 'timestamp' | 'type' | 'senderId' | 'content' | 'addressedTargetIds' | 'replyDebtTargetIds' | 'metadata'> | null;
+  anchorBranchName: string | undefined;
+  consumedSpeakerIds: string[];
+  consumedReplyDebtSpeakerIds: string[];
+  presenceByMemberId: Array<[string, string]>;
+}
+
 function nowMs() {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
 }
@@ -287,6 +298,8 @@ function resolveCommitApiConfig(api: APIConfig | AIModelProfile[]): APIConfig {
 export async function runSessionLoop(params: {
   loopId: string;
   executionMode?: 'continuous' | 'single_turn';
+  continuation?: SessionLoopContinuation;
+  onContinuation?: (continuation: SessionLoopContinuation) => void | Promise<void>;
   chatId: string;
   chat: GroupChat;
   characters: AICharacter[];
@@ -343,9 +356,9 @@ export async function runSessionLoop(params: {
 }) {
   const random = params.random || Math.random;
   let conversationRunStart: GroupChat | null = null;
-  let noSendContextKey: string | null = null;
-  let externalInputAnchor: Message | null = null;
-  let anchorBranchName = params.chat.messageBranchState?.activeBranchName;
+  let noSendContextKey: string | null = params.continuation?.noSendContextKey ?? null;
+  let externalInputAnchor: ExternalInputAnchor | null = params.continuation?.externalInputAnchor ?? null;
+  let anchorBranchName = params.continuation?.anchorBranchName ?? params.chat.messageBranchState?.activeBranchName;
   const getAutonomousContextKey = (chat: GroupChat, messages: Message[]) => {
     const branchName = chat.messageBranchState?.activeBranchName;
     if (branchName !== anchorBranchName) externalInputAnchor = null;
@@ -353,9 +366,28 @@ export async function runSessionLoop(params: {
     externalInputAnchor = latestExternalInput(messages, externalInputAnchor);
     return buildNoSendContextKey(chat, messages, externalInputAnchor);
   };
-  const consumedSpeakerIds = new Set<string>();
-  const consumedReplyDebtSpeakerIds = new Set<string>();
-  const presenceByMemberId = new Map<string, string>();
+  const consumedSpeakerIds = new Set(params.continuation?.consumedSpeakerIds || []);
+  const consumedReplyDebtSpeakerIds = new Set(params.continuation?.consumedReplyDebtSpeakerIds || []);
+  const presenceByMemberId = new Map(params.continuation?.presenceByMemberId || []);
+  const saveContinuation = async () => {
+    await params.onContinuation?.({
+      noSendContextKey,
+      externalInputAnchor: externalInputAnchor ? {
+        id: externalInputAnchor.id,
+        timestamp: externalInputAnchor.timestamp,
+        type: externalInputAnchor.type,
+        senderId: externalInputAnchor.senderId,
+        content: externalInputAnchor.content,
+        addressedTargetIds: externalInputAnchor.addressedTargetIds,
+        replyDebtTargetIds: externalInputAnchor.replyDebtTargetIds,
+        metadata: externalInputAnchor.metadata?.withdrawal ? { withdrawal: externalInputAnchor.metadata.withdrawal } : undefined,
+      } : null,
+      anchorBranchName,
+      consumedSpeakerIds: [...consumedSpeakerIds],
+      consumedReplyDebtSpeakerIds: [...consumedReplyDebtSpeakerIds],
+      presenceByMemberId: [...presenceByMemberId],
+    });
+  };
   activeSessionLoops.set(params.loopId, {
     chatId: params.chatId,
     startedAt: Date.now(),
@@ -395,6 +427,7 @@ export async function runSessionLoop(params: {
             && waitingMembers.every((character) => getEffectiveCharacterPresence(character).status === 'away' || consumedSpeakerIds.has(character.id))) {
             console.info('[chat-run:waiting-input] 当前可发言角色均选择不发言，停止运行，等待用户输入。');
             params.onWaitingForInput?.();
+            await saveContinuation();
             return;
           }
         }
@@ -521,6 +554,7 @@ export async function runSessionLoop(params: {
         if (handled) {
           turnWorkActive = false;
           params.onTurnWorkFinished?.();
+          await saveContinuation();
           if (params.executionMode === 'single_turn') return;
           if (params.isRunning() && !params.isPaused() && shouldWaitAfterSessionTick()) {
             await new Promise((resolve) => setTimeout(resolve, getLoopWaitTime(currentChat, random)));
@@ -847,6 +881,8 @@ export async function runSessionLoop(params: {
           eventClass: 'phase', visibilityScope: 'public', channelId: 'public',
         });
       }
+
+      await saveContinuation();
 
       if (params.executionMode === 'single_turn') return;
 
