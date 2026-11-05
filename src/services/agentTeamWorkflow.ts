@@ -1,7 +1,7 @@
 import type { APIConfig } from '../types/settings';
 import { generateResponse } from './aiClient';
 import { planAgentTeam, validateAgentTeamPlan, type AgentTeamPlan, type AgentTeamTask } from './agentTeamPlan';
-import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
+import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
 import { ensureAssistantArtifactStoreHydrated, useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
@@ -29,22 +29,27 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
   const runtime: ReturnType<typeof createWorkflowRunRuntime> = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
     async execute(task: WorkflowTask, signal) {
       if (task.kind === 'team_plan') {
-        if (typeof task.input !== 'string') throw new Error('团队目标无效');
+        if (typeof task.input !== 'string') throw new WorkflowPreflightError('团队目标无效');
         return { output: await planAgentTeam({ api, goal: task.input, signal }) };
       }
-      if (task.kind !== 'agent_text' || !isTeamTaskInput(task.input)) throw new Error('团队任务类型无效');
+      if (task.kind !== 'agent_text' || !isTeamTaskInput(task.input)) throw new WorkflowPreflightError('团队任务类型无效');
       const role = task.input.role;
       const snapshot = await runtime.read(task.runId);
-      if (!snapshot) throw new Error('团队任务记录不存在');
-      const plan = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === 'plan')?.output);
+      if (!snapshot) throw new WorkflowPreflightError('团队任务记录不存在');
+      let plan: AgentTeamPlan;
+      try {
+        plan = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === 'plan')?.output);
+      } catch (error) {
+        throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队计划无效');
+      }
       const plannedTask = plan.tasks.find((item) => item.id === task.id);
       const plannedRole = plan.roles.find((item) => item.id === plannedTask?.roleId);
       if (!plannedTask || !plannedRole || JSON.stringify(task.input.task) !== JSON.stringify(plannedTask) || JSON.stringify(role) !== JSON.stringify(plannedRole) || task.input.goal !== snapshot.run.goal) {
-        throw new Error('团队任务与已保存计划不一致');
+        throw new WorkflowPreflightError('团队任务与已保存计划不一致');
       }
       const upstream = task.input.task.dependsOn.map((id) => {
         const dependency = snapshot.tasks.find((item) => item.id === id);
-        if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new Error('上游交付尚未就绪');
+        if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('上游交付尚未就绪');
         return { taskId: id, content: dependency.output.slice(0, 24_000) };
       });
       const output = await generateResponse(api, [
