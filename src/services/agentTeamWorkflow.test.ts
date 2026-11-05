@@ -79,4 +79,43 @@ describe('agent team workflow', () => {
     expect(saved?.tasks.map((task) => task.status)).toEqual(['result_unknown', 'waiting_dependency']);
     expect(generate).not.toHaveBeenCalled();
   });
+
+  it('stores an instruction only for a paused unstarted child task and uses it on resume', async () => {
+    const runId = `team-${crypto.randomUUID()}`;
+    const plan = {
+      summary: '写报告',
+      roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理材料', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '成稿' }],
+      finalAcceptance: '可阅读',
+    };
+    const now = Date.now();
+    const scoped = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-instruction-test');
+    await indexedDbWorkflowRepository.transact('team-instruction-test', runId, () => ({
+      snapshot: {
+        run: { id: runId, chatId: 'chat', goal: '写报告', status: 'paused', generation: 1, planVersion: 2, planOpen: true, updatedAt: now },
+        tasks: [
+          { id: 'plan', runId, kind: 'team_plan', input: '写报告', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+          { id: 'write', runId, kind: 'agent_text', input: { task: plan.tasks[0], role: plan.roles[0], goal: '写报告' }, dependsOn: ['plan'], status: 'queued', attempt: 0, updatedAt: now },
+        ],
+      }, value: undefined,
+    }));
+    await expect(scoped.instructQueuedTask(runId, 'write', 1, '用简体中文')).rejects.toThrow('团队计划已更新');
+    const updated = await scoped.instructQueuedTask(runId, 'write', 2, '用简体中文');
+    expect(updated.run.planVersion).toBe(3);
+    expect(updated.tasks[1].input).toMatchObject({ userInstruction: '用简体中文' });
+    await indexedDbWorkflowRepository.transact('team-instruction-test', runId, (current) => {
+      if (!current) throw new Error('测试任务不存在');
+      return { snapshot: { ...current, run: { ...current.run, status: 'active' } }, value: undefined };
+    });
+    await expect(scoped.instructQueuedTask(runId, 'write', 3, '执行中修改')).rejects.toThrow('请先暂停整个团队任务');
+    await indexedDbWorkflowRepository.transact('team-instruction-test', runId, (current) => {
+      if (!current) throw new Error('测试任务不存在');
+      return { snapshot: { ...current, run: { ...current.run, status: 'paused' } }, value: undefined };
+    });
+    generate.mockResolvedValueOnce('中文报告');
+    const result = await scoped.resume(runId);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(generate.mock.calls[0][2][0].content).toContain('用户补充指示：用简体中文');
+    await expect(scoped.instructQueuedTask(runId, 'write', 3, '再次修改')).rejects.toThrow('请先暂停整个团队任务');
+  });
 });

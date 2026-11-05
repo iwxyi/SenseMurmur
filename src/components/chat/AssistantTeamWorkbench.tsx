@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Stack, Typography } from '@mui/material';
+import { Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Stack, TextField, Typography } from '@mui/material';
 import type { WorkflowSnapshot, WorkflowTask } from '../../services/workflowRunRuntime';
 import { summarizeWorkflowRun } from '../../services/workflowRunRuntime';
 import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
@@ -9,6 +9,7 @@ interface Props {
   isRunActive: (runId: string) => boolean;
   onResume: (run: WorkflowSnapshot) => void;
   onCreate: () => void;
+  onInstruct: (run: WorkflowSnapshot, task: WorkflowTask, instruction: string) => Promise<void>;
 }
 
 const taskStatus: Record<WorkflowTask['status'], string> = {
@@ -36,10 +37,13 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate }: Props) {
+export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate, onInstruct }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [instruction, setInstruction] = useState('');
+  const [savingInstruction, setSavingInstruction] = useState(false);
+  const [instructionError, setInstructionError] = useState<string | null>(null);
   if (!runs.length) return null;
   const run = runs.find((item) => item.run.id === selectedRunId) || runs[0];
   const task = run.tasks.find((item) => item.id === selectedTaskId) || null;
@@ -49,6 +53,8 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
   const childTasks = run.tasks.filter((item) => item.kind === 'agent_text');
   const blocked = summary.blocked.length > 0;
   const running = isRunActive(run.run.id);
+  const editable = Boolean(task && run.run.status === 'paused' && task.kind === 'agent_text' && task.attempt === 0
+    && (task.status === 'queued' || task.status === 'waiting_dependency'));
 
   return <>
     <Box role="status" sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, left: 12, right: 12, zIndex: 5, display: 'flex', alignItems: 'center', gap: 1, px: 1.25, py: 0.5, borderRadius: 1.5, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider', boxShadow: 1, minWidth: 0 }}>
@@ -78,6 +84,17 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
           {details.method && <Typography variant="body2"><strong>方法</strong> {details.method}</Typography>}
           {details.acceptance && <Typography variant="body2"><strong>验收</strong> {details.acceptance}</Typography>}
           {task.error && <Typography variant="body2" color="error.main"><strong>问题</strong> {task.error}</Typography>}
+          {typeof (task.input as { userInstruction?: unknown })?.userInstruction === 'string' && <Typography variant="body2"><strong>用户指示</strong> {String((task.input as { userInstruction: string }).userInstruction)}</Typography>}
+          {editable && <Box sx={{ display: 'grid', gap: 1 }}>
+            <TextField multiline minRows={2} fullWidth size="small" label="补充该子任务的指示" value={instruction} onChange={(event) => { setInstruction(event.target.value); setInstructionError(null); }} slotProps={{ htmlInput: { maxLength: 4000 } }} disabled={savingInstruction} />
+            {instructionError && <Typography variant="caption" color="error.main">{instructionError}</Typography>}
+            <Button size="small" variant="outlined" disabled={!instruction.trim() || savingInstruction} onClick={() => {
+              setSavingInstruction(true);
+              void onInstruct(run, task, instruction).then(() => { setInstruction(''); setInstructionError(null); }).catch((error: unknown) => {
+                setInstructionError(error instanceof Error ? error.message : '保存指示失败');
+              }).finally(() => setSavingInstruction(false));
+            }}>保存指示</Button>
+          </Box>}
           {typeof task.output === 'string' && <Box sx={{ p: 1.5, borderRadius: 1, bgcolor: 'action.hover', maxHeight: 300, overflowY: 'auto' }}><Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.output}</Typography></Box>}
         </Box> : <Box sx={{ display: 'grid', gap: 1.25, overflowWrap: 'anywhere' }}>
           <Typography variant="body2"><strong>目标</strong> {run.run.goal}</Typography>

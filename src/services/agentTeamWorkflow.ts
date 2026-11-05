@@ -18,6 +18,7 @@ interface TeamTaskInput {
   task: AgentTeamTask;
   goal: string;
   role: AgentTeamPlan['roles'][number];
+  userInstruction?: string;
 }
 
 function isTeamTaskInput(value: unknown): value is TeamTaskInput {
@@ -45,7 +46,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       }
       const plannedTask = plan.tasks.find((item) => item.id === task.id);
       const plannedRole = plan.roles.find((item) => item.id === plannedTask?.roleId);
-      if (!plannedTask || !plannedRole || JSON.stringify(task.input.task) !== JSON.stringify(plannedTask) || JSON.stringify(role) !== JSON.stringify(plannedRole) || task.input.goal !== snapshot.run.goal) {
+      if (!plannedTask || !plannedRole || JSON.stringify(task.input.task) !== JSON.stringify(plannedTask) || JSON.stringify(role) !== JSON.stringify(plannedRole) || task.input.goal !== snapshot.run.goal
+        || (task.input.userInstruction !== undefined && (typeof task.input.userInstruction !== 'string' || !task.input.userInstruction.trim() || task.input.userInstruction.length > 4000))) {
         throw new WorkflowPreflightError('团队任务与已保存计划不一致');
       }
       const upstream = task.input.task.dependsOn.map((id) => {
@@ -60,7 +62,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         `岗位验收：${role.acceptance}`,
         `本任务验收：${task.input.task.acceptance}`,
         '只根据提供的目标与上游交付工作；不声称调用了未提供的工具。缺少事实依据时标明不确定性。',
-      ].join('\n'), [{ role: 'user', content: `总目标：${task.input.goal}\n当前任务：${task.input.task.goal}\n上游交付：${JSON.stringify(upstream)}` }], undefined, {
+      ].join('\n'), [{ role: 'user', content: `总目标：${task.input.goal}\n当前任务：${task.input.task.goal}\n${task.input.userInstruction ? `用户补充指示：${task.input.userInstruction}\n` : ''}上游交付：${JSON.stringify(upstream)}` }], undefined, {
         responseFormat: 'text', signal,
         aiUsage: { type: 'assistant_chat', label: '团队文本任务', scope: 'chat' },
       });
@@ -72,6 +74,35 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
   return {
     read: runtime.read,
     list: runtime.list,
+    async instructQueuedTask(runId: string, taskId: string, expectedPlanVersion: number, instruction: string) {
+      const trimmed = instruction.trim();
+      if (!trimmed || trimmed.length > 4000) throw new Error('补充指示应为 1 到 4000 个字符');
+      if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务修改');
+      const storageScope = scope();
+      const snapshot = await navigator.locks.request(workflowRunLockName(storageScope, runId), { ifAvailable: true }, async (lock) => {
+        if (!lock) throw new Error('团队任务正在执行，请暂停后重试');
+        if (scope() !== storageScope) throw new Error('账号已切换，任务修改已停止');
+        return indexedDbWorkflowRepository.transact(storageScope, runId, (current) => {
+          if (!current || current.tasks[0]?.kind !== 'team_plan') throw new Error('团队任务不存在');
+          if (current.run.status !== 'paused') throw new Error('请先暂停整个团队任务');
+          if (current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
+          const target = current.tasks.find((task) => task.id === taskId);
+          if (!target || target.kind !== 'agent_text' || !isTeamTaskInput(target.input) || target.attempt !== 0
+            || (target.status !== 'queued' && target.status !== 'waiting_dependency')) throw new Error('只能修改尚未执行的子任务');
+          const next: WorkflowSnapshot = {
+            ...current,
+            run: { ...current.run, planVersion: current.run.planVersion + 1, updatedAt: Date.now() },
+            tasks: current.tasks.map((task) => task.id === taskId ? {
+              ...task,
+              input: { ...(target.input as TeamTaskInput), userInstruction: trimmed },
+              updatedAt: Date.now(),
+            } : task),
+          };
+          return { snapshot: next, value: next };
+        });
+      });
+      return snapshot;
+    },
     async start(runId: string, chatId: string, goal: string) {
       const now = Date.now();
       const initial: WorkflowSnapshot = {
@@ -203,6 +234,14 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
 export function isAgentTeamRunActive(runId: string) { return activeTeamRuns.has(runId); }
 
 export function hasActiveAgentTeamRuns() { return activeTeamRuns.size > 0; }
+
+export async function instructAgentTeamTask(params: { runId: string; taskId: string; expectedPlanVersion: number; instruction: string }) {
+  const auth = readAuthSnapshot();
+  if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
+  const result = await currentTeamWorkflow().instructQueuedTask(params.runId, params.taskId, params.expectedPlanVersion, params.instruction);
+  notifyTeam();
+  return result;
+}
 
 export async function recoverAgentTeamRuns() {
   if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务恢复');

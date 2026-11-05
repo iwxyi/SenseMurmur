@@ -50,7 +50,7 @@ import { useChatSurfaceActions } from '../hooks/useChatSurfaceActions';
 import { useReplyOperation } from '../hooks/useReplyOperation';
 import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, getAssistantBackgroundStreamingSnapshot, listAssistantBackgroundReplies, resumeAssistantBackgroundReply, subscribeAssistantBackgroundReplies, subscribeAssistantBackgroundRunChanges, subscribeAssistantBackgroundStreaming } from '../services/assistantBackgroundReply';
 import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
-import { getAgentTeamRunRevision, hasActiveAgentTeamRuns, isAgentTeamRunActive, listAgentTeamRuns, runAgentTeam, subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
+import { getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, runAgentTeam, subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
 import { getDirectBackgroundRevision, isDirectBackgroundActive, listDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply, subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
 import AssistantTeamWorkbench from '../components/chat/AssistantTeamWorkbench';
 import ChatBackground from '../components/chat/ChatBackground';
@@ -4459,6 +4459,7 @@ export default function ChatDetailPage() {
           runs={teamRuns}
           isRunActive={isAgentTeamRunActive}
           onCreate={() => setTeamGoalOpen(true)}
+          onInstruct={async (selected, task, instruction) => { await instructAgentTeamTask({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, instruction }); }}
           onResume={(selected) => { void runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id }).catch((error) => showErrorToast(error instanceof Error ? error.message : '恢复团队任务失败')); }}
         /> : null}
         {isAssistantChat && assistantRuns.length && (isAssistantBackgroundPending || assistantBackgroundNotice) ? (
