@@ -249,6 +249,20 @@ describe('runSessionLoop', () => {
     expect(params.onLoopError).not.toHaveBeenCalled();
   });
 
+  it('tags a committed private reply with its triggering user message for recovery', async () => {
+    const params = buildLoopParams(buildChat({ type: 'ai_direct', mode: 'open_chat', sessionKind: { topology: 'thread', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    const committed = vi.fn();
+    runSessionCommitPipelineMock.mockImplementation(async (args) => buildCommitPipelineResult(args));
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks) => {
+      await hooks.onMessageComplete({ id: 'reply', chatId: 'chat-1', type: 'ai', senderId: 'a', senderName: '甲', content: '已回复', emotion: 0 });
+    });
+    await runSessionLoop({ ...params, executionMode: 'single_turn', replyToUserMessageId: 'user-1', onCommittedMessage: committed } as never);
+    expect(runSessionCommitPipelineMock).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.objectContaining({ metadata: expect.objectContaining({ directReplyToUserMessageId: 'user-1' }) }),
+    }));
+    expect(committed).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ directReplyToUserMessageId: 'user-1' }) }));
+  });
+
   it('releases a single-turn execution slot when the engine has no speaking turn', async () => {
     const params = buildLoopParams(buildChat({ mode: 'werewolf', sessionKind: { topology: 'group', family: 'werewolf', scenarioId: 'werewolf-classic', surfaceProfile: 'text' } }));
 

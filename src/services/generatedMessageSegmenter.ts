@@ -85,6 +85,7 @@ export function splitGeneratedRoundMessage(message: GeneratedRoundMessage) {
       content: part.content,
       metadata: {
         ...(part.metadata || {}),
+        directReplyToUserMessageId: message.metadata?.directReplyToUserMessageId,
         presenceUpdate: stateUpdateForSegment(message.metadata?.presenceUpdate, parts.map((item) => item.content), index),
         activityUpdate: stateUpdateForSegment(message.metadata?.activityUpdate, parts.map((item) => item.content), index),
         conversationUpdate: continuityForSegment(message.metadata?.conversationUpdate, parts.map((item) => item.content), index),
@@ -130,6 +131,7 @@ export function splitGeneratedRoundMessage(message: GeneratedRoundMessage) {
     metadata: {
       ...(index === 0 ? baseMessage.metadata : {
         format: baseMessage.metadata?.format,
+        directReplyToUserMessageId: baseMessage.metadata?.directReplyToUserMessageId,
         manualSpeaker: baseMessage.metadata?.manualSpeaker,
         turnParameters: baseMessage.metadata?.turnParameters,
       }),

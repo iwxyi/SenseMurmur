@@ -298,6 +298,8 @@ function resolveCommitApiConfig(api: APIConfig | AIModelProfile[]): APIConfig {
 export async function runSessionLoop(params: {
   loopId: string;
   executionMode?: 'continuous' | 'single_turn';
+  replyToUserMessageId?: string;
+  onCommittedMessage?: (message: Message) => void;
   continuation?: SessionLoopContinuation;
   onContinuation?: (continuation: SessionLoopContinuation) => void | Promise<void>;
   chatId: string;
@@ -324,6 +326,7 @@ export async function runSessionLoop(params: {
   onTurnWorkFinished?: () => void;
   onIdle?: (reason: string) => void;
   onQuiet?: () => void;
+  onNoSendDecision?: () => void;
   onWaitingForInput?: () => void;
   onMessageChunk: (content: string) => void;
   onStreamingComplete?: () => void;
@@ -691,6 +694,7 @@ export async function runSessionLoop(params: {
           },
           onNoSend: ({ speakerId }) => {
             if (!isActiveLoop(params) || params.signal?.aborted) return;
+            params.onNoSendDecision?.();
             const speakerName = effectiveCharacters.find((character) => character.id === speakerId)?.name || '未命名角色';
             console.info('[chat-run:no-send]', { speakerName, delivery: 'no_send' });
             reportDiscardedPreview('no_send_after_preview');
@@ -729,7 +733,9 @@ export async function runSessionLoop(params: {
                 chatId: params.chatId,
                 chat: currentChat,
                 characters: currentCharacters,
-                message,
+                message: params.replyToUserMessageId
+                  ? { ...message, metadata: { ...message.metadata, directReplyToUserMessageId: params.replyToUserMessageId } }
+                  : message,
                 streamingMessage: params.getDisplayedStreamingMessage?.() || roundStreamingMessage || params.getStreamingMessage?.() || null,
                 currentMessages: params.getCurrentMessages(),
                 onCommit: params.onCommit,
@@ -747,6 +753,7 @@ export async function runSessionLoop(params: {
                 shouldContinue: () => isActiveLoop(params),
               });
               previewContentLength = 0;
+              for (const result of committedTurn.results) params.onCommittedMessage?.(result.persistedMessage);
               if (hadVisiblePreview) {
                 const projected = params.getCurrentMessages();
                 const missing = committedTurn.results

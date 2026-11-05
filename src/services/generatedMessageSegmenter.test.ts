@@ -27,6 +27,14 @@ function buildMessage(content: string, messageCount = 1): GeneratedRoundMessage 
 }
 
 describe('generatedMessageSegmenter', () => {
+  it.each(['modern', 'legacy'])('keeps the triggering private message on every committed bubble (%s)', (format) => {
+    const message = { ...buildMessage('第一句。'), metadata: { directReplyToUserMessageId: 'user-1' },
+      ...(format === 'modern' ? { messageParts: [{ content: '第一句。' }, { content: '第二句。' }] }
+        : { extraMessages: ['第二句。'] }) };
+    expect(splitGeneratedRoundMessage(message).map((part) => part.metadata?.directReplyToUserMessageId))
+      .toEqual(['user-1', 'user-1']);
+  });
+
   it('routes each send independently and never inherits turn targets once any part has routing', () => {
     const message = { ...buildMessage('嗯。'), addressedTargetIds: ['old'], replyDebtTargetIds: ['old'],
       messageParts: [

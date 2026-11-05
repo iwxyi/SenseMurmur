@@ -52,6 +52,7 @@ import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, g
 import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
 import { delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, runAgentTeam, subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
 import { getDirectBackgroundRevision, isDirectBackgroundActive, listDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply, subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
+import { getAiDirectBackgroundRevision, isAiDirectBackgroundActive, listAiDirectBackgroundReplies, resumeAiDirectBackgroundReply, startAiDirectBackgroundReply, subscribeAiDirectBackgroundReplies } from '../services/aiDirectBackgroundReply';
 import AssistantTeamWorkbench from '../components/chat/AssistantTeamWorkbench';
 import ChatBackground from '../components/chat/ChatBackground';
 import { getSyncableCharacterMemberIds } from '../services/pageSyncScopeContract';
@@ -915,6 +916,17 @@ export default function ChatDetailPage() {
   const directBackgroundRevision = useSyncExternalStore(subscribeDirectBackgroundReplies, getDirectBackgroundRevision, getDirectBackgroundRevision);
   const [directBackgroundRuns, setDirectBackgroundRuns] = useState<WorkflowSnapshot[]>([]);
   const visibleDirectBackgroundRun = directBackgroundRuns.find((run) => run.run.status !== 'completed') || null;
+  const aiDirectBackgroundRevision = useSyncExternalStore(subscribeAiDirectBackgroundReplies, getAiDirectBackgroundRevision, getAiDirectBackgroundRevision);
+  const [aiDirectBackgroundRuns, setAiDirectBackgroundRuns] = useState<WorkflowSnapshot[]>([]);
+  const visibleAiDirectBackgroundRun = aiDirectBackgroundRuns.find((run) => run.run.status !== 'completed') || null;
+  useEffect(() => {
+    if (!id) { setAiDirectBackgroundRuns([]); return; }
+    let cancelled = false;
+    void listAiDirectBackgroundReplies(id).then((runs) => {
+      if (!cancelled) setAiDirectBackgroundRuns(runs.sort((left, right) => right.run.updatedAt - left.run.updatedAt));
+    }).catch((error) => { if (!cancelled) console.error('[ai-direct-workflow:list-failed]', error); });
+    return () => { cancelled = true; };
+  }, [id, aiDirectBackgroundRevision]);
   useEffect(() => {
     if (!id) { setDirectBackgroundRuns([]); return; }
     let cancelled = false;
@@ -3114,6 +3126,14 @@ export default function ChatDetailPage() {
         return;
       }
       if (latestChat.type === 'ai_direct') {
+        if (typeof navigator.locks?.request === 'function') {
+          void startAiDirectBackgroundReply(id, userMessage.id).catch((error) => {
+            console.error('[ai-direct-workflow:send-failed]', error);
+            showErrorToast(error instanceof Error ? error.message : 'AI 私聊回复失败');
+          });
+          return;
+        }
+        setSnackbar({ open: true, message: '当前连接不支持后台运行，回复期间请保持此页面打开。', severity: 'info' });
         startConversationLoopIfNeeded(latestChat, { allowDirect: true, immediate: true });
         return;
       }
@@ -4450,6 +4470,15 @@ export default function ChatDetailPage() {
             }}>继续</Button>
           ) : undefined} sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, left: 12, right: 12, zIndex: 5, '& .MuiAlert-message': { overflowWrap: 'anywhere' } }}>
             {visibleDirectBackgroundRun.tasks[0]?.error || (isDirectBackgroundActive(chat.id) ? '正在回复，离开此页面后仍会继续' : visibleDirectBackgroundRun.run.status === 'paused' ? '单聊任务已暂停' : '单聊任务等待处理')}
+          </Alert>
+        ) : null}
+        {chat.type === 'ai_direct' && visibleAiDirectBackgroundRun ? (
+          <Alert severity={visibleAiDirectBackgroundRun.tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed') ? 'warning' : 'info'} role="status" action={visibleAiDirectBackgroundRun.run.status === 'paused' && !visibleAiDirectBackgroundRun.tasks.some((task) => task.status === 'result_unknown') ? (
+            <Button size="small" color="inherit" onClick={() => {
+              void resumeAiDirectBackgroundReply(visibleAiDirectBackgroundRun.run.id).catch((error) => showErrorToast(error instanceof Error ? error.message : '继续 AI 私聊任务失败'));
+            }}>继续</Button>
+          ) : undefined} sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, left: 12, right: 12, zIndex: 5, '& .MuiAlert-message': { overflowWrap: 'anywhere' } }}>
+            {visibleAiDirectBackgroundRun.tasks[0]?.error || (isAiDirectBackgroundActive(chat.id) ? '正在回复，离开此页面后仍会继续' : visibleAiDirectBackgroundRun.run.status === 'paused' ? 'AI 私聊任务已暂停' : 'AI 私聊任务等待处理')}
           </Alert>
         ) : null}
         {isAssistantChat && agentEntitled && !teamRuns.length ? (

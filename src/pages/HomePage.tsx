@@ -58,6 +58,7 @@ import { loadBackgroundExecutionOverview, type BackgroundExecutionOverview } fro
 import { subscribeBackgroundExecution } from '../services/backgroundExecutionScheduler';
 import { subscribeAssistantBackgroundRunChanges } from '../services/assistantBackgroundReply';
 import { subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
+import { subscribeAiDirectBackgroundReplies } from '../services/aiDirectBackgroundReply';
 import { subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
 
 interface HomeOverviewCard {
@@ -594,6 +595,7 @@ export default function HomePage() {
       subscribeBackgroundExecution(refresh),
       subscribeAssistantBackgroundRunChanges(refresh),
       subscribeDirectBackgroundReplies(refresh),
+      subscribeAiDirectBackgroundReplies(refresh),
       subscribeAgentTeamRuns(refresh),
     ];
     refresh();

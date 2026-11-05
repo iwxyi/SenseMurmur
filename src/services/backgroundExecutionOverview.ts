@@ -2,6 +2,7 @@ import { listAgentTeamRuns } from './agentTeamWorkflow';
 import { listAssistantBackgroundReplies } from './assistantBackgroundReply';
 import { getBackgroundExecutionSummary } from './backgroundExecutionScheduler';
 import { listDirectBackgroundReplies } from './directBackgroundReply';
+import { listAiDirectBackgroundReplies } from './aiDirectBackgroundReply';
 import type { WorkflowSnapshot } from './workflowRunRuntime';
 
 export interface BackgroundExecutionOverview {
@@ -37,13 +38,14 @@ export function projectBackgroundExecutionOverview(
 }
 
 export async function loadBackgroundExecutionOverview() {
-  const [assistant, direct, team] = await Promise.all([
+  const [assistant, direct, aiDirect, team] = await Promise.all([
     listAssistantBackgroundReplies(),
     listDirectBackgroundReplies(),
+    listAiDirectBackgroundReplies(),
     listAgentTeamRuns(),
   ]);
   return projectBackgroundExecutionOverview(
-    [...assistant, ...direct, ...team],
+    [...assistant, ...direct, ...aiDirect, ...team],
     getBackgroundExecutionSummary().activeWorkIds,
   );
 }
