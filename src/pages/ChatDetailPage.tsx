@@ -4854,9 +4854,17 @@ export default function ChatDetailPage() {
           <Button disabled={!teamGoal.trim() || !navigator.locks?.request} onClick={() => {
             if (!id) return;
             const goal = teamGoal.trim();
+            const chatId = id;
             setTeamGoalOpen(false);
             setTeamGoal('');
-            void runAgentTeam({ chatId: id, goal }).catch((error) => showErrorToast(error instanceof Error ? error.message : '团队任务启动失败'));
+            void (async () => {
+              const message = await addMessageStable({
+                chatId, type: 'user', senderId: 'user', senderName: currentUser?.nickname?.trim() || '我',
+                content: goal, emotion: 0, timestamp: getNextMessageTimestamp(),
+              });
+              void updateChat(chatId, { lastMessageAt: message.timestamp, latestMessage: message });
+              await runAgentTeam({ chatId, goal });
+            })().catch((error) => showErrorToast(error instanceof Error ? error.message : '团队任务启动失败'));
           }}>开始</Button>
         </DialogActions>
       </Dialog>
