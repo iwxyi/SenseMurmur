@@ -18,6 +18,8 @@ import { useMessageStore } from '../stores/useMessageStore';
 import { useSchedulerStore } from '../stores/useSchedulerStore';
 import { isGenerationCancelledError } from '../services/generationCancellation';
 import { runSessionLoop as runChatLoop } from '../services/sessionRunner';
+import { currentWorkflowScope } from '../services/workflowRunRuntime';
+import { readSessionLoopContinuation, writeSessionLoopContinuation } from '../services/sessionLoopContinuationStore';
 
 export type ConversationLoopStartBlockReason = 'direct_chat' | 'waiting_story_choice' | 'already_active';
 type ConversationLoopStartOptions = { ignoreReaderPositionOnce?: boolean; immediate?: boolean; allowDirect?: boolean };
@@ -160,8 +162,16 @@ export function useChatRunLoop(params: {
         elapsedMs: Number(((typeof performance !== 'undefined' ? performance.now() : Date.now()) - moduleLoadStartedAt).toFixed(2)),
       }, 'debug', 'chat-run');
       if (abortController.signal.aborted) return;
+      const continuationScope = currentWorkflowScope();
+      const continuation = await readSessionLoopContinuation(current.chatId, continuationScope);
+      if (abortController.signal.aborted || currentWorkflowScope() !== continuationScope) return;
       await runChatLoop({
         loopId,
+        continuation: continuation || undefined,
+        onContinuation: async (next) => {
+          if (abortController.signal.aborted || currentWorkflowScope() !== continuationScope) return;
+          await writeSessionLoopContinuation(current.chatId!, next, continuationScope);
+        },
         chatId: current.chatId,
         chat: loopChat,
         characters: current.activeMembers,
