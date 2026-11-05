@@ -122,6 +122,35 @@ export async function listDirectBackgroundReplies(chatId?: string) {
   return runs.filter((item) => item.tasks[0]?.kind === 'direct_reply' && (!chatId || item.run.chatId === chatId));
 }
 
+async function reconcileCommittedDirectReply(runId: string) {
+  if (!navigator.locks?.request) throw new Error('此设备不支持安全的单聊任务恢复');
+  const scope = currentWorkflowScope();
+  await Promise.all([
+    useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
+    useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
+  ]);
+  const reconciled = await navigator.locks.request(workflowRunLockName(scope, runId), { ifAvailable: true }, async (lock) => {
+    if (!lock || currentWorkflowScope() !== scope) return false;
+    const run = await indexedDbWorkflowRepository.read(scope, runId);
+    const task = run?.tasks[0];
+    if (!run || !task || run.tasks.length !== 1 || task.kind !== 'direct_reply' || task.attempt < 1 || run.run.status === 'completed') return false;
+    const chat = useChatStore.getState().chats.find((item) => item.id === run.run.chatId && item.type === 'direct' && item.deletedAt == null);
+    const reply = chat ? committedReply(chat.id, task.id) : null;
+    if (!reply) return false;
+    return indexedDbWorkflowRepository.transact(scope, runId, (current) => {
+      if (!current || current.run.status === 'completed' || current.tasks[0]?.id !== task.id) return { snapshot: current || run, value: false };
+      const snapshot: WorkflowSnapshot = {
+        ...current,
+        run: { ...current.run, status: 'completed', generation: current.run.generation + 1, updatedAt: Date.now() },
+        tasks: [{ ...current.tasks[0], status: 'completed', output: reply.id, error: undefined, updatedAt: Date.now() }],
+      };
+      return { snapshot, value: true };
+    });
+  });
+  if (reconciled) publish();
+  return reconciled;
+}
+
 export async function startDirectBackgroundReply(chatId: string, userMessageId: string) {
   const runId = directReplyRunId(chatId, userMessageId);
   const now = Date.now();
@@ -137,6 +166,7 @@ export async function startDirectBackgroundReply(chatId: string, userMessageId: 
 }
 
 export async function resumeDirectBackgroundReply(runId: string) {
+  if (!active.has(runId)) await reconcileCommittedDirectReply(runId);
   const run = await runtime.read(runId);
   if (!run) throw new Error('单聊任务不存在');
   if (run.run.status === 'completed' || run.tasks.some((task) => task.status === 'result_unknown')) return { snapshot: run, summary: summarizeWorkflowRun(run) };
@@ -157,21 +187,13 @@ export async function recoverDirectBackgroundReplies() {
   ]);
   let changed = false;
   for (const item of runs) {
-    if (item.run.status !== 'active' || active.has(item.run.id)) continue;
+    if (item.run.status === 'completed' || active.has(item.run.id)) continue;
+    if (await reconcileCommittedDirectReply(item.run.id)) { changed = true; continue; }
+    if (item.run.status !== 'active') continue;
     const recovered = await navigator.locks.request(workflowRunLockName(scope, item.run.id), { ifAvailable: true }, async (lock) => {
       if (!lock || currentWorkflowScope() !== scope) return false;
-      const chat = useChatStore.getState().chats.find((entry) => entry.id === item.run.chatId && entry.type === 'direct' && entry.deletedAt == null);
-      const reply = chat && item.tasks[0] ? committedReply(chat.id, item.tasks[0].id) : null;
       return indexedDbWorkflowRepository.transact(scope, item.run.id, (current) => {
         if (!current || current.run.status !== 'active') return { snapshot: current || item, value: false };
-        if (reply && current.tasks.length === 1) {
-          const snapshot: WorkflowSnapshot = {
-            ...current,
-            run: { ...current.run, status: 'completed', generation: current.run.generation + 1, updatedAt: Date.now() },
-            tasks: [{ ...current.tasks[0], status: 'completed', output: reply.id, error: undefined, updatedAt: Date.now() }],
-          };
-          return { snapshot, value: true };
-        }
         const snapshot: WorkflowSnapshot = {
           ...current,
           run: { ...current.run, status: 'paused', generation: current.run.generation + 1, updatedAt: Date.now() },

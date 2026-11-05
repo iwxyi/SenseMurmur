@@ -82,4 +82,22 @@ describe('direct background reply', () => {
     expect(restored.tasks[0].status).toBe('completed');
     expect(flow).not.toHaveBeenCalled();
   });
+
+  it('reconciles a saved reply after a later flow error without resending the model request', async () => {
+    const { chatId, userMessage } = setup();
+    flow.mockImplementation(async (params: { upsertMessage: (message: Message) => void }) => {
+      params.upsertMessage({
+        id: crypto.randomUUID(), chatId, type: 'ai', senderId: 'character', senderName: '角色',
+        content: '已保存', emotion: 0, timestamp: userMessage.timestamp + 1, isDeleted: false,
+        metadata: { directReplyToUserMessageId: userMessage.id },
+      });
+      throw new Error('后续分析失败');
+    });
+    const first = await startDirectBackgroundReply(chatId, userMessage.id);
+    expect(first.snapshot.tasks[0].status).toBe('result_unknown');
+    const resumed = await resumeDirectBackgroundReply(first.snapshot.run.id);
+    expect(resumed.snapshot.run.status).toBe('completed');
+    expect(resumed.snapshot.tasks[0].status).toBe('completed');
+    expect(flow).toHaveBeenCalledTimes(1);
+  });
 });
