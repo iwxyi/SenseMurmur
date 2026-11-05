@@ -43,7 +43,10 @@ function pump() {
     if (item.workId) activeWorkIds.add(item.workId);
     activeCount += 1;
     publish();
-    void item.run().then(item.resolve, item.reject).finally(() => {
+    void Promise.resolve().then(() => {
+      if (item.signal?.aborted) throw item.signal.reason || new Error('任务已取消');
+      return item.run();
+    }).then(item.resolve, item.reject).finally(() => {
       activeChats.delete(item.chatId);
       if (item.workId) activeWorkIds.delete(item.workId);
       activeCount -= 1;

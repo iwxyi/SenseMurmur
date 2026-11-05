@@ -41,4 +41,22 @@ describe('background execution scheduler', () => {
     gates[1].release(); gates[2].release();
     await Promise.all([running[1], running[2]]);
   });
+
+  it('releases a chat slot when a task throws before returning a promise', async () => {
+    const first = scheduleBackgroundExecution('sync-throw', () => { throw new Error('启动失败'); }, undefined, 'failed-run');
+    const next = scheduleBackgroundExecution('sync-throw', async () => 'recovered', undefined, 'next-run');
+    await expect(first).rejects.toThrow('启动失败');
+    await expect(next).resolves.toBe('recovered');
+    expect(getBackgroundExecutionSummary()).toMatchObject({ active: 0, queued: 0, activeWorkIds: [] });
+  });
+
+  it('does not invoke a claimed task if its signal aborts before dispatch', async () => {
+    const controller = new AbortController();
+    const execute = vi.fn(async () => 'unexpected');
+    const pending = scheduleBackgroundExecution('abort-before-dispatch', execute, controller.signal, 'aborted-run');
+    controller.abort(new Error('账号已切换'));
+    await expect(pending).rejects.toThrow('账号已切换');
+    expect(execute).not.toHaveBeenCalled();
+    expect(getBackgroundExecutionSummary()).toMatchObject({ active: 0, queued: 0, activeWorkIds: [] });
+  });
 });
