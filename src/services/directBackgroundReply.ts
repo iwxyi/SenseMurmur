@@ -45,8 +45,6 @@ function committedReply(chatId: string, userMessageId: string) {
 async function executeDirectReply(task: WorkflowTask, signal: AbortSignal) {
   if (task.kind !== 'direct_reply' || !isDirectReplyInput(task.input)) throw new WorkflowPreflightError('单聊任务输入无效');
   const { chatId, userMessageId } = task.input;
-  if (!navigator.locks?.request) throw new WorkflowPreflightError('此设备不支持安全的会话串行执行');
-  return navigator.locks.request(`pneumata-direct-chat-${currentWorkflowScope()}-${chatId}`, async () => {
     await Promise.all([
       useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
       useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -103,7 +101,6 @@ async function executeDirectReply(task: WorkflowTask, signal: AbortSignal) {
     if (!reply) throw new Error('单聊生成返回后未找到已提交回复，结果需要核对');
     flushBufferedPersistenceWrites();
     return { output: reply.id };
-  });
 }
 
 const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: executeDirectReply });
@@ -166,14 +163,24 @@ export async function startDirectBackgroundReply(chatId: string, userMessageId: 
 }
 
 export async function resumeDirectBackgroundReply(runId: string) {
+  if (!navigator.locks?.request) throw new Error('此设备不支持安全的会话串行执行');
   if (!active.has(runId)) await reconcileCommittedDirectReply(runId);
   const run = await runtime.read(runId);
   if (!run) throw new Error('单聊任务不存在');
   if (run.run.status === 'completed' || run.tasks.some((task) => task.status === 'result_unknown')) return { snapshot: run, summary: summarizeWorkflowRun(run) };
+  const scope = currentWorkflowScope();
   active.add(runId); publish();
   try {
-    const snapshot = await runtime.resume(runId, getWorkspaceSignal());
-    return { snapshot, summary: summarizeWorkflowRun(snapshot) };
+    return await navigator.locks.request(`pneumata-direct-chat-${scope}-${run.run.chatId}`, async () => {
+      if (currentWorkflowScope() !== scope || getWorkspaceSignal().aborted) throw new Error('账号已切换，单聊任务已暂停');
+      const current = await runtime.read(runId);
+      if (!current) throw new Error('单聊任务不存在');
+      if (current.run.status === 'completed' || current.tasks.some((task) => task.status === 'result_unknown')) {
+        return { snapshot: current, summary: summarizeWorkflowRun(current) };
+      }
+      const snapshot = await runtime.resume(runId, getWorkspaceSignal());
+      return { snapshot, summary: summarizeWorkflowRun(snapshot) };
+    });
   } finally { active.delete(runId); publish(); }
 }
 

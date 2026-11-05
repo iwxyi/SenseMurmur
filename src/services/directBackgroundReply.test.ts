@@ -100,4 +100,40 @@ describe('direct background reply', () => {
     expect(resumed.snapshot.tasks[0].status).toBe('completed');
     expect(flow).toHaveBeenCalledTimes(1);
   });
+
+  it('keeps a second reply queued until the first reply releases the chat lock', async () => {
+    const { chatId, userMessage } = setup();
+    const secondMessage: Message = { ...userMessage, id: crypto.randomUUID(), content: '第二条', timestamp: userMessage.timestamp + 10 };
+    useMessageStore.getState().upsertMessage(secondMessage);
+    const held = new Map<string, Promise<unknown>>();
+    vi.stubGlobal('navigator', { locks: { request: async (name: string, options: unknown, callback?: (lock: object) => Promise<unknown>) => {
+      const run = callback || options as (lock: object) => Promise<unknown>;
+      const previous = held.get(name);
+      if (previous) await previous.catch(() => undefined);
+      const current = run({});
+      held.set(name, current);
+      try { return await current; } finally { if (held.get(name) === current) held.delete(name); }
+    } } });
+    let releaseFirst!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    flow.mockImplementation(async (params: { userMessage: Message; upsertMessage: (message: Message) => void }) => {
+      if (params.userMessage.id === userMessage.id) await gate;
+      params.upsertMessage({
+        id: crypto.randomUUID(), chatId, type: 'ai', senderId: 'character', senderName: '角色',
+        content: '已回复', emotion: 0, timestamp: params.userMessage.timestamp + 1, isDeleted: false,
+        metadata: { directReplyToUserMessageId: params.userMessage.id },
+      });
+    });
+    const first = startDirectBackgroundReply(chatId, userMessage.id);
+    await vi.waitFor(() => expect(flow).toHaveBeenCalledTimes(1));
+    const second = startDirectBackgroundReply(chatId, secondMessage.id);
+    await vi.waitFor(async () => expect((await listDirectBackgroundReplies(chatId)).length).toBe(2));
+    const queued = (await listDirectBackgroundReplies(chatId)).find((item) => item.tasks[0].id === secondMessage.id);
+    expect(queued?.tasks[0].status).toBe('queued');
+    expect(queued?.tasks[0].attempt).toBe(0);
+    expect(flow).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(flow).toHaveBeenCalledTimes(2);
+  });
 });
