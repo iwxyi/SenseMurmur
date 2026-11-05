@@ -164,7 +164,7 @@ async function runAssistantBackgroundReply(runId: string, chatId: string, comman
 
 export async function recoverAssistantBackgroundReplies() {
   if (typeof navigator === 'undefined' || !navigator.locks?.request) throw new Error('此设备不支持安全的工作流恢复');
-  const runs = await assistantRuntime.list();
+  const runs = await listAssistantBackgroundReplies();
   const recovered: WorkflowSnapshot[] = [];
   for (const item of runs) {
     if (item.run.status !== 'active') continue;
@@ -193,7 +193,7 @@ export async function recoverAssistantBackgroundReplies() {
 
 export async function listAssistantBackgroundReplies(chatId?: string) {
   const runs = await assistantRuntime.list();
-  return runs.filter((item) => item.run.chatId && (!chatId || item.run.chatId === chatId));
+  return runs.filter((item) => item.tasks[0]?.kind === 'assistant_reply' && (!chatId || item.run.chatId === chatId));
 }
 
 export async function resumeAssistantBackgroundReply(runId: string, commandId: string) {

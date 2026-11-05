@@ -54,6 +54,11 @@ import { dismissAllRichMediaGenerationErrors, dismissRichMediaGenerationError, g
 import { dismissAllChatCompletionErrors, dismissChatCompletionError, getChatCompletionSummary, subscribeChatCompletionQueue, type ChatCompletionSummary } from '../services/chatCompletionQueue';
 import { isImageAvatar } from '../utils/avatar';
 import { buildCardAvatarHoverMotionSx } from '../styles/avatarHoverMotion';
+import { loadBackgroundExecutionOverview, type BackgroundExecutionOverview } from '../services/backgroundExecutionOverview';
+import { subscribeBackgroundExecution } from '../services/backgroundExecutionScheduler';
+import { subscribeAssistantBackgroundRunChanges } from '../services/assistantBackgroundReply';
+import { subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
+import { subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
 
 interface HomeOverviewCard {
   label: string;
@@ -489,6 +494,7 @@ export default function HomePage() {
   const [avatarQueueSummary, setAvatarQueueSummary] = useState<AvatarGenerationQueueSummary>(() => avatarGenerationQueue.getSummary());
   const [characterCompletionSummary, setCharacterCompletionSummary] = useState<CharacterCompletionSummary>(() => getCharacterCompletionSummary());
   const [chatCompletionSummary, setChatCompletionSummary] = useState<ChatCompletionSummary>(() => getChatCompletionSummary());
+  const [backgroundOverview, setBackgroundOverview] = useState<BackgroundExecutionOverview | null>(null);
   const [generationErrorsDialogOpen, setGenerationErrorsDialogOpen] = useState(false);
   const [selectedGenerationError, setSelectedGenerationError] = useState<GenerationOverviewError | null>(null);
   const previousLoginIdentityRef = useRef<string | null | undefined>(undefined);
@@ -572,6 +578,27 @@ export default function HomePage() {
     return () => { unsubscribe(); };
   }, []);
   useEffect(() => { const unsubscribe = subscribeChatCompletionQueue(setChatCompletionSummary); return () => { unsubscribe(); }; }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    let revision = 0;
+    const refresh = () => {
+      const requestRevision = ++revision;
+      void loadBackgroundExecutionOverview().then((overview) => {
+        if (mounted && requestRevision === revision) setBackgroundOverview(overview);
+      }).catch((error) => {
+        if (mounted && requestRevision === revision) console.error('[home-background-execution] 状态读取失败', error);
+      });
+    };
+    const unsubscribers = [
+      subscribeBackgroundExecution(refresh),
+      subscribeAssistantBackgroundRunChanges(refresh),
+      subscribeDirectBackgroundReplies(refresh),
+      subscribeAgentTeamRuns(refresh),
+    ];
+    refresh();
+    return () => { mounted = false; unsubscribers.forEach((unsubscribe) => unsubscribe()); };
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => setCalendarNow(Date.now()), 60_000);
@@ -971,6 +998,23 @@ export default function HomePage() {
       value: `${chatCompletionSummary.text.completed + chatCompletionSummary.image.completed}/${chatCompletionSummary.text.total + chatCompletionSummary.image.total}`
         + (chatCompletionSummary.text.failed + chatCompletionSummary.image.failed > 0 ? ` · 失败 ${chatCompletionSummary.text.failed + chatCompletionSummary.image.failed}` : ''),
       icon: <AutoAwesomeIcon />, color: 'primary.main', onOpen: () => navigate('/chats'), attention: true,
+    }] : []),
+    ...(backgroundOverview && (backgroundOverview.running || backgroundOverview.queued || backgroundOverview.interrupted || backgroundOverview.blocked) ? [{
+      label: backgroundOverview.blocked > 0 ? '后台任务需要处理'
+        : backgroundOverview.running > 0 ? '后台会话运行中'
+          : backgroundOverview.queued > 0 ? '后台会话等待执行' : '后台任务已中断',
+      value: [
+        backgroundOverview.running ? `运行 ${backgroundOverview.running}` : '',
+        backgroundOverview.queued ? `排队 ${backgroundOverview.queued}` : '',
+        backgroundOverview.interrupted ? `中断 ${backgroundOverview.interrupted}` : '',
+        backgroundOverview.blocked ? `待处理 ${backgroundOverview.blocked}` : '',
+      ].filter(Boolean).join(' · '),
+      icon: <AutoAwesomeIcon />,
+      color: backgroundOverview.blocked ? 'warning.main' : 'primary.main',
+      onOpen: () => backgroundOverview.chatId
+        ? navigate(`/chats/${encodeURIComponent(backgroundOverview.chatId)}`)
+        : navigate('/chats'),
+      attention: true,
     }] : []),
     ...(hasActiveImageCompletions ? [{
       label: `正在生成：${characterCompletionSummary.image.current || avatarQueueSummary.current || '图片'}`,

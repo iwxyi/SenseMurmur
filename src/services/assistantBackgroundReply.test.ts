@@ -6,6 +6,7 @@ import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import type { Message } from '../types/message';
 import { assistantReplyRunId, listAssistantBackgroundReplies, recoverAssistantBackgroundReplies, resumeAssistantBackgroundReply, startAssistantBackgroundReply } from './assistantBackgroundReply';
+import { currentWorkflowScope, indexedDbWorkflowRepository } from './workflowRunRuntime';
 
 const reply = vi.hoisted(() => vi.fn());
 vi.mock('./assistantChatFlow', () => ({ runAssistantChatReplyFlow: reply }));
@@ -31,6 +32,16 @@ beforeEach(() => {
 });
 
 describe('assistant background reply', () => {
+  it('excludes other workflow kinds from assistant reply listings', async () => {
+    const chatId = crypto.randomUUID();
+    const runId = `team-${crypto.randomUUID()}`;
+    await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, () => ({ snapshot: {
+      run: { id: runId, chatId, goal: '团队目标', status: 'paused', generation: 0, planVersion: 1, updatedAt: 1 },
+      tasks: [{ id: 'plan', runId, kind: 'team_plan', input: '团队目标', dependsOn: [], status: 'queued', attempt: 0, updatedAt: 1 }],
+    }, value: undefined }));
+    expect(await listAssistantBackgroundReplies(chatId)).toEqual([]);
+  });
+
   it('uses the stored user message and current account scoped run', async () => {
     const chatId = crypto.randomUUID();
     const chat = { ...buildAssistantChatDraft(), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 1 };
