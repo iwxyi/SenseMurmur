@@ -234,6 +234,38 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
+  async function addTasksOnce(runId: string, expectedPlanVersion: number, additions: WorkflowTask[]) {
+    if (!additions.length) throw new Error('工作流计划修订不能为空');
+    return mutate(scope(), runId, (current) => {
+      if (additions.every((task) => current.tasks.some((item) => item.id === task.id))) return { snapshot: current, value: current };
+      if (additions.some((task) => current.tasks.some((item) => item.id === task.id))) throw new Error('工作流计划部分任务已存在');
+      if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
+      if (current.run.status !== 'active' && current.run.status !== 'paused') throw new Error('工作流已结束');
+      if (additions.some((task) => task.runId !== runId || (task.status !== 'queued' && task.status !== 'waiting_dependency') || task.attempt !== 0)) throw new Error('新任务状态无效');
+      const tasks = [...current.tasks, ...additions];
+      assertTaskGraph(tasks);
+      const snapshot: WorkflowSnapshot = { ...current, run: { ...current.run, planVersion: current.run.planVersion + 1, updatedAt: Date.now() }, tasks };
+      return { snapshot, value: snapshot };
+    });
+  }
+
+  async function expandPlanOnce(runId: string, expectedPlanVersion: number, sourceTaskId: string, additions: WorkflowTask[]) {
+    if (!additions.length) throw new Error('团队计划不能没有任务');
+    return mutate(scope(), runId, (current) => {
+      const source = current.tasks.find((task) => task.id === sourceTaskId);
+      if (!source || source.status !== 'completed') throw new Error('团队规划尚未完成');
+      if (additions.every((task) => current.tasks.some((item) => item.id === task.id))) return { snapshot: current, value: current };
+      if (additions.some((task) => current.tasks.some((item) => item.id === task.id))) throw new Error('团队计划部分任务已存在');
+      if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
+      if (current.run.status !== 'active' && current.run.status !== 'paused') throw new Error('工作流已结束');
+      if (additions.some((task) => task.runId !== runId || (task.status !== 'queued' && task.status !== 'waiting_dependency') || task.attempt !== 0)) throw new Error('新任务状态无效');
+      const tasks = [...current.tasks, ...additions];
+      assertTaskGraph(tasks);
+      const snapshot: WorkflowSnapshot = { ...current, run: { ...current.run, planVersion: current.run.planVersion + 1, updatedAt: Date.now() }, tasks };
+      return { snapshot, value: snapshot };
+    });
+  }
+
   async function closePlan(runId: string, expectedPlanVersion: number) {
     return mutate(scope(), runId, (current) => {
       if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
@@ -337,5 +369,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, addTasks, closePlan, resume, pause, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, addTasks, addTasksOnce, expandPlanOnce, closePlan, resume, pause, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }

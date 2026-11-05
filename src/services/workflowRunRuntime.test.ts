@@ -248,4 +248,18 @@ describe('workflow run runtime', () => {
     expect(second.run.status).toBe('active');
     expect((await runtime.closePlan(id, 2)).run.status).toBe('completed');
   });
+
+  it('expands a completed planner task only once', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.run.planOpen = true;
+    plan.tasks = [{ ...plan.tasks[0], id: 'plan', kind: 'team_plan', status: 'completed', output: { summary: '计划' } }];
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'test');
+    await runtime.create(plan);
+    const child = { id: 'child', runId: id, kind: 'agent_text', input: { goal: '写报告' }, dependsOn: ['plan'], status: 'queued' as const, attempt: 0, updatedAt: 2 };
+    await runtime.expandPlanOnce(id, 1, 'plan', [child]);
+    await runtime.expandPlanOnce(id, 1, 'plan', [child]);
+    expect((await runtime.read(id))?.tasks).toHaveLength(2);
+    expect((await runtime.read(id))?.run.planVersion).toBe(2);
+  });
 });
