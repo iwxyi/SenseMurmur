@@ -142,4 +142,71 @@ describe('agent team workflow', () => {
     expect(generate.mock.calls[0][2][0].content).toContain('用户补充指示：用简体中文');
     await expect(scoped.instructQueuedTask(runId, 'write', 3, '再次修改')).rejects.toThrow('请先暂停整个团队任务');
   });
+
+  it('persists a delegated plan, resumes its child task, and includes its result in delivery', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `delegate-chat-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '交付', memberIds: [], deletedAt: null } as (typeof state.chats)[number]] }));
+    const basePlan = {
+      summary: '先调研', roles: [{ id: 'researcher', name: '研究员', responsibility: '调研', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'research', roleId: 'researcher', goal: '调研问题', dependsOn: [], acceptance: '有结论' }], finalAcceptance: '完成研究',
+    };
+    const delegatedPlan = {
+      summary: '追加总结', roles: [{ id: 'writer', name: '写作者', responsibility: '总结', method: '整理研究', acceptance: '有报告', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'report', roleId: 'writer', goal: '撰写报告', dependsOn: [], acceptance: '报告完整' }], finalAcceptance: '报告可读',
+    };
+    let finishPlan!: (value: string) => void;
+    generate.mockImplementationOnce(() => new Promise<string>((resolve) => { finishPlan = resolve; }));
+    const scoped = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-delegation-test');
+    const initial = scoped.start(runId, chatId, '研究问题');
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    await scoped.requestPauseAfterCurrentBatch(runId);
+    finishPlan(JSON.stringify(basePlan));
+    expect((await initial).snapshot.run.status).toBe('paused');
+    const paused = await scoped.read(runId);
+    expect(paused?.run.status).toBe('paused');
+    await scoped.addRevisionRequest(runId, paused!.run.planVersion, '根据研究结论写报告');
+    generate.mockResolvedValueOnce('研究结论').mockResolvedValueOnce(JSON.stringify(delegatedPlan)).mockResolvedValueOnce('完整报告');
+    const result = await scoped.resume(runId);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'delegated_report')?.output).toBe('完整报告');
+    expect(generate.mock.calls[3][2][0].content).toContain('研究结论');
+    const artifact = await scoped.publish(runId);
+    const content = artifact.versions.find((version) => version.id === artifact.currentVersionId)?.content;
+    expect(content).toContain('完整报告');
+    await scoped.resume(runId);
+    expect(generate).toHaveBeenCalledTimes(4);
+  });
+
+  it('keeps delegated children queued when paused during delegated planning', async () => {
+    const runId = crypto.randomUUID();
+    const now = Date.now();
+    const basePlan = {
+      summary: '调研', roles: [{ id: 'researcher', name: '研究员', responsibility: '调研', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'research', roleId: 'researcher', goal: '调研', dependsOn: [], acceptance: '有结论' }], finalAcceptance: '完成',
+    };
+    const revisionPlan = {
+      summary: '补充报告', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'report', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '成稿' }], finalAcceptance: '可读',
+    };
+    const scoped = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-delegation-pause-test');
+    await indexedDbWorkflowRepository.transact('team-delegation-pause-test', runId, () => ({ snapshot: {
+      run: { id: runId, chatId: 'chat', goal: '调研并写报告', status: 'paused', generation: 1, planVersion: 2, planOpen: true, updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '调研并写报告', output: basePlan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        { id: 'research', runId, kind: 'agent_text', input: { task: basePlan.tasks[0], role: basePlan.roles[0], goal: '调研并写报告' }, output: '研究结论', dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
+      ],
+    }, value: undefined }));
+    await scoped.addRevisionRequest(runId, 2, '写报告');
+    let finishRevision!: (value: string) => void;
+    generate.mockImplementationOnce(() => new Promise<string>((resolve) => { finishRevision = resolve; }));
+    const pending = scoped.resume(runId);
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    await scoped.requestPauseAfterCurrentBatch(runId);
+    finishRevision(JSON.stringify(revisionPlan));
+    const paused = await pending;
+    expect(paused.snapshot.run.status).toBe('paused');
+    expect(paused.snapshot.tasks.find((task) => task.id === 'delegated_report')?.status).toBe('waiting_dependency');
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
 });

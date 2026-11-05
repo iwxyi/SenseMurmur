@@ -19,6 +19,17 @@ interface TeamTaskInput {
   goal: string;
   role: AgentTeamPlan['roles'][number];
   userInstruction?: string;
+  sourcePlanTaskId?: string;
+  contextTaskIds?: string[];
+}
+
+interface TeamRevisionInput { request: string; sourceTaskIds: string[] }
+
+function isTeamRevisionInput(value: unknown): value is TeamRevisionInput {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<TeamRevisionInput>;
+  return typeof candidate.request === 'string' && candidate.request.trim().length > 0
+    && Array.isArray(candidate.sourceTaskIds) && candidate.sourceTaskIds.every((id) => typeof id === 'string');
 }
 
 function isTeamTaskInput(value: unknown): value is TeamTaskInput {
@@ -34,23 +45,35 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (typeof task.input !== 'string') throw new WorkflowPreflightError('团队目标无效');
         return { output: await planAgentTeam({ api, goal: task.input, signal }) };
       }
+      if (task.kind === 'team_plan_revision') {
+        if (!isTeamRevisionInput(task.input)) throw new WorkflowPreflightError('追加委派输入无效');
+        const snapshot = await runtime.read(task.runId);
+        if (!snapshot) throw new WorkflowPreflightError('团队任务记录不存在');
+        const prior = task.input.sourceTaskIds.map((id) => {
+          const source = snapshot.tasks.find((item) => item.id === id);
+          if (!source || source.status !== 'completed' || typeof source.output !== 'string') throw new WorkflowPreflightError('已有交付尚未就绪');
+          return { task: id, output: source.output.slice(0, 8000) };
+        });
+        return { output: await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}\n追加要求：${task.input.request}\n已有交付：${JSON.stringify(prior)}\n只规划新增且尚未完成的工作。`, signal }) };
+      }
       if (task.kind !== 'agent_text' || !isTeamTaskInput(task.input)) throw new WorkflowPreflightError('团队任务类型无效');
-      const role = task.input.role;
+      const input = task.input;
+      const role = input.role;
       const snapshot = await runtime.read(task.runId);
       if (!snapshot) throw new WorkflowPreflightError('团队任务记录不存在');
       let plan: AgentTeamPlan;
       try {
-        plan = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === 'plan')?.output);
+        plan = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === (input.sourcePlanTaskId || 'plan'))?.output);
       } catch (error) {
         throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队计划无效');
       }
-      const plannedTask = plan.tasks.find((item) => item.id === task.id);
+      const plannedTask = plan.tasks.find((item) => item.id === (input.sourcePlanTaskId ? task.id.replace(/^delegated_/, '') : task.id));
       const plannedRole = plan.roles.find((item) => item.id === plannedTask?.roleId);
-      if (!plannedTask || !plannedRole || JSON.stringify(task.input.task) !== JSON.stringify(plannedTask) || JSON.stringify(role) !== JSON.stringify(plannedRole) || task.input.goal !== snapshot.run.goal
-        || (task.input.userInstruction !== undefined && (typeof task.input.userInstruction !== 'string' || !task.input.userInstruction.trim() || task.input.userInstruction.length > 4000))) {
+      if (!plannedTask || !plannedRole || JSON.stringify(input.task) !== JSON.stringify(plannedTask) || JSON.stringify(role) !== JSON.stringify(plannedRole) || input.goal !== snapshot.run.goal
+        || (input.userInstruction !== undefined && (typeof input.userInstruction !== 'string' || !input.userInstruction.trim() || input.userInstruction.length > 4000))) {
         throw new WorkflowPreflightError('团队任务与已保存计划不一致');
       }
-      const upstream = task.input.task.dependsOn.map((id) => {
+      const upstream = [...input.task.dependsOn.map((id) => input.sourcePlanTaskId ? `delegated_${id}` : id), ...(input.contextTaskIds || [])].map((id) => {
         const dependency = snapshot.tasks.find((item) => item.id === id);
         if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('上游交付尚未就绪');
         return { taskId: id, content: dependency.output.slice(0, 24_000) };
@@ -60,9 +83,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         `职责：${role.responsibility}`,
         `方法：${role.method}`,
         `岗位验收：${role.acceptance}`,
-        `本任务验收：${task.input.task.acceptance}`,
+        `本任务验收：${input.task.acceptance}`,
         '只根据提供的目标与上游交付工作；不声称调用了未提供的工具。缺少事实依据时标明不确定性。',
-      ].join('\n'), [{ role: 'user', content: `总目标：${task.input.goal}\n当前任务：${task.input.task.goal}\n${task.input.userInstruction ? `用户补充指示：${task.input.userInstruction}\n` : ''}上游交付：${JSON.stringify(upstream)}` }], undefined, {
+      ].join('\n'), [{ role: 'user', content: `总目标：${input.goal}\n当前任务：${input.task.goal}\n${input.userInstruction ? `用户补充指示：${input.userInstruction}\n` : ''}上游交付：${JSON.stringify(upstream)}` }], undefined, {
         responseFormat: 'text', signal,
         aiUsage: { type: 'assistant_chat', label: '团队文本任务', scope: 'chat' },
       });
@@ -75,6 +98,30 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
     read: runtime.read,
     list: runtime.list,
     requestPauseAfterCurrentBatch: runtime.requestPauseAfterCurrentBatch,
+    async addRevisionRequest(runId: string, expectedPlanVersion: number, request: string) {
+      const trimmed = request.trim();
+      if (!trimmed || trimmed.length > 4000) throw new Error('追加要求应为 1 到 4000 个字符');
+      if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务修改');
+      const storageScope = scope();
+      return navigator.locks.request(workflowRunLockName(storageScope, runId), { ifAvailable: true }, async (lock) => {
+        if (!lock) throw new Error('团队任务正在执行，请暂停后重试');
+        if (scope() !== storageScope) throw new Error('账号已切换，任务修改已停止');
+        const current = await runtime.read(runId);
+        if (!current || current.tasks[0]?.kind !== 'team_plan') throw new Error('团队任务不存在');
+        if (current.run.status !== 'paused') throw new Error('请先暂停整个团队任务');
+        if (current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
+        if (current.tasks.some((task) => task.kind === 'team_plan_revision')) throw new Error('当前团队任务已使用追加委派机会');
+        if (current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown' || task.status === 'failed')) throw new Error('请先处理未完成或待核对的步骤');
+        const sourceTaskIds = current.tasks.filter((task) => task.kind === 'agent_text').map((task) => task.id);
+        if (!sourceTaskIds.length) throw new Error('团队规划尚未完成');
+        const task: WorkflowTask = {
+          id: 'delegate', runId, kind: 'team_plan_revision',
+          input: { request: trimmed, sourceTaskIds } satisfies TeamRevisionInput,
+          dependsOn: sourceTaskIds, status: 'waiting_dependency', attempt: 0, updatedAt: Date.now(),
+        };
+        return runtime.addTasks(runId, expectedPlanVersion, [task]);
+      });
+    },
     async instructQueuedTask(runId: string, taskId: string, expectedPlanVersion: number, instruction: string) {
       const trimmed = instruction.trim();
       if (!trimmed || trimmed.length > 4000) throw new Error('补充指示应为 1 到 4000 个字符');
@@ -131,6 +178,21 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       }));
       snapshot = await runtime.expandPlanOnce(runId, snapshot.run.planVersion, 'plan', additions);
       if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, getWorkspaceSignal());
+      const revisionTask = snapshot.tasks.find((task) => task.kind === 'team_plan_revision');
+      if (revisionTask?.status === 'completed') {
+        const delegated = validateAgentTeamPlan(revisionTask.output);
+        if (snapshot.tasks.length + delegated.tasks.length > 24) throw new Error('团队任务规模超出限制');
+        const delegatedRoles = new Map(delegated.roles.map((role) => [role.id, role]));
+        const contextTaskIds = isTeamRevisionInput(revisionTask.input) ? revisionTask.input.sourceTaskIds : [];
+        const delegatedTasks = delegated.tasks.map((task): WorkflowTask => ({
+          id: `delegated_${task.id}`, runId, kind: 'agent_text',
+          input: { task, goal: snapshot.run.goal, role: delegatedRoles.get(task.roleId)!, sourcePlanTaskId: revisionTask.id, contextTaskIds } satisfies TeamTaskInput,
+          dependsOn: [revisionTask.id, ...contextTaskIds, ...task.dependsOn.map((id) => `delegated_${id}`)],
+          status: 'waiting_dependency', attempt: 0, updatedAt: Date.now(),
+        }));
+        snapshot = await runtime.expandPlanOnce(runId, snapshot.run.planVersion, revisionTask.id, delegatedTasks);
+        if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, getWorkspaceSignal());
+      }
       if (snapshot.run.status !== 'completed' && snapshot.tasks.every((task) => task.status === 'completed')) snapshot = await runtime.closePlan(runId, snapshot.run.planVersion);
       return { snapshot, summary: summarizeWorkflowRun(snapshot) };
     },
@@ -151,6 +213,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const sourceId = `team-delivery-${runId}`;
       const existing = useAssistantArtifactStore.getState().getArtifactsForChat(chat.id).find((item) => item.sourceMessageId === sourceId);
       const plan = validateAgentTeamPlan(snapshot.tasks.find((task) => task.id === 'plan')?.output);
+      const delegatedPlan = snapshot.tasks.find((task) => task.kind === 'team_plan_revision')?.output;
+      const delegated = delegatedPlan ? validateAgentTeamPlan(delegatedPlan) : null;
       const content = [
         `# ${plan.summary}`,
         ...plan.tasks.map((task) => {
@@ -158,6 +222,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           if (typeof output !== 'string') throw new Error('团队交付缺少任务结果');
           return `## ${task.goal}\n\n${output}`;
         }),
+        ...(delegated ? delegated.tasks.map((task) => {
+          const output = snapshot.tasks.find((item) => item.id === `delegated_${task.id}`)?.output;
+          if (typeof output !== 'string') throw new Error('追加委派交付缺少任务结果');
+          return `## ${task.goal}\n\n${output}`;
+        }) : []),
       ].join('\n\n');
       const artifact = existing || useAssistantArtifactStore.getState().upsertArtifactsFromMessage({
         chatId: chat.id,
@@ -251,6 +320,14 @@ export async function instructAgentTeamTask(params: { runId: string; taskId: str
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
   const result = await currentTeamWorkflow().instructQueuedTask(params.runId, params.taskId, params.expectedPlanVersion, params.instruction);
+  notifyTeam();
+  return result;
+}
+
+export async function delegateAgentTeamTask(params: { runId: string; expectedPlanVersion: number; request: string }) {
+  const auth = readAuthSnapshot();
+  if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
+  const result = await currentTeamWorkflow().addRevisionRequest(params.runId, params.expectedPlanVersion, params.request);
   notifyTeam();
   return result;
 }

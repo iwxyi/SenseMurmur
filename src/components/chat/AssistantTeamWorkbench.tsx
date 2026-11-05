@@ -11,6 +11,7 @@ interface Props {
   onCreate: () => void;
   onInstruct: (run: WorkflowSnapshot, task: WorkflowTask, instruction: string) => Promise<void>;
   onPause: (run: WorkflowSnapshot) => Promise<void>;
+  onDelegate: (run: WorkflowSnapshot, request: string) => Promise<void>;
 }
 
 const taskStatus: Record<WorkflowTask['status'], string> = {
@@ -38,7 +39,7 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate, onInstruct, onPause }: Props) {
+export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate, onInstruct, onPause, onDelegate }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -46,6 +47,9 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
   const [savingInstruction, setSavingInstruction] = useState(false);
   const [instructionError, setInstructionError] = useState<string | null>(null);
   const [pauseError, setPauseError] = useState<string | null>(null);
+  const [delegateRequest, setDelegateRequest] = useState('');
+  const [delegateError, setDelegateError] = useState<string | null>(null);
+  const [savingDelegate, setSavingDelegate] = useState(false);
   if (!runs.length) return null;
   const run = runs.find((item) => item.run.id === selectedRunId) || runs[0];
   const task = run.tasks.find((item) => item.id === selectedTaskId) || null;
@@ -103,7 +107,15 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
           {plan?.finalAcceptance && <Typography variant="body2"><strong>最终验收</strong> {plan.finalAcceptance}</Typography>}
           {summary.blocked.length > 0 && <Typography variant="body2" color="warning.main"><strong>需要处理</strong> {summary.blocked.map((item) => item.reason).join('；')}</Typography>}
           {pauseError && <Typography variant="body2" color="error.main">{pauseError}</Typography>}
-          {run.tasks.map((item, index) => <Typography key={item.id} variant="body2" color="text.secondary">{index + 1}. {item.kind === 'team_plan' ? '规划团队' : taskDetails(item)?.goal || '执行任务'} · {taskStatus[item.status]}</Typography>)}
+          {run.run.status === 'paused' && !run.tasks.some((item) => item.kind === 'team_plan_revision') && <Box sx={{ display: 'grid', gap: 1 }}>
+            <TextField multiline minRows={2} fullWidth size="small" label="交给主 Agent 追加任务" value={delegateRequest} onChange={(event) => { setDelegateRequest(event.target.value); setDelegateError(null); }} slotProps={{ htmlInput: { maxLength: 4000 } }} disabled={savingDelegate} />
+            {delegateError && <Typography variant="caption" color="error.main">{delegateError}</Typography>}
+            <Button size="small" variant="outlined" disabled={!delegateRequest.trim() || savingDelegate} onClick={() => {
+              setSavingDelegate(true);
+              void onDelegate(run, delegateRequest).then(() => { setDelegateRequest(''); setDelegateError(null); }).catch((error: unknown) => setDelegateError(error instanceof Error ? error.message : '追加任务失败')).finally(() => setSavingDelegate(false));
+            }}>保存追加任务</Button>
+          </Box>}
+          {run.tasks.map((item, index) => <Typography key={item.id} variant="body2" color="text.secondary">{index + 1}. {item.kind === 'team_plan' ? '规划团队' : item.kind === 'team_plan_revision' ? '规划追加任务' : taskDetails(item)?.goal || '执行任务'} · {taskStatus[item.status]}</Typography>)}
         </Box>}
       </DialogContent>
       <DialogActions>
