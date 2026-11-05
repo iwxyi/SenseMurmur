@@ -43,6 +43,7 @@ describe('direct background reply', () => {
     const first = await startDirectBackgroundReply(chatId, userMessage.id);
     expect(first.snapshot.run.status).toBe('completed');
     expect(flow.mock.calls[0][0].userMessage.id).toBe(userMessage.id);
+    expect(flow.mock.calls[0][0].historyCutoffTimestamp).toBe(userMessage.timestamp);
     expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.some((message) => message.type === 'ai' && message.content === '你好')).toBe(true);
     expect((await listDirectBackgroundReplies(chatId))[0].run.id).toBe(directReplyRunId(chatId, userMessage.id));
     await resumeDirectBackgroundReply(first.snapshot.run.id);
