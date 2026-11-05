@@ -12,6 +12,7 @@ import type { Message } from '../types/message';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { readAuthSnapshot } from './authSnapshot';
 import { getWorkspaceSignal } from './workspaceLifecycle';
+import { scheduleBackgroundExecution } from './backgroundExecutionScheduler';
 
 interface TeamTaskInput {
   task: AgentTeamTask;
@@ -185,14 +186,14 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
   notifyTeam();
   try {
     const chatLock = `pneumata-assistant-chat-${originalScope}-${params.chatId}`;
-    return await navigator.locks.request(chatLock, async () => {
+    return await scheduleBackgroundExecution(params.chatId, () => navigator.locks.request(chatLock, async () => {
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队任务已暂停');
       const workflow = currentTeamWorkflow();
       const result = params.runId ? await workflow.resume(runId) : await workflow.start(runId, params.chatId, params.goal);
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队交付已暂停');
       if (result.snapshot.run.status === 'completed') await workflow.publish(runId);
       return result;
-    });
+    }), getWorkspaceSignal());
   } finally {
     activeTeamRuns.delete(runId);
     notifyTeam();
