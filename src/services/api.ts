@@ -94,6 +94,7 @@ export interface OfficialAiModelInfo {
 export interface AiMediaTask {
   task_id: string;
   model: string;
+  aspectRatio?: string;
   status: 'submitting' | 'running' | 'submission_unknown' | 'billing_pending' | 'succeeded' | 'failed';
   result: unknown;
   chargedAmount: number | null;
@@ -970,6 +971,19 @@ class ApiClient {
 
   async getAiMediaTask(taskId: string) {
     return this.request<AiMediaTask>('GET', `/ai/media/tasks/${encodeURIComponent(taskId)}`);
+  }
+
+  async downloadAiMediaTaskContent(taskId: string) {
+    const response = await this.fetchWithAuth(backendUrl(`${API_BASE}/media-assets/from-ai-task/${encodeURIComponent(taskId)}/content`), { method: 'GET' });
+    if (!response.ok) {
+      const failure = await this.parseJsonResponse<{ error?: string; code?: string }>(response).catch((): { error?: string; code?: string } => ({}));
+      throw new ApiError(failure.error || `视频结果下载失败 (${response.status})`, { code: failure.code, status: response.status });
+    }
+    return response.blob();
+  }
+
+  async createMediaAssetFromAiTask(input: { chatId: string; messageId: string; attachmentId: string; taskId: string; description?: string; promptText?: string }) {
+    return this.request<{ id: string; url: string; mimeType: string; sizeBytes: number; checksum?: string }>('POST', '/media-assets/from-ai-task', input);
   }
 
   async claimBillingVipPoints(kind: 'daily' | 'monthly') {

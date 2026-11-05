@@ -4,9 +4,10 @@ import { isAIProfileUsable, type AIModelProfile } from '../types/settings';
 import { api } from './api';
 import { workspaceFetch as fetch } from './workspaceLifecycle';
 import { generateImageWithAdapter, generateVideoWithAdapter, synthesizeSpeechWithAdapter } from './aiGenerationAdapter';
-import { extractAiMediaResultUrl, waitForAiMediaTask } from './aiClient';
+import { waitForAiMediaTask } from './aiClient';
 import { readAuthSnapshot } from './authSnapshot';
 import { logRecoverableError, reportRecoverableError } from './diagnostics';
+import { redactAiDiagnosticValue } from './aiDiagnosticText';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
 import { synthesizeSpeech, usesManagedSpeechProfile } from './speech';
 import { useAuthStore } from '../stores/useAuthStore';
@@ -131,6 +132,7 @@ function toMediaGenerationErrorText(error: unknown, kind: GenerativeAttachmentKi
 
 const latestRichMediaMessageById = new Map<string, Message>();
 const richMediaMessageUsers = new Map<string, number>();
+const richMediaMetadataWritesByMessageId = new Map<string, Promise<void>>();
 type RichMediaQueueEntryStatus = 'queued' | 'generating';
 export type RichMediaQueueSnapshotEntry = {
   messageId: string;
@@ -163,6 +165,8 @@ type RichMediaQueueEntry = {
   promise: Promise<void>;
   resolve: () => void;
   reject: (error: unknown) => void;
+  taskId?: string;
+  generationJobId?: string;
 };
 
 const pendingRichMediaQueue: RichMediaQueueEntry[] = [];
@@ -245,6 +249,7 @@ export function resetRichMediaQueueForTests() {
   richMediaQueueSnapshotCache = [];
   latestRichMediaMessageById.clear();
   richMediaMessageUsers.clear();
+  richMediaMetadataWritesByMessageId.clear();
   richMediaGenerationErrors.clear();
   dismissedRichMediaGenerationErrorIds.clear();
   publishRichMediaQueueSnapshot();
@@ -274,16 +279,23 @@ function persistRichMessageMetadata(message: Message, metadata: MessageMetadata,
     });
     return;
   }
-  void api.updateMessageMetadata(message.serverId, metadata).catch((error) => {
+  const serverId = message.serverId;
+  const previous = richMediaMetadataWritesByMessageId.get(serverId);
+  const write = () => api.updateMessageMetadata(serverId, metadata).then(() => undefined).catch((error) => {
     logRecoverableError({
       location,
       error,
-      extra: { messageId: message.id, serverId: message.serverId, attachmentId },
+      extra: { messageId: message.id, serverId, attachmentId },
     });
+  });
+  const pending = previous ? previous.then(write) : write();
+  richMediaMetadataWritesByMessageId.set(serverId, pending);
+  void pending.finally(() => {
+    if (richMediaMetadataWritesByMessageId.get(serverId) === pending) richMediaMetadataWritesByMessageId.delete(serverId);
   });
 }
 
-function retryAttachmentMetadata(metadata: MessageMetadata | undefined, attachmentId: string, generationJobId: string): MessageMetadata {
+function retryAttachmentMetadata(metadata: MessageMetadata | undefined, attachmentId: string, generationJobId: string, reuseVideoTask = false): MessageMetadata {
   const attachments = metadata?.attachments || [];
   const target = attachments.find((attachment) => attachment.id === attachmentId);
   if (!target) return metadata || {};
@@ -291,6 +303,7 @@ function retryAttachmentMetadata(metadata: MessageMetadata | undefined, attachme
     ...target,
     status: 'queued',
     error: undefined,
+    mediaTaskId: reuseVideoTask && target.kind === 'video' ? target.mediaTaskId : undefined,
     assetId: undefined,
     url: undefined,
     thumbnailAssetId: undefined,
@@ -431,13 +444,6 @@ async function attachAssistantImageArtifact(params: {
   return nextMessage;
 }
 
-async function downloadMediaUrlAsDataUrl(url: string) {
-  if (url.startsWith('data:')) return url;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`视频结果下载失败 (${response.status})`);
-  return blobToDataUrl(await response.blob());
-}
-
 async function pollVideoTask(params: {
   entry: RichMediaQueueEntry;
   message: Message;
@@ -446,30 +452,41 @@ async function pollVideoTask(params: {
   taskId: string;
 }) {
   const task = await waitForAiMediaTask(params.taskId);
-  const latestMessage = getLatestRichMediaMessage(params.entry.messageId, params.message);
+  let latestMessage = getLatestRichMediaMessage(params.entry.messageId, params.message);
   const latestAttachment = latestMessage.metadata?.attachments?.find((item) => item.id === params.attachment.id);
   if (latestAttachment?.generationJobId !== params.generationJobId) return;
-  if (task.status === 'failed') throw new Error('视频生成失败');
+  if (task.aspectRatio && task.aspectRatio !== latestAttachment?.aspectRatio) {
+    latestMessage = updateRichMediaMessage({ message: latestMessage, attachmentId: params.attachment.id, patch: { aspectRatio: task.aspectRatio }, upsertMessage: params.entry.upsertMessage });
+  }
+  if (task.status === 'failed') {
+    const result = task.result && typeof task.result === 'object' && !Array.isArray(task.result)
+      ? task.result as Record<string, unknown> : {};
+    console.error('[rich-message-media:video-task-failed]', { result: redactAiDiagnosticValue(task.result) });
+    const reason = typeof result.error === 'string' ? result.error.trim() : '';
+    const safeSubmissionReason = /^ACE 任务生成失败：ACE 请求失败 \([45]\d\d\)(：ACE 上游可用余额不足)?(，?错误码 [A-Za-z][A-Za-z0-9_.-]{0,63})?(，类型 [A-Za-z][A-Za-z0-9_.-]{0,63})?(，参数 [A-Za-z][A-Za-z0-9_.[\]-]{0,79})?$/.test(reason);
+    throw new Error(safeSubmissionReason || /^ACE 任务生成失败：(上游返回 HTTP [45]\d\d(，错误码 [A-Za-z][A-Za-z0-9_.-]{0,63})?(，参数 [A-Za-z][A-Za-z0-9_.[\]-]{0,79})?(，视频输入参数无效)?(，任务已取消)?|错误码 [A-Za-z][A-Za-z0-9_.-]{0,63}(，参数 [A-Za-z][A-Za-z0-9_.[\]-]{0,79})?(，视频输入参数无效)?(，任务已取消)?|任务已取消|上游任务失败，未提供错误码或状态码)$/.test(reason)
+      ? reason : '视频生成失败，服务端未返回可展示的失败原因。');
+  }
   if (task.status === 'succeeded') {
-      const url = extractAiMediaResultUrl(task.result);
-      if (!url) throw new Error('视频任务已完成，但未返回视频地址');
-      const dataUrl = await downloadMediaUrlAsDataUrl(url);
-      const asset = isLocalOnlyMediaMode()
-        ? { id: undefined, url: dataUrl, mimeType: 'video/mp4', sizeBytes: dataUrl.length, checksum: undefined }
-        : await api.createMediaAsset({
+      let asset: { id?: string; url: string; mimeType: string; sizeBytes?: number; checksum?: string };
+      try {
+        asset = isLocalOnlyMediaMode()
+          ? await api.downloadAiMediaTaskContent(params.taskId).then(async (blob) => ({ id: undefined, url: await blobToDataUrl(blob), mimeType: blob.type || 'video/mp4', sizeBytes: blob.size, checksum: undefined }))
+          : await api.createMediaAssetFromAiTask({
             chatId: latestMessage.chatId,
             messageId: latestMessage.serverId || latestMessage.id,
             attachmentId: params.attachment.id,
-            kind: 'video',
-            dataUrl,
+            taskId: params.taskId,
             description: params.attachment.caption || params.attachment.altText,
             promptText: params.attachment.promptText,
-            sourceType: 'chat-video',
           });
+      } catch (error) {
+        throw new Error(`视频已生成，但文件获取或保存失败：${error instanceof Error ? error.message : '网络请求失败'}`);
+      }
       updateRichMediaMessage({
         message: latestMessage,
         attachmentId: params.attachment.id,
-        patch: { status: 'ready', mediaTaskId: undefined, assetId: asset.id, url: asset.url || dataUrl, mimeType: asset.mimeType, sizeBytes: asset.sizeBytes, checksum: asset.checksum, generationJobId: params.generationJobId },
+        patch: { status: 'ready', mediaTaskId: undefined, assetId: asset.id, url: asset.url, mimeType: asset.mimeType, sizeBytes: asset.sizeBytes, checksum: asset.checksum, generationJobId: params.generationJobId },
         upsertMessage: params.entry.upsertMessage,
       });
     return;
@@ -548,7 +565,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
         },
       });
       const first = images[0];
-      if (!first?.dataUrl) throw new Error('图片生成失败');
+      if (!first?.dataUrl) throw new Error('图片服务未返回可用的图片数据，请检查模型响应。');
       const latestAttachment = getLatestRichMediaMessage(messageId, workingMessage).metadata?.attachments?.find((item) => item.id === attachment.id);
       if (latestAttachment?.generationJobId !== generationJobId) return;
       const dataUrl = await ensureDataUrl(first.dataUrl);
@@ -589,23 +606,32 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
 
     if (attachment.kind === 'video') {
       const profile = findGenerationProfile(entry.aiProfiles, 'video', entry.character?.modelProfileIds?.video);
-      if (!profile || !attachment.promptText) throw new Error('视频模型未配置');
       const referenceImages = resolveAttachmentReferenceImages(attachment, [
         ...(entry.messages || []),
         currentMessage,
       ]);
-      const task = attachment.mediaTaskId
-        ? { task_id: attachment.mediaTaskId }
-        : await generateVideoWithAdapter({
-            profile,
-            prompt: attachment.promptText,
-            aspectRatio: attachment.aspectRatio,
-            duration: attachment.videoDuration,
-            resolution: attachment.videoResolution || '720p',
-            referenceImages,
-            aiUsage: { type: 'video_generation', label: '聊天视频生成', scope: 'chat', resourceId: workingMessage.chatId },
+      let taskId = attachment.mediaTaskId;
+      if (!taskId) {
+        if (!profile || !attachment.promptText) throw new Error('视频模型未配置');
+        const task = await generateVideoWithAdapter({
+          profile,
+          prompt: attachment.promptText,
+          aspectRatio: attachment.aspectRatio,
+          duration: attachment.videoDuration,
+          resolution: attachment.videoResolution,
+          referenceImages,
+          aiUsage: { type: 'video_generation', label: '聊天视频生成', scope: 'chat', resourceId: workingMessage.chatId },
+        });
+        taskId = task.task_id;
+        if (taskId && task.aspectRatio) {
+          workingMessage = updateRichMediaMessage({
+            message: workingMessage,
+            attachmentId: attachment.id,
+            patch: { aspectRatio: task.aspectRatio },
+            upsertMessage: entry.upsertMessage,
           });
-      const taskId = task.task_id;
+        }
+      }
       if (!taskId) throw new Error('视频任务提交失败：未返回任务 ID');
       workingMessage = updateRichMediaMessage({
         message: workingMessage,
@@ -615,6 +641,8 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
       });
       // The server owns the long-running task. Poll independently so other
       // media kinds can continue through their own queue work.
+      entry.taskId = taskId;
+      entry.generationJobId = generationJobId;
       longRunningRichMediaEntriesById.set(entry.id, entry);
       publishRichMediaQueueSnapshot();
       void pollVideoTask({ entry, message: workingMessage, attachment, generationJobId, taskId })
@@ -627,7 +655,9 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
           updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id, patch: { status: 'failed', error: errorText, mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
         })
         .finally(() => {
-          longRunningRichMediaEntriesById.delete(entry.id);
+          if (longRunningRichMediaEntriesById.get(entry.id) === entry) {
+            longRunningRichMediaEntriesById.delete(entry.id);
+          }
           publishRichMediaQueueSnapshot();
         });
       return;
@@ -693,7 +723,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
     reportRecoverableError({
       location: 'rich-message-media.process',
       error,
-      userMessage: attachment.kind === 'sticker' ? '表情包搜索失败。' : attachment.kind === 'image' ? '图片生成失败。' : '语音生成失败。',
+      userMessage: attachment.kind === 'sticker' ? '表情包搜索失败。' : attachment.kind === 'image' ? '图片生成失败。' : attachment.kind === 'video' ? '视频生成失败。' : '语音生成失败。',
       extra: {
         messageId: workingMessage.id,
         attachmentId: attachment.id,
@@ -704,7 +734,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
     const errorText = toMediaGenerationErrorText(error, attachment.kind);
     richMediaGenerationErrors.set(entry.id, {
       id: entry.id,
-      title: attachment.kind === 'sticker' ? '聊天表情包搜索' : attachment.kind === 'image' ? '聊天图片生成' : '聊天语音生成',
+      title: attachment.kind === 'sticker' ? '聊天表情包搜索' : attachment.kind === 'image' ? '聊天图片生成' : attachment.kind === 'video' ? '聊天视频生成' : '聊天语音生成',
       message: errorText,
       createdAt: Date.now(),
     });
@@ -755,6 +785,11 @@ function enqueueRichMediaAttachment(params: {
   const id = richMediaQueueEntryId(params.message.id, params.attachment.id);
   const existing = activeRichMediaQueueEntriesById.get(id);
   if (existing) return existing.promise;
+  const polling = longRunningRichMediaEntriesById.get(id);
+  if (polling && (
+    (params.attachment.mediaTaskId && params.attachment.mediaTaskId === polling.taskId)
+    || (params.attachment.generationJobId && params.attachment.generationJobId === polling.generationJobId)
+  )) return polling.promise;
 
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
@@ -866,8 +901,13 @@ export async function retryRichMessageMedia(params: {
   const attachments = params.message.metadata?.attachments || [];
   const target = attachments.find((attachment) => attachment.id === params.attachmentId);
   if (!target || (target.status !== 'failed' && target.status !== 'queued' && target.status !== 'generating' && !(target.status === 'ready' && (!target.url || target.kind === 'sticker')))) return;
+  let reuseVideoTask = false;
+  if (target.kind === 'video' && target.mediaTaskId) {
+    try { reuseVideoTask = (await api.getAiMediaTask(target.mediaTaskId)).status !== 'failed'; }
+    catch { reuseVideoTask = true; }
+  }
   const generationJobId = createGenerationJobId();
-  const retryMetadata = retryAttachmentMetadata(params.message.metadata, params.attachmentId, generationJobId);
+  const retryMetadata = retryAttachmentMetadata(params.message.metadata, params.attachmentId, generationJobId, reuseVideoTask);
   const retryMessage = { ...params.message, metadata: retryMetadata };
   params.upsertMessage(retryMessage);
   persistRichMessageMetadata(retryMessage, retryMetadata, 'rich-message-media.retry-persist-metadata', params.attachmentId);

@@ -20,6 +20,7 @@ import { logRecoverableError } from './diagnostics';
 import { normalizeAssistantHtmlRuntime } from '../features/assistantHtml/assistantHtmlValidation';
 import { summarizeAssistantArtifactData } from './assistantArtifactData';
 import { parseAssistantAgentWriterOutput } from './assistantAgentWriterProtocol';
+import { redactAiDiagnosticText } from './aiDiagnosticText';
 
 const VALID_ARTIFACT_KINDS = new Set<AssistantArtifactKind>(['document', 'code', 'diagram', 'html', 'table', 'json', 'text', 'image']);
 const MAX_RECENT_MESSAGES = 12;
@@ -97,10 +98,13 @@ function safeJsonParse(value: string): unknown {
     const lineMatch = parseError.match(/line\s+(\d+)/i);
     const columnMatch = parseError.match(/column\s+(\d+)/i);
     console.error('[assistant-agent:invalid-json]', {
+      stage: 'json-parse',
+      parserError: redactAiDiagnosticText(parseError),
       responseLength: value.length,
       position: positionMatch ? Number(positionMatch[1]) : undefined,
       line: lineMatch ? Number(lineMatch[1]) : undefined,
       column: columnMatch ? Number(columnMatch[1]) : undefined,
+      response: redactAiDiagnosticText(value, Infinity),
     });
     throw new AssistantAgentFormatError();
   }
@@ -288,6 +292,7 @@ function buildPlannerPrompt(options: { includeImages: boolean; includeLocalFiles
     '结合用户输入、最近对话、产物注册表和交互焦点判断，不要要求用户使用“HTML/产物”等技术词。',
     '普通问答=chat；创建结果=create；修改现有产物=update；目标不明确=clarify。不要猜多个候选目标。',
     '需要创建图片或图片变体=create。',
+    '视频生成能力由 toolCapabilities.videoGeneration 表示。用户要求生成视频（包括先写脚本再生成成片）且能力可用时，选择 create、responseExperience=direct_answer，由 writer 输出脚本和真实视频 mediaTasks；不要询问要脚本、提示词还是 HTML。禁止用 HTML 动画代替视频。能力不可用时明确提示配置视频模型，不得假装生成。只有用户明确要求网页动画时才选择 HTML。',
     'structured_input 用于少量字段的小表单、单题投票/选择、简短反馈，以及汇率换算、单位换算等可在原地完成的轻量计算工具；是否提交给助手是独立选择，本地计算无需提交。interactive_workspace 用于多题试卷/问卷、多步骤配置、连续练习、审批及代码量较大的复杂工具；不能仅因为是计算器就选择完整页面。visual_explanation 用于复杂图表、对比表和公式。HTML 只是实现方式。',
     'source_code 只在用户明确要源码时使用，并输出 intent=chat；每轮必须选择 responseExperience。',
     'selectedArtifactId 存在且用户说“这个/当前产物/改一下”等相对指代时优先作为 update 目标；没有唯一目标则 clarify。',
@@ -404,7 +409,7 @@ function normalizePlan(
   };
 }
 
-function buildWriterPrompt(options: { includeImages: boolean; includeLocalFiles: boolean; includeHtml: boolean; includeData: boolean; requiresHtmlRuntimeRepair?: boolean }) {
+function buildWriterPrompt(options: { includeImages: boolean; videoGeneration: boolean; videoModel?: string; includeLocalFiles: boolean; includeHtml: boolean; includeData: boolean; requiresHtmlRuntimeRepair?: boolean }) {
   const sections = [
     '你是企业级 Artifact Patch Writer。',
     '输出由 JSON 元数据和独立正文块组成，不要在协议之外输出解释。JSON 内只放元数据，不要把完整源码转义后嵌入 JSON 字符串。',
@@ -421,6 +426,15 @@ function buildWriterPrompt(options: { includeImages: boolean; includeLocalFiles:
     '6.1 如果 targetArtifacts 中 currentVersionContentTruncated 或 currentVersionFiles[].contentTruncated 为 true，说明完整正文未发送给你；任何 update patch 仍然必须输出完整新版本。若无法基于已发送内容安全重建完整版本，必须返回 patches=[] 并要求用户缩小修改范围或打开具体文件后重试，禁止编造缺失正文。',
     '6.2 assistantMessage 不要重复输出 patches[].content 或 files[].content 的完整正文/源码。产物正文只放在 patch content/files 中；assistantMessage 只写简短说明、必要的前言或图片槽位。',
   ];
+  sections.push(
+    '视频必须通过真实视频生成任务产出，禁止用 HTML 动画代替视频。用户只要脚本或提示词时不要提交生成任务；要求最终成片时应提交任务，不要再次要求在脚本、提示词和 HTML 之间选择。',
+    options.videoGeneration
+      ? '视频生成已配置：输出 mediaTasks kind=video，必须含 slotId、prompt、altText、userCaption；可选 aspectRatio、videoResolution、videoDuration（秒）、referenceImageIds。prompt 是基于脚本的完整视频模型提示词，描述角色、场景、动作时序、镜头与风格。用户要求先脚本再视频时，同轮以 document/text patch 保存完整脚本，并将脚本转为视频任务。用户明确指定宽高比、画质、时长时填写对应参数；若你在脚本或视频 prompt 中明确写了宽高比或时长，也必须在任务参数中填写相同的值，避免文本与实际生成参数冲突；其余参数省略并使用用户/后台默认配置。参考图只能引用 imageReferenceRegistry 中已有图片，不得引用尚未生成的图片或虚构 ID。每项在 assistantMessage 中用 ![视频说明](attachment:slotId) 占位。视频是异步任务，提交后由系统轮询；只能说已提交/等待生成，不能声称成片已完成、已检查或已经自动拼接。当前不支持把尚未完成的生图任务结果直接作为同轮视频依赖，遇到这种需求需明确分步执行。'
+      : '当前没有可用的视频模型。需要最终视频时明确提示用户先在模型设置中配置视频模型，可以提供脚本，但不得用 HTML 冒充视频或输出视频生成任务。',
+  );
+  if (options.videoGeneration && /^doubao-seedance-/i.test(options.videoModel || '')) sections.push(
+    '当前使用 Seedance 视频模型：mediaTasks.kind=video 的 prompt 必须控制在 1000 个字符以内，建议不超过 900 字符。分镜脚本全文保存在 document/text 产物中；视频 prompt 只提炼成片所需的核心角色、场景、动作顺序、镜头和风格，不要复制完整脚本或逐镜详细表格。',
+  );
   if (options.includeImages) sections.push(
     '图片：如需生成图片必须输出 mediaTasks，不要把图片写成代码或 Markdown 正文；图片引用 ID 必须来自 registry，区分 target/reference/style；仅在需要图片时生成 prompt。单次数量由当前会员权益校验，超限时系统会拒绝整批任务。',
   );
@@ -439,8 +453,9 @@ function buildWriterPrompt(options: { includeImages: boolean; includeLocalFiles:
     'HTML 运行诊断修复：这是针对指定 HTML 产物的强制修复任务。必须输出恰好一个 action=update、kind=html 的 patch，并使用 targetArtifacts 中该产物的 id 与 currentVersionId。patch.content 必须是修复后的完整页面源码，而不是修复说明、伪代码或片段。若无法生成完整源码，返回 patches=[] 并在 assistantMessage 明确说明“原页面未改变”；绝不能声称已经修复。',
   );
   sections.push('assistantMessage 是用户可见的简短自然回复，不重复完整产物正文。');
+  if (options.videoGeneration) sections.push('视频任务结构示例（可选参数仅按用户要求填写）：{"kind":"video","slotId":"video-1","prompt":"完整成片提示词","altText":"视频说明","userCaption":"视频说明","aspectRatio":"16:9","videoResolution":"720p","videoDuration":5,"referenceImageIds":[]}。mediaTasks 可以包含图片和视频两种任务。');
   if (options.includeImages) sections.push(
-    '7.2 mediaTasks.prompt 是给图片模型的完整提示词；aspectRatio、imageSize、referenceImageIds 等图片要求只能放在 mediaTasks 中，不要混入聊天正文。',
+    '7.2 以下图片规则仅适用于 kind=image 的任务。其 mediaTasks.prompt 是给图片模型的完整提示词；aspectRatio、imageSize、referenceImageIds 等图片要求只能放在 mediaTasks 中，不要混入聊天正文。',
     '7.3 每个图片任务必须有稳定 slotId，例如 image-1、cover、step-2；assistantMessage 中用 Markdown 图片占位符引用：![给用户看的图片说明](attachment:slotId)。slotId 必须和 mediaTasks[].slotId 完全一致。',
     '7.4 mediaTasks.userCaption 是该图片在正文中的用户可见说明，应和 Markdown 图片占位符的 alt 文本一致或高度接近；不得写图片模型提示词。',
     '7.5 复合指令应拆成多张独立图片任务，例如封面、步骤图、风格 A/B/C，而不是把多张图塞进一个 prompt。',
@@ -534,6 +549,7 @@ function withImplicitLatestImageTarget(
   const latestImage = latestUniqueImageReference(imageReferenceRegistry);
   if (!latestImage) return mediaTasks;
   return mediaTasks.map((task) => {
+    if (task.kind !== 'image') return task;
     if (task.targetImageIds?.length || task.referenceImageIds?.length || task.styleImageIds?.length || task.referenceImages?.length) return task;
     const caption = latestImage.caption || latestImage.altText || '上一张图片';
     return {
@@ -621,8 +637,8 @@ function normalizeDataOperations(value: unknown): AssistantArtifactDataOperation
 function normalizeMediaTasks(value: unknown, imageReferenceRegistry = new Map<string, ImageAttachmentRef>()): AssistantAgentMediaTask[] {
   if (!Array.isArray(value)) return [];
   const usedSlotIds = new Set<string>();
-  const uniqueSlotId = (rawSlotId: string, index: number) => {
-    const fallback = `image-${index + 1}`;
+  const uniqueSlotId = (rawSlotId: string, index: number, kind: AssistantAgentMediaTask['kind']) => {
+    const fallback = `${kind}-${index + 1}`;
     const base = (rawSlotId.replace(/[^\w.-]/g, '') || fallback).slice(0, 80);
     if (!usedSlotIds.has(base)) {
       usedSlotIds.add(base);
@@ -640,10 +656,10 @@ function normalizeMediaTasks(value: unknown, imageReferenceRegistry = new Map<st
     return candidate;
   };
   return value.flatMap((item, index): AssistantAgentMediaTask[] => {
-    if (!isRecord(item) || item.kind !== 'image') return [];
+    if (!isRecord(item) || (item.kind !== 'image' && item.kind !== 'video')) return [];
     const prompt = text(item.prompt, 4000);
-    const slotId = uniqueSlotId(text(item.slotId, 80), index);
-    const altText = text(item.altText, 160) || text(item.title, 160) || 'AI 图片';
+    const slotId = uniqueSlotId(text(item.slotId, 80), index, item.kind);
+    const altText = text(item.altText, 160) || text(item.title, 160) || (item.kind === 'video' ? 'AI 视频' : 'AI 图片');
     const userCaption = text(item.userCaption, 240) || text(item.caption, 240) || altText;
     const aspectRatio = text(item.aspectRatio, 16);
     const imageSize = text(item.imageSize, 8).toUpperCase();
@@ -672,6 +688,17 @@ function normalizeMediaTasks(value: unknown, imageReferenceRegistry = new Map<st
       }];
     });
     const resolvedReferenceImages = referenceImagesFromIds.slice(0, 8);
+    if (item.kind === 'video') {
+      const duration = item.videoDuration;
+      return [{
+        kind: 'video', slotId, prompt, altText, userCaption,
+        aspectRatio: /^\d+(?:\.\d+)?:\d+(?:\.\d+)?$/.test(aspectRatio) ? aspectRatio : undefined,
+        videoResolution: text(item.videoResolution, 32) || undefined,
+        videoDuration: typeof duration === 'number' && Number.isFinite(duration) && duration > 0 ? duration : undefined,
+        referenceImageIds: referenceImageIds.length ? referenceImageIds : undefined,
+        referenceImages: resolvedReferenceImages.length ? resolvedReferenceImages : undefined,
+      }];
+    }
     return [{
       kind: 'image',
       slotId,
@@ -839,7 +866,7 @@ function normalizePatchSet(raw: unknown, imageReferenceRegistry = new Map<string
     });
   }
   const mediaTaskContractError = missingTaskSlots.length
-    ? `图片任务输出不完整：缺少 ${missingTaskSlots.join('、')} 的 mediaTasks。未创建任何图片生成任务，请重试。`
+    ? `媒体任务输出不完整：缺少 ${missingTaskSlots.join('、')} 的 mediaTasks。未创建任何生成任务，请重试。`
     : '';
   let mediaTasks = mediaTaskContractError ? [] : normalizedMediaTasks;
   mediaTasks = withImplicitLatestImageTarget(mediaTasks, userMessage, imageReferenceRegistry);
@@ -851,7 +878,7 @@ function normalizePatchSet(raw: unknown, imageReferenceRegistry = new Map<string
     assistantMessage: mediaTaskContractError
       ? [visibleAssistantMessage, mediaTaskContractError].filter(Boolean).join('\n\n')
       : ensureMediaTaskPlaceholders(visibleAssistantMessage, mediaTasks)
-      || (mediaTasks.length && !patches.length ? '我已根据你的要求准备生成图片。' : patches.length || dataOperations.length ? '已完成产物变更。' : '没有可提交的产物变更。'),
+      || (mediaTasks.length && !patches.length ? '我已根据你的要求准备生成媒体。' : patches.length || dataOperations.length ? '已完成产物变更。' : '没有可提交的产物变更。'),
     patches,
     dataOperations,
     versionOperations,
@@ -917,6 +944,7 @@ export async function planAssistantAgentChange(params: {
   existingArtifacts: AssistantArtifactItem[];
   interactionFocus?: Record<string, unknown>;
   toolCapabilities?: {
+    videoGeneration?: boolean;
     webSearch?: boolean;
     networkAccess?: boolean;
     localWorkspace?: boolean;
@@ -979,6 +1007,7 @@ export async function planAssistantAgentChange(params: {
     imageReferenceRegistry: buildCompactImageReferenceRegistry(withLatestUserMessage(params.messages, params.userMessage)),
     artifactRegistry: artifactRegistry(params.existingArtifacts),
     toolCapabilities: {
+      videoGeneration: Boolean(params.toolCapabilities?.videoGeneration),
       webSearch: Boolean(params.toolCapabilities?.webSearch),
       networkAccess: Boolean(params.toolCapabilities?.networkAccess),
       localWorkspace: Boolean(params.toolCapabilities?.localWorkspace),
@@ -1080,6 +1109,8 @@ export async function writeAssistantAgentPatchSet(params: {
   existingArtifacts: AssistantArtifactItem[];
   localFiles?: AssistantAgentLocalFileContext[];
   workspaceDirectories?: Array<{ id: string; name: string; isDefault: boolean }>;
+  videoGeneration?: boolean;
+  videoModel?: string;
   signal?: AbortSignal;
 }) {
   const registryMessages = withLatestUserMessage(params.messages, params.userMessage);
@@ -1135,8 +1166,11 @@ export async function writeAssistantAgentPatchSet(params: {
     targetArtifacts,
     localFiles: compactLocalFilesForPrompt(params.localFiles),
     workspaceRegistry: params.workspaceDirectories || [],
+    toolCapabilities: { videoGeneration: Boolean(params.videoGeneration) },
   };
   const writerPromptOptions = {
+      videoGeneration: Boolean(params.videoGeneration),
+      videoModel: params.videoModel,
       includeImages: Boolean(
         imageReferenceRegistry.size
         || userImageAttachments.length
@@ -1173,7 +1207,13 @@ export async function writeAssistantAgentPatchSet(params: {
     parsed = parseAssistantAgentWriterOutput(raw, safeJsonParse);
   } catch (error) {
     if (error instanceof AssistantAgentFormatError) throw error;
-    console.error('[assistant-agent:invalid-writer-output]', { responseLength: raw.length });
+    console.error('[assistant-agent:invalid-writer-output]', {
+      stage: 'writer-protocol',
+      parserError: redactAiDiagnosticText(error instanceof Error ? error.message : String(error)),
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+      responseLength: raw.length,
+      response: redactAiDiagnosticText(raw, Infinity),
+    });
     throw new AssistantAgentFormatError();
   }
   return validateAssistantAgentPatchSet({

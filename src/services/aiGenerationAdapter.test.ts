@@ -1,6 +1,42 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_IMAGE_AI_PROFILE } from '../types/settings';
-import { generateImageWithAdapter, resolveImageGenerationRequest } from './aiGenerationAdapter';
+import { api } from './api';
+import { generateImageWithAdapter, generateVideoWithAdapter, resolveImageGenerationRequest, resolveVideoGenerationParameters } from './aiGenerationAdapter';
+
+describe('video generation defaults', () => {
+  const profile = { ...DEFAULT_IMAGE_AI_PROFILE, type: 'video' as const };
+  afterEach(() => vi.restoreAllMocks());
+
+  it('sends resolved parameters through the asynchronous media submission', async () => {
+    const membership = { vipActive: false, activeSubscription: null, latestSubscription: null, recentOrders: [] };
+    vi.spyOn(api, 'getBillingMembership').mockResolvedValue({
+      ...membership,
+      vipEntitlement: { tierCode: 'free', entitlement: { multimediaGenerationEnabled: true } as NonNullable<Awaited<ReturnType<typeof api.getBillingMembership>>['vipEntitlement']>['entitlement'] },
+    });
+    const submit = vi.spyOn(api, 'generateAiMedia').mockResolvedValue({
+      task_id: 'task-test', model: profile.model, status: 'running', result: null,
+      chargedAmount: null, reservedAmount: 0, createdAt: 0, updatedAt: 0,
+    });
+    await generateVideoWithAdapter({ profile: { ...profile, videoDefaults: { aspectRatio: '9:16', resolution: '1080p', duration: 6 } }, prompt: 'tea', duration: 4 });
+    expect(submit).toHaveBeenLastCalledWith(expect.objectContaining({ async: true, aspect_ratio: '9:16', resolution: '1080p', duration: 4 }));
+    await generateVideoWithAdapter({ profile, prompt: 'tea' });
+    expect(submit.mock.calls[1][0]).not.toHaveProperty('resolution');
+    expect(submit.mock.calls[1][0]).not.toHaveProperty('aspect_ratio');
+    expect(submit.mock.calls[1][0]).not.toHaveProperty('duration');
+  });
+
+  it('omits unset parameters so backend defaults can apply', () => {
+    expect(resolveVideoGenerationParameters({ profile, prompt: 'tea' })).toEqual({});
+    expect(resolveVideoGenerationParameters({ profile: { ...profile, videoDefaults: { aspectRatio: '', resolution: ' ', duration: NaN } }, prompt: 'tea' })).toEqual({});
+  });
+
+  it('merges explicit requests over model defaults independently for each parameter', () => {
+    const params = { profile: { ...profile, videoDefaults: { aspectRatio: '16:9', resolution: '1080p', duration: 8 } }, prompt: 'tea' };
+    expect(resolveVideoGenerationParameters(params)).toEqual({ aspect_ratio: '16:9', resolution: '1080p', duration: 8 });
+    expect(resolveVideoGenerationParameters({ ...params, resolution: '720p' })).toEqual({ aspect_ratio: '16:9', resolution: '720p', duration: 8 });
+    expect(resolveVideoGenerationParameters({ ...params, aspectRatio: '9:16', duration: 5, resolution: '480p', referenceImages: [{ url: 'https://example.com/tea.png' }] })).toEqual({ aspect_ratio: '9:16', resolution: '480p', duration: 5, image_urls: ['https://example.com/tea.png'] });
+  });
+});
 
 describe('image generation default resolution', () => {
   afterEach(() => vi.unstubAllGlobals());

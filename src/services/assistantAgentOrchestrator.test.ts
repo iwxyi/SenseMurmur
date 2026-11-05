@@ -389,6 +389,54 @@ describe('assistantAgentOrchestrator validation', () => {
     expect(JSON.stringify(registry)).not.toContain('data:image');
   });
 
+  it.each([true, false])('describes actual video capability to the planner (%s)', async (videoGeneration) => {
+    generateResponseMock.mockResolvedValue(JSON.stringify({ intent: 'create', operations: [], scope: {} }));
+    await planAssistantAgentChange({
+      api: { provider: 'openai', apiKey: 'k', baseUrl: '', model: 'text' },
+      chatId: 'chat-a', messages: [], existingArtifacts: [],
+      userMessage: { id: 'user', chatId: 'chat-a', type: 'user', senderId: 'user', senderName: '用户', content: '先写脚本再生成视频', emotion: 0, timestamp: 1, isDeleted: false },
+      toolCapabilities: { videoGeneration },
+    });
+    expect(generateResponseMock.mock.calls[0][1]).toContain('禁止用 HTML 动画代替视频');
+    const payload = JSON.parse(generateResponseMock.mock.calls[0][2][0].content);
+    expect(payload.toolCapabilities.videoGeneration).toBe(videoGeneration);
+  });
+
+  it.each([true, false])('creates a script and a real video task with optional explicit parameters (%s)', async (explicitParameters) => {
+    const prompt = '恐龙追逐蓝色机器猫，先远景后近景，最后躲入树林。';
+    generateResponseMock.mockResolvedValue([
+      '```json',
+      JSON.stringify({
+        assistantMessage: '脚本已准备，视频等待生成。',
+        patches: [{ action: 'create', kind: 'document', title: '追逐脚本', contentRef: 'script' }],
+        mediaTasks: [{ kind: 'video', prompt, altText: '追逐短片', referenceImageIds: ['user:ref'],
+          ...(explicitParameters ? { aspectRatio: '16:9', videoResolution: '1080p', videoDuration: 8 } : {}) }],
+      }),
+      '```', '~~~~artifact-content script', '先远景展示恐龙追逐，随后切近景，最后躲入树林。', '~~~~', '<!-- assistant-patch-set:end -->',
+    ].join('\n'));
+    const userMessage: Message = {
+      id: 'user', chatId: 'chat-a', type: 'user', senderId: 'user', senderName: '用户',
+      content: '先写脚本再生成视频，用参考图片', emotion: 0, timestamp: 1, isDeleted: false,
+      metadata: { attachments: [{ id: 'ref', kind: 'image', status: 'ready', altText: '参考图', url: 'https://example.test/ref.png', createdAt: 1, updatedAt: 1 }] },
+    };
+    const result = await writeAssistantAgentPatchSet({
+      api: { provider: 'openai', apiKey: 'k', baseUrl: '', model: 'text' },
+      chatId: 'chat-a', messages: [], userMessage, existingArtifacts: [], videoGeneration: true, videoModel: 'doubao-seedance-2-0-fast-260128',
+      plan: { intent: 'create', scope: { targetMode: 'unknown', artifactIds: [] }, operations: [{ kind: 'create', instruction: '先脚本再成片' }], requiresConfirmation: false, confidence: 1 },
+    });
+    expect(result.patches[0]).toMatchObject({ kind: 'document', content: '先远景展示恐龙追逐，随后切近景，最后躲入树林。' });
+    expect(result.mediaTasks).toHaveLength(1);
+    expect(result.mediaTasks?.[0]).toMatchObject({ kind: 'video', slotId: 'video-1', prompt, referenceImages: [{ url: 'https://example.test/ref.png' }] });
+    expect(result.mediaTasks?.[0].videoResolution).toBe(explicitParameters ? '1080p' : undefined);
+    expect(result.mediaTasks?.[0].videoDuration).toBe(explicitParameters ? 8 : undefined);
+    expect(result.mediaTasks?.[0].aspectRatio).toBe(explicitParameters ? '16:9' : undefined);
+    expect(result.mediaTasks?.[0].targetArtifactId).toBeUndefined();
+    expect(result.assistantMessage).toContain('(attachment:video-1)');
+    expect(generateResponseMock.mock.calls[0][1]).toContain('禁止用 HTML 动画代替视频');
+    expect(generateResponseMock.mock.calls[0][1]).toContain('prompt 必须控制在 1000 个字符以内');
+    expect(generateResponseMock.mock.calls[0][1]).toContain('避免文本与实际生成参数冲突');
+  });
+
   it('keeps terse image media prompts model-guided before dispatching image generation', async () => {
     generateResponseMock.mockResolvedValue(JSON.stringify({
       assistantMessage: '下面是三张图。',
@@ -473,7 +521,7 @@ describe('assistantAgentOrchestrator validation', () => {
       existingArtifacts: [],
     });
 
-    expect(patchSet.assistantMessage).toContain('图片任务输出不完整');
+    expect(patchSet.assistantMessage).toContain('媒体任务输出不完整');
     expect(patchSet.assistantMessage).toContain('image-1');
     expect(patchSet.mediaTasks).toEqual([]);
   });
@@ -937,8 +985,12 @@ describe('assistantAgentOrchestrator validation', () => {
     expect(String(generateResponseMock.mock.calls[0]?.[1] || '')).toContain('HTML 运行诊断修复');
   });
 
-  it('does not retain malformed model output on format errors', async () => {
-    generateResponseMock.mockResolvedValue('sensitive malformed response');
+  it.each([
+    ['json-parse', 'sensitive malformed response token="private-token"', '[assistant-agent:invalid-json]'],
+    ['writer-protocol', '```json\n{"patches":[{"contentRef":"main"}]}\n```\n~~~~artifact-content main\npartial token="private-token"', '[assistant-agent:invalid-writer-output]'],
+  ])('logs redacted %s diagnostics without retaining model output on the error', async (stage, raw, event) => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    generateResponseMock.mockResolvedValue(raw);
     const request = writeAssistantAgentPatchSet({
       api: { provider: 'openai', apiKey: 'k', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4.1' },
       chatId: 'chat-a',
@@ -956,5 +1008,15 @@ describe('assistantAgentOrchestrator validation', () => {
     expect(error).toMatchObject({ name: 'AssistantAgentFormatError' });
     expect(error).not.toHaveProperty('rawResponse');
     expect(JSON.stringify(error)).not.toContain('sensitive malformed response');
+    expect(errorLog).toHaveBeenCalledWith(event, expect.objectContaining({
+      stage,
+      parserError: expect.any(String),
+      responseLength: raw.length,
+      response: expect.stringContaining('[REDACTED]'),
+    }));
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain('private-token');
+    const details = errorLog.mock.calls.find((call) => call[0] === event)?.[1] as { parserError: string };
+    expect(details.parserError.length).toBeGreaterThan(0);
+    errorLog.mockRestore();
   });
 });

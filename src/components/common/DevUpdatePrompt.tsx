@@ -3,7 +3,7 @@ import Button from '@mui/material/Button';
 import AppSnackbar from './AppSnackbar';
 import { useSettingsStore } from '../../stores/useSettingsStore';
 
-const DEV_UPDATE_POLL_INTERVAL_MS = 2500;
+const DEV_UPDATE_POLL_INTERVAL_MS = 15_000;
 
 async function fetchDevUpdateVersion(signal: AbortSignal) {
   const response = await fetch('/__pneumata_dev_updates', {
@@ -28,7 +28,7 @@ export default function DevUpdatePrompt() {
     let controller: AbortController | null = null;
 
     const schedulePoll = () => {
-      if (disposed) return;
+      if (disposed || document.visibilityState === 'hidden') return;
       pollTimer = window.setTimeout(() => void poll(), DEV_UPDATE_POLL_INTERVAL_MS);
     };
 
@@ -54,10 +54,24 @@ export default function DevUpdatePrompt() {
       }
     };
 
-    void poll();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        if (pollTimer !== null) window.clearTimeout(pollTimer);
+        pollTimer = null;
+        return;
+      }
+      if (controller) return;
+      if (pollTimer !== null) window.clearTimeout(pollTimer);
+      pollTimer = null;
+      void poll();
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    if (document.visibilityState !== 'hidden') void poll();
 
     return () => {
       disposed = true;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       if (pollTimer !== null) window.clearTimeout(pollTimer);
       controller?.abort();
     };

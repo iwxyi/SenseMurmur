@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Box, Dialog, IconButton, Typography, Zoom } from '@mui/material';
+import { Box, CircularProgress, Dialog, Fade, IconButton, Typography, Zoom } from '@mui/material';
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import CloseIcon from '@mui/icons-material/Close';
@@ -10,9 +10,11 @@ import { TransformComponent, TransformWrapper, type ReactZoomPanPinchRef } from 
 
 export interface LightboxImageItem {
   key?: string;
+  kind?: 'image' | 'video';
   src: string;
   fullSrc?: string;
   alt?: string;
+  poster?: string;
 }
 
 interface ImageLightboxProps {
@@ -25,11 +27,69 @@ interface ImageLightboxProps {
   reachStartVersion?: string | number;
   maxReachStartAttempts?: number;
   onClose: () => void;
+  onExited?: () => void;
+  sourceRect?: { x: number; y: number; width: number; height: number };
 }
 
 const SWIPE_THRESHOLD = 54;
 
-export default function ImageLightbox({ open, images, index, onIndexChange, resolveImageSrc, onReachStart, reachStartVersion, maxReachStartAttempts = 20, onClose }: ImageLightboxProps) {
+function LightboxVideo({ src, poster, alt, sourceRatio }: { src: string; poster?: string; alt?: string; sourceRatio?: number }) {
+  const [ready, setReady] = useState(false);
+  const [failed, setFailed] = useState(false);
+  return (
+    <Box
+      data-media-stage
+      sx={{
+        position: 'relative',
+        width: sourceRatio ? `min(calc(88dvh * ${sourceRatio}), calc(100vw - 24px))` : 'auto',
+        maxWidth: '100%',
+        maxHeight: '88dvh',
+        aspectRatio: sourceRatio ? `${sourceRatio}` : undefined,
+        bgcolor: 'common.black',
+        overflow: 'hidden',
+      }}
+    >
+      <Box
+        component="video"
+        src={src}
+        poster={poster}
+        controls
+        autoPlay
+        playsInline
+        onLoadedData={() => setReady(true)}
+        onError={() => setFailed(true)}
+        aria-label={alt || '聊天视频'}
+        sx={{ display: 'block', width: '100%', height: '100%', maxHeight: '88dvh', objectFit: 'contain' }}
+      />
+      {!ready ? (
+        <Box sx={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', pointerEvents: 'none' }}>
+          {failed ? <Typography color="common.white" variant="body2">视频加载失败</Typography> : <CircularProgress size={28} sx={{ color: 'common.white' }} />}
+        </Box>
+      ) : null}
+    </Box>
+  );
+}
+
+function animateFromThumbnail(node: HTMLElement, rect: { x: number; y: number; width: number; height: number }, opening: boolean) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const stage = node.querySelector<HTMLElement>('[data-media-stage]');
+  if (!stage) return;
+  stage.getAnimations().forEach((animation) => animation.cancel());
+  const target = stage.getBoundingClientRect();
+  if (!target.width || !target.height) return;
+  const thumbnail = {
+    transform: `translate3d(${rect.x - target.x}px, ${rect.y - target.y}px, 0) scale(${rect.width / target.width}, ${rect.height / target.height})`,
+    borderRadius: '8px',
+  };
+  const fullscreen = { transform: 'translate3d(0, 0, 0) scale(1)', borderRadius: '0px' };
+  stage.animate(opening ? [thumbnail, fullscreen] : [fullscreen, thumbnail], {
+    duration: opening ? 240 : 190,
+    easing: opening ? 'cubic-bezier(0.2, 0, 0, 1)' : 'cubic-bezier(0.4, 0, 1, 1)',
+    fill: 'forwards',
+  });
+}
+
+export default function ImageLightbox({ open, images, index, onIndexChange, resolveImageSrc, onReachStart, reachStartVersion, maxReachStartAttempts = 20, onClose, onExited, sourceRect }: ImageLightboxProps) {
   const [dragOffset, setDragOffset] = useState(0);
   const [zoomScale, setZoomScale] = useState(1);
   const [resolvedActiveSrc, setResolvedActiveSrc] = useState<{ request: string; src: string } | null>(null);
@@ -53,6 +113,8 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
     if (!hasMultiple) return;
     if (!canUseGalleryNavigation) return;
     if (!canGoPrev) return;
+    setDragOffset(0);
+    setZoomScale(1);
     transformRef.current?.resetTransform(0);
     onIndexChange(safeIndex - 1);
   }, [canGoPrev, canUseGalleryNavigation, hasMultiple, onIndexChange, safeIndex]);
@@ -60,6 +122,8 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
   const goNext = useCallback(() => {
     if (!canUseGalleryNavigation) return;
     if (!canGoNext) return;
+    setDragOffset(0);
+    setZoomScale(1);
     transformRef.current?.resetTransform(0);
     onIndexChange(safeIndex + 1);
   }, [canGoNext, canUseGalleryNavigation, onIndexChange, safeIndex]);
@@ -125,13 +189,10 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
     if (!open) {
       pointerStartRef.current = null;
       activePointerIdsRef.current.clear();
-      setZoomScale(1);
     }
   }, [open]);
 
   useEffect(() => {
-    setDragOffset(0);
-    setZoomScale(1);
     transformRef.current?.resetTransform(0);
   }, [activeSrcRequest]);
 
@@ -145,6 +206,8 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
   }, [activeSrcRequest, open, resolveImageSrc]);
 
   const handlePointerDown = (event: React.PointerEvent<HTMLElement>) => {
+    const target = event.target;
+    if (target instanceof HTMLVideoElement && event.clientY >= target.getBoundingClientRect().bottom - 56) return;
     activePointerIdsRef.current.add(event.pointerId);
     if (!hasMultiple) return;
     if (!canUseGalleryNavigation) return;
@@ -192,10 +255,13 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
       onClose={onClose}
       maxWidth={false}
       fullScreen
-      slots={{ transition: Zoom }}
+      slots={{ transition: sourceRect ? Fade : Zoom }}
       slotProps={{
         transition: {
-          timeout: { enter: 180, exit: 140 },
+          timeout: { enter: sourceRect ? 240 : 180, exit: sourceRect ? 190 : 140 },
+          onEnter: (node: HTMLElement) => { if (sourceRect) animateFromThumbnail(node, sourceRect, true); },
+          onExit: (node: HTMLElement) => { if (sourceRect) animateFromThumbnail(node, sourceRect, false); },
+          onExited,
         },
         backdrop: {
           sx: (theme) => ({
@@ -247,7 +313,7 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
         }}
       >
         <IconButton
-          aria-label="关闭图片"
+          aria-label="关闭媒体浏览器"
           onClick={onClose}
           onPointerDown={(event) => event.stopPropagation()}
           sx={{
@@ -274,7 +340,7 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
           <Box
             component="button"
             type="button"
-            aria-label="上一张图片"
+            aria-label="上一个媒体"
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();
@@ -371,23 +437,47 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
                   justifyContent: 'center',
                 }}
               >
-                <Box
-                  component="img"
-                  src={activeSrc}
-                  alt={activeImage.alt || ''}
-                  draggable={false}
-                  sx={{
-                    maxWidth: '100%',
-                    maxHeight: '88vh',
-                    objectFit: 'contain',
-                    userSelect: 'none',
-                    borderRadius: activeSrc.startsWith('data:image/svg') ? 2 : 1.25,
-                    boxShadow: (theme) => theme.palette.mode === 'light' ? '0 28px 80px rgba(15,23,42,0.18)' : '0 28px 80px rgba(0,0,0,0.34)',
-                    transform: `translateX(${dragOffset}px) scale(${dragOffset ? 0.985 : 1})`,
-                    transition: dragOffset ? 'none' : 'transform 180ms cubic-bezier(0.2, 0, 0, 1), opacity 180ms ease',
-                    willChange: 'transform',
-                  }}
-                />
+                {activeImage.kind === 'video' ? (
+                  <LightboxVideo
+                    key={activeImage.key || activeSrcRequest}
+                    src={activeSrc}
+                    poster={activeImage.poster}
+                    alt={activeImage.alt}
+                    sourceRatio={sourceRect ? sourceRect.width / sourceRect.height : undefined}
+                  />
+                ) : (
+                  <Box
+                    data-media-stage={sourceRect ? true : undefined}
+                    sx={{
+                      width: sourceRect ? `min(calc(88dvh * ${sourceRect.width / sourceRect.height}), calc(100vw - 24px))` : 'auto',
+                      maxWidth: '100%',
+                      maxHeight: '88dvh',
+                      aspectRatio: sourceRect ? `${sourceRect.width / sourceRect.height}` : undefined,
+                      display: 'grid',
+                      placeItems: 'center',
+                    }}
+                  >
+                    <Box
+                      component="img"
+                      src={activeSrc}
+                      alt={activeImage.alt || ''}
+                      draggable={false}
+                      sx={{
+                        width: sourceRect ? '100%' : undefined,
+                        height: sourceRect ? '100%' : undefined,
+                        maxWidth: '100%',
+                        maxHeight: '88vh',
+                        objectFit: 'contain',
+                        userSelect: 'none',
+                        borderRadius: activeSrc.startsWith('data:image/svg') ? 2 : 1.25,
+                        boxShadow: (theme) => theme.palette.mode === 'light' ? '0 28px 80px rgba(15,23,42,0.18)' : '0 28px 80px rgba(0,0,0,0.34)',
+                        transform: `translateX(${dragOffset}px) scale(${dragOffset ? 0.985 : 1})`,
+                        transition: dragOffset ? 'none' : 'transform 180ms cubic-bezier(0.2, 0, 0, 1), opacity 180ms ease',
+                        willChange: 'transform',
+                      }}
+                    />
+                  </Box>
+                )}
               </TransformComponent>
             </TransformWrapper>
           </Box>
@@ -397,7 +487,7 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
           <Box
             component="button"
             type="button"
-            aria-label="下一张图片"
+            aria-label="下一个媒体"
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();
@@ -458,16 +548,18 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
           onPointerDown={(event) => event.stopPropagation()}
         >
           {[
-            { label: '放大', icon: <ZoomInIcon />, action: () => transformRef.current?.zoomIn(0.32, 180) },
-            { label: '缩小', icon: <ZoomOutIcon />, action: () => transformRef.current?.zoomOut(0.32, 180) },
-            { label: '还原', icon: <RestartAltIcon />, action: () => transformRef.current?.resetTransform(180) },
+            { label: '放大', icon: <ZoomInIcon />, action: 'zoomIn' },
+            { label: '缩小', icon: <ZoomOutIcon />, action: 'zoomOut' },
+            { label: '还原', icon: <RestartAltIcon />, action: 'reset' },
           ].map((item) => (
             <IconButton
               key={item.label}
               aria-label={item.label}
               onClick={(event) => {
                 event.stopPropagation();
-                item.action();
+                if (item.action === 'zoomIn') transformRef.current?.zoomIn(0.32, 180);
+                if (item.action === 'zoomOut') transformRef.current?.zoomOut(0.32, 180);
+                if (item.action === 'reset') transformRef.current?.resetTransform(180);
               }}
               sx={{
                 color: (theme) => theme.palette.mode === 'light' ? 'rgba(15,23,42,0.78)' : 'rgba(248,250,252,0.88)',

@@ -50,6 +50,24 @@ export function normalizeImageGenerationSize(value: unknown): ImageGenerationSiz
   return value === '2K' || value === '4K' ? value : '1K';
 }
 
+export interface VideoGenerationDefaults {
+  aspectRatio?: string;
+  resolution?: string;
+  duration?: number;
+}
+
+export function normalizeVideoGenerationDefaults(value?: VideoGenerationDefaults): VideoGenerationDefaults | undefined {
+  const aspectRatio = typeof value?.aspectRatio === 'string' ? value.aspectRatio.trim() : '';
+  const resolution = typeof value?.resolution === 'string' ? value.resolution.trim() : '';
+  const duration = value?.duration;
+  const defaults: VideoGenerationDefaults = {
+    ...(aspectRatio ? { aspectRatio } : {}),
+    ...(resolution ? { resolution } : {}),
+    ...(typeof duration === 'number' && Number.isFinite(duration) && duration > 0 ? { duration } : {}),
+  };
+  return Object.keys(defaults).length ? defaults : undefined;
+}
+
 export interface AIModelProfile extends APIConfig {
   id: string;
   name: string;
@@ -58,6 +76,7 @@ export interface AIModelProfile extends APIConfig {
   isDefault?: boolean;
   imageCapabilities?: Partial<AIModelImageCapabilities>;
   defaultImageSize?: ImageGenerationSize;
+  videoDefaults?: VideoGenerationDefaults;
   inputCapabilities?: Partial<AIModelInputCapabilities>;
   advancedOptions?: Partial<AIModelAdvancedOptions>;
 }
@@ -518,6 +537,7 @@ export function normalizeAIProfiles(aiProfiles?: AIModelProfile[], api?: APIConf
       isDefault,
       imageCapabilities: type === 'image' ? normalizeImageCapabilities(profile.imageCapabilities) : undefined,
       defaultImageSize: type === 'image' ? normalizeImageGenerationSize(profile.defaultImageSize) : undefined,
+      videoDefaults: type === 'video' ? normalizeVideoGenerationDefaults(profile.videoDefaults) : undefined,
       inputCapabilities: type === 'text' ? resolveAIModelInputCapabilities(profile) : undefined,
       advancedOptions: type === 'text' ? normalizeAIModelAdvancedOptions(provider, model, profile.advancedOptions) : undefined,
     };

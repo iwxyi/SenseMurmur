@@ -147,6 +147,7 @@ export type AiMediaTaskStatus = 'submitting' | 'running' | 'submission_unknown' 
 export interface AiMediaTask {
   task_id: string;
   model: string;
+  aspectRatio?: string;
   status: AiMediaTaskStatus;
   result: unknown;
   chargedAmount: number | null;
@@ -207,9 +208,8 @@ export async function waitForAiMediaTask(taskId: string, options: {
     options.onUpdate?.(task);
     if (task.status === 'succeeded' || task.status === 'failed') return task;
     await new Promise<void>((resolve, reject) => {
-      let timer: ReturnType<typeof setTimeout>;
       const abort = () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); reject(options.signal?.reason || new DOMException('Aborted', 'AbortError')); };
-      timer = setTimeout(() => { options.signal?.removeEventListener('abort', abort); resolve(); }, delay);
+      const timer = setTimeout(() => { options.signal?.removeEventListener('abort', abort); resolve(); }, delay);
       options.signal?.addEventListener('abort', abort, { once: true });
     });
     delay = Math.min(maxDelay, Math.round(delay * 1.25));
@@ -1718,7 +1718,12 @@ export const testConnection = async (config: MaybeTypedConfig): Promise<AIConnec
       await synthesizeMicrosoftSpeech(config, { input: 'connection test', voice: config.model });
       return { success: true };
     }
-    if (config.type === 'image' || config.type === 'audio') {
+    if (config.type === 'video') {
+      const models = await listAvailableModels(config, 'video');
+      if (!models.some((model) => model.id === config.model.trim())) {
+        throw new Error('所选视频模型未在当前渠道的视频模型列表中，请重新拉取并选择模型');
+      }
+    } else if (config.type === 'image' || config.type === 'audio') {
       await testMetadataConnection(config);
     } else {
       await testTextLikeConnection(config);

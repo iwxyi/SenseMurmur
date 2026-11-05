@@ -21,6 +21,15 @@ describe('GPT image input capabilities', () => {
 });
 
 describe('normalizeAIProfiles', () => {
+  it('preserves video defaults through serialization and leaves new profiles empty', () => {
+    const profile = { ...DEFAULT_IMAGE_AI_PROFILE, id: 'video', type: 'video' as const };
+    const findVideo = (input: typeof profile) => normalizeAIProfiles([input]).find((item) => item.id === 'video');
+    expect(findVideo(profile)?.videoDefaults).toBeUndefined();
+    const videoDefaults = { aspectRatio: '9:16', resolution: '1080p', duration: 6 };
+    expect(findVideo(JSON.parse(JSON.stringify({ ...profile, videoDefaults })))?.videoDefaults).toEqual(videoDefaults);
+    expect(findVideo({ ...profile, videoDefaults: { aspectRatio: ' ', resolution: '', duration: -1 } } as typeof profile)?.videoDefaults).toBeUndefined();
+  });
+
   it('preserves the ACE model name and selected channel', () => {
     const profiles = normalizeAIProfiles([{
       id: 'ace-text', name: 'ACE', type: 'text', isDefault: true,

@@ -2,7 +2,7 @@ import type { GroupChat } from '../types/chat';
 import type { Message, MessageAttachment, MessageMetadata } from '../types/message';
 import type { AssistantAgentChangePlan, AssistantAgentLocalFileContext, AssistantAgentPatchSet, AssistantArtifactDataResult } from '../types/assistantArtifact';
 import type { AIModelInputCapabilities, APIConfig, AIModelProfile } from '../types/settings';
-import { getUsablePreferredAIProfile, resolveAIModelInputCapabilities } from '../types/settings';
+import { getUsablePreferredAIProfile, normalizeVideoGenerationDefaults, resolveAIModelInputCapabilities } from '../types/settings';
 import { createStreamingLocalMessage, persistLocalFirstMessage } from './chatCommitMessage';
 import { generateResponse } from './aiClient';
 import { GenerationCancelledError } from './generationCancellation';
@@ -447,17 +447,21 @@ async function generateAssistantGeneralAnswer(params: {
   return parseAssistantVisionReply(raw, params.userMessage, promptImageState.projectedImageAttachments);
 }
 
-function createAssistantMediaAttachments(patchSet: AssistantAgentPatchSet, timestamp: number): MessageAttachment[] {
+function createAssistantMediaAttachments(patchSet: AssistantAgentPatchSet, timestamp: number, aiProfiles: AIModelProfile[]): MessageAttachment[] {
+  const defaultVideoProfile = getUsablePreferredAIProfile(aiProfiles, 'video');
+  const videoDefaults = normalizeVideoGenerationDefaults(defaultVideoProfile?.videoDefaults);
   return (patchSet.mediaTasks || []).map((task, index) => ({
-    id: `assistant-image-${timestamp}-${index + 1}`,
-    kind: 'image',
+    id: `assistant-${task.kind}-${timestamp}-${index + 1}`,
+    kind: task.kind,
     status: 'queued',
-    slotId: task.slotId || `image-${index + 1}`,
+    slotId: task.slotId || `${task.kind}-${index + 1}`,
     promptText: task.prompt,
-    altText: task.altText || 'AI 图片',
+    altText: task.altText || (task.kind === 'video' ? 'AI 视频' : 'AI 图片'),
     caption: task.userCaption || task.altText,
-    aspectRatio: task.aspectRatio,
+    aspectRatio: task.aspectRatio || (task.kind === 'video' ? videoDefaults?.aspectRatio : undefined),
     imageSize: task.imageSize,
+    videoResolution: task.videoResolution,
+    videoDuration: task.videoDuration,
     targetArtifactId: task.targetArtifactId,
     targetImageIds: task.targetImageIds,
     referenceImageIds: task.referenceImageIds,
@@ -474,8 +478,8 @@ async function processAssistantMediaAttachments(params: {
   upsertMessage: (message: Message) => void;
 }) {
   if (!params.message.metadata?.attachments?.some((attachment) => attachment.status === 'queued')) return;
-  const { processRichMessageMedia } = await import('./richMessageMedia');
   try {
+    const { processRichMessageMedia } = await import('./richMessageMedia');
     await processRichMessageMedia({
       message: params.message,
       character: null,
@@ -484,6 +488,7 @@ async function processAssistantMediaAttachments(params: {
       upsertMessage: params.upsertMessage,
     });
   } catch (error) {
+    console.error('[assistant-agent:media-processing-failed]', error);
     params.upsertMessage(markAssistantMediaAttachmentsFailed(params.message, error));
   }
 }
@@ -520,6 +525,8 @@ async function persistAssistantArtifactsFromReply(params: {
   const defaultLocalWorkspaceDirectory = localWorkspaceState.getDefaultDirectory();
   const selectedLocalWorkspaceFilePaths = localWorkspaceState.getSelectedFilePaths(params.chatId);
   const resolvedCapabilities = resolveChatAgentCapabilities(params.chat);
+  const videoProfile = getUsablePreferredAIProfile(params.aiProfiles, 'video');
+  const videoGeneration = Boolean(videoProfile);
   const workspaceDirectories = resolvedCapabilities.workspaceRead
     ? localWorkspaceState.directories
     : [];
@@ -557,6 +564,7 @@ async function persistAssistantArtifactsFromReply(params: {
     userMessage: params.userMessage,
     existingArtifacts,
     toolCapabilities: {
+      videoGeneration,
       webSearch: isAssistantAgentSearchEnabled(params.chat),
       networkAccess: resolvedCapabilities.webSearch || resolvedCapabilities.fileDownload,
       localWorkspace: Boolean(workspaceDirectories.length || uploadedFileContexts.length),
@@ -811,6 +819,8 @@ async function persistAssistantArtifactsFromReply(params: {
   let patchesCommitted = 0;
   if (plan.intent === 'create' || plan.intent === 'update') {
     let patchSet = await writeAssistantAgentPatchSet({
+      videoGeneration,
+      videoModel: videoProfile?.model,
       api: params.api,
       chatId: params.chatId,
       messages: params.messages,
@@ -857,7 +867,7 @@ async function persistAssistantArtifactsFromReply(params: {
     content = [buildAgentArtifactReplyContent(patchSet), dataResults.length ? formatAssistantDataResults(dataResults) : '']
       .filter(Boolean).join('\n\n');
     let mediaAuthorizationError = '';
-    const requestedImageCount = patchSet.mediaTasks?.length || 0;
+    const requestedImageCount = patchSet.mediaTasks?.filter((task) => task.kind === 'image').length || 0;
     if (requestedImageCount > 0 && useAuthStore.getState().authMode === 'cloud') {
       try {
         await api.authorizeImageGenerationBatch(requestedImageCount);
@@ -866,7 +876,8 @@ async function persistAssistantArtifactsFromReply(params: {
         mediaAuthorizationError = error instanceof Error && error.message ? error.message : fallback;
       }
     }
-    const attachments = mediaAuthorizationError ? [] : createAssistantMediaAttachments(patchSet, params.timestamp || Date.now());
+    const attachments = createAssistantMediaAttachments(patchSet, params.timestamp || Date.now(), params.aiProfiles)
+      .filter((attachment) => !mediaAuthorizationError || attachment.kind !== 'image');
     if (mediaAuthorizationError) content = [content, mediaAuthorizationError].filter(Boolean).join('\n\n');
     const workspaceOperations = patchSet.workspaceOperations || [];
     const workspaceDirectoryIds = new Set(workspaceOperations.map((operation) => operation.directoryId));
@@ -915,7 +926,7 @@ async function persistAssistantArtifactsFromReply(params: {
         message: assistantMessage,
         aiProfiles: params.aiProfiles,
         upsertMessage: params.upsertMessage,
-      }).catch(() => undefined);
+      }).catch((error) => console.error('[assistant-agent:media-state-update-failed]', error));
     }
     if (patchSet.patches.length || dataArtifacts.length) {
       const changedArtifacts = patchSet.patches.length
@@ -1047,17 +1058,20 @@ export function buildAgentArtifactReplyContent(patchSet: AssistantAgentPatchSet)
   const visiblePatches = patchSet.patches
     .filter((patch) => (patch.content || patch.files?.length) && !hasInlineArtifactContent(intro, patch))
     .slice(0, 3);
-  const hasImageTasks = Boolean(patchSet.mediaTasks?.length);
-  const imageTaskNotice = hasImageTasks ? '对方正在发送图片，稍等一下。' : '';
-  if (!visiblePatches.length && hasImageTasks) return intro || imageTaskNotice;
+  const hasImageTasks = patchSet.mediaTasks?.some((task) => task.kind === 'image');
+  const hasVideoTasks = patchSet.mediaTasks?.some((task) => task.kind === 'video');
+  const mediaTaskNotice = hasVideoTasks
+    ? hasImageTasks ? '图片和视频正在生成中。' : '视频正在生成中。'
+    : hasImageTasks ? '对方正在发送图片，稍等一下。' : '';
+  if (!visiblePatches.length && mediaTaskNotice) return intro || mediaTaskNotice;
   if (!visiblePatches.length) return intro;
-  return `${intro}${visiblePatches.map(formatPatchForBubble).join('')}${imageTaskNotice ? `\n\n${imageTaskNotice}` : ''}`;
+  return `${intro}${visiblePatches.map(formatPatchForBubble).join('')}${mediaTaskNotice ? `\n\n${mediaTaskNotice}` : ''}`;
 }
 
 export function markAssistantMediaAttachmentsFailed(message: Message, error: unknown): Message {
   const attachments = message.metadata?.attachments || [];
   if (!attachments.some((attachment) => attachment.status === 'queued' || attachment.status === 'generating')) return message;
-  const errorText = error instanceof Error ? error.message : String(error || '图片生成失败');
+  const errorText = error instanceof Error ? error.message : String(error || '媒体生成失败');
   const nextAttachments = attachments.map((attachment) => (
     attachment.status === 'queued' || attachment.status === 'generating'
       ? { ...attachment, status: 'failed' as const, error: errorText, updatedAt: Date.now() }

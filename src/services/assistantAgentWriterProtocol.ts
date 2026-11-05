@@ -16,7 +16,7 @@ function resolveContents(manifest: unknown, blocks: Map<string, string>) {
     if (!isRecord(item) || !Object.hasOwn(item, 'contentRef')) return;
     const ref = item.contentRef;
     if (typeof ref !== 'string' || !blocks.has(ref) || Object.hasOwn(item, 'content')) {
-      throw new SyntaxError('Invalid or ambiguous content reference');
+      throw new SyntaxError('Content reference must name an existing block and cannot coexist with inline content');
     }
     item.content = blocks.get(ref);
     delete item.contentRef;
@@ -29,7 +29,7 @@ function resolveContents(manifest: unknown, blocks: Map<string, string>) {
     }
   }
   if (Array.isArray(manifest.workspaceOperations)) manifest.workspaceOperations.forEach(resolve);
-  if (used.size !== blocks.size) throw new SyntaxError('Unreferenced content block');
+  if (used.size !== blocks.size) throw new SyntaxError(`Unreferenced content blocks: ${blocks.size - used.size}`);
   return manifest;
 }
 
@@ -44,9 +44,11 @@ export function parseAssistantAgentWriterOutput(raw: string, parseLegacyJson: (v
   const endNode = nodes[nodes.length - 1];
   // A missing closing fence consumes the end marker as code, so truncated
   // responses cannot be mistaken for complete files.
-  if (manifestNode?.type !== 'code' || manifestNode.lang !== 'json'
-    || endNode?.type !== 'html' || endNode.value.trim() !== END_MARKER) {
-    throw new SyntaxError('Incomplete writer response');
+  if (manifestNode?.type !== 'code' || manifestNode.lang !== 'json') {
+    throw new SyntaxError('Writer response must begin with a json code fence');
+  }
+  if (endNode?.type !== 'html' || endNode.value.trim() !== END_MARKER) {
+    throw new SyntaxError('Writer response is missing its final end marker or has an unclosed content fence');
   }
   const blocks = new Map<string, string>();
   for (const node of nodes.slice(1, -1)) {

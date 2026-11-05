@@ -46,13 +46,14 @@ describe('development code updates', () => {
     vi.stubEnv('DEV', true);
     const reload = vi.fn();
     vi.stubGlobal('window', { setTimeout, clearTimeout, location: { reload } });
+    vi.stubGlobal('document', { visibilityState: 'visible', addEventListener: vi.fn(), removeEventListener: vi.fn() });
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce({ ok: true, json: async () => ({ version: 1 }) })
       .mockResolvedValue({ ok: true, json: async () => ({ version: 2 }) }));
 
     DevUpdatePrompt();
     const cleanup = harness.effects[0]();
-    await vi.advanceTimersByTimeAsync(2500);
+    await vi.advanceTimersByTimeAsync(15_000);
     expect(harness.pending).toBe(true);
 
     harness.effects = [];
@@ -67,6 +68,34 @@ describe('development code updates', () => {
     harness.effects[1]();
     expect(reload).toHaveBeenCalledOnce();
     if (typeof cleanup === 'function') cleanup();
+  });
+
+  it('pauses polling in hidden tabs and checks once on return', async () => {
+    vi.stubEnv('DEV', true);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ version: 1 }) });
+    const listeners = new Map<string, () => void>();
+    const page = { visibilityState: 'visible',
+      addEventListener: vi.fn((name: string, callback: () => void) => listeners.set(name, callback)),
+      removeEventListener: vi.fn((name: string) => listeners.delete(name)),
+    };
+    vi.stubGlobal('window', { setTimeout, clearTimeout });
+    vi.stubGlobal('document', page);
+    vi.stubGlobal('fetch', fetchMock);
+
+    DevUpdatePrompt();
+    const cleanup = harness.effects[0]();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    page.visibilityState = 'hidden';
+    listeners.get('visibilitychange')?.();
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    page.visibilityState = 'visible';
+    listeners.get('visibilitychange')?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    if (typeof cleanup === 'function') cleanup();
+    expect(listeners.has('visibilitychange')).toBe(false);
   });
 
   it('requires developer mode even when automatic updates are saved as enabled', () => {

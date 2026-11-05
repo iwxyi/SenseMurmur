@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Box, Typography, TextField, Button,
@@ -51,7 +51,35 @@ type ModelDropdownOption = {
   inputPriceLabel?: string;
   outputPriceLabel?: string;
   group: string;
+  videoOptions?: VideoModelOptions;
 };
+
+type VideoModelOptions = {
+  aspectRatios: string[];
+  resolutions: string[];
+  duration?: { min?: number; max?: number; required: boolean };
+  requiredResolution: boolean;
+};
+
+function readVideoModelOptions(value: unknown): VideoModelOptions | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const strings = (key: string) => Array.isArray(record[key])
+    ? (record[key] as unknown[]).filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+    : [];
+  const duration = record.duration && typeof record.duration === 'object' && !Array.isArray(record.duration)
+    ? record.duration as Record<string, unknown> : null;
+  return {
+    aspectRatios: strings('aspectRatios'),
+    resolutions: strings('resolutions'),
+    duration: duration ? {
+      min: typeof duration.min === 'number' ? duration.min : undefined,
+      max: typeof duration.max === 'number' ? duration.max : undefined,
+      required: duration.required === true,
+    } : undefined,
+    requiredResolution: record.requiredResolution === true,
+  };
+}
 
 type OfficialProvidersState = {
   key: string;
@@ -647,6 +675,7 @@ function buildRemoteModelOption(model: AvailableModelInfo, type: AIModelType, pr
     inputPriceLabel: inputPriceLabel || undefined,
     outputPriceLabel: outputPriceLabel || undefined,
     group: aceGroup || (usesOfficialProxy ? getOfficialModelGroupLabel(model.id, isZh) : (isZh ? '远程可用模型' : 'Available from provider')),
+    videoOptions: type === 'video' ? readVideoModelOptions(raw.aceVideoOptions) : undefined,
   };
 }
 
@@ -836,6 +865,13 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
   const authMode = useAuthStore((state) => state.authMode);
   const canUseOfficialProviders = authMode === 'cloud' && isLoggedIn;
   const [showKey, setShowKey] = useState(false);
+  const [fabContainer] = useState(() => typeof document === 'undefined' ? null : document.createElement('div'));
+  useLayoutEffect(() => {
+    if (!fabContainer) return;
+    // Activity hides cached pages by cleaning up effects; detach their viewport overlay too.
+    document.body.appendChild(fabContainer);
+    return () => fabContainer.remove();
+  }, [fabContainer]);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [assigningId, setAssigningId] = useState<string | null>(null);
   const [applyingKeyId, setApplyingKeyId] = useState<string | null>(null);
@@ -1069,6 +1105,7 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
     if (profile?.model === value) return;
     updateCurrentAIProfile(profileId, {
       model: value,
+      ...(profile?.type === 'video' ? { videoDefaults: undefined } : {}),
       ...(profile?.type === 'image' ? { imageCapabilities: inferImageCapabilities(profile.provider, value) } : {}),
       ...(profile?.type === 'text' ? {
         inputCapabilities: inferTextInputCapabilities(profile.provider, value),
@@ -1155,8 +1192,8 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
         ? '浏览器直连被目标站跨域策略拦截，配置已保存，实际使用建议走服务端代理。'
         : 'Browser-direct request was blocked by the target CORS policy. Config saved; production use should go through your server proxy.';
       const successMessage = i18n.language.startsWith('zh')
-        ? '连接测试成功，配置已保存'
-        : 'Connection test succeeded. Config saved.';
+        ? (profile.type === 'video' ? '视频模型列表校验通过，配置已保存；实际生成可用性以提交任务结果为准' : '连接测试成功，配置已保存')
+        : (profile.type === 'video' ? 'Video model verified in catalog. Config saved; generation availability is checked on submission.' : 'Connection test succeeded. Config saved.');
       const errorMessage = extractConnectionErrorMessage(result.error);
       const message = result.success
         ? successMessage
@@ -1470,6 +1507,10 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
                       })),
                       ...remoteModels,
                     ];
+                    const selectedVideoOptions = activeType === 'video'
+                      ? modelOptions.find((option) => option.value === profile.model)?.videoOptions
+                      : undefined;
+                    const isAceVideoProvider = activeType === 'video' && ['official-acedata', 'official-ace'].includes(String(profile.provider));
                     return (
                       <>
                   <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
@@ -1520,6 +1561,7 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
                               provider: nextProvider,
                               baseUrl: nextDefaults.baseUrl,
                               model: nextDefaults.model,
+                              videoDefaults: type === 'video' ? undefined : profile.videoDefaults,
                               imageCapabilities: type === 'image' ? inferImageCapabilities(nextProvider, nextDefaults.model) : undefined,
                               inputCapabilities: type === 'text' ? inferTextInputCapabilities(nextProvider, nextDefaults.model) : undefined,
                               advancedOptions: type === 'text' ? normalizeAIModelAdvancedOptions(nextProvider, nextDefaults.model, profile.advancedOptions) : undefined,
@@ -1584,6 +1626,7 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
                           provider,
                           baseUrl: nextDefaults.baseUrl,
                           model: nextDefaults.model,
+                          videoDefaults: activeType === 'video' ? undefined : profile.videoDefaults,
                           imageCapabilities: activeType === 'image' ? inferImageCapabilities(provider, nextDefaults.model) : profile.imageCapabilities,
                           inputCapabilities: activeType === 'text' ? inferTextInputCapabilities(provider, nextDefaults.model) : profile.inputCapabilities,
                           advancedOptions: activeType === 'text' ? normalizeAIModelAdvancedOptions(provider, nextDefaults.model, profile.advancedOptions) : profile.advancedOptions,
@@ -1838,6 +1881,62 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
                     </>
                   ) : null}
 
+                  {activeType === 'video' ? (
+                    <Box sx={{ display: 'grid', gap: 1.5 }}>
+                      <Box sx={{ display: 'grid', gap: 1.5, gridTemplateColumns: { xs: 'minmax(0, 1fr)', sm: 'repeat(3, minmax(0, 1fr))' } }}>
+                        <TextField
+                          select
+                          size="small"
+                          label={i18n.language.startsWith('zh') ? '默认宽高比' : 'Default aspect ratio'}
+                          value={profile.videoDefaults?.aspectRatio ?? ''}
+                          onChange={(event) => updateAIProfile(profile.id, { videoDefaults: { ...profile.videoDefaults, aspectRatio: event.target.value } })}
+                          disabled={isAceVideoProvider && !selectedVideoOptions?.aspectRatios.length}
+                          sx={fieldSx()}
+                        >
+                          <MenuItem value="">{i18n.language.startsWith('zh') ? '使用后台默认' : 'Use backend default'}</MenuItem>
+                          {(selectedVideoOptions?.aspectRatios || (!isAceVideoProvider ? ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] : [])).map((value) => <MenuItem key={value} value={value}>{value}</MenuItem>)}
+                        </TextField>
+                        <TextField
+                          select
+                          size="small"
+                          label={i18n.language.startsWith('zh') ? '默认分辨率（画质）' : 'Default resolution (quality)'}
+                          value={profile.videoDefaults?.resolution ?? ''}
+                          onChange={(event) => updateAIProfile(profile.id, { videoDefaults: { ...profile.videoDefaults, resolution: event.target.value } })}
+                          disabled={isAceVideoProvider && !selectedVideoOptions?.resolutions.length}
+                          sx={fieldSx()}
+                        >
+                          <MenuItem value="">{i18n.language.startsWith('zh') ? '使用后台或模型默认' : 'Use backend or model default'}</MenuItem>
+                          {(selectedVideoOptions?.resolutions || (!isAceVideoProvider ? ['480p', '720p', '1080p', '4k'] : [])).map((value) => <MenuItem key={value} value={value}>{value}</MenuItem>)}
+                        </TextField>
+                        <TextField
+                          size="small"
+                          type="number"
+                          label={i18n.language.startsWith('zh') ? '默认时长（秒）' : 'Default duration (seconds)'}
+                          value={profile.videoDefaults?.duration ?? ''}
+                          onChange={(event) => {
+                            const duration = Number(event.target.value);
+                            updateAIProfile(profile.id, { videoDefaults: { ...profile.videoDefaults, duration: event.target.value && Number.isInteger(duration) && duration > 0 ? duration : undefined } });
+                          }}
+                          disabled={isAceVideoProvider && !selectedVideoOptions?.duration}
+                          slotProps={{ htmlInput: { min: selectedVideoOptions?.duration?.min ?? 1, max: selectedVideoOptions?.duration?.max, step: 1 } }}
+                          helperText={selectedVideoOptions?.duration
+                            ? `${selectedVideoOptions.duration.min ?? 1}–${selectedVideoOptions.duration.max ?? '∞'} ${i18n.language.startsWith('zh') ? '秒' : 'seconds'}`
+                            : undefined}
+                          error={Boolean(profile.videoDefaults?.duration && selectedVideoOptions?.duration && (
+                            profile.videoDefaults.duration < (selectedVideoOptions.duration.min ?? 1)
+                            || (selectedVideoOptions.duration.max !== undefined && profile.videoDefaults.duration > selectedVideoOptions.duration.max)
+                          ))}
+                          sx={fieldSx()}
+                        />
+                      </Box>
+                      {!selectedVideoOptions && isAceVideoProvider ? (
+                        <Typography variant="caption" color="text.secondary">
+                          {i18n.language.startsWith('zh') ? '拉取模型列表后显示该模型支持的参数。' : 'Fetch models to see supported parameters.'}
+                        </Typography>
+                      ) : null}
+                    </Box>
+                  ) : null}
+
                   {activeType === 'image' ? (
                     <Box sx={{
                       display: 'grid',
@@ -1987,7 +2086,7 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
         destructive
       />
 
-      {typeof document !== 'undefined' ? createPortal(
+      {fabContainer ? createPortal(
         <ExpandableFab
           icon={<AddIcon />}
           label={i18n.language.startsWith('zh') ? '添加模型' : 'Add model'}
@@ -1999,7 +2098,7 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
             bottom: { xs: 'calc(env(safe-area-inset-bottom, 0px) + 76px)', sm: 32, md: 36 },
           }}
         />,
-        document.body,
+        fabContainer,
       ) : null}
     </Box>
   );

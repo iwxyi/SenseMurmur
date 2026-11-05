@@ -1,6 +1,6 @@
 import type { AICharacter, CharacterVisualReferenceImage } from '../types/character';
 import type { APIConfig, AIModelProfile } from '../types/settings';
-import { normalizeImageCapabilities, normalizeImageGenerationSize } from '../types/settings';
+import { normalizeImageCapabilities, normalizeImageGenerationSize, normalizeVideoGenerationDefaults } from '../types/settings';
 import { assertMultimediaGenerationPermission, reportMultimediaPermissionError } from './multimediaPermission';
 import {
   generateImage,
@@ -199,17 +199,25 @@ export async function generateImageWithAdapter(params: ImageGenerationAdapterOpt
   return generateImage(profileToApi(params.profile), resolveImageGenerationRequest(params));
 }
 
+export function resolveVideoGenerationParameters(params: VideoGenerationAdapterOptions): Record<string, unknown> {
+  const defaults = normalizeVideoGenerationDefaults(params.profile.videoDefaults);
+  const aspectRatio = params.aspectRatio?.trim() || defaults?.aspectRatio;
+  const resolution = params.resolution?.trim() || defaults?.resolution;
+  const duration = params.duration ?? defaults?.duration;
+  return {
+    ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+    ...(duration !== undefined ? { duration } : {}),
+    ...(resolution ? { resolution } : {}),
+    ...(params.referenceImages?.length ? { image_urls: params.referenceImages.map((item) => item.url) } : {}),
+  };
+}
+
 export async function generateVideoWithAdapter(params: VideoGenerationAdapterOptions) {
   await assertMultimediaGenerationPermission();
   return submitAiMediaTask({
     profile: profileToApi(params.profile),
     prompt: params.prompt,
-    parameters: {
-      ...(params.aspectRatio ? { aspect_ratio: params.aspectRatio } : {}),
-      ...(params.duration ? { duration: params.duration } : {}),
-      ...(params.resolution ? { resolution: params.resolution } : {}),
-      ...(params.referenceImages?.length ? { image_urls: params.referenceImages.map((item) => item.url) } : {}),
-    },
+    parameters: resolveVideoGenerationParameters(params),
     signal: params.signal,
     aiUsage: params.aiUsage || { type: 'video_generation', label: '聊天视频生成' },
   }).catch((error: unknown) => {

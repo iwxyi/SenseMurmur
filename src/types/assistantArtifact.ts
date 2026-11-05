@@ -262,13 +262,15 @@ export interface AssistantAgentPatch {
 }
 
 export interface AssistantAgentMediaTask {
-  kind: 'image';
+  kind: 'image' | 'video';
   slotId?: string;
   prompt: string;
   altText: string;
   userCaption?: string;
   aspectRatio?: string;
   imageSize?: string;
+  videoResolution?: string;
+  videoDuration?: number;
   targetArtifactId?: string;
   targetImageIds?: string[];
   referenceImageIds?: string[];

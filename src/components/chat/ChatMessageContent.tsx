@@ -1,5 +1,6 @@
 import { useEffect, useState, type MouseEvent } from 'react';
-import { Box, Button, CircularProgress, LinearProgress, Typography, keyframes } from '@mui/material';
+import { Box, Button, CircularProgress, Dialog, LinearProgress, Typography, keyframes } from '@mui/material';
+import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import type { Message, MessageAttachment, NarrativeBlock } from '../../types/message';
 import type { AICharacter } from '../../types/character';
 import { getAttachmentStatusDetail, getAttachmentStatusLabel } from '../../services/messageAttachmentDisplay';
@@ -87,18 +88,60 @@ function MessageAudioAttachment({ attachment, showTranscript }: { attachment: Me
   );
 }
 
-function MessageVideoAttachment({ attachment }: { attachment: MessageAttachment }) {
+function MessageVideoAttachment({ message, attachment, onOpenMedia }: { message: Message; attachment: MessageAttachment; onOpenMedia?: (message: Message, attachment: MessageAttachment, poster?: string, sourceRect?: DOMRect) => void }) {
   const videoSource = attachment.url?.startsWith('/') ? backendUrl(attachment.url) : attachment.url;
+  const [open, setOpen] = useState(false);
+  const [videoSize, setVideoSize] = useState<{ width: number; height: number } | null>(getAttachmentKnownSize(attachment));
+  const ratio = videoSize ? videoSize.width / videoSize.height : parseAttachmentRatio(attachment);
+  const maxHeight = typeof window === 'undefined' ? 520 : Math.min(window.innerHeight * 0.56, 520);
+  const width = getAttachmentDisplayWidth({ displaySize: videoSize, ratioValue: ratio, maxWidth: getAttachmentMaxWidth(ratio, 'video'), maxHeight });
   if (!videoSource) return null;
   return (
-    <Box
-      component="video"
-      controls
-      preload="metadata"
-      src={videoSource}
-      aria-label={attachment.altText || attachment.caption || '生成的视频'}
-      sx={{ display: 'block', width: '100%', maxWidth: 520, maxHeight: 520, borderRadius: 1.5, bgcolor: 'common.black' }}
-    />
+    <>
+      <Box
+        component="button"
+        type="button"
+        onClick={(event) => {
+          const preview = event.currentTarget.querySelector('video');
+          let poster: string | undefined;
+          if (preview && preview.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && preview.videoWidth && preview.videoHeight) {
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.min(preview.videoWidth, 720);
+            canvas.height = Math.round(canvas.width * preview.videoHeight / preview.videoWidth);
+            try {
+              const context = canvas.getContext('2d');
+              if (context) {
+                context.drawImage(preview, 0, 0, canvas.width, canvas.height);
+                poster = canvas.toDataURL('image/jpeg', 0.78);
+              }
+            } catch { /* Cross-origin media may not allow frame capture. */ }
+          }
+          if (onOpenMedia) onOpenMedia(message, attachment, poster, event.currentTarget.getBoundingClientRect());
+          else setOpen(true);
+        }}
+        aria-label={`播放${attachment.altText || attachment.caption || '生成的视频'}`}
+        sx={{ position: 'relative', display: 'block', width, maxWidth: '100%', aspectRatio: `${ratio} / 1`, p: 0, border: 0, borderRadius: 1.5, overflow: 'hidden', bgcolor: 'common.black', cursor: 'pointer', justifySelf: 'start' }}
+      >
+        <Box
+          component="video"
+          src={videoSource}
+          preload="metadata"
+          muted
+          playsInline
+          onLoadedMetadata={(event: React.SyntheticEvent<HTMLVideoElement>) => {
+            const video = event.currentTarget;
+            if (video.videoWidth > 0 && video.videoHeight > 0) setVideoSize({ width: video.videoWidth, height: video.videoHeight });
+          }}
+          sx={{ width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'none' }}
+        />
+        <Box sx={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', bgcolor: 'rgba(0, 0, 0, 0.16)' }}>
+          <PlayArrowIcon sx={{ fontSize: 44, color: 'common.white', filter: 'drop-shadow(0 1px 4px rgba(0,0,0,.7))' }} />
+        </Box>
+      </Box>
+      <Dialog open={open} onClose={() => setOpen(false)} maxWidth="lg" fullWidth slotProps={{ paper: { sx: { bgcolor: 'common.black', maxHeight: '95dvh' } } }}>
+        {open ? <Box component="video" src={videoSource} controls autoPlay playsInline aria-label={attachment.altText || attachment.caption || '生成的视频'} sx={{ display: 'block', width: '100%', maxHeight: '90dvh', objectFit: 'contain' }} /> : null}
+      </Dialog>
+    </>
   );
 }
 
@@ -112,7 +155,7 @@ function MessageImageAttachment({
 }: {
   message: Message;
   attachment: MessageAttachment;
-  onOpenImage?: (message: Message, attachment: MessageAttachment) => void;
+  onOpenImage?: (message: Message, attachment: MessageAttachment, poster?: string, sourceRect?: DOMRect) => void;
   onOpenPrompt?: (attachment: MessageAttachment, event: MouseEvent<HTMLElement>) => void;
   onRetryMedia?: (message: Message, attachmentId: string) => void | Promise<void>;
   caption?: string;
@@ -197,7 +240,7 @@ function MessageImageAttachment({
             onError={() => setLoadedImage((current) => current.source === imageSource
               ? { ...current, status: 'failed' }
               : { source: imageSource, size: knownSize, status: 'failed' })}
-            onClick={() => onOpenImage?.(message, attachment)}
+            onClick={(event) => onOpenImage?.(message, attachment, undefined, event.currentTarget.getBoundingClientRect())}
             onContextMenu={(event) => {
               if (!attachment.promptText || !onOpenPrompt) return;
               event.preventDefault();
@@ -345,7 +388,7 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
   characters?: AICharacter[];
   onCharacterMentionClick?: (character: import('../../services/markdownCharacterMentions').MentionCharacter, anchorEl: HTMLElement) => void;
   onRetryMedia?: (message: Message, attachmentId: string) => void | Promise<void>;
-  onOpenImage?: (message: Message, attachment: MessageAttachment) => void;
+  onOpenImage?: (message: Message, attachment: MessageAttachment, poster?: string, sourceRect?: DOMRect) => void;
   onOpenPrompt?: (attachment: MessageAttachment, event: MouseEvent<HTMLElement>) => void;
   onOpenDiagram?: (message: Message, diagram: { source: string; svg: string; dataUrl: string }) => void;
   compactMediaLayout?: boolean;
@@ -446,16 +489,18 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
     }
     if (attachment.kind === 'video') {
       if (attachment.status === 'ready' && attachment.url) {
-        return <MessageVideoAttachment key={attachment.id} attachment={attachment} />;
+        return <MessageVideoAttachment key={attachment.id} message={message} attachment={attachment} onOpenMedia={onOpenImage} />;
       }
+      const processing = isAttachmentProcessing(attachment.status);
+      const frameStyle = getMediaFrameStyle(attachment);
       return (
-        <Box key={attachment.id} sx={{ ...getMediaFrameStyle(attachment), display: 'grid', aspectRatio: attachment.status === 'failed' ? undefined : getMediaFrameStyle(attachment).aspectRatio }}>
-          <Box sx={{ display: 'grid', placeItems: 'center', minHeight: 112, p: 1.5, textAlign: 'center' }}>
-            <Box sx={{ display: 'grid', gap: 0.75, maxWidth: '85%' }}>
+        <Box key={attachment.id} sx={{ ...frameStyle, display: 'grid', aspectRatio: processing ? frameStyle.aspectRatio : undefined }}>
+          <Box sx={{ display: 'grid', placeItems: 'center', minHeight: processing ? 96 : 112, p: 1.5, textAlign: 'center' }}>
+            <Box sx={{ display: 'grid', gap: 0.75, minWidth: 0, width: '100%', maxWidth: '85%' }}>
               <Typography variant="caption" color={attachment.status === 'failed' ? 'error' : 'text.secondary'}>
                 {attachment.status === 'failed' ? getAttachmentStatusDetail(attachment) : getAttachmentStatusLabel(attachment)}
               </Typography>
-              {isAttachmentProcessing(attachment.status) ? <LinearProgress /> : null}
+              {processing ? <LinearProgress /> : null}
               {attachment.status === 'failed' && onRetryMedia ? (
                 <Button size="small" variant="outlined" color="error" onClick={() => void onRetryMedia?.(message, attachment.id)}>
                   重试

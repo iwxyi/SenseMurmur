@@ -4,6 +4,7 @@ import type { Message } from '../types/message';
 import type { GroupChat } from '../types/chat';
 import { useChatStore } from '../stores/useChatStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
+import { useAuthStore } from '../stores/useAuthStore';
 import { buildAssistantChatDraft } from './chatDraftBuilder';
 import { generateResponse } from './aiClient';
 import { api } from './api';
@@ -17,6 +18,8 @@ const agentOrchestratorMock = vi.hoisted(() => ({
 const networkTransferMock = vi.hoisted(() => ({
   executeNetworkTransferTask: vi.fn(),
 }));
+const processRichMessageMediaMock = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock('./richMessageMedia', () => ({ processRichMessageMedia: processRichMessageMediaMock }));
 
 vi.mock('./aiClient', () => ({
   generateResponse: vi.fn(),
@@ -111,6 +114,69 @@ describe('assistantChatFlow failed regeneration', () => {
 });
 
 describe('assistant reply display', () => {
+  it('persists video placeholders and dispatches media processing without image authorization', async () => {
+    const chat = assistantChat();
+    chat.name = '视频测试';
+    chat.modeState.assistantCapabilities = { ...chat.modeState.assistantCapabilities, agent: true, artifacts: true };
+    const userMessage: Message = { id: 'user-video', chatId: chat.id, type: 'user', senderId: 'user', senderName: '用户', content: '先写脚本再生成视频', emotion: 0, timestamp: 1001, isDeleted: false };
+    agentOrchestratorMock.planAssistantAgentChange.mockResolvedValue({
+      intent: 'create', scope: { targetMode: 'unknown', artifactIds: [] },
+      operations: [{ kind: 'create', instruction: userMessage.content }], requiresConfirmation: false, confidence: 1,
+    });
+    agentOrchestratorMock.writeAssistantAgentPatchSet.mockResolvedValue({
+      assistantMessage: '脚本已准备。![短片](attachment:video-1)',
+      patches: [{ action: 'create', kind: 'document', title: '脚本', content: '追逐场景' }],
+      mediaTasks: [{ kind: 'video', slotId: 'video-1', prompt: '追逐场景视频提示词', altText: '短片', aspectRatio: '16:9', videoDuration: 8, videoResolution: '720p' }],
+    });
+    const originalAuthMode = useAuthStore.getState().authMode;
+    const authorize = vi.spyOn(api, 'authorizeImageGenerationBatch').mockResolvedValue({ authorized: true, limit: null, requested: 1, tierCode: 'test' });
+    const upsertMessage = vi.fn();
+    processRichMessageMediaMock.mockClear();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ mode: 'assistant_agent' }));
+    useAuthStore.setState({ authMode: 'cloud' });
+    try {
+      await runAssistantChatReplyFlow({
+        api: { provider: 'openai', apiKey: 'k', baseUrl: '', model: 'text' },
+        aiProfiles: [{ id: 'video', name: '视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'video-model', isDefault: true }],
+        chat, chatId: chat.id, currentMessages: [userMessage], upsertMessage, updateChat: vi.fn(async () => undefined),
+      });
+      await vi.waitFor(() => expect(processRichMessageMediaMock).toHaveBeenCalled());
+      expect(agentOrchestratorMock.planAssistantAgentChange.mock.calls[0][0].toolCapabilities.videoGeneration).toBe(true);
+      expect(agentOrchestratorMock.writeAssistantAgentPatchSet.mock.calls[0][0].videoGeneration).toBe(true);
+      expect(authorize).not.toHaveBeenCalled();
+      const queued = upsertMessage.mock.calls.map(([message]) => message as Message).find((message) => message.metadata?.attachments?.[0]?.kind === 'video');
+      expect(queued?.metadata?.attachments?.[0]).toMatchObject({ kind: 'video', status: 'queued', slotId: 'video-1', promptText: '追逐场景视频提示词', videoDuration: 8, videoResolution: '720p', aspectRatio: '16:9' });
+      expect(queued?.content).toContain('视频正在生成中');
+      expect(queued?.content).not.toContain('正在发送图片');
+    } finally {
+      useAuthStore.setState({ authMode: originalAuthMode });
+      authorize.mockRestore();
+    }
+  });
+
+  it('uses the selected video model default ratio for an Agent waiting card', async () => {
+    const chat = assistantChat();
+    chat.modeState.assistantCapabilities = { ...chat.modeState.assistantCapabilities, agent: true, artifacts: true };
+    const userMessage: Message = { id: 'user-video-ratio', chatId: chat.id, type: 'user', senderId: 'user', senderName: '用户', content: '生成一段森林视频', emotion: 0, timestamp: 1001, isDeleted: false };
+    agentOrchestratorMock.planAssistantAgentChange.mockResolvedValue({
+      intent: 'create', scope: { targetMode: 'unknown', artifactIds: [] },
+      operations: [{ kind: 'create', instruction: userMessage.content }], requiresConfirmation: false, confidence: 1,
+    });
+    agentOrchestratorMock.writeAssistantAgentPatchSet.mockResolvedValue({
+      assistantMessage: '视频正在生成。![视频](attachment:video-1)', patches: [],
+      mediaTasks: [{ kind: 'video', slotId: 'video-1', prompt: '森林追逐', altText: '视频' }],
+    });
+    const upsertMessage = vi.fn();
+    generateResponseMock.mockResolvedValue(JSON.stringify({ mode: 'assistant_agent' }));
+    await runAssistantChatReplyFlow({
+      api: { provider: 'openai', apiKey: 'k', baseUrl: '', model: 'text' },
+      aiProfiles: [{ id: 'video', name: '视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true, videoDefaults: { aspectRatio: '9:16' } }],
+      chat, chatId: chat.id, currentMessages: [userMessage], upsertMessage, updateChat: vi.fn(async () => undefined),
+    });
+    const queued = upsertMessage.mock.calls.map(([message]) => message as Message).find((message) => message.metadata?.attachments?.[0]?.kind === 'video');
+    expect(queued?.metadata?.attachments?.[0]?.aspectRatio).toBe('9:16');
+  });
+
   it('reveals a network chunk gradually and persists the same branch node', async () => {
     const wasEnabled = useSettingsStore.getState().enableStreamingDisplayAnimation;
     useSettingsStore.setState({ enableStreamingDisplayAnimation: true });

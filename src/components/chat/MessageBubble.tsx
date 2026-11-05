@@ -47,7 +47,7 @@ interface MessageBubbleProps {
   onAnalyze?: (message: Message) => void;
   onExpressionFeedback?: (message: Message, kind: ExpressionFeedbackKind) => void;
   onRetryMedia?: (message: Message, attachmentId: string) => void | Promise<void>;
-  onOpenImage?: (message: Message, attachment: MessageAttachment) => void;
+  onOpenImage?: (message: Message, attachment: MessageAttachment, poster?: string, sourceRect?: DOMRect) => void;
   onAddImagesToReference?: (message: Message, attachments: MessageAttachment[]) => void;
   onOpenDiagram?: (message: Message, diagram: { source: string; svg: string; dataUrl: string }) => void;
   onCharacterAvatarClick?: (character: import('../../services/markdownCharacterMentions').MentionCharacter, anchorEl: HTMLElement) => void;

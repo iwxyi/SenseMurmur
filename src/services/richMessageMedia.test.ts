@@ -3,12 +3,16 @@ import type { AICharacter } from '../types/character';
 import type { Message } from '../types/message';
 import type { AIModelProfile } from '../types/settings';
 import { getRichMediaQueueSnapshot, processRichMessageMedia, resetRichMediaQueueForTests, retryRichMessageMedia, scrubLocalMediaUrlsForCloud } from './richMessageMedia';
-import { generateImageWithAdapter } from './aiGenerationAdapter';
+import { generateImageWithAdapter, generateVideoWithAdapter } from './aiGenerationAdapter';
+import { waitForAiMediaTask } from './aiClient';
 import { api } from './api';
 
 vi.mock('./api', () => ({
   api: {
     createMediaAsset: vi.fn(),
+    createMediaAssetFromAiTask: vi.fn(),
+    downloadAiMediaTaskContent: vi.fn(),
+    getAiMediaTask: vi.fn(),
     updateMessageMetadata: vi.fn(),
     searchDoutu: vi.fn(),
   },
@@ -16,7 +20,12 @@ vi.mock('./api', () => ({
 
 vi.mock('./aiGenerationAdapter', () => ({
   generateImageWithAdapter: vi.fn(),
+  generateVideoWithAdapter: vi.fn(),
   synthesizeSpeechWithAdapter: vi.fn(),
+}));
+vi.mock('./aiClient', () => ({
+  waitForAiMediaTask: vi.fn(),
+  extractAiMediaResultUrl: vi.fn(() => 'data:video/mp4;base64,AAAA'),
 }));
 
 const imageProfile: AIModelProfile = {
@@ -133,6 +142,145 @@ describe('processRichMessageMedia', () => {
     chatStoreState.chats = [];
     artifactStoreState.createImageArtifactFromAttachment.mockReset();
     vi.mocked(api.updateMessageMetadata).mockResolvedValue({});
+  });
+
+  it.each([false, true])('polls video tasks and stores the playable result (resume: %s)', async (resume) => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const pending = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(waitForAiMediaTask).mockReturnValue(pending.promise);
+    vi.mocked(generateVideoWithAdapter).mockResolvedValue({ task_id: 'video-task' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>);
+    vi.mocked(api.createMediaAssetFromAiTask).mockResolvedValue({ id: 'video-asset', url: 'https://example.test/video.mp4', mimeType: 'video/mp4', sizeBytes: 123 } as Awaited<ReturnType<typeof api.createMediaAssetFromAiTask>>);
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: resume ? 'generating' : 'queued',
+      altText: '追逐短片',
+      mediaTaskId: resume ? 'video-task' : undefined,
+      promptText: resume ? undefined : '追逐场景', videoDuration: 8, videoResolution: '720p', aspectRatio: '16:9',
+      createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    await processRichMessageMedia({ message,
+      aiProfiles: resume ? [] : [{ ...imageProfile, type: 'video', model: 'video-model' }],
+      upsertMessage: (next) => upserts.push(next),
+    });
+    await waitForExpectation(() => expect(waitForAiMediaTask).toHaveBeenCalledWith('video-task'));
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'generating', mediaTaskId: 'video-task' });
+    if (resume) expect(generateVideoWithAdapter).not.toHaveBeenCalled();
+    else expect(generateVideoWithAdapter).toHaveBeenCalledWith(expect.objectContaining({ prompt: '追逐场景', duration: 8, resolution: '720p', aspectRatio: '16:9' }));
+    pending.resolve({ task_id: 'video-task', model: 'video-model', status: 'succeeded', result: {}, chargedAmount: 1, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'ready', assetId: 'video-asset', url: 'https://example.test/video.mp4', mediaTaskId: undefined }));
+  });
+
+  it('uses the submitted video ratio for the waiting card', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const pending = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(waitForAiMediaTask).mockReturnValue(pending.promise);
+    vi.mocked(generateVideoWithAdapter).mockResolvedValue({ task_id: 'video-ratio', aspectRatio: '9:16' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>);
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'queued', altText: '视频', promptText: '森林追逐', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    await processRichMessageMedia({ message, aiProfiles: [{ ...imageProfile, type: 'video', model: 'MiniMax-H3' }], upsertMessage: (next) => upserts.push(next) });
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'generating', aspectRatio: '9:16' });
+    pending.resolve({ task_id: 'video-ratio', model: 'MiniMax-H3', status: 'failed', result: {}, chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('failed'));
+  });
+
+  it('keeps one video poll and avoids repeated metadata writes while the chat reprocesses a generating task', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const pending = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(waitForAiMediaTask).mockReturnValue(pending.promise);
+    vi.mocked(generateVideoWithAdapter).mockResolvedValue({ task_id: 'video-task' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>);
+    vi.mocked(api.createMediaAssetFromAiTask).mockResolvedValue({ id: 'video-asset', url: 'https://example.test/video.mp4', mimeType: 'video/mp4', sizeBytes: 123 } as Awaited<ReturnType<typeof api.createMediaAssetFromAiTask>>);
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'queued', altText: '追逐短片', promptText: '追逐场景', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    const params = { aiProfiles: [{ ...imageProfile, type: 'video' as const, model: 'video-model' }], upsertMessage: (next: Message) => upserts.push(next) };
+    await processRichMessageMedia({ ...params, message });
+    await waitForExpectation(() => expect(waitForAiMediaTask).toHaveBeenCalledTimes(1));
+    const metadataWrites = vi.mocked(api.updateMessageMetadata).mock.calls.length;
+    const generating = upserts.at(-1)!;
+    for (let index = 0; index < 10; index += 1) {
+      await processRichMessageMedia({ ...params, message: generating });
+    }
+    expect(waitForAiMediaTask).toHaveBeenCalledTimes(1);
+    expect(generateVideoWithAdapter).toHaveBeenCalledTimes(1);
+    expect(api.updateMessageMetadata).toHaveBeenCalledTimes(metadataWrites);
+    pending.resolve({ task_id: 'video-task', model: 'video-model', status: 'succeeded', result: {}, chargedAmount: 1, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('ready'));
+  });
+
+  it('persists the server video failure reason on the attachment', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    vi.mocked(waitForAiMediaTask).mockResolvedValue({
+      task_id: 'video-task', model: 'video-model', status: 'failed',
+      result: { error: 'ACE 任务生成失败：上游返回 HTTP 400，错误码 INVALID_DURATION' },
+      chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 2,
+    });
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'generating', altText: '追逐短片',
+      mediaTaskId: 'video-task', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    await processRichMessageMedia({ message, aiProfiles: [], upsertMessage: (next) => upserts.push(next) });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({
+      status: 'failed', error: 'ACE 任务生成失败：上游返回 HTTP 400，错误码 INVALID_DURATION',
+    }));
+    await waitForExpectation(() => expect(api.updateMessageMetadata).toHaveBeenCalledWith('server-video', expect.objectContaining({
+      attachments: [expect.objectContaining({ status: 'failed', error: 'ACE 任务生成失败：上游返回 HTTP 400，错误码 INVALID_DURATION' })],
+    })));
+  });
+
+  it('shows the ACE upstream balance reason on a failed video placeholder', async () => {
+    vi.mocked(waitForAiMediaTask).mockResolvedValue({
+      task_id: 'video-task', model: 'MiniMax-H3', status: 'failed',
+      result: { error: 'ACE 任务生成失败：ACE 请求失败 (403)：ACE 上游可用余额不足，错误码 used_up' },
+      chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 2,
+    });
+    const message = buildQueuedImageMessage({ metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'generating', mediaTaskId: 'video-task', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    await processRichMessageMedia({ message, aiProfiles: [], upsertMessage: (next) => upserts.push(next) });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({
+      status: 'failed', error: 'ACE 任务生成失败：ACE 请求失败 (403)：ACE 上游可用余额不足，错误码 used_up',
+    }));
+  });
+
+  it('shows the ACE submission rejection on a failed video placeholder', async () => {
+    vi.mocked(generateVideoWithAdapter).mockRejectedValue(new Error('ACE 请求失败 (403)：ACE 上游可用余额不足，错误码 used_up'));
+    const message = buildQueuedImageMessage({ metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'queued', promptText: '追逐场景', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    await processRichMessageMedia({ message, aiProfiles: [{ ...imageProfile, type: 'video', model: 'MiniMax-H3' }], upsertMessage: (next) => upserts.push(next) });
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({
+      status: 'failed', error: 'ACE 请求失败 (403)：ACE 上游可用余额不足，错误码 used_up',
+    });
+  });
+
+  it('writes a concrete image failure after the generating metadata update completes', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const firstWrite = deferred<Record<string, unknown>>();
+    vi.mocked(api.updateMessageMetadata).mockReturnValueOnce(firstWrite.promise);
+    vi.mocked(generateImageWithAdapter).mockRejectedValue(new Error('图片供应商请求限流，请稍后重试。'));
+    const upserts: Message[] = [];
+    await processRichMessageMedia({
+      message: buildQueuedImageMessage({ serverId: 'server-image' }),
+      aiProfiles: [imageProfile], upsertMessage: (next) => upserts.push(next),
+    });
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'failed', error: '图片供应商请求限流，请稍后重试。' });
+    expect(api.updateMessageMetadata).toHaveBeenCalledTimes(1);
+    firstWrite.resolve({});
+    await waitForExpectation(() => expect(api.updateMessageMetadata).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.updateMessageMetadata).mock.calls[1]?.[1]).toMatchObject({
+      attachments: [expect.objectContaining({ status: 'failed', error: '图片供应商请求限流，请稍后重试。' })],
+    });
   });
 
   it('searches stickers without a model profile and preserves the keyword on retry', async () => {
@@ -520,6 +668,64 @@ describe('processRichMessageMedia', () => {
       });
       expect(upserts.at(-1)?.metadata?.generation?.status).toBe('ready');
     });
+  });
+
+  it('submits a new video task on retry instead of polling the failed task again', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const submitted = deferred<Awaited<ReturnType<typeof generateVideoWithAdapter>>>();
+    const polled = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(generateVideoWithAdapter).mockReturnValue(submitted.promise);
+    vi.mocked(waitForAiMediaTask).mockReturnValue(polled.promise);
+    vi.mocked(api.getAiMediaTask).mockResolvedValue({ task_id: 'old-failed-task', model: 'video-model', status: 'failed', result: {}, chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+    const failedMessage = buildQueuedImageMessage({ serverId: 'server-video', metadata: {
+      attachments: [{ id: 'video-1', kind: 'video', status: 'failed', altText: '追逐短片',
+        promptText: '恐龙追逐机器猫', mediaTaskId: 'old-failed-task', error: '上次任务失败', createdAt: 123, updatedAt: 124 }],
+      generation: { status: 'failed', updatedAt: 124 },
+    } });
+    const upserts: Message[] = [];
+    await retryRichMessageMedia({ message: failedMessage, attachmentId: 'video-1',
+      aiProfiles: [{ ...imageProfile, type: 'video', model: 'video-model' }],
+      upsertMessage: (next) => upserts.push(next),
+    });
+    expect(upserts[0]?.metadata?.attachments?.[0]).toMatchObject({ status: 'queued', mediaTaskId: undefined, error: undefined });
+    await waitForExpectation(() => expect(generateVideoWithAdapter).toHaveBeenCalledTimes(1));
+    await waitForExpectation(() => expect(api.updateMessageMetadata).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.updateMessageMetadata).mock.calls.map(([, metadata]) => (metadata as Message['metadata'])?.attachments?.[0]?.status)).toEqual(['queued', 'generating']);
+    expect(waitForAiMediaTask).not.toHaveBeenCalled();
+    submitted.resolve({ task_id: 'new-task' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>);
+    await waitForExpectation(() => expect(waitForAiMediaTask).toHaveBeenCalledWith('new-task'));
+    expect(waitForAiMediaTask).not.toHaveBeenCalledWith('old-failed-task');
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'generating', mediaTaskId: 'new-task' });
+    await waitForExpectation(() => expect(api.updateMessageMetadata).toHaveBeenCalledTimes(3));
+    expect((vi.mocked(api.updateMessageMetadata).mock.calls[2]?.[1] as Message['metadata'])?.attachments?.[0]).toMatchObject({ status: 'generating', mediaTaskId: 'new-task' });
+    polled.resolve({ task_id: 'new-task', model: 'video-model', status: 'failed', result: { error: 'ACE 任务生成失败：错误码 bad_request，视频输入参数无效' }, chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('failed'));
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]?.error).toContain('视频输入参数无效');
+  });
+
+  it('reuses a successful video task when saving its file fails', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const completedTask = { task_id: 'completed-video', model: 'MiniMax-H3', status: 'succeeded' as const, result: { data: { url: 'https://example.test/video.mp4' } }, chargedAmount: 1, reservedAmount: 1, createdAt: 1, updatedAt: 2 };
+    vi.mocked(waitForAiMediaTask).mockResolvedValue(completedTask);
+    vi.mocked(api.getAiMediaTask).mockResolvedValue(completedTask);
+    vi.mocked(api.createMediaAssetFromAiTask)
+      .mockRejectedValueOnce(new Error('网络请求失败'))
+      .mockResolvedValueOnce({ id: 'saved-video', url: '/media/saved-video', mimeType: 'video/mp4', sizeBytes: 18_000_000 });
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'generating', mediaTaskId: 'completed-video', promptText: '追逐场景', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    const upsertMessage = (next: Message) => upserts.push(next);
+    await processRichMessageMedia({ message, aiProfiles: [], upsertMessage });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'failed', mediaTaskId: 'completed-video' }));
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]?.error).toContain('视频已生成，但文件获取或保存失败');
+    await retryRichMessageMedia({ message: upserts.at(-1)!, attachmentId: 'video-1', aiProfiles: [], upsertMessage });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'ready', assetId: 'saved-video' }));
+    expect(generateVideoWithAdapter).not.toHaveBeenCalled();
+    expect(api.createMediaAssetFromAiTask).toHaveBeenCalledTimes(2);
+    expect(api.createMediaAssetFromAiTask).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'completed-video' }));
   });
 
   it('allows retrying a stuck generating media attachment', async () => {

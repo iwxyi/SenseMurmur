@@ -139,9 +139,10 @@ function buildChatImageTimeline(messages: Message[]) {
     .filter((message) => !message.isDeleted)
     .sort((left, right) => left.timestamp - right.timestamp)
     .flatMap((message) => (message.metadata?.attachments || [])
-      .filter((attachment) => attachment.kind === 'image' && attachment.status === 'ready' && Boolean(attachment.url))
+      .filter((attachment) => (attachment.kind === 'image' || attachment.kind === 'video') && attachment.status === 'ready' && Boolean(attachment.url))
       .map((attachment) => ({
         key: `${message.id}-${attachment.id}`,
+        kind: attachment.kind as 'image' | 'video',
         messageId: message.id,
         attachmentId: attachment.id,
         src: attachment.url as string,
@@ -660,6 +661,9 @@ export default function MessageList({
   const [initialViewportReady, setInitialViewportReady] = useState(() => !autoStickToBottom && !hasInitialRestorePosition);
   const [prependStabilizing, setPrependStabilizing] = useState(false);
   const [diagramViewerItem, setDiagramViewerItem] = useState<LightboxImageItem | null>(null);
+  const [videoPoster, setVideoPoster] = useState<{ key: string; src: string } | null>(null);
+  const [videoOrigin, setVideoOrigin] = useState<{ key: string; rect: { x: number; y: number; width: number; height: number } } | null>(null);
+  const [viewerClosing, setViewerClosing] = useState(false);
   const [selectedMessageKeys, setSelectedMessageKeys] = useState<ReadonlySet<string>>(() => new Set());
   const textSelectionActive = selectedMessageKeys.size > 0;
   const renderItemKeys = useMemo(() => renderItems.map((item) => item.key), [renderItems]);
@@ -726,14 +730,17 @@ export default function MessageList({
   }, []);
 
   const viewerIndex = viewerKey ? chatImageTimeline.findIndex((item) => item.key === viewerKey) : -1;
-  const viewerImages = diagramViewerItem ? [diagramViewerItem] : chatImageTimeline;
-  const viewerOpen = Boolean(diagramViewerItem) || viewerIndex >= 0;
+  const viewerImages = diagramViewerItem ? [diagramViewerItem] : chatImageTimeline.map((item) => item.key === videoPoster?.key ? { ...item, poster: videoPoster.src } : item);
+  const viewerOpen = !viewerClosing && (Boolean(diagramViewerItem) || viewerIndex >= 0);
   const activeViewerIndex = diagramViewerItem ? 0 : Math.max(0, viewerIndex);
 
-  const openChatImage = useCallback((message: Message, attachment: MessageAttachment) => {
+  const openChatImage = useCallback((message: Message, attachment: MessageAttachment, poster?: string, sourceRect?: DOMRect) => {
     setDiagramViewerItem(null);
     const key = `${message.id}-${attachment.id}`;
     if (!chatImageTimeline.some((item) => item.key === key)) return;
+    setVideoPoster(poster ? { key, src: poster } : null);
+    setVideoOrigin(sourceRect ? { key, rect: { x: sourceRect.x, y: sourceRect.y, width: sourceRect.width, height: sourceRect.height } } : null);
+    setViewerClosing(false);
     setViewerKey(key);
   }, [chatImageTimeline]);
 
@@ -2198,6 +2205,7 @@ export default function MessageList({
         open={viewerOpen}
         images={viewerImages}
         index={activeViewerIndex}
+        sourceRect={videoOrigin && videoOrigin.key === viewerImages[activeViewerIndex]?.key ? videoOrigin.rect : undefined}
         onIndexChange={(index) => {
           if (diagramViewerItem) return;
           setViewerKey(chatImageTimeline[index]?.key || null);
@@ -2205,8 +2213,14 @@ export default function MessageList({
         onReachStart={!diagramViewerItem && hasMore && !isLoadingOlder ? loadOlderFromViewer : undefined}
         reachStartVersion={messages.length}
         onClose={() => {
+          setViewerClosing(true);
+        }}
+        onExited={() => {
           setViewerKey(null);
           setDiagramViewerItem(null);
+          setVideoPoster(null);
+          setVideoOrigin(null);
+          setViewerClosing(false);
         }}
       />
     </Box>
