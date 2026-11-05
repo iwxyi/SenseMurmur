@@ -6,7 +6,7 @@ import { useSettingsStore } from '../stores/useSettingsStore';
 import { buildPrivateSessionEvent } from './directSessionHelpers';
 import { buildRuntimeEventMessageContent, normalizeRuntimeEvent } from './runtimeEventFactory';
 import { persistLocalFirstMessage, persistLocalFirstMessages } from './chatCommitMessage';
-import { projectCurrentChatMessages } from './currentChatMessages';
+import { projectCurrentChatMessages, projectMergedChatMessages } from './currentChatMessages';
 import { getWorkspaceSignal } from './workspaceLifecycle';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { createWorkflowRunRuntime, currentWorkflowScope, indexedDbWorkflowRepository, summarizeWorkflowRun, workflowRunLockName, WorkflowPreflightError, type WorkflowSnapshot, type WorkflowTask } from './workflowRunRuntime';
@@ -31,7 +31,14 @@ function messagesForDirectChat(chatId: string) {
 }
 
 function committedReply(chatId: string, userMessageId: string) {
-  return messagesForDirectChat(chatId).find((item) => item.type === 'ai' && !item.isDeleted && !item.isStreaming
+  const state = useMessageStore.getState();
+  return projectMergedChatMessages({
+    chatId,
+    activeMessages: state.messages.filter((message) => message.chatId === chatId),
+    cachedWindow: state.messageWindowsByChatId[chatId]
+      ? { ...state.messageWindowsByChatId[chatId], preserveBranchContext: true }
+      : undefined,
+  }).find((item) => item.type === 'ai' && !item.isDeleted && !item.isStreaming
     && item.metadata?.directReplyToUserMessageId === userMessageId);
 }
 
