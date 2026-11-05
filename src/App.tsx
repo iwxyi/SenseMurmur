@@ -359,6 +359,9 @@ function DataLoader({ children }: { children: React.ReactNode }) {
       void import('./services/assistantBackgroundReply').then(({ recoverAssistantBackgroundReplies }) => recoverAssistantBackgroundReplies()).catch((error) => {
         console.error('[assistant-workflow:recovery-failed]', error);
       });
+      void import('./services/directBackgroundReply').then(({ recoverDirectBackgroundReplies }) => recoverDirectBackgroundReplies()).catch((error) => {
+        console.error('[direct-workflow:recovery-failed]', error);
+      });
       void import('./services/agentTeamWorkflow').then(({ recoverAgentTeamRuns }) => recoverAgentTeamRuns()).catch((error) => {
         console.error('[agent-team:recovery-failed]', error);
       });
