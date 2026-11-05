@@ -2976,6 +2976,29 @@ export default function ChatDetailPage() {
         return;
       }
       if (chat.type === 'assistant') {
+        if (!navigator.locks?.request) {
+          setSnackbar({ open: true, message: '当前连接不支持后台运行，回复期间请保持此页面打开。', severity: 'info' });
+          const { controller, epoch } = beginReplyOperation();
+          void import('../services/assistantChatFlow').then(({ runAssistantChatReplyFlow }) => runAssistantChatReplyFlow({
+            api,
+            aiProfiles,
+            chatId: id,
+            chat: latestChat,
+            currentMessages: recentMessagesWithUser,
+            selectedArtifactId: selectedAssistantArtifactId,
+            timestamp: userMessage.timestamp + 1,
+            upsertMessage: upsertMessageStable,
+            updateChat,
+            signal: controller.signal,
+            shouldContinue: () => !controller.signal.aborted && directReplyEpochRef.current === epoch,
+          })).catch((error) => {
+            if (!isGenerationCancelledError(error)) {
+              console.error('[assistant-reply:send-error]', error);
+              showErrorToast(error instanceof Error ? error.message : String(error));
+            }
+          }).finally(() => finishReplyOperation(controller));
+          return;
+        }
         void (async () => {
           try {
             const { startAssistantBackgroundReply } = await import('../services/assistantBackgroundReply');

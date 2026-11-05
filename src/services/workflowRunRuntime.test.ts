@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, type WorkflowSnapshot } from './workflowRunRuntime';
+import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowSnapshot } from './workflowRunRuntime';
 
 function snapshot(id: string): WorkflowSnapshot {
   return {
@@ -219,5 +219,33 @@ describe('workflow run runtime', () => {
     expect(result.tasks[0].status).toBe('result_unknown');
     await runtime.resume(id);
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks a rejected preflight as failed before a paid request starts', async () => {
+    const id = crypto.randomUUID();
+    const execute = vi.fn().mockRejectedValue(new WorkflowPreflightError('原始消息已删除'));
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => 'test');
+    await runtime.create(snapshot(id));
+    const result = await runtime.resume(id);
+    expect(result.run.status).toBe('failed');
+    expect(result.tasks[0]).toMatchObject({ status: 'failed', error: '原始消息已删除' });
+  });
+
+  it('keeps an open plan available for delegation after its initial tasks finish', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.run.planOpen = true;
+    plan.tasks = [plan.tasks[0]];
+    const execute = vi.fn(async () => ({ output: '脚本' }));
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => 'test');
+    await runtime.create(plan);
+    const first = await runtime.resume(id);
+    expect(first.run.status).toBe('active');
+    const delegated = { id: 'video', runId: id, kind: 'video', input: '生成视频', dependsOn: ['script'], status: 'queued' as const, attempt: 0, updatedAt: Date.now() };
+    await runtime.addTasks(id, 1, [delegated]);
+    const second = await runtime.resume(id);
+    expect(second.tasks[1].status).toBe('completed');
+    expect(second.run.status).toBe('active');
+    expect((await runtime.closePlan(id, 2)).run.status).toBe('completed');
   });
 });

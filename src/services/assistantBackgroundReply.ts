@@ -4,7 +4,7 @@ import { getWorkspaceSignal } from './workspaceLifecycle';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
-import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, workflowRunLockName, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
+import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, workflowRunLockName, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
 import { currentWorkflowScope } from './workflowRunRuntime';
 
 interface AssistantReplyInput {
@@ -30,7 +30,7 @@ function messagesForChat(chatId: string) {
 }
 
 async function executeAssistantReplyUnlocked(task: WorkflowTask, signal: AbortSignal) {
-  if (!isAssistantReplyInput(task.input)) throw new Error('助手任务输入无效');
+  if (!isAssistantReplyInput(task.input)) throw new WorkflowPreflightError('助手任务输入无效');
   const input = task.input;
   const chatId = input.chatId;
   await Promise.all([
@@ -39,10 +39,11 @@ async function executeAssistantReplyUnlocked(task: WorkflowTask, signal: AbortSi
     useSettingsStore.persist.hasHydrated() ? Promise.resolve() : useSettingsStore.persist.rehydrate(),
   ]);
   const chat = useChatStore.getState().chats.find((item) => item.id === chatId);
-  if (!chat || chat.type !== 'assistant') throw new Error('助手会话已不存在');
+  if (!chat || chat.type !== 'assistant') throw new WorkflowPreflightError('助手会话已不存在');
+  if (chat.deletedAt != null) throw new WorkflowPreflightError('助手会话已删除');
   const allMessages = messagesForChat(chatId);
   const userMessage = allMessages.find((message) => message.id === input.userMessageId);
-  if (!userMessage || userMessage.isDeleted) throw new Error('原始用户消息已不存在');
+  if (!userMessage || userMessage.isDeleted) throw new WorkflowPreflightError('原始用户消息已不存在');
   const messages = allMessages.filter((message) => message.timestamp <= userMessage.timestamp);
   const settings = useSettingsStore.getState();
   const { runAssistantChatReplyFlow } = await import('./assistantChatFlow');
@@ -57,14 +58,14 @@ async function executeAssistantReplyUnlocked(task: WorkflowTask, signal: AbortSi
     upsertMessage: upsertAssistantBackgroundMessage,
     updateChat: (id, patch) => useChatStore.getState().updateChat(id, patch),
     signal,
-    shouldContinue: () => !signal.aborted && useChatStore.getState().chats.some((item) => item.id === chatId),
+    shouldContinue: () => !signal.aborted && useChatStore.getState().chats.some((item) => item.id === chatId && item.deletedAt == null),
   });
   return { output: result?.id || null };
 }
 
 async function executeAssistantReply(task: WorkflowTask, signal: AbortSignal) {
-  if (!isAssistantReplyInput(task.input)) throw new Error('助手任务输入无效');
-  if (typeof navigator === 'undefined' || !navigator.locks?.request) throw new Error('此设备不支持安全的会话串行执行');
+  if (!isAssistantReplyInput(task.input)) throw new WorkflowPreflightError('助手任务输入无效');
+  if (typeof navigator === 'undefined' || !navigator.locks?.request) throw new WorkflowPreflightError('此设备不支持安全的会话串行执行');
   const lockName = `pneumata-assistant-chat-${currentWorkflowScope()}-${task.input.chatId}`;
   return navigator.locks.request(lockName, async () => executeAssistantReplyUnlocked(task, signal));
 }

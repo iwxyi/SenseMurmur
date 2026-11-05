@@ -25,6 +25,7 @@ export interface WorkflowRun {
   generation: number;
   planVersion: number;
   resumeCommandIds?: string[];
+  planOpen?: boolean;
   updatedAt: number;
 }
 
@@ -76,6 +77,13 @@ export interface WorkflowTaskResult {
 export interface WorkflowExecutor {
   execute(task: WorkflowTask, signal: AbortSignal): Promise<WorkflowTaskResult>;
   inspectExternal?(task: WorkflowTask, signal: AbortSignal): Promise<{ status: 'pending' | 'completed' | 'failed'; output?: unknown; error?: string }>;
+}
+
+export class WorkflowPreflightError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkflowPreflightError';
+  }
 }
 
 export interface WorkflowRepository {
@@ -226,6 +234,19 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
+  async function closePlan(runId: string, expectedPlanVersion: number) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
+      if (current.run.status !== 'active' && current.run.status !== 'paused') throw new Error('工作流已结束');
+      const allCompleted = current.tasks.every((task) => task.status === 'completed');
+      const snapshot: WorkflowSnapshot = {
+        ...current,
+        run: { ...current.run, planOpen: false, status: allCompleted ? 'completed' : current.run.status, planVersion: current.run.planVersion + 1, updatedAt: Date.now() },
+      };
+      return { snapshot, value: snapshot };
+    });
+  }
+
   async function runWithLock(runId: string, storageScope: string, work: () => Promise<WorkflowSnapshot>) {
     if (typeof navigator === 'undefined') return work();
     if (!navigator.locks?.request) throw new Error('此浏览器不支持安全的多标签页工作流执行');
@@ -287,7 +308,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
             }, value: undefined }));
             if ('status' in result && result.status === 'pending') inspectedExternalIds.add(task.id);
           } catch (error) {
-            await mutate(storageScope, runId, (current) => ({ snapshot: scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' ? current : { ...current, tasks: current.tasks.map((item) => item.id === task.id ? { ...item, status: isReady ? 'result_unknown' : 'waiting_external', error: error instanceof Error ? error.message : '任务状态查询失败', updatedAt: Date.now() } : item) }, value: undefined }));
+            await mutate(storageScope, runId, (current) => ({ snapshot: scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' ? current : { ...current, tasks: current.tasks.map((item) => item.id === task.id ? { ...item, status: !isReady ? 'waiting_external' : error instanceof WorkflowPreflightError ? 'failed' : 'result_unknown', error: error instanceof Error ? error.message : '任务状态查询失败', updatedAt: Date.now() } : item) }, value: undefined }));
             if (!isReady) inspectedExternalIds.add(task.id);
           }
         }));
@@ -298,7 +319,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
             ? { ...task, status: 'result_unknown' as const, error: '请求已中断，结果需要核对', updatedAt: Date.now() }
             : task)
           : current.tasks;
-        const completed = tasks.every((task) => task.status === 'completed');
+        const completed = !current.run.planOpen && tasks.every((task) => task.status === 'completed');
         const failed = tasks.some((task) => task.status === 'failed');
         const snapshot = { ...current, tasks, run: { ...current.run, status: current.run.status !== 'active' ? current.run.status : signal.aborted ? 'paused' as const : completed ? 'completed' as const : failed ? 'failed' as const : current.run.status } };
         return { snapshot, value: snapshot };
@@ -316,5 +337,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, addTasks, resume, pause, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, addTasks, closePlan, resume, pause, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }
