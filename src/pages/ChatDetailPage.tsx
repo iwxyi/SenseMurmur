@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { lazy, Suspense, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore } from 'react';
 import { Box, IconButton, Button, Typography, Switch, Stack, TextField, Chip, Alert, Dialog, DialogTitle, DialogContent, DialogActions, Slider, FormControl, InputLabel, Select, MenuItem, Divider, FormControlLabel, Checkbox, CircularProgress, Tooltip, Collapse } from '@mui/material';
 import PageSection from '../components/common/PageSection';
 import AppSnackbar from '../components/common/AppSnackbar';
@@ -48,6 +48,7 @@ import { useChatSidebarProjection } from '../hooks/useChatSidebarProjection';
 import { useMessageAnalysis } from '../hooks/useMessageAnalysis';
 import { useChatSurfaceActions } from '../hooks/useChatSurfaceActions';
 import { useReplyOperation } from '../hooks/useReplyOperation';
+import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, getAssistantBackgroundStreamingSnapshot, listAssistantBackgroundReplies, resumeAssistantBackgroundReply, subscribeAssistantBackgroundReplies, subscribeAssistantBackgroundRunChanges, subscribeAssistantBackgroundStreaming } from '../services/assistantBackgroundReply';
 import ChatBackground from '../components/chat/ChatBackground';
 import { getSyncableCharacterMemberIds } from '../services/pageSyncScopeContract';
 import SessionInfoCards from '../components/chat/SessionInfoCards';
@@ -900,6 +901,33 @@ export default function ChatDetailPage() {
     finish: finishReplyOperation,
     cancel: cancelReplyOperation,
   } = useReplyOperation();
+  const activeAssistantBackgroundChats = useSyncExternalStore(subscribeAssistantBackgroundReplies, getActiveAssistantBackgroundChats, getActiveAssistantBackgroundChats);
+  const isAssistantBackgroundPending = Boolean(id && activeAssistantBackgroundChats.split('\n').includes(id));
+  const assistantBackgroundStreamingMessages = useSyncExternalStore(subscribeAssistantBackgroundStreaming, getAssistantBackgroundStreamingSnapshot, getAssistantBackgroundStreamingSnapshot);
+  const assistantBackgroundRunRevision = useSyncExternalStore(subscribeAssistantBackgroundRunChanges, getAssistantBackgroundRunRevision, getAssistantBackgroundRunRevision);
+  const [assistantBackgroundNotice, setAssistantBackgroundNotice] = useState<string | null>(null);
+  const [assistantBackgroundResumeRunId, setAssistantBackgroundResumeRunId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!id) {
+      setAssistantBackgroundNotice(null);
+      setAssistantBackgroundResumeRunId(null);
+      return;
+    }
+    let cancelled = false;
+    void listAssistantBackgroundReplies(id).then((runs) => {
+      if (cancelled) return;
+      const uncertain = runs.find((run) => run.tasks.some((task) => task.status === 'result_unknown'));
+      const resumable = runs.find((run) => run.run.status === 'paused' && run.tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency') && !run.tasks.some((task) => task.status === 'result_unknown'));
+      setAssistantBackgroundNotice(uncertain ? '上次助手请求已中断，结果与费用暂时无法确认。该请求不会自动重试。' : resumable ? '上次助手任务在发出请求前暂停，可继续执行。' : null);
+      setAssistantBackgroundResumeRunId(resumable?.run.id || null);
+    }).catch((error) => {
+      if (!cancelled) {
+        setAssistantBackgroundNotice(error instanceof Error ? error.message : '工作流状态读取失败');
+        setAssistantBackgroundResumeRunId(null);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [id, assistantBackgroundRunRevision]);
   const [htmlRepairRetry, setHtmlRepairRetry] = useState<HtmlRepairRetryState | null>(null);
   const [readOnlyEmphasis, setReadOnlyEmphasis] = useState(true);
 
@@ -1132,8 +1160,11 @@ export default function ChatDetailPage() {
     return result;
   }, [chat, rawCurrentMessageWindow, id, messages]);
   const visibleChatMessages = useMemo(
-    () => overlayTransientMessages(currentChatMessages, transientMessages),
-    [currentChatMessages, transientMessages],
+    () => overlayTransientMessages(currentChatMessages, [
+      ...transientMessages,
+      ...assistantBackgroundStreamingMessages.filter((message) => message.chatId === id),
+    ]),
+    [currentChatMessages, transientMessages, assistantBackgroundStreamingMessages, id],
   );
   useEffect(() => {
     setTransientMessages((current) => releaseConfirmedTransientMessages(current, currentChatMessages));
@@ -2945,23 +2976,20 @@ export default function ChatDetailPage() {
         return;
       }
       if (chat.type === 'assistant') {
-        const { controller: assistantReplyAbortController, epoch: assistantReplyEpoch } = beginReplyOperation();
         void (async () => {
           try {
-            const { runAssistantChatReplyFlow } = await import('../services/assistantChatFlow');
-            await runAssistantChatReplyFlow({
-              api,
-              aiProfiles,
+            const { startAssistantBackgroundReply } = await import('../services/assistantBackgroundReply');
+            const result = await startAssistantBackgroundReply({
               chatId: id,
-            chat: latestChat,
-              currentMessages: recentMessagesWithUser,
+              userMessageId: userMessage.id,
               selectedArtifactId: selectedAssistantArtifactId,
-              timestamp: userMessage.timestamp + 1,
-              upsertMessage: upsertMessageStable,
-              updateChat,
-              signal: assistantReplyAbortController.signal,
-              shouldContinue: () => !assistantReplyAbortController.signal.aborted && directReplyEpochRef.current === assistantReplyEpoch,
             });
+            if (result.summary.blocked.length) {
+              const blockedTask = result.snapshot.tasks.find((task) => task.id === result.summary.blocked[0].taskId);
+              throw new Error(blockedTask?.status === 'result_unknown'
+                ? '助手请求已中断，结果和费用暂时无法确认。为避免重复扣费，任务已暂停，请查看任务状态。'
+                : result.summary.blocked[0].reason);
+            }
           } catch (error) {
             if (!isGenerationCancelledError(error)) {
               console.error('[assistant-reply:send-error]', error);
@@ -2977,8 +3005,6 @@ export default function ChatDetailPage() {
                 timestamp: Date.now(),
               });
             }
-          } finally {
-            finishReplyOperation(assistantReplyAbortController);
           }
         })();
         return;
@@ -4348,6 +4374,17 @@ export default function ChatDetailPage() {
           )}
         />
         {storyTailStatusBar}
+        {isAssistantChat && assistantBackgroundNotice ? (
+          <Alert severity="warning" role="status" action={assistantBackgroundResumeRunId ? (
+            <Button size="small" color="inherit" onClick={() => {
+              void resumeAssistantBackgroundReply(assistantBackgroundResumeRunId, `resume-${crypto.randomUUID()}`).catch((error) => {
+                showErrorToast(error instanceof Error ? error.message : '恢复助手任务失败');
+              });
+            }}>继续</Button>
+          ) : undefined} sx={{ position: 'absolute', top: { xs: 'calc(72px + env(safe-area-inset-top, 0px))', sm: 64 }, left: 12, right: 12, zIndex: 5, borderRadius: 2, '& .MuiAlert-message': { overflowWrap: 'anywhere' } }}>
+            {assistantBackgroundNotice}
+          </Alert>
+        ) : null}
         <Box sx={{ position: 'absolute', inset: 0, overflow: 'hidden', zIndex: 1 }}>
           {relationshipInitializationBlocked ? (
             <Box sx={{ position: 'absolute', top: { xs: 'calc(80px + env(safe-area-inset-top, 0px))', sm: 72 }, left: 0, right: 0, zIndex: 3, display: 'flex', justifyContent: 'center', px: 2, pointerEvents: 'none' }}>
@@ -4506,8 +4543,8 @@ export default function ChatDetailPage() {
             speakAsCharacterName={effectiveSpeakAsChar?.name}
             onCloseSpeakAs={effectiveSpeakAsChar && chat.type !== 'ai_direct' ? () => setSpeakAsCharacter(null) : undefined}
             sendingLabel="等待角色发言结束"
-            composerState={isDirectReplyPending || (isRunning && !isPaused && (thinkingId || hasPendingTurnWork()))
-              ? { phase: 'generating', label: 'AI 正在处理…', canSend: false, canDraft: true, canCancel: true }
+            composerState={isDirectReplyPending || isAssistantBackgroundPending || (isRunning && !isPaused && (thinkingId || hasPendingTurnWork()))
+              ? { phase: 'generating', label: 'AI 正在处理…', canSend: false, canDraft: true, canCancel: !isAssistantBackgroundPending }
               : { phase: 'idle', canSend: true, canDraft: true, canCancel: false }}
             hideSpeakAsChip={chat.type === 'ai_direct'}
             inputCapabilities={effectiveTextInputCapabilities}

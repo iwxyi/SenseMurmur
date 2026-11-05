@@ -356,6 +356,9 @@ function DataLoader({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!isAdminRoute && isWorkspaceReady && (isLoggedIn || authMode === 'local')) {
       void loadSettings();
+      void import('./services/assistantBackgroundReply').then(({ recoverAssistantBackgroundReplies }) => recoverAssistantBackgroundReplies()).catch((error) => {
+        console.error('[assistant-workflow:recovery-failed]', error);
+      });
     }
   }, [authMode, isAdminRoute, isLoggedIn, isWorkspaceReady, loadSettings]);
 

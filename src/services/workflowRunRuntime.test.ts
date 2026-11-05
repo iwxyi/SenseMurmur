@@ -1,0 +1,223 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
+import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, type WorkflowSnapshot } from './workflowRunRuntime';
+
+function snapshot(id: string): WorkflowSnapshot {
+  return {
+    run: { id, chatId: 'chat', goal: '制作短片', status: 'active', generation: 0, planVersion: 1, updatedAt: 1 },
+    tasks: [
+      { id: 'script', runId: id, kind: 'script', input: '恐龙追逐', dependsOn: [], status: 'queued', attempt: 0, updatedAt: 1 },
+      { id: 'video', runId: id, kind: 'video', input: '使用脚本', dependsOn: ['script'], status: 'waiting_dependency', attempt: 0, updatedAt: 1 },
+    ],
+  };
+}
+
+beforeEach(() => {
+  vi.stubGlobal('indexedDB', new IDBFactory());
+  vi.stubGlobal('IDBKeyRange', IDBKeyRange);
+  vi.stubGlobal('navigator', { locks: { request: async (_name: string, _options: unknown, callback: (lock: object) => Promise<WorkflowSnapshot>) => callback({}) } });
+});
+
+describe('workflow run runtime', () => {
+  it('persists dependency progress and resumes the external task without generating it again', async () => {
+    const id = crypto.randomUUID();
+    const execute = vi.fn(async (task: { id: string }) => task.id === 'script' ? { output: '脚本完成' } : { externalTaskId: 'upstream-1' });
+    const inspectExternal = vi.fn().mockResolvedValueOnce({ status: 'pending' }).mockResolvedValueOnce({ status: 'completed', output: 'video.mp4' });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute, inspectExternal }, () => 'test');
+    await runtime.create(snapshot(id));
+    const first = await runtime.resume(id);
+    expect(first.tasks.map((task) => task.status)).toEqual(['completed', 'waiting_external']);
+    expect(execute).toHaveBeenCalledTimes(2);
+    const second = await runtime.resume(id);
+    expect(second.run.status).toBe('completed');
+    expect(second.tasks[1].output).toBe('video.mp4');
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps uncertain results blocked across repeated resume calls', async () => {
+    const id = crypto.randomUUID();
+    const execute = vi.fn().mockRejectedValue(new Error('连接中断'));
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => 'test');
+    await runtime.create(snapshot(id));
+    const result = await runtime.resume(id);
+    expect(result.tasks[0]).toMatchObject({ status: 'result_unknown', attempt: 1 });
+    await runtime.resume(id);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects cyclic plans before persisting', async () => {
+    const id = crypto.randomUUID();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'test');
+    const plan = snapshot(id);
+    plan.tasks[0].dependsOn = ['video'];
+    await expect(runtime.create(plan)).rejects.toThrow('依赖形成环');
+    expect(await runtime.read(id)).toBeNull();
+  });
+
+  it('rejects a late result after pause changes the run generation', async () => {
+    const id = crypto.randomUUID();
+    let finish!: (value: { output: string }) => void;
+    const execute = vi.fn(() => new Promise<{ output: string }>((resolve) => { finish = resolve; }));
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => 'test');
+    await runtime.create(snapshot(id));
+    const pending = runtime.resume(id);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    await runtime.pause(id);
+    finish({ output: '迟到结果' });
+    const result = await pending;
+    expect(result.run.status).toBe('paused');
+    expect(result.tasks[0].output).toBeUndefined();
+  });
+
+  it('continues independent tasks while an external result is pending', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.tasks[0] = { ...plan.tasks[0], status: 'waiting_external', externalTaskId: 'upstream-2' };
+    plan.tasks[1] = { ...plan.tasks[1], dependsOn: [], status: 'queued' };
+    const execute = vi.fn(async () => ({ output: '独立任务完成' }));
+    const inspectExternal = vi.fn(async () => ({ status: 'pending' as const }));
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute, inspectExternal }, () => 'test');
+    await runtime.create(plan);
+    const result = await runtime.resume(id);
+    expect(result.tasks.map((task) => task.status)).toEqual(['waiting_external', 'completed']);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(inspectExternal).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a queryable external task available after a transient status query error', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.tasks = [{ ...plan.tasks[0], status: 'waiting_external', externalTaskId: 'upstream-3' }];
+    const inspectExternal = vi.fn().mockRejectedValueOnce(new Error('网络断开')).mockResolvedValueOnce({ status: 'completed', output: '结果' });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn(), inspectExternal }, () => 'test');
+    await runtime.create(plan);
+    const first = await runtime.resume(id);
+    expect(first.tasks[0].status).toBe('waiting_external');
+    const second = await runtime.resume(id);
+    expect(second.tasks[0].status).toBe('completed');
+    expect(inspectExternal).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not write an in-flight result after the account scope changes', async () => {
+    const id = crypto.randomUUID();
+    let account = 'account-a';
+    let finish!: (value: { output: string }) => void;
+    const execute = vi.fn(() => new Promise<{ output: string }>((resolve) => { finish = resolve; }));
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => account);
+    await runtime.create(snapshot(id));
+    const pending = runtime.resume(id);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    account = 'account-b';
+    finish({ output: '旧账号结果' });
+    await pending;
+    account = 'account-a';
+    const stored = await runtime.read(id);
+    expect(stored?.tasks[0].output).toBeUndefined();
+    expect(stored?.tasks[0].status).toBe('running');
+  });
+
+  it('summarizes blocked dependent tasks for a single run-level resume view', () => {
+    const plan = snapshot('run');
+    plan.tasks[0] = { ...plan.tasks[0], status: 'result_unknown', error: '结果需要核对' };
+    expect(summarizeWorkflowRun(plan)).toEqual({
+      completed: [], waiting: [], runnable: [],
+      blocked: [
+        { taskId: 'script', reason: '结果需要核对' },
+        { taskId: 'video', reason: '前置任务未完成且需要处理' },
+      ],
+    });
+  });
+
+  it('does not dispatch when another tab owns the run lock', async () => {
+    const id = crypto.randomUUID();
+    const execute = vi.fn();
+    vi.stubGlobal('navigator', { locks: { request: async (_name: string, _options: unknown, callback: (lock: null) => Promise<WorkflowSnapshot>) => callback(null) } });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => 'test');
+    await runtime.create(snapshot(id));
+    await expect(runtime.resume(id)).rejects.toThrow('另一个标签页运行');
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('adds delegated tasks atomically with a plan version guard', async () => {
+    const id = crypto.randomUUID();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'test');
+    await runtime.create(snapshot(id));
+    const delegated = { id: 'soundtrack', runId: id, kind: 'audio', input: '配乐', dependsOn: ['script'], status: 'waiting_dependency' as const, attempt: 0, updatedAt: 2 };
+    const revised = await runtime.addTasks(id, 1, [delegated]);
+    expect(revised.run.planVersion).toBe(2);
+    expect(revised.tasks).toHaveLength(3);
+    await expect(runtime.addTasks(id, 1, [{ ...delegated, id: 'another' }])).rejects.toThrow('计划版本冲突');
+    await expect(runtime.addTasks(id, 2, [{ ...delegated, id: 'loop', dependsOn: ['loop'] }])).rejects.toThrow('依赖形成环');
+    expect((await runtime.read(id))?.tasks).toHaveLength(3);
+  });
+
+  it('allows only one concurrent revision against the same plan version', async () => {
+    const id = crypto.randomUUID();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'test');
+    await runtime.create(snapshot(id));
+    const additions = ['audio-a', 'audio-b'].map((taskId) => ({
+      id: taskId, runId: id, kind: 'audio', input: taskId, dependsOn: ['script'],
+      status: 'waiting_dependency' as const, attempt: 0, updatedAt: 2,
+    }));
+    const results = await Promise.allSettled(additions.map((task) => runtime.addTasks(id, 1, [task])));
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect((await runtime.read(id))?.tasks).toHaveLength(3);
+  });
+
+  it('deduplicates a run-level resume command after it has been applied', async () => {
+    const id = crypto.randomUUID();
+    const execute = vi.fn(async () => ({ output: '完成' }));
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => 'test');
+    await runtime.create(snapshot(id));
+    await runtime.resume(id, undefined, 'resume-1');
+    const generation = (await runtime.read(id))?.run.generation;
+    await runtime.resume(id, undefined, 'resume-1');
+    expect((await runtime.read(id))?.run.generation).toBe(generation);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it('lists only runs in the current account scope', async () => {
+    const prefix = crypto.randomUUID();
+    const runtimeA = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => `${prefix}-account-a`);
+    const runtimeB = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => `${prefix}-account-b`);
+    await runtimeA.create(snapshot(crypto.randomUUID()));
+    await runtimeB.create(snapshot(crypto.randomUUID()));
+    expect(await runtimeA.list()).toHaveLength(1);
+    expect(await runtimeB.list()).toHaveLength(1);
+    expect((await runtimeA.list())[0].run.id).not.toBe((await runtimeB.list())[0].run.id);
+  });
+
+  it('runs independent delegated tasks concurrently within the configured limit', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.tasks[1] = { ...plan.tasks[1], dependsOn: [], status: 'queued' };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const execute = vi.fn(async () => { await gate; return { output: '完成' }; });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => 'test', 2);
+    await runtime.create(plan);
+    const pending = runtime.resume(id);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+    release();
+    expect((await pending).run.status).toBe('completed');
+  });
+
+  it('marks a cancelled in-flight request as unknown instead of retrying it', async () => {
+    const id = crypto.randomUUID();
+    const abortController = new AbortController();
+    let rejectExecution!: (error: Error) => void;
+    const execute = vi.fn(() => new Promise<{ output: string }>((_resolve, reject) => { rejectExecution = reject; }));
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => 'test');
+    await runtime.create(snapshot(id));
+    const pending = runtime.resume(id, abortController.signal);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    abortController.abort();
+    rejectExecution(new Error('已中断'));
+    const result = await pending;
+    expect(result.run.status).toBe('paused');
+    expect(result.tasks[0].status).toBe('result_unknown');
+    await runtime.resume(id);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+});
