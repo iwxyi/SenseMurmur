@@ -172,17 +172,22 @@ export async function listAgentTeamRuns(chatId?: string) {
 export async function runAgentTeam(params: { chatId: string; goal: string; runId?: string }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
+  if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务执行');
   const originalScope = currentWorkflowScope();
   if (activeTeamRuns.has(params.runId || '')) throw new Error('团队任务正在执行');
   const runId = params.runId || `team-${crypto.randomUUID()}`;
   activeTeamRuns.add(runId);
   notifyTeam();
   try {
-    const workflow = currentTeamWorkflow();
-    const result = params.runId ? await workflow.resume(runId) : await workflow.start(runId, params.chatId, params.goal);
-    if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队交付已暂停');
-    if (result.snapshot.run.status === 'completed') await workflow.publish(runId);
-    return result;
+    const chatLock = `pneumata-assistant-chat-${originalScope}-${params.chatId}`;
+    return await navigator.locks.request(chatLock, async () => {
+      if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队任务已暂停');
+      const workflow = currentTeamWorkflow();
+      const result = params.runId ? await workflow.resume(runId) : await workflow.start(runId, params.chatId, params.goal);
+      if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队交付已暂停');
+      if (result.snapshot.run.status === 'completed') await workflow.publish(runId);
+      return result;
+    });
   } finally {
     activeTeamRuns.delete(runId);
     notifyTeam();
