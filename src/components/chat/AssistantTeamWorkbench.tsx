@@ -1,0 +1,96 @@
+import { useState } from 'react';
+import { Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Stack, Typography } from '@mui/material';
+import type { WorkflowSnapshot, WorkflowTask } from '../../services/workflowRunRuntime';
+import { summarizeWorkflowRun } from '../../services/workflowRunRuntime';
+import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
+
+interface Props {
+  runs: WorkflowSnapshot[];
+  isRunActive: (runId: string) => boolean;
+  onResume: (run: WorkflowSnapshot) => void;
+  onCreate: () => void;
+}
+
+const taskStatus: Record<WorkflowTask['status'], string> = {
+  queued: '排队', running: '执行中', waiting_dependency: '等待前置步骤', waiting_external: '等待生成',
+  waiting_user: '等待用户', result_unknown: '待核对', completed: '已完成', failed: '失败', cancelled: '已取消',
+};
+
+function teamPlan(run: WorkflowSnapshot) {
+  const raw = run.tasks.find((task) => task.kind === 'team_plan')?.output;
+  if (!raw) return null;
+  try { return validateAgentTeamPlan(raw); } catch { return null; }
+}
+
+function taskDetails(task: WorkflowTask) {
+  const input = task.input;
+  if (!input || typeof input !== 'object' || !('task' in input)) return null;
+  const value = input as { task?: { goal?: unknown; acceptance?: unknown }; role?: { name?: unknown; responsibility?: unknown; method?: unknown } };
+  if (typeof value.task?.goal !== 'string') return null;
+  return {
+    goal: value.task.goal,
+    acceptance: typeof value.task.acceptance === 'string' ? value.task.acceptance : '',
+    role: typeof value.role?.name === 'string' ? value.role.name : '子 Agent',
+    responsibility: typeof value.role?.responsibility === 'string' ? value.role.responsibility : '',
+    method: typeof value.role?.method === 'string' ? value.role.method : '',
+  };
+}
+
+export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate }: Props) {
+  const [open, setOpen] = useState(false);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  if (!runs.length) return null;
+  const run = runs.find((item) => item.run.id === selectedRunId) || runs[0];
+  const task = run.tasks.find((item) => item.id === selectedTaskId) || null;
+  const details = task ? taskDetails(task) : null;
+  const plan = teamPlan(run);
+  const summary = summarizeWorkflowRun(run);
+  const childTasks = run.tasks.filter((item) => item.kind === 'agent_text');
+  const blocked = summary.blocked.length > 0;
+  const running = isRunActive(run.run.id);
+
+  return <>
+    <Box role="status" sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, left: 12, right: 12, zIndex: 5, display: 'flex', alignItems: 'center', gap: 1, px: 1.25, py: 0.5, borderRadius: 1.5, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider', boxShadow: 1, minWidth: 0 }}>
+      <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>{run.run.goal}</Typography>
+      <Chip size="small" color={blocked ? 'warning' : running ? 'primary' : 'default'} label={blocked ? '需处理' : running ? '运行中' : `${summary.completed.length}/${run.tasks.length} 步`} />
+      <Button size="small" onClick={() => setOpen(true)}>工作台</Button>
+    </Box>
+    <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="md" aria-labelledby="team-workbench-title">
+      <DialogTitle id="team-workbench-title">团队工作台</DialogTitle>
+      <DialogContent dividers sx={{ display: 'grid', gap: 2, minHeight: 260 }}>
+        {runs.length > 1 && <Stack direction="row" spacing={0.75} sx={{ overflowX: 'auto', pb: 0.5 }}>
+          {runs.map((item, index) => <Chip key={item.run.id} size="small" clickable color={item.run.id === run.run.id ? 'primary' : 'default'} label={teamPlan(item)?.summary || `任务 ${index + 1}`} onClick={() => { setSelectedRunId(item.run.id); setSelectedTaskId(null); }} />)}
+        </Stack>}
+        <Box>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{plan?.summary || run.run.goal}</Typography>
+          <Typography variant="body2" color="text.secondary">{running ? '运行中' : run.run.status === 'completed' ? '已完成' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '失败' : '等待执行'} · 已完成 {summary.completed.length}/{run.tasks.length} 步</Typography>
+        </Box>
+        <Stack direction="row" spacing={0.75} sx={{ overflowX: 'auto', pb: 0.5 }}>
+          <Chip size="small" clickable color={!task ? 'primary' : 'default'} label="总览与主 Agent" onClick={() => setSelectedTaskId(null)} />
+          {childTasks.map((item, index) => <Chip key={item.id} size="small" clickable color={task?.id === item.id ? 'primary' : 'default'} label={`${taskDetails(item)?.role || `子 Agent ${index + 1}`} · ${taskStatus[item.status]}`} onClick={() => setSelectedTaskId(item.id)} />)}
+        </Stack>
+        <Divider />
+        {task && details ? <Box sx={{ display: 'grid', gap: 1.5, overflowWrap: 'anywhere' }}>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{details.role} · {taskStatus[task.status]}</Typography>
+          <Typography variant="body2"><strong>任务</strong> {details.goal}</Typography>
+          {details.responsibility && <Typography variant="body2"><strong>职责</strong> {details.responsibility}</Typography>}
+          {details.method && <Typography variant="body2"><strong>方法</strong> {details.method}</Typography>}
+          {details.acceptance && <Typography variant="body2"><strong>验收</strong> {details.acceptance}</Typography>}
+          {task.error && <Typography variant="body2" color="error.main"><strong>问题</strong> {task.error}</Typography>}
+          {typeof task.output === 'string' && <Box sx={{ p: 1.5, borderRadius: 1, bgcolor: 'action.hover', maxHeight: 300, overflowY: 'auto' }}><Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.output}</Typography></Box>}
+        </Box> : <Box sx={{ display: 'grid', gap: 1.25, overflowWrap: 'anywhere' }}>
+          <Typography variant="body2"><strong>目标</strong> {run.run.goal}</Typography>
+          {plan?.finalAcceptance && <Typography variant="body2"><strong>最终验收</strong> {plan.finalAcceptance}</Typography>}
+          {summary.blocked.length > 0 && <Typography variant="body2" color="warning.main"><strong>需要处理</strong> {summary.blocked.map((item) => item.reason).join('；')}</Typography>}
+          {run.tasks.map((item, index) => <Typography key={item.id} variant="body2" color="text.secondary">{index + 1}. {item.kind === 'team_plan' ? '规划团队' : taskDetails(item)?.goal || '执行任务'} · {taskStatus[item.status]}</Typography>)}
+        </Box>}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => { setOpen(false); onCreate(); }}>新建团队任务</Button>
+        {!running && !blocked && run.run.status !== 'failed' && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : '继续整个任务'}</Button>}
+        <Button onClick={() => setOpen(false)}>关闭</Button>
+      </DialogActions>
+    </Dialog>
+  </>;
+}

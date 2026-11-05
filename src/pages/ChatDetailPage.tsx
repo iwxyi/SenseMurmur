@@ -52,7 +52,7 @@ import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, g
 import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
 import { getAgentTeamRunRevision, hasActiveAgentTeamRuns, isAgentTeamRunActive, listAgentTeamRuns, runAgentTeam, subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
 import { getDirectBackgroundRevision, isDirectBackgroundActive, listDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply, subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
-import { summarizeWorkflowRun } from '../services/workflowRunRuntime';
+import AssistantTeamWorkbench from '../components/chat/AssistantTeamWorkbench';
 import ChatBackground from '../components/chat/ChatBackground';
 import { getSyncableCharacterMemberIds } from '../services/pageSyncScopeContract';
 import SessionInfoCards from '../components/chat/SessionInfoCards';
@@ -925,8 +925,6 @@ export default function ChatDetailPage() {
   }, [id, directBackgroundRevision]);
   const teamRevision = useSyncExternalStore(subscribeAgentTeamRuns, getAgentTeamRunRevision, getAgentTeamRunRevision);
   const [teamRuns, setTeamRuns] = useState<WorkflowSnapshot[]>([]);
-  const [selectedTeamRunId, setSelectedTeamRunId] = useState<string | null>(null);
-  const [selectedTeamTaskId, setSelectedTeamTaskId] = useState<string | null>(null);
   const [teamGoalOpen, setTeamGoalOpen] = useState(false);
   const [teamGoal, setTeamGoal] = useState('');
   const [teamProgressTick, setTeamProgressTick] = useState(0);
@@ -4454,32 +4452,15 @@ export default function ChatDetailPage() {
             {visibleDirectBackgroundRun.tasks[0]?.error || (isDirectBackgroundActive(chat.id) ? '正在回复，离开此页面后仍会继续' : visibleDirectBackgroundRun.run.status === 'paused' ? '单聊任务已暂停' : '单聊任务等待处理')}
           </Alert>
         ) : null}
-        {isAssistantChat && agentEntitled ? (
+        {isAssistantChat && agentEntitled && !teamRuns.length ? (
           <Button size="small" variant="outlined" onClick={() => setTeamGoalOpen(true)} sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, right: 16, zIndex: 5, bgcolor: 'background.paper' }}>团队任务</Button>
         ) : null}
-        {isAssistantChat && teamRuns.length ? (
-          <Box sx={{ position: 'absolute', top: { xs: 'calc(104px + env(safe-area-inset-top, 0px))', sm: 96 }, left: 12, right: 12, zIndex: 5, p: 1, borderRadius: 2, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider', maxHeight: 230, overflow: 'auto' }}>
-            <Stack direction="row" spacing={0.5} sx={{ overflowX: 'auto', pb: 0.5 }}>
-              {teamRuns.map((run) => <Chip key={run.run.id} size="small" clickable color={selectedTeamRunId === run.run.id ? 'primary' : 'default'} label={run.run.goal.slice(0, 22)} onClick={() => { setSelectedTeamRunId(run.run.id); setSelectedTeamTaskId(null); }} />)}
-            </Stack>
-            {(() => {
-              const selected = teamRuns.find((item) => item.run.id === selectedTeamRunId) || teamRuns[0];
-              const current = selected.tasks.find((task) => task.id === selectedTeamTaskId);
-              const summary = summarizeWorkflowRun(selected);
-              return <>
-                <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-                  <Typography variant="body2">{selected.run.status === 'completed' ? '已完成' : selected.run.status === 'failed' ? '失败' : selected.run.status === 'paused' ? '已暂停' : '进行中'} · {summary.completed.length}/{selected.tasks.length} 步</Typography>
-                  {!isAgentTeamRunActive(selected.run.id) && (selected.run.status === 'completed' || (!summary.blocked.length && selected.run.status !== 'failed')) ? <Button size="small" onClick={() => { void runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id }).catch((error) => showErrorToast(error instanceof Error ? error.message : '恢复团队任务失败')); }}>{selected.run.status === 'completed' ? '检查交付' : '继续整个任务'}</Button> : null}
-                </Stack>
-                <Stack direction="row" spacing={0.5} sx={{ overflowX: 'auto', mt: 0.75 }}>
-                  <Chip size="small" clickable color={!selectedTeamTaskId ? 'primary' : 'default'} label="主 Agent" onClick={() => setSelectedTeamTaskId(null)} />
-                  {selected.tasks.filter((task) => task.kind === 'agent_text').map((task) => <Chip key={task.id} size="small" clickable color={selectedTeamTaskId === task.id ? 'primary' : 'default'} label={`${(task.input as { role?: { name?: string } })?.role?.name || '子 Agent'} · ${task.status === 'completed' ? '完成' : task.status === 'running' ? '执行中' : task.status === 'result_unknown' ? '待核对' : task.status === 'failed' ? '失败' : '等待'}`} onClick={() => setSelectedTeamTaskId(task.id)} />)}
-                </Stack>
-                <Typography variant="caption" component="div" sx={{ mt: 0.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{current ? `${(current.input as { task?: { goal?: string } })?.task?.goal || ''}\n${current.error || (typeof current.output === 'string' ? current.output.slice(0, 400) : current.status)}` : summary.blocked.length ? `需要处理：${summary.blocked[0].reason}` : selected.run.goal}</Typography>
-              </>;
-            })()}
-          </Box>
-        ) : null}
+        {isAssistantChat && teamRuns.length ? <AssistantTeamWorkbench
+          runs={teamRuns}
+          isRunActive={isAgentTeamRunActive}
+          onCreate={() => setTeamGoalOpen(true)}
+          onResume={(selected) => { void runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id }).catch((error) => showErrorToast(error instanceof Error ? error.message : '恢复团队任务失败')); }}
+        /> : null}
         {isAssistantChat && assistantRuns.length && (isAssistantBackgroundPending || assistantBackgroundNotice) ? (
           <Box role="status" sx={{ position: 'absolute', top: { xs: 'calc(64px + env(safe-area-inset-top, 0px))', sm: 56 }, left: 0, right: 0, zIndex: 4, display: 'flex', gap: 0.75, px: { xs: 1.5, sm: 2.5 }, py: 0.75, overflowX: 'auto', bgcolor: 'background.paper', borderBottom: '1px solid', borderColor: 'divider' }}>
             <Chip size="small" label={`助手任务 · ${assistantRuns[0].run.status === 'completed' ? '已完成' : assistantRuns[0].run.status === 'paused' ? '已暂停' : assistantRuns[0].tasks.some((task) => task.status === 'running') ? '执行中' : '等待中'}`} />
