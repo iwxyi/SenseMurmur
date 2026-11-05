@@ -193,7 +193,7 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队交付已暂停');
       if (result.snapshot.run.status === 'completed') await workflow.publish(runId);
       return result;
-    }), getWorkspaceSignal());
+    }), getWorkspaceSignal(), runId);
   } finally {
     activeTeamRuns.delete(runId);
     notifyTeam();

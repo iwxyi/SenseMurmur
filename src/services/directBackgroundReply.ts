@@ -181,7 +181,7 @@ export async function resumeDirectBackgroundReply(runId: string) {
       }
       const snapshot = await runtime.resume(runId, getWorkspaceSignal());
       return { snapshot, summary: summarizeWorkflowRun(snapshot) };
-    }), getWorkspaceSignal());
+    }), getWorkspaceSignal(), runId);
   } finally { active.delete(runId); publish(); }
 }
 

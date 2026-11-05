@@ -14,12 +14,13 @@ describe('background execution scheduler', () => {
     const first = vi.fn(async () => { await firstGate.wait; return 'first'; });
     const sameChat = vi.fn(async () => 'same');
     const otherChat = vi.fn(async () => { await secondGate.wait; return 'other'; });
-    const firstResult = scheduleBackgroundExecution('chat-a', first);
-    const waitingResult = scheduleBackgroundExecution('chat-a', sameChat);
+    const firstResult = scheduleBackgroundExecution('chat-a', first, undefined, 'run-a');
+    const waitingResult = scheduleBackgroundExecution('chat-a', sameChat, undefined, 'run-waiting');
     const otherResult = scheduleBackgroundExecution('chat-b', otherChat);
     await vi.waitFor(() => expect(otherChat).toHaveBeenCalledTimes(1));
     expect(sameChat).not.toHaveBeenCalled();
     expect(getBackgroundExecutionSummary()).toMatchObject({ active: 2, queued: 1 });
+    expect(getBackgroundExecutionSummary().activeWorkIds).toEqual(['run-a']);
     firstGate.release();
     await expect(firstResult).resolves.toBe('first');
     await expect(waitingResult).resolves.toBe('same');

@@ -4,6 +4,7 @@ const MAX_ACTIVE_CONVERSATIONS = 3;
 
 interface QueuedWork<T> {
   chatId: string;
+  workId?: string;
   run: () => Promise<T>;
   resolve: (value: T) => void;
   reject: (reason: unknown) => void;
@@ -13,6 +14,7 @@ interface QueuedWork<T> {
 
 const queue: QueuedWork<unknown>[] = [];
 const activeChats = new Set<string>();
+const activeWorkIds = new Set<string>();
 const listeners = new Set<() => void>();
 let activeCount = 0;
 
@@ -24,7 +26,7 @@ export function subscribeBackgroundExecution(listener: () => void) {
 }
 
 export function getBackgroundExecutionSummary() {
-  return { active: activeCount, queued: queue.length, activeChatIds: [...activeChats] };
+  return { active: activeCount, queued: queue.length, activeChatIds: [...activeChats], activeWorkIds: [...activeWorkIds] };
 }
 
 function pump() {
@@ -38,10 +40,12 @@ function pump() {
       continue;
     }
     activeChats.add(item.chatId);
+    if (item.workId) activeWorkIds.add(item.workId);
     activeCount += 1;
     publish();
     void item.run().then(item.resolve, item.reject).finally(() => {
       activeChats.delete(item.chatId);
+      if (item.workId) activeWorkIds.delete(item.workId);
       activeCount -= 1;
       publish();
       pump();
@@ -50,11 +54,11 @@ function pump() {
   publish();
 }
 
-export function scheduleBackgroundExecution<T>(chatId: string, run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+export function scheduleBackgroundExecution<T>(chatId: string, run: () => Promise<T>, signal?: AbortSignal, workId?: string): Promise<T> {
   if (!chatId) return Promise.reject(new Error('后台任务缺少会话'));
   if (signal?.aborted) return Promise.reject(signal.reason || new Error('任务已取消'));
   return new Promise<T>((resolve, reject) => {
-    const item: QueuedWork<T> = { chatId, run, resolve, reject, signal };
+    const item: QueuedWork<T> = { chatId, workId, run, resolve, reject, signal };
     item.onAbort = () => {
       const index = queue.indexOf(item as QueuedWork<unknown>);
       if (index < 0) return;

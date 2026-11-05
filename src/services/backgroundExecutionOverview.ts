@@ -14,9 +14,9 @@ export interface BackgroundExecutionOverview {
 
 export function projectBackgroundExecutionOverview(
   runs: WorkflowSnapshot[],
-  activeChatIds: string[],
+  activeRunIds: string[],
 ): BackgroundExecutionOverview {
-  const activeChats = new Set(activeChatIds);
+  const activeRuns = new Set(activeRunIds);
   const overview: BackgroundExecutionOverview = { running: 0, queued: 0, interrupted: 0, blocked: 0, chatId: null };
   const relevant = runs.filter(({ run, tasks }) => run.status !== 'completed' && run.status !== 'cancelled'
     && tasks.some((task) => task.status !== 'completed' && task.status !== 'cancelled'));
@@ -25,13 +25,13 @@ export function projectBackgroundExecutionOverview(
       overview.blocked += 1;
     } else if (run.status === 'paused') {
       overview.interrupted += 1;
-    } else if (activeChats.has(run.chatId) && tasks.some((task) => task.status === 'running' || task.status === 'waiting_external')) {
+    } else if (activeRuns.has(run.id)) {
       overview.running += 1;
     } else {
       overview.queued += 1;
     }
   }
-  const first = relevant.find(({ run }) => activeChats.has(run.chatId)) || relevant[0];
+  const first = relevant.find(({ run }) => activeRuns.has(run.id)) || relevant[0];
   overview.chatId = first?.run.chatId || null;
   return overview;
 }
@@ -44,6 +44,6 @@ export async function loadBackgroundExecutionOverview() {
   ]);
   return projectBackgroundExecutionOverview(
     [...assistant, ...direct, ...team],
-    getBackgroundExecutionSummary().activeChatIds,
+    getBackgroundExecutionSummary().activeWorkIds,
   );
 }
