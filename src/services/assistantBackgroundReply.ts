@@ -7,6 +7,7 @@ import { useSettingsStore } from '../stores/useSettingsStore';
 import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, workflowRunLockName, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
 import { currentWorkflowScope } from './workflowRunRuntime';
 import { scheduleBackgroundExecution } from './backgroundExecutionScheduler';
+import { runWithConversationExecutionLock } from './conversationExecutionLock';
 
 interface AssistantReplyInput {
   chatId: string;
@@ -149,7 +150,8 @@ async function runAssistantBackgroundReply(runId: string, chatId: string, comman
   activeChatCounts.set(chatId, (activeChatCounts.get(chatId) || 0) + 1);
   publishActive();
   try {
-    const result = await scheduleBackgroundExecution(chatId, () => assistantRuntime.resume(runId, getWorkspaceSignal(), commandId), getWorkspaceSignal(), runId);
+    const scope = currentWorkflowScope();
+    const result = await scheduleBackgroundExecution(chatId, () => runWithConversationExecutionLock(scope, chatId, () => assistantRuntime.resume(runId, getWorkspaceSignal(), commandId)), getWorkspaceSignal(), runId);
     publishRun();
     return { snapshot: result, summary: summarizeWorkflowRun(result) };
   } finally {
