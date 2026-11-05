@@ -10,6 +10,7 @@ import { projectCurrentChatMessages, projectMergedChatMessages } from './current
 import { getWorkspaceSignal } from './workspaceLifecycle';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { scheduleBackgroundExecution } from './backgroundExecutionScheduler';
+import { runWithConversationExecutionLock } from './conversationExecutionLock';
 import { createWorkflowRunRuntime, currentWorkflowScope, indexedDbWorkflowRepository, summarizeWorkflowRun, workflowRunLockName, WorkflowPreflightError, type WorkflowSnapshot, type WorkflowTask } from './workflowRunRuntime';
 
 interface DirectReplyInput { chatId: string; userMessageId: string }
@@ -172,7 +173,7 @@ export async function resumeDirectBackgroundReply(runId: string) {
   const scope = currentWorkflowScope();
   active.add(runId); publish();
   try {
-    return await scheduleBackgroundExecution(run.run.chatId, () => navigator.locks.request(`pneumata-direct-chat-${scope}-${run.run.chatId}`, async () => {
+    return await scheduleBackgroundExecution(run.run.chatId, () => runWithConversationExecutionLock(scope, run.run.chatId, async () => {
       if (currentWorkflowScope() !== scope || getWorkspaceSignal().aborted) throw new Error('账号已切换，单聊任务已暂停');
       const current = await runtime.read(runId);
       if (!current) throw new Error('单聊任务不存在');

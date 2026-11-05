@@ -20,6 +20,7 @@ import { isGenerationCancelledError } from '../services/generationCancellation';
 import { runSessionLoop as runChatLoop } from '../services/sessionRunner';
 import { currentWorkflowScope } from '../services/workflowRunRuntime';
 import { readSessionLoopContinuation, writeSessionLoopContinuation } from '../services/sessionLoopContinuationStore';
+import { runWithConversationExecutionLock } from '../services/conversationExecutionLock';
 
 export type ConversationLoopStartBlockReason = 'direct_chat' | 'waiting_story_choice' | 'already_active';
 type ConversationLoopStartOptions = { ignoreReaderPositionOnce?: boolean; immediate?: boolean; allowDirect?: boolean };
@@ -137,9 +138,10 @@ export function useChatRunLoop(params: {
     const current = paramsRef.current;
     const startedChat = pendingStartChatByLoopTokenRef.current.get(loopId);
     const loopChat = startedChat || current.chat;
+    const chatId = current.chatId;
     const pendingTimer = pendingStartTimerByLoopTokenRef.current.get(loopId);
     if (pendingTimer) pendingStartTimerByLoopTokenRef.current.delete(loopId);
-    if (!loopChat || !current.chatId) {
+    if (!loopChat || !chatId) {
       pendingStartChatByLoopTokenRef.current.delete(loopId);
       return;
     }
@@ -163,16 +165,18 @@ export function useChatRunLoop(params: {
       }, 'debug', 'chat-run');
       if (abortController.signal.aborted) return;
       const continuationScope = currentWorkflowScope();
-      const continuation = await readSessionLoopContinuation(current.chatId, continuationScope);
-      if (abortController.signal.aborted || currentWorkflowScope() !== continuationScope) return;
-      await runChatLoop({
+      const executeLoop = async () => {
+        if (abortController.signal.aborted || currentWorkflowScope() !== continuationScope) return;
+        const continuation = await readSessionLoopContinuation(chatId, continuationScope);
+        if (abortController.signal.aborted || currentWorkflowScope() !== continuationScope) return;
+        await runChatLoop({
         loopId,
         continuation: continuation || undefined,
         onContinuation: async (next) => {
           if (abortController.signal.aborted || currentWorkflowScope() !== continuationScope) return;
-          await writeSessionLoopContinuation(current.chatId!, next, continuationScope);
+          await writeSessionLoopContinuation(chatId, next, continuationScope);
         },
-        chatId: current.chatId,
+        chatId,
         chat: loopChat,
         characters: current.activeMembers,
         api: current.aiProfiles,
@@ -424,7 +428,15 @@ export function useChatRunLoop(params: {
         getCooldownMap: () => useSchedulerStore.getState().lastSpeakTimestamps,
         resolveSessionEngine: loadSessionEngine,
         signal: abortController.signal,
-      });
+        });
+      };
+      if (typeof navigator !== 'undefined' && 'locks' in navigator && navigator.locks) {
+        await runWithConversationExecutionLock(continuationScope, chatId, executeLoop);
+      } else {
+        // Local HTTP development origins may lack Web Locks. Preserve the
+        // existing single-page runner; cross-tab execution is unavailable.
+        await executeLoop();
+      }
     } finally {
       const remaining = workTracker.clear(loopId);
       if (remaining && (remaining.turn || remaining.commit)) {
