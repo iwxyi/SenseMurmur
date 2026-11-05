@@ -11,6 +11,7 @@ import { attachMessageToActiveBranch } from './messageBranching';
 import type { Message } from '../types/message';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { readAuthSnapshot } from './authSnapshot';
+import { getWorkspaceSignal } from './workspaceLifecycle';
 
 interface TeamTaskInput {
   task: AgentTeamTask;
@@ -75,7 +76,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       return this.resume(runId);
     },
     async resume(runId: string) {
-      let snapshot = await runtime.resume(runId);
+      let snapshot = await runtime.resume(runId, getWorkspaceSignal());
       const planner = snapshot.tasks.find((task) => task.id === 'plan');
       if (planner?.status !== 'completed') return { snapshot, summary: summarizeWorkflowRun(snapshot) };
       const plan = validateAgentTeamPlan(planner.output);
@@ -91,7 +92,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         updatedAt: Date.now(),
       }));
       snapshot = await runtime.expandPlanOnce(runId, snapshot.run.planVersion, 'plan', additions);
-      snapshot = await runtime.resume(runId);
+      snapshot = await runtime.resume(runId, getWorkspaceSignal());
       if (snapshot.run.status !== 'completed' && snapshot.tasks.every((task) => task.status === 'completed')) snapshot = await runtime.closePlan(runId, snapshot.run.planVersion);
       return { snapshot, summary: summarizeWorkflowRun(snapshot) };
     },
@@ -179,7 +180,7 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
   try {
     const workflow = currentTeamWorkflow();
     const result = params.runId ? await workflow.resume(runId) : await workflow.start(runId, params.chatId, params.goal);
-    if (currentWorkflowScope() !== originalScope) throw new Error('账号已切换，团队交付已暂停');
+    if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队交付已暂停');
     if (result.snapshot.run.status === 'completed') await workflow.publish(runId);
     return result;
   } finally {
@@ -191,3 +192,30 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
 export function isAgentTeamRunActive(runId: string) { return activeTeamRuns.has(runId); }
 
 export function hasActiveAgentTeamRuns() { return activeTeamRuns.size > 0; }
+
+export async function recoverAgentTeamRuns() {
+  if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务恢复');
+  const storageScope = currentWorkflowScope();
+  const runs = await listAgentTeamRuns();
+  let changed = false;
+  for (const run of runs) {
+    if (run.run.status !== 'active' || activeTeamRuns.has(run.run.id)) continue;
+    const recovered = await navigator.locks.request(workflowRunLockName(storageScope, run.run.id), { ifAvailable: true }, async (lock) => {
+      if (!lock || currentWorkflowScope() !== storageScope) return false;
+      return indexedDbWorkflowRepository.transact(storageScope, run.run.id, (current) => {
+        if (!current || current.run.status !== 'active') return { snapshot: current || run, value: false };
+        const snapshot: WorkflowSnapshot = {
+          ...current,
+          run: { ...current.run, status: 'paused', generation: current.run.generation + 1, updatedAt: Date.now() },
+          tasks: current.tasks.map((task) => task.status === 'running'
+            ? { ...task, status: 'result_unknown', error: '程序关闭前的模型请求结果无法确认', updatedAt: Date.now() }
+            : task),
+        };
+        return { snapshot, value: true };
+      });
+    });
+    changed ||= recovered;
+  }
+  if (changed) notifyTeam();
+  return changed;
+}
