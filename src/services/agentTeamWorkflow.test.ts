@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { generateResponse } from './aiClient';
-import { createAgentTeamWorkflow } from './agentTeamWorkflow';
+import { createAgentTeamWorkflow, recoverAgentTeamRuns } from './agentTeamWorkflow';
+import { currentWorkflowScope, indexedDbWorkflowRepository } from './workflowRunRuntime';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
@@ -57,5 +58,25 @@ describe('agent team workflow', () => {
     expect(first.id).toBe(second.id);
     expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId).filter((item) => item.sourceMessageId === `team-delivery-${runId}`)).toHaveLength(1);
     expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.filter((item) => item.id === `team-delivery-${runId}`)).toHaveLength(1);
+  });
+
+  it('recovers a stopped run without resending an in-flight model request', async () => {
+    const runId = `team-${crypto.randomUUID()}`;
+    const scope = currentWorkflowScope();
+    const now = Date.now();
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({
+      snapshot: {
+        run: { id: runId, chatId: 'chat', goal: '写报告', status: 'active', generation: 1, planVersion: 1, planOpen: true, updatedAt: now },
+        tasks: [
+          { id: 'plan', runId, kind: 'team_plan', input: '写报告', dependsOn: [], status: 'running', attempt: 1, updatedAt: now },
+          { id: 'later', runId, kind: 'agent_text', input: {}, dependsOn: ['plan'], status: 'waiting_dependency', attempt: 0, updatedAt: now },
+        ],
+      }, value: undefined,
+    }));
+    expect(await recoverAgentTeamRuns()).toBe(true);
+    const saved = await indexedDbWorkflowRepository.read(scope, runId);
+    expect(saved?.run.status).toBe('paused');
+    expect(saved?.tasks.map((task) => task.status)).toEqual(['result_unknown', 'waiting_dependency']);
+    expect(generate).not.toHaveBeenCalled();
   });
 });
