@@ -914,6 +914,7 @@ export default function ChatDetailPage() {
   const [assistantRuns, setAssistantRuns] = useState<WorkflowSnapshot[]>([]);
   const directBackgroundRevision = useSyncExternalStore(subscribeDirectBackgroundReplies, getDirectBackgroundRevision, getDirectBackgroundRevision);
   const [directBackgroundRuns, setDirectBackgroundRuns] = useState<WorkflowSnapshot[]>([]);
+  const visibleDirectBackgroundRun = directBackgroundRuns.find((run) => run.run.status !== 'completed') || null;
   useEffect(() => {
     if (!id) { setDirectBackgroundRuns([]); return; }
     let cancelled = false;
@@ -4444,13 +4445,13 @@ export default function ChatDetailPage() {
           )}
         />
         {storyTailStatusBar}
-        {chat.type === 'direct' && directBackgroundRuns.some((run) => run.run.status !== 'completed') ? (
-          <Alert severity={directBackgroundRuns[0].tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed') ? 'warning' : 'info'} role="status" action={directBackgroundRuns[0].run.status === 'paused' && !directBackgroundRuns[0].tasks.some((task) => task.status === 'result_unknown') ? (
+        {chat.type === 'direct' && visibleDirectBackgroundRun ? (
+          <Alert severity={visibleDirectBackgroundRun.tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed') ? 'warning' : 'info'} role="status" action={visibleDirectBackgroundRun.run.status === 'paused' && !visibleDirectBackgroundRun.tasks.some((task) => task.status === 'result_unknown') ? (
             <Button size="small" color="inherit" onClick={() => {
-              void resumeDirectBackgroundReply(directBackgroundRuns[0].run.id).catch((error) => showErrorToast(error instanceof Error ? error.message : '继续单聊任务失败'));
+              void resumeDirectBackgroundReply(visibleDirectBackgroundRun.run.id).catch((error) => showErrorToast(error instanceof Error ? error.message : '继续单聊任务失败'));
             }}>继续</Button>
           ) : undefined} sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, left: 12, right: 12, zIndex: 5, '& .MuiAlert-message': { overflowWrap: 'anywhere' } }}>
-            {directBackgroundRuns[0].tasks[0]?.error || (isDirectBackgroundActive(chat.id) ? '正在回复，离开此页面后仍会继续' : directBackgroundRuns[0].run.status === 'paused' ? '单聊任务已暂停' : '单聊任务等待处理')}
+            {visibleDirectBackgroundRun.tasks[0]?.error || (isDirectBackgroundActive(chat.id) ? '正在回复，离开此页面后仍会继续' : visibleDirectBackgroundRun.run.status === 'paused' ? '单聊任务已暂停' : '单聊任务等待处理')}
           </Alert>
         ) : null}
         {isAssistantChat && agentEntitled ? (
