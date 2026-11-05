@@ -4437,8 +4437,8 @@ export default function ChatDetailPage() {
               const summary = summarizeWorkflowRun(selected);
               return <>
                 <Stack direction="row" spacing={1} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-                  <Typography variant="body2">{selected.run.status === 'completed' ? '已完成' : selected.run.status === 'paused' ? '已暂停' : '进行中'} · {summary.completed.length}/{selected.tasks.length} 步</Typography>
-                  {!isAgentTeamRunActive(selected.run.id) ? <Button size="small" onClick={() => { void runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id }).catch((error) => showErrorToast(error instanceof Error ? error.message : '恢复团队任务失败')); }}>{selected.run.status === 'completed' ? '检查交付' : '继续整个任务'}</Button> : null}
+                  <Typography variant="body2">{selected.run.status === 'completed' ? '已完成' : selected.run.status === 'failed' ? '失败' : selected.run.status === 'paused' ? '已暂停' : '进行中'} · {summary.completed.length}/{selected.tasks.length} 步</Typography>
+                  {!isAgentTeamRunActive(selected.run.id) && (selected.run.status === 'completed' || (!summary.blocked.length && selected.run.status !== 'failed')) ? <Button size="small" onClick={() => { void runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id }).catch((error) => showErrorToast(error instanceof Error ? error.message : '恢复团队任务失败')); }}>{selected.run.status === 'completed' ? '检查交付' : '继续整个任务'}</Button> : null}
                 </Stack>
                 <Stack direction="row" spacing={0.5} sx={{ overflowX: 'auto', mt: 0.75 }}>
                   <Chip size="small" clickable color={!selectedTeamTaskId ? 'primary' : 'default'} label="主 Agent" onClick={() => setSelectedTeamTaskId(null)} />
