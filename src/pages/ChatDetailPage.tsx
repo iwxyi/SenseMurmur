@@ -49,6 +49,7 @@ import { useMessageAnalysis } from '../hooks/useMessageAnalysis';
 import { useChatSurfaceActions } from '../hooks/useChatSurfaceActions';
 import { useReplyOperation } from '../hooks/useReplyOperation';
 import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, getAssistantBackgroundStreamingSnapshot, listAssistantBackgroundReplies, resumeAssistantBackgroundReply, subscribeAssistantBackgroundReplies, subscribeAssistantBackgroundRunChanges, subscribeAssistantBackgroundStreaming } from '../services/assistantBackgroundReply';
+import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
 import ChatBackground from '../components/chat/ChatBackground';
 import { getSyncableCharacterMemberIds } from '../services/pageSyncScopeContract';
 import SessionInfoCards from '../components/chat/SessionInfoCards';
@@ -907,15 +908,18 @@ export default function ChatDetailPage() {
   const assistantBackgroundRunRevision = useSyncExternalStore(subscribeAssistantBackgroundRunChanges, getAssistantBackgroundRunRevision, getAssistantBackgroundRunRevision);
   const [assistantBackgroundNotice, setAssistantBackgroundNotice] = useState<string | null>(null);
   const [assistantBackgroundResumeRunId, setAssistantBackgroundResumeRunId] = useState<string | null>(null);
+  const [assistantRuns, setAssistantRuns] = useState<WorkflowSnapshot[]>([]);
   useEffect(() => {
     if (!id) {
       setAssistantBackgroundNotice(null);
       setAssistantBackgroundResumeRunId(null);
+      setAssistantRuns([]);
       return;
     }
     let cancelled = false;
     void listAssistantBackgroundReplies(id).then((runs) => {
       if (cancelled) return;
+      setAssistantRuns(runs.sort((left, right) => right.run.updatedAt - left.run.updatedAt));
       const uncertain = runs.find((run) => run.tasks.some((task) => task.status === 'result_unknown'));
       const resumable = runs.find((run) => run.run.status === 'paused' && run.tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency') && !run.tasks.some((task) => task.status === 'result_unknown'));
       setAssistantBackgroundNotice(uncertain ? '上次助手请求已中断，结果与费用暂时无法确认。该请求不会自动重试。' : resumable ? '上次助手任务在发出请求前暂停，可继续执行。' : null);
@@ -4397,6 +4401,14 @@ export default function ChatDetailPage() {
           )}
         />
         {storyTailStatusBar}
+        {isAssistantChat && assistantRuns.length && (isAssistantBackgroundPending || assistantBackgroundNotice) ? (
+          <Box role="status" sx={{ position: 'absolute', top: { xs: 'calc(64px + env(safe-area-inset-top, 0px))', sm: 56 }, left: 0, right: 0, zIndex: 4, display: 'flex', gap: 0.75, px: { xs: 1.5, sm: 2.5 }, py: 0.75, overflowX: 'auto', bgcolor: 'background.paper', borderBottom: '1px solid', borderColor: 'divider' }}>
+            <Chip size="small" label={`助手任务 · ${assistantRuns[0].run.status === 'completed' ? '已完成' : assistantRuns[0].run.status === 'paused' ? '已暂停' : assistantRuns[0].tasks.some((task) => task.status === 'running') ? '执行中' : '等待中'}`} />
+            {assistantRuns[0].tasks.map((task, index) => (
+              <Chip key={task.id} size="small" variant="outlined" label={`步骤 ${index + 1} · ${task.status === 'completed' ? '完成' : task.status === 'result_unknown' ? '待核对' : task.status === 'failed' ? '失败' : task.status === 'running' ? '执行中' : task.status === 'waiting_external' ? '等待生成' : '排队中'}`} />
+            ))}
+          </Box>
+        ) : null}
         {isAssistantChat && assistantBackgroundNotice ? (
           <Alert severity="warning" role="status" action={assistantBackgroundResumeRunId ? (
             <Button size="small" color="inherit" onClick={() => {
@@ -4404,7 +4416,7 @@ export default function ChatDetailPage() {
                 showErrorToast(error instanceof Error ? error.message : '恢复助手任务失败');
               });
             }}>继续</Button>
-          ) : undefined} sx={{ position: 'absolute', top: { xs: 'calc(72px + env(safe-area-inset-top, 0px))', sm: 64 }, left: 12, right: 12, zIndex: 5, borderRadius: 2, '& .MuiAlert-message': { overflowWrap: 'anywhere' } }}>
+          ) : undefined} sx={{ position: 'absolute', top: { xs: 'calc(112px + env(safe-area-inset-top, 0px))', sm: 104 }, left: 12, right: 12, zIndex: 5, borderRadius: 2, '& .MuiAlert-message': { overflowWrap: 'anywhere' } }}>
             {assistantBackgroundNotice}
           </Alert>
         ) : null}
@@ -4452,7 +4464,9 @@ export default function ChatDetailPage() {
             hasMoreNewer={hasMoreNewer}
             loadingText={t('common.loading')}
             topHint="没有更早的消息"
-            topInset={isSplitDetailPane ? { xs: '68px', sm: '68px' } : { xs: 'calc(80px + env(safe-area-inset-top, 0px))', sm: '72px' }}
+            topInset={isAssistantChat && assistantRuns.length && (isAssistantBackgroundPending || assistantBackgroundNotice)
+              ? (isSplitDetailPane ? { xs: assistantBackgroundNotice ? '164px' : '104px', sm: assistantBackgroundNotice ? '164px' : '104px' } : { xs: assistantBackgroundNotice ? 'calc(176px + env(safe-area-inset-top, 0px))' : 'calc(116px + env(safe-area-inset-top, 0px))', sm: assistantBackgroundNotice ? '168px' : '108px' })
+              : isSplitDetailPane ? { xs: '68px', sm: '68px' } : { xs: 'calc(80px + env(safe-area-inset-top, 0px))', sm: '72px' }}
             bottomInset={messageListBottomInset}
             emptyContent={isStoryRoom && storyRoomOpeningPreview ? <StoryRoomOpeningEmptyState preview={storyRoomOpeningPreview} /> : undefined}
             privateConversation={chat.type !== 'group'}
