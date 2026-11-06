@@ -78,6 +78,29 @@ describe('agent team workflow', () => {
     expect(pending.snapshot.tasks.map((task) => task.status)).toEqual(['completed', 'completed', 'waiting_external']);
     expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining('恐龙从树林冲出，猫骑着飞行器逃离') }));
   });
+
+  it('continues a failed run after its video attachment was retried successfully', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `retried-video-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
+    generate.mockResolvedValueOnce(JSON.stringify({
+      summary: '制作短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '拍摄', acceptance: '成片', allowedTools: ['video_generation', 'text_generation'] }],
+      tasks: [
+        { id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: [], tool: 'video_generation', acceptance: '可播放' },
+        { id: 'summary', roleId: 'director', goal: '总结视频', dependsOn: ['shot'], tool: 'text_generation', acceptance: '有总结' },
+      ], finalAcceptance: '可播放',
+    })).mockResolvedValueOnce('视频已交付');
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'retried-task' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'failed', error: '上游暂时失败' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-retried-video-test');
+    expect((await workflow.start(runId, chatId, '制作短片')).snapshot.run.status).toBe('failed');
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'completed', output: '视频已生成并保存在当前聊天附件' });
+    const completed = await workflow.resume(runId);
+    expect(completed.snapshot.run.status).toBe('completed');
+    expect(completed.snapshot.tasks.map((task) => task.status)).toEqual(['completed', 'completed', 'completed']);
+    expect(queueAgentTeamVideo).toHaveBeenCalledTimes(1);
+  });
   it('does not start child tasks when pause was requested during planning', async () => {
     const runId = crypto.randomUUID();
     let finishPlan!: (value: string) => void;

@@ -206,6 +206,20 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       return this.resume(runId);
     },
     async resume(runId: string) {
+      const beforeResume = await runtime.read(runId);
+      if (beforeResume?.run.status === 'failed' && beforeResume.tasks.some((task) => task.kind === 'agent_video' && task.status === 'failed'
+        && inspectAgentTeamVideoAttachment(runId, task.id)?.status === 'completed')) {
+        await indexedDbWorkflowRepository.transact(scope(), runId, (current) => {
+          if (!current) throw new Error('团队任务记录不存在');
+          if (current.run.status !== 'failed') return { snapshot: current, value: undefined };
+          const tasks = current.tasks.map((task) => {
+            if (task.kind !== 'agent_video' || task.status !== 'failed') return task;
+            const result = inspectAgentTeamVideoAttachment(runId, task.id);
+            return result?.status === 'completed' ? { ...task, status: 'completed' as const, output: result.output, error: undefined, updatedAt: Date.now() } : task;
+          });
+          return { snapshot: { ...current, tasks, run: { ...current.run, status: tasks.some((task) => task.status === 'failed') ? 'failed' : 'paused', updatedAt: Date.now() } }, value: undefined };
+        });
+      }
       let snapshot = await runtime.resume(runId, getWorkspaceSignal());
       const planner = snapshot.tasks.find((task) => task.id === 'plan');
       if (planner?.status !== 'completed') return { snapshot, summary: summarizeWorkflowRun(snapshot) };
@@ -310,7 +324,7 @@ const activeTeamRuns = new Set<string>();
 let videoWakePending = false;
 const videoWakeKeys = new Set<string>();
 const deferredVideoWakeRuns = new Set<string>();
-function completedTeamVideoKeys(state: ReturnType<typeof useMessageStore.getState>) {
+function completedTeamVideoStatuses(state: ReturnType<typeof useMessageStore.getState>) {
   const latest = new Map<string, Message>();
   for (const message of [...state.messages, ...Object.values(state.messageWindowsByChatId).flatMap((window) => window.messages)]) {
     const team = message.metadata?.agentTeamMedia;
@@ -321,23 +335,22 @@ function completedTeamVideoKeys(state: ReturnType<typeof useMessageStore.getStat
     const previousUpdatedAt = Math.max(0, ...(previous?.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0));
     if (!previous || updatedAt > previousUpdatedAt || (updatedAt === previousUpdatedAt && Boolean(message.serverId) && !previous.serverId)) latest.set(key, message);
   }
-  const keys = new Set<string>();
-  for (const message of latest.values()) {
+  const statuses = new Map<string, 'ready' | 'failed'>();
+  for (const [key, message] of latest) {
     const team = message.metadata?.agentTeamMedia;
     if (!team || message.isDeleted) continue;
-    if (message.metadata?.attachments?.some((attachment) => attachment.kind === 'video' && (attachment.status === 'ready' || attachment.status === 'failed'))) {
-      keys.add(`${team.runId}:${team.taskId}`);
-    }
+    const status = message.metadata?.attachments?.find((attachment) => attachment.kind === 'video')?.status;
+    if (status === 'ready' || status === 'failed') statuses.set(key, status);
   }
-  return keys;
+  return statuses;
 }
 useMessageStore.subscribe((next, previous) => {
   if (next.messages === previous.messages && next.messageWindowsByChatId === previous.messageWindowsByChatId) return;
-  const previousCompleted = completedTeamVideoKeys(previous);
-  const newlyCompleted = completedTeamVideoKeys(next);
-  for (const key of previousCompleted) newlyCompleted.delete(key);
+  const previousCompleted = completedTeamVideoStatuses(previous);
+  const newlyCompleted = completedTeamVideoStatuses(next);
+  for (const [key, status] of previousCompleted) if (newlyCompleted.get(key) === status) newlyCompleted.delete(key);
   if (!newlyCompleted.size) return;
-  for (const key of newlyCompleted) videoWakeKeys.add(key);
+  for (const key of newlyCompleted.keys()) videoWakeKeys.add(key);
   if (videoWakePending) return;
   videoWakePending = true;
   queueMicrotask(() => {
@@ -346,9 +359,11 @@ useMessageStore.subscribe((next, previous) => {
     videoWakeKeys.clear();
     void listAgentTeamRuns().then((runs) => {
       for (const run of runs) {
-        if (run.run.status !== 'active') continue;
-        if (!run.tasks.some((task) => task.kind === 'agent_video' && (task.status === 'waiting_external' || task.status === 'running')
+        if (run.run.status !== 'active' && run.run.status !== 'failed') continue;
+        if (!run.tasks.some((task) => task.kind === 'agent_video' && (task.status === 'waiting_external' || task.status === 'running' || task.status === 'failed')
           && wakeKeys.has(`${task.runId}:${task.id}`))) continue;
+        if (run.run.status === 'failed' && !run.tasks.some((task) => task.kind === 'agent_video' && task.status === 'failed'
+          && inspectAgentTeamVideoAttachment(task.runId, task.id)?.status === 'completed')) continue;
         if (activeTeamRuns.has(run.run.id)) {
           deferredVideoWakeRuns.add(run.run.id);
           continue;
