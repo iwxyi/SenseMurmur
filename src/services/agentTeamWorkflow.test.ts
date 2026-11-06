@@ -390,6 +390,29 @@ describe('agent team workflow', () => {
     expect(generate).not.toHaveBeenCalled();
   });
 
+  it('preserves an interrupted review as unknown instead of evaluating or publishing it again', async () => {
+    const runId = `team-${crypto.randomUUID()}`;
+    const scope = currentWorkflowScope();
+    const now = Date.now();
+    const plan = { summary: '报告', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '成稿' }], finalAcceptance: '可阅读' };
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
+      run: { id: runId, chatId: 'chat', goal: '写报告', status: 'active', generation: 1, planVersion: 3, planOpen: true, autoReview: true, updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '写报告', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        { id: 'write', runId, kind: 'agent_text', input: { task: plan.tasks[0], role: plan.roles[0], goal: '写报告' }, output: '报告正文', dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
+        { id: 'review_1', runId, kind: 'team_review', input: { sourceTaskIds: ['write'] }, dependsOn: ['write'], status: 'running', attempt: 1, updatedAt: now },
+      ],
+    }, value: undefined }));
+    expect(await recoverAgentTeamRuns()).toBe(true);
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const resumed = await workflow.resume(runId);
+    expect(resumed.snapshot.run.status).toBe('active');
+    expect(resumed.snapshot.tasks.find((task) => task.id === 'review_1')?.status).toBe('result_unknown');
+    expect(resumed.summary.blocked.some((item) => item.taskId === 'review_1')).toBe(true);
+    expect(generate).not.toHaveBeenCalled();
+  });
+
   it('stores an instruction only for a paused unstarted child task and uses it on resume', async () => {
     const runId = `team-${crypto.randomUUID()}`;
     const plan = {
