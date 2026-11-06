@@ -4509,6 +4509,7 @@ export default function ChatDetailPage() {
         ) : null}
         {isAssistantChat && teamRuns.length ? <AssistantTeamWorkbench
           runs={teamRuns}
+          canRun={agentEntitled}
           isRunActive={isAgentTeamRunActive}
           onCreate={() => setTeamGoalOpen(true)}
           onInstruct={async (selected, task, instruction) => { await instructAgentTeamTask({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, instruction }); }}

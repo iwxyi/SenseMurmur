@@ -6,6 +6,7 @@ import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
 
 interface Props {
   runs: WorkflowSnapshot[];
+  canRun: boolean;
   isRunActive: (runId: string) => boolean;
   onResume: (run: WorkflowSnapshot) => void;
   onCreate: () => void;
@@ -41,7 +42,7 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate, onInstruct, onPause, onDelegate, onAbandonReview, onResumeAfterReviewRetry }: Props) {
+export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onCreate, onInstruct, onPause, onDelegate, onAbandonReview, onResumeAfterReviewRetry }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -66,11 +67,11 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
   const childTasks = run.tasks.filter((item) => item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_video');
   const blocked = summary.blocked.length > 0;
   const running = isRunActive(run.run.id);
-  const editable = Boolean(task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_video') && task.attempt === 0
+  const editable = Boolean(canRun && task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_video') && task.attempt === 0
     && (task.status === 'queued' || task.status === 'waiting_dependency'));
   const unknownReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'result_unknown');
   const failedReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'failed');
-  const canAddRevision = (run.run.status === 'paused' || run.run.status === 'completed')
+  const canAddRevision = canRun && (run.run.status === 'paused' || run.run.status === 'completed')
     && run.tasks.length < 24
     && !run.tasks.some((item) => item.status === 'running' || item.status === 'result_unknown' || item.status === 'failed'
       || (item.kind === 'team_plan_revision' && item.status !== 'completed'));
@@ -120,7 +121,7 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
           {plan?.finalAcceptance && <Typography variant="body2"><strong>最终验收</strong> {plan.finalAcceptance}</Typography>}
           {reviewResult && typeof reviewResult.reason === 'string' && <Typography variant="body2" color={reviewResult.complete === true ? 'text.secondary' : 'warning.main'}><strong>主 Agent 验收</strong> {reviewResult.reason}</Typography>}
           {summary.blocked.length > 0 && <Typography variant="body2" color="warning.main"><strong>需要处理</strong> {summary.blocked.map((item) => item.reason).join('；')}</Typography>}
-          {unknownReview && run.run.status === 'paused' && <Box sx={{ display: 'grid', gap: 0.75 }}>
+          {unknownReview && canRun && run.run.status === 'paused' && <Box sx={{ display: 'grid', gap: 0.75 }}>
             <Typography variant="body2" color="text.secondary">上次验收请求的结果无法核对。放弃本次验收后，仍需追加明确任务才能继续；原结果会保留为未知记录。</Typography>
             {reviewActionError && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
             <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
@@ -130,7 +131,7 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
               }).finally(() => setSavingReviewAction(false));
             }}>放弃本次验收，改由我指定下一步</Button>
           </Box>}
-          {failedReview && run.run.status === 'failed' && <Box sx={{ display: 'grid', gap: 0.75 }}>
+          {failedReview && canRun && run.run.status === 'failed' && <Box sx={{ display: 'grid', gap: 0.75 }}>
             <Typography variant="body2" color="text.secondary">本次验收已明确失败。修正模型或要求后，可以只重试主 Agent 验收；之前完成的任务会保留。</Typography>
             {reviewActionError && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
             <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
@@ -153,9 +154,9 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
         </Box>}
       </DialogContent>
       <DialogActions>
-        <Button onClick={() => { setOpen(false); onCreate(); }}>新建团队任务</Button>
-        {running && !run.run.pauseRequested && <Button onClick={() => { void onPause(run).then(() => setPauseError(null)).catch((error: unknown) => setPauseError(error instanceof Error ? error.message : '暂停任务失败')); }}>当前步骤完成后暂停</Button>}
-        {!running && ((!blocked && run.run.status !== 'failed') || run.tasks.some((item) => (item.kind === 'agent_video' || item.kind === 'agent_image') && (item.status === 'failed' || item.status === 'result_unknown'))) && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : blocked ? '核对媒体结果' : '继续整个任务'}</Button>}
+        {canRun && <Button onClick={() => { setOpen(false); onCreate(); }}>新建团队任务</Button>}
+        {canRun && running && !run.run.pauseRequested && <Button onClick={() => { void onPause(run).then(() => setPauseError(null)).catch((error: unknown) => setPauseError(error instanceof Error ? error.message : '暂停任务失败')); }}>当前步骤完成后暂停</Button>}
+        {canRun && !running && ((!blocked && run.run.status !== 'failed') || run.tasks.some((item) => (item.kind === 'agent_video' || item.kind === 'agent_image') && (item.status === 'failed' || item.status === 'result_unknown'))) && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : blocked ? '核对媒体结果' : '继续整个任务'}</Button>}
         <Button onClick={() => setOpen(false)}>关闭</Button>
       </DialogActions>
     </Dialog>
