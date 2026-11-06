@@ -256,6 +256,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const hasReviewBlock = current.tasks.some((task) => task.id === 'review_needs_user' && task.status === 'waiting_user');
         if (current.tasks.length - (hasReviewBlock ? 1 : 0) >= 24) throw new Error('团队任务规模超出限制');
         if (current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown' || task.status === 'failed')) throw new Error('请先处理未完成或待核对的步骤');
+        if (current.tasks.some((task) => task.kind === 'team_plan_revision' && task.status !== 'completed')) throw new Error('请先完成已追加的团队任务');
         const sourceTaskIds = current.tasks.filter((task) => task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_video').map((task) => task.id);
         if (!sourceTaskIds.length) throw new Error('团队规划尚未完成');
         const revisionCount = current.tasks.filter((task) => task.kind === 'team_plan_revision').length;

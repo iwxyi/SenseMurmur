@@ -432,6 +432,7 @@ describe('agent team workflow', () => {
     await expect(workflow.abandonUnknownReview(runId, 'review_1', paused!.run.planVersion)).rejects.toThrow('计划已更新');
     const continued = await workflow.addRevisionRequest(runId, handled.run.planVersion, '按新要求完成报告');
     expect(continued.tasks.some((task) => task.id === 'review_needs_user')).toBe(false);
+    await expect(workflow.addRevisionRequest(runId, continued.run.planVersion, '重复追加')).rejects.toThrow('请先完成已追加');
     generate.mockResolvedValueOnce(JSON.stringify({ ...plan, tasks: [{ ...plan.tasks[0], id: 'followup', goal: '按新要求完成报告' }] })).mockResolvedValueOnce('新报告正文');
     const delivered = await workflow.resume(runId);
     expect(delivered.snapshot.run.status).toBe('completed');
