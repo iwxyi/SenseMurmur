@@ -71,13 +71,13 @@ export async function queueAgentTeamImage(params: { runId: string; taskId: strin
   ]);
   const chat = useChatStore.getState().chats.find((item) => item.id === params.chatId && item.type === 'assistant' && item.deletedAt == null);
   if (!chat) throw new WorkflowPreflightError('助手会话已删除');
-  if (!getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image')) throw new WorkflowPreflightError('图片模型未配置');
   if (params.signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
   const existing = teamImageMessage(params.runId, params.taskId);
   const prior = inspectAgentTeamImageAttachment(params.runId, params.taskId);
   if (prior?.status === 'completed') return { output: prior.output };
   if (prior?.status === 'failed') throw new WorkflowPreflightError(prior.error);
   if (existing && prior?.status !== 'queued') throw new Error('图片任务已开始提交，但结果尚未确认，请核对后继续');
+  if (!getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image')) throw new WorkflowPreflightError('图片模型未配置');
   const now = Date.now();
   const state = useMessageStore.getState();
   const known = [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])];

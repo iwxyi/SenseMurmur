@@ -42,6 +42,7 @@ describe('agent team image task', () => {
 
   it('does not resubmit an image whose upstream request started before interruption', async () => {
     useMessageStore.setState({ messages: [imageMessage('generating')] });
+    useSettingsStore.setState({ aiProfiles: [] });
     await expect(queueAgentTeamImage({ runId: 'run', taskId: 'shot', chatId: 'team-image-chat', prompt: '森林场景图', signal: new AbortController().signal }))
       .rejects.toThrow('结果尚未确认');
     expect(processRichMessageMedia).not.toHaveBeenCalled();
