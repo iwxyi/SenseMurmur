@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { generateResponse, listAvailableModels } from './aiClient';
 import { createAgentTeamWorkflow, recoverAgentTeamRuns } from './agentTeamWorkflow';
-import { currentWorkflowScope, indexedDbWorkflowRepository } from './workflowRunRuntime';
+import { currentWorkflowScope, indexedDbWorkflowRepository, type WorkflowSnapshot } from './workflowRunRuntime';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
@@ -59,6 +59,33 @@ describe('agent team workflow', () => {
     expect(finished.snapshot.tasks.filter((task) => task.kind === 'team_review')).toHaveLength(2);
     await workflow.resume(runId);
     expect(generate).toHaveBeenCalledTimes(6);
+  });
+  it('resumes an already expanded automatic plan near the task limit without blocking it again', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `auto-limit-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
+    const basePlan = { summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '生成视频', method: '生成', acceptance: '成片', allowedTools: ['video_generation'] }],
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成短片', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' };
+    const extraPlan = { summary: '补充', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'note', roleId: 'writer', goal: '补充说明', dependsOn: [], acceptance: '有说明' }], finalAcceptance: '完整' };
+    const now = Date.now();
+    const tasks: WorkflowSnapshot['tasks'] = [
+      { id: 'plan', runId, kind: 'team_plan', input: '短片', output: basePlan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+      { id: 'shot', runId, kind: 'agent_video', input: { task: basePlan.tasks[0], role: basePlan.roles[0], goal: '短片' }, output: '视频已生成', dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
+      { id: 'review_1', runId, kind: 'team_review', input: { sourceTaskIds: ['shot'] }, output: { complete: false, reason: '缺少说明', nextRequest: '补充说明' }, dependsOn: ['shot'], status: 'completed', attempt: 1, updatedAt: now },
+      { id: 'auto_delegate_1', runId, kind: 'team_plan_revision', input: { request: '补充说明', sourceTaskIds: ['shot'] }, output: extraPlan, dependsOn: ['review_1', 'shot'], status: 'completed', attempt: 1, updatedAt: now },
+      { id: 'auto_delegate_1_note', runId, kind: 'agent_text', input: { task: extraPlan.tasks[0], role: extraPlan.roles[0], goal: '短片', sourcePlanTaskId: 'auto_delegate_1', contextTaskIds: ['shot'] }, dependsOn: ['auto_delegate_1', 'shot'], status: 'completed', output: '说明完成', attempt: 1, updatedAt: now },
+      ...Array.from({ length: 18 }, (_, index): WorkflowSnapshot['tasks'][number] => ({ id: `history_${index}`, runId, kind: 'agent_text', input: {}, dependsOn: [], status: 'completed', output: '历史记录', attempt: 1, updatedAt: now })),
+    ];
+    const scope = 'team-auto-limit-resume-test';
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: { run: { id: runId, chatId, goal: '短片', status: 'paused', generation: 1, planVersion: 6, planOpen: true, autoReview: true, updatedAt: now }, tasks }, value: undefined }));
+    generate.mockResolvedValueOnce(JSON.stringify({ complete: true, reason: '已完成' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const result = await workflow.resume(runId);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks.some((task) => task.id === 'review_needs_user')).toBe(false);
+    expect(result.snapshot.tasks.find((task) => task.id === 'review_2')?.status).toBe('completed');
   });
   it('reports malformed completed review output as a definite failure', async () => {
     const runId = crypto.randomUUID();

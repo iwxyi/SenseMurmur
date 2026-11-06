@@ -452,7 +452,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const revision = snapshot.tasks.find((task) => task.id === revisionId);
           if (revision?.status !== 'completed') break;
           const delegated = validateAgentTeamPlan(revision.output);
-          if (snapshot.tasks.length + delegated.tasks.length > 23) {
+          const alreadyExpanded = snapshot.tasks.some((task) => task.id === delegatedTaskId(revisionId, delegated.tasks[0]?.id || ''));
+          if (!alreadyExpanded && snapshot.tasks.length + delegated.tasks.length > 23) {
             snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '新增任务超过团队规模上限，请缩小目标后追加指示。'));
             break;
           }
