@@ -189,19 +189,25 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       }
       if (selectedTool === 'video_generation') {
         const existingVideo = inspectAgentTeamVideoAttachment(task.runId, task.id);
-        const hasImageDependency = input.task.dependsOn.some((id) => {
+        const upstreamTaskIds = new Set<string>();
+        const collectUpstream = (id: string) => {
           const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
-          return snapshot.tasks.find((item) => item.id === dependencyId)?.kind === 'agent_image';
-        });
+          if (upstreamTaskIds.has(dependencyId)) return;
+          const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
+          if (!dependency) throw new WorkflowPreflightError('视频的上游素材尚未就绪');
+          upstreamTaskIds.add(dependencyId);
+          const dependencyInput = isTeamTaskInput(dependency.input) ? dependency.input : null;
+          dependencyInput?.task.dependsOn.forEach(collectUpstream);
+        };
+        input.task.dependsOn.forEach(collectUpstream);
+        const imageTaskIds = [...upstreamTaskIds].filter((id) => snapshot.tasks.find((item) => item.id === id)?.kind === 'agent_image');
+        const hasImageDependency = imageTaskIds.length > 0;
         if (hasImageDependency && (!existingVideo || existingVideo.status === 'queued')) {
           const capabilities = await teamMediaCapabilities();
           if (!capabilities.videoGeneration) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
           if (!capabilities.videoReferenceImages) throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换支持参考图的视频模型后继续');
         }
-        const referenceImages = input.task.dependsOn.flatMap((id) => {
-          const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
-          const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
-          if (dependency?.kind !== 'agent_image') return [];
+        const referenceImages = imageTaskIds.flatMap((dependencyId) => {
           const reference = teamImageReference(task.runId, dependencyId);
           if (!reference) throw new WorkflowPreflightError('参考图片文件尚未就绪');
           return [reference];

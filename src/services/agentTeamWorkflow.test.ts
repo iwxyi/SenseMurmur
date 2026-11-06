@@ -253,6 +253,29 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks.map((task) => task.status)).toEqual(['completed', 'completed', 'waiting_external']);
     expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ referenceImages: [{ url: 'https://example.test/scene.png', mimeType: 'image/png', label: '场景图' }] }));
   });
+  it('passes an image reference through an intermediate script dependency', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `indirect-image-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true },
+      { id: 'video', name: '视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true },
+    ] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '先画后拍', acceptance: '成片', allowedTools: ['image_generation', 'text_generation', 'video_generation'] }],
+      tasks: [
+        { id: 'scene', roleId: 'director', goal: '场景图', dependsOn: [], tool: 'image_generation', acceptance: '有图片' },
+        { id: 'script', roleId: 'director', goal: '写镜头脚本', dependsOn: ['scene'], tool: 'text_generation', acceptance: '有脚本' },
+        { id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: ['script'], tool: 'video_generation', acceptance: '可播放' },
+      ], finalAcceptance: '视频可播放' })).mockResolvedValueOnce('镜头脚本');
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '场景图已保存' });
+    vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/scene.png', mimeType: 'image/png', label: '场景图' });
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'video-task' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'video-task' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-indirect-image-test');
+    const result = await workflow.start(runId, chatId, '先画场景再生成视频');
+    expect(result.snapshot.tasks.find((task) => task.id === 'shot')?.status).toBe('waiting_external');
+    expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ referenceImages: [{ url: '/uploads/media/scene.png', mimeType: 'image/png', label: '场景图' }] }));
+  });
   it('waits for a submitted video and runs dependent writing only after the attachment is ready', async () => {
     const runId = crypto.randomUUID();
     const chatId = `video-chat-${runId}`;
