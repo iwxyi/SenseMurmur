@@ -121,7 +121,7 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
       <DialogActions>
         <Button onClick={() => { setOpen(false); onCreate(); }}>新建团队任务</Button>
         {running && !run.run.pauseRequested && <Button onClick={() => { void onPause(run).then(() => setPauseError(null)).catch((error: unknown) => setPauseError(error instanceof Error ? error.message : '暂停任务失败')); }}>当前步骤完成后暂停</Button>}
-        {!running && ((!blocked && run.run.status !== 'failed') || (run.run.status === 'failed' && run.tasks.some((item) => (item.kind === 'agent_video' || item.kind === 'agent_image') && item.status === 'failed'))) && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : run.run.status === 'failed' ? '核对媒体重试结果' : '继续整个任务'}</Button>}
+        {!running && ((!blocked && run.run.status !== 'failed') || run.tasks.some((item) => (item.kind === 'agent_video' || item.kind === 'agent_image') && (item.status === 'failed' || item.status === 'result_unknown'))) && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : blocked ? '核对媒体结果' : '继续整个任务'}</Button>}
         <Button onClick={() => setOpen(false)}>关闭</Button>
       </DialogActions>
     </Dialog>

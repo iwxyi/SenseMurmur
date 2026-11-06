@@ -132,6 +132,27 @@ describe('agent team workflow', () => {
     expect(completed.snapshot.tasks.map((task) => task.status)).toEqual(['completed', 'completed', 'completed']);
     expect(queueAgentTeamVideo).toHaveBeenCalledTimes(1);
   });
+
+  it('reconciles an unknown video result from its saved attachment before continuing', async () => {
+    const runId = `team-${crypto.randomUUID()}`;
+    const scope = 'team-unknown-video-test';
+    const now = Date.now();
+    const plan = { summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '拍摄', acceptance: '成片', allowedTools: ['video_generation'] }],
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '成片' };
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
+      run: { id: runId, chatId: 'chat', goal: '生成短片', status: 'paused', generation: 1, planVersion: 1, planOpen: false, updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '生成短片', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        { id: 'shot', runId, kind: 'agent_video', input: { task: plan.tasks[0], role: plan.roles[0], goal: '生成短片' }, dependsOn: ['plan'], status: 'result_unknown', attempt: 1, updatedAt: now },
+      ],
+    }, value: undefined }));
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'completed', output: '视频已生成' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const result = await workflow.resume(runId);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks[1].status).toBe('completed');
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+  });
   it('does not start child tasks when pause was requested during planning', async () => {
     const runId = crypto.randomUUID();
     let finishPlan!: (value: string) => void;

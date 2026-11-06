@@ -232,13 +232,12 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
     },
     async resume(runId: string) {
       const beforeResume = await runtime.read(runId);
-      if (beforeResume?.run.status === 'failed' && beforeResume.tasks.some((task) => task.status === 'failed'
+      if (beforeResume && beforeResume.tasks.some((task) => (task.status === 'failed' || task.status === 'result_unknown')
         && (task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(runId, task.id)?.status : task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(runId, task.id)?.status : null) === 'completed')) {
         await indexedDbWorkflowRepository.transact(scope(), runId, (current) => {
           if (!current) throw new Error('团队任务记录不存在');
-          if (current.run.status !== 'failed') return { snapshot: current, value: undefined };
           const tasks = current.tasks.map((task) => {
-            if ((task.kind !== 'agent_video' && task.kind !== 'agent_image') || task.status !== 'failed') return task;
+            if ((task.kind !== 'agent_video' && task.kind !== 'agent_image') || (task.status !== 'failed' && task.status !== 'result_unknown')) return task;
             const result = task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(runId, task.id) : inspectAgentTeamImageAttachment(runId, task.id);
             return result?.status === 'completed' ? { ...task, status: 'completed' as const, output: result.output, error: undefined, updatedAt: Date.now() } : task;
           });
@@ -385,9 +384,9 @@ useMessageStore.subscribe((next, previous) => {
     void listAgentTeamRuns().then((runs) => {
       for (const run of runs) {
         if (run.run.status !== 'active' && run.run.status !== 'failed') continue;
-        if (!run.tasks.some((task) => (task.kind === 'agent_video' || task.kind === 'agent_image') && (task.status === 'waiting_external' || task.status === 'running' || task.status === 'failed')
+        if (!run.tasks.some((task) => (task.kind === 'agent_video' || task.kind === 'agent_image') && (task.status === 'waiting_external' || task.status === 'running' || task.status === 'failed' || task.status === 'result_unknown')
           && wakeKeys.has(`${task.runId}:${task.id}`))) continue;
-        if (run.run.status === 'failed' && !run.tasks.some((task) => task.status === 'failed'
+        if (run.run.status === 'failed' && !run.tasks.some((task) => (task.status === 'failed' || task.status === 'result_unknown')
           && (task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(task.runId, task.id)?.status : task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(task.runId, task.id)?.status : null) === 'completed')) continue;
         if (activeTeamRuns.has(run.run.id)) {
           deferredMediaWakeRuns.add(run.run.id);
