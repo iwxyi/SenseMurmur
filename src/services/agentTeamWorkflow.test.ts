@@ -58,6 +58,26 @@ describe('agent team workflow', () => {
     expect(queueAgentTeamVideo).toHaveBeenCalledTimes(1);
     expect(generate.mock.calls[1][2][0].content).toContain('视频已生成');
   });
+
+  it('passes a completed script into the video prompt', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `script-video-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
+    generate.mockResolvedValueOnce(JSON.stringify({
+      summary: '制作短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '按脚本拍摄', acceptance: '可播放', allowedTools: ['text_generation', 'video_generation'] }],
+      tasks: [
+        { id: 'script', roleId: 'director', goal: '写追逐脚本', dependsOn: [], tool: 'text_generation', acceptance: '脚本完成' },
+        { id: 'shot', roleId: 'director', goal: '生成追逐视频', dependsOn: ['script'], tool: 'video_generation', acceptance: '视频可播放' },
+      ], finalAcceptance: '成片',
+    })).mockResolvedValueOnce('恐龙从树林冲出，猫骑着飞行器逃离');
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'task-script' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'task-script' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-script-video-test');
+    const pending = await workflow.start(runId, chatId, '制作追逐短片');
+    expect(pending.snapshot.tasks.map((task) => task.status)).toEqual(['completed', 'completed', 'waiting_external']);
+    expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining('恐龙从树林冲出，猫骑着飞行器逃离') }));
+  });
   it('does not start child tasks when pause was requested during planning', async () => {
     const runId = crypto.randomUUID();
     let finishPlan!: (value: string) => void;
