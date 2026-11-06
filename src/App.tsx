@@ -371,6 +371,9 @@ function DataLoader({ children }: { children: React.ReactNode }) {
       void import('./services/agentTeamWorkflow').then(({ recoverAgentTeamRuns }) => recoverAgentTeamRuns()).catch((error) => {
         console.error('[agent-team:recovery-failed]', error);
       });
+      void import('./services/backgroundVideoRecovery').then(({ recoverBackgroundVideoTasks }) => recoverBackgroundVideoTasks()).catch((error) => {
+        console.error('[video-task:recovery-failed]', error);
+      });
     }
   }, [authMode, isAdminRoute, isLoggedIn, isWorkspaceReady, loadSettings]);
 
