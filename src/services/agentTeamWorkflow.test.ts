@@ -57,6 +57,7 @@ describe('agent team workflow', () => {
     expect(finished.snapshot.run.status).toBe('completed');
     expect(finished.snapshot.tasks.find((task) => task.id === 'auto_delegate_1_report')?.output).toBe('完整报告');
     expect(finished.snapshot.tasks.filter((task) => task.kind === 'team_review')).toHaveLength(2);
+    expect(generate.mock.calls[2][2][0].content).toContain('最终验收标准：报告可读');
     await workflow.resume(runId);
     expect(generate).toHaveBeenCalledTimes(6);
   });
