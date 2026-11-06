@@ -99,6 +99,38 @@ describe('AI direct background reply', () => {
     expect(runLoop).not.toHaveBeenCalled();
   });
 
+  it('reconciles a saved reply after the run was marked uncertain', async () => {
+    const { chatId, source } = setup();
+    const runId = aiDirectReplyRunId(chatId, source.id);
+    const replyId = crypto.randomUUID();
+    useMessageStore.getState().upsertMessage({ ...source, id: replyId, type: 'ai', senderId: 'a', senderName: 'a', content: '已保存', timestamp: source.timestamp + 1,
+      metadata: { directReplyToUserMessageId: source.id } });
+    await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, () => ({ snapshot: {
+      run: { id: runId, chatId, goal: 'AI 私聊回复', status: 'paused', generation: 2, planVersion: 1, updatedAt: Date.now() },
+      tasks: [{ id: source.id, runId, kind: 'ai_direct_reply', input: { chatId, userMessageId: source.id }, dependsOn: [], status: 'result_unknown', attempt: 1, updatedAt: Date.now() }],
+    }, value: undefined }));
+    await recoverAiDirectBackgroundReplies();
+    const restored = (await listAiDirectBackgroundReplies(chatId))[0];
+    expect(restored.run.status).toBe('completed');
+    expect(restored.tasks[0]).toMatchObject({ status: 'completed', output: replyId });
+    expect(runLoop).not.toHaveBeenCalled();
+  });
+
+  it('does not complete an unstarted task from a matching saved message', async () => {
+    const { chatId, source } = setup();
+    const runId = aiDirectReplyRunId(chatId, source.id);
+    useMessageStore.getState().upsertMessage({ ...source, id: crypto.randomUUID(), type: 'ai', senderId: 'a', senderName: 'a', content: '已有消息', timestamp: source.timestamp + 1,
+      metadata: { directReplyToUserMessageId: source.id } });
+    await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, () => ({ snapshot: {
+      run: { id: runId, chatId, goal: 'AI 私聊回复', status: 'active', generation: 0, planVersion: 1, updatedAt: Date.now() },
+      tasks: [{ id: source.id, runId, kind: 'ai_direct_reply', input: { chatId, userMessageId: source.id }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: Date.now() }],
+    }, value: undefined }));
+    await recoverAiDirectBackgroundReplies();
+    const restored = (await listAiDirectBackgroundReplies(chatId))[0];
+    expect(restored.run.status).toBe('paused');
+    expect(restored.tasks[0].status).toBe('queued');
+  });
+
   it('does not mark an interrupted multi-bubble reply complete from its first bubble', async () => {
     const { chatId, source } = setup();
     const runId = aiDirectReplyRunId(chatId, source.id);

@@ -142,6 +142,31 @@ export function isAiDirectBackgroundActive(chatId: string) { return [...active].
 export async function listAiDirectBackgroundReplies(chatId?: string) {
   return (await runtime.list()).filter((item) => item.tasks[0]?.kind === 'ai_direct_reply' && (!chatId || item.run.chatId === chatId));
 }
+async function reconcileCommittedAiDirectReply(runId: string) {
+  const scope = currentWorkflowScope();
+  await Promise.all([
+    useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
+    useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
+  ]);
+  const reconciled = await navigator.locks.request(workflowRunLockName(scope, runId), { ifAvailable: true }, async (lock) => {
+    if (!lock || currentWorkflowScope() !== scope) return false;
+    const run = await indexedDbWorkflowRepository.read(scope, runId);
+    const task = run?.tasks[0];
+    if (!run || !task || run.tasks.length !== 1 || task.kind !== 'ai_direct_reply' || task.attempt < 1 || run.run.status === 'completed') return false;
+    const chat = useChatStore.getState().chats.find((item) => item.id === run.run.chatId && item.type === 'ai_direct' && item.deletedAt == null);
+    const reply = chat ? committedReply(chat.id, task.id) : null;
+    if (!reply) return false;
+    return indexedDbWorkflowRepository.transact(scope, runId, (current) => {
+      if (!current || current.run.status === 'completed' || current.tasks[0]?.id !== task.id) return { snapshot: current || run, value: false };
+      const snapshot: WorkflowSnapshot = { ...current,
+        run: { ...current.run, status: 'completed', generation: current.run.generation + 1, updatedAt: Date.now() },
+        tasks: [{ ...current.tasks[0], status: 'completed', output: reply.id, error: undefined, updatedAt: Date.now() }] };
+      return { snapshot, value: true };
+    });
+  });
+  if (reconciled) publish();
+  return reconciled;
+}
 export async function startAiDirectBackgroundReply(chatId: string, userMessageId: string) {
   const runId = aiDirectReplyRunId(chatId, userMessageId);
   if (!await runtime.read(runId)) {
@@ -155,6 +180,7 @@ export async function startAiDirectBackgroundReply(chatId: string, userMessageId
 }
 export async function resumeAiDirectBackgroundReply(runId: string) {
   if (!navigator.locks?.request) throw new Error('此设备不支持安全的 AI 私聊任务恢复');
+  if (!active.has(runId)) await reconcileCommittedAiDirectReply(runId);
   const run = await runtime.read(runId);
   if (!run) throw new Error('AI 私聊任务不存在');
   if (run.run.status === 'completed' || run.tasks.some((task) => task.status === 'result_unknown')) return run;
@@ -176,16 +202,17 @@ export async function recoverAiDirectBackgroundReplies() {
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
   ]);
   for (const item of await listAiDirectBackgroundReplies()) {
-    if (item.run.status !== 'active' || active.has(item.run.id)) continue;
+    if (item.run.status === 'completed' || active.has(item.run.id)) continue;
+    if (await reconcileCommittedAiDirectReply(item.run.id)) continue;
+    if (item.run.status !== 'active') continue;
     await navigator.locks.request(workflowRunLockName(scope, item.run.id), { ifAvailable: true }, async (lock) => {
       if (!lock || currentWorkflowScope() !== scope) return;
-      const reply = committedReply(item.run.chatId, item.tasks[0]?.id);
       await indexedDbWorkflowRepository.transact(scope, item.run.id, (current) => {
         if (!current || current.run.status !== 'active') return { snapshot: current || item, value: undefined };
         const snapshot: WorkflowSnapshot = { ...current,
-          run: { ...current.run, status: reply ? 'completed' : 'paused', generation: current.run.generation + 1, updatedAt: Date.now() },
-          tasks: current.tasks.map((task) => reply ? { ...task, status: 'completed', output: reply.id, updatedAt: Date.now() }
-            : task.status === 'running' ? { ...task, status: 'result_unknown', error: '程序关闭前的回复结果无法确认', updatedAt: Date.now() } : task) };
+          run: { ...current.run, status: 'paused', generation: current.run.generation + 1, updatedAt: Date.now() },
+          tasks: current.tasks.map((task) => task.status === 'running'
+            ? { ...task, status: 'result_unknown', error: '程序关闭前的回复结果无法确认', updatedAt: Date.now() } : task) };
         return { snapshot, value: undefined };
       });
     });
