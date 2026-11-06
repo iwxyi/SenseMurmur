@@ -78,7 +78,7 @@ export interface WorkflowTaskResult {
 export interface WorkflowExecutor {
   execute(task: WorkflowTask, signal: AbortSignal): Promise<WorkflowTaskResult>;
   inspectExternal?(task: WorkflowTask, signal: AbortSignal): Promise<{ status: 'pending' | 'completed' | 'failed'; output?: unknown; error?: string }>;
-  reconcileInterrupted?(task: WorkflowTask): Promise<{ status: 'waiting_external' | 'completed' | 'failed'; externalTaskId?: string; output?: unknown; error?: string } | null>;
+  reconcileInterrupted?(task: WorkflowTask): Promise<{ status: 'queued' | 'waiting_external' | 'completed' | 'failed'; externalTaskId?: string; output?: unknown; error?: string } | null>;
 }
 
 export class WorkflowPreflightError extends Error {

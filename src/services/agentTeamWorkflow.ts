@@ -1,4 +1,4 @@
-import type { APIConfig } from '../types/settings';
+import { getUsablePreferredAIProfile, type APIConfig } from '../types/settings';
 import { generateResponse } from './aiClient';
 import { planAgentTeam, validateAgentTeamPlan, type AgentTeamPlan, type AgentTeamTask } from './agentTeamPlan';
 import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
@@ -16,6 +16,7 @@ import { scheduleBackgroundExecution } from './backgroundExecutionScheduler';
 import { runWithConversationExecutionLock } from './conversationExecutionLock';
 import { api as appApi } from './api';
 import { resolveChatAgentCapabilities } from './chatAgentCapabilities';
+import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTeamVideoTask';
 
 interface TeamTaskInput {
   task: AgentTeamTask;
@@ -48,7 +49,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (typeof task.input !== 'string') throw new WorkflowPreflightError('团队目标无效');
         const snapshot = await runtime.read(task.runId);
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot?.run.chatId);
-        return { output: await planAgentTeam({ api, goal: task.input, webSearch: Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch), signal }) };
+        return { output: await planAgentTeam({ api, goal: task.input, webSearch: Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch), videoGeneration: Boolean(getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video')), signal }) };
       }
       if (task.kind === 'team_plan_revision') {
         if (!isTeamRevisionInput(task.input)) throw new WorkflowPreflightError('追加委派输入无效');
@@ -60,9 +61,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return { task: id, output: source.output.slice(0, 8000) };
         });
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId);
-        return { output: await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}\n追加要求：${task.input.request}\n已有交付：${JSON.stringify(prior)}\n只规划新增且尚未完成的工作。`, webSearch: Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch), signal }) };
+        return { output: await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}\n追加要求：${task.input.request}\n已有交付：${JSON.stringify(prior)}\n只规划新增且尚未完成的工作。`, webSearch: Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch), videoGeneration: Boolean(getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video')), signal }) };
       }
-      if ((task.kind !== 'agent_text' && task.kind !== 'agent_web_search') || !isTeamTaskInput(task.input)) throw new WorkflowPreflightError('团队任务类型无效');
+      if ((task.kind !== 'agent_text' && task.kind !== 'agent_web_search' && task.kind !== 'agent_video') || !isTeamTaskInput(task.input)) throw new WorkflowPreflightError('团队任务类型无效');
       const input = task.input;
       const role = input.role;
       const snapshot = await runtime.read(task.runId);
@@ -80,7 +81,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         throw new WorkflowPreflightError('团队任务与已保存计划不一致');
       }
       const selectedTool = input.task.tool || 'text_generation';
-      if (task.kind !== (selectedTool === 'web_search' ? 'agent_web_search' : 'agent_text')) throw new WorkflowPreflightError('团队任务工具与计划不一致');
+      if (task.kind !== (selectedTool === 'web_search' ? 'agent_web_search' : selectedTool === 'video_generation' ? 'agent_video' : 'agent_text')) throw new WorkflowPreflightError('团队任务工具与计划不一致');
+      if (selectedTool === 'video_generation') {
+        return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          prompt: [input.task.goal, input.userInstruction].filter(Boolean).join('\n'), signal });
+      }
       if (selectedTool === 'web_search') {
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId && item.type === 'assistant' && item.deletedAt == null);
         if (!chat?.modeState || !resolveChatAgentCapabilities(chat).webSearch) throw new WorkflowPreflightError('当前会话未开启网页搜索');
@@ -113,6 +118,17 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (!output.trim()) throw new Error('子 Agent 未提交内容');
       return { output: output.trim() };
     },
+    async inspectExternal(task) {
+      if (task.kind !== 'agent_video') throw new WorkflowPreflightError('外部任务类型无效');
+      const result = inspectAgentTeamVideoAttachment(task.runId, task.id);
+      if (result?.status === 'completed') return result;
+      if (result?.status === 'failed') return result;
+      return { status: 'pending' as const };
+    },
+    async reconcileInterrupted(task) {
+      if (task.kind !== 'agent_video') return null;
+      return inspectAgentTeamVideoAttachment(task.runId, task.id);
+    },
   }, scope);
 
   return {
@@ -133,7 +149,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
         if (current.tasks.some((task) => task.kind === 'team_plan_revision')) throw new Error('当前团队任务已使用追加委派机会');
         if (current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown' || task.status === 'failed')) throw new Error('请先处理未完成或待核对的步骤');
-        const sourceTaskIds = current.tasks.filter((task) => task.kind === 'agent_text' || task.kind === 'agent_web_search').map((task) => task.id);
+        const sourceTaskIds = current.tasks.filter((task) => task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_video').map((task) => task.id);
         if (!sourceTaskIds.length) throw new Error('团队规划尚未完成');
         const task: WorkflowTask = {
           id: 'delegate', runId, kind: 'team_plan_revision',
@@ -158,7 +174,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           if (current.run.status !== 'paused') throw new Error('请先暂停整个团队任务');
           if (current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
           const target = current.tasks.find((task) => task.id === taskId);
-          if (!target || (target.kind !== 'agent_text' && target.kind !== 'agent_web_search') || !isTeamTaskInput(target.input) || target.attempt !== 0
+          if (!target || (target.kind !== 'agent_text' && target.kind !== 'agent_web_search' && target.kind !== 'agent_video') || !isTeamTaskInput(target.input) || target.attempt !== 0
             || (target.status !== 'queued' && target.status !== 'waiting_dependency')) throw new Error('只能修改尚未执行的子任务');
           const next: WorkflowSnapshot = {
             ...current,
@@ -192,7 +208,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const additions = plan.tasks.map((task): WorkflowTask => ({
         id: task.id,
         runId,
-        kind: task.tool === 'web_search' ? 'agent_web_search' : 'agent_text',
+        kind: task.tool === 'web_search' ? 'agent_web_search' : task.tool === 'video_generation' ? 'agent_video' : 'agent_text',
         input: { task, goal: snapshot.run.goal, role: roles.get(task.roleId)! } satisfies TeamTaskInput,
         dependsOn: ['plan', ...task.dependsOn],
         status: task.dependsOn.length ? 'waiting_dependency' : 'queued',
@@ -208,7 +224,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const delegatedRoles = new Map(delegated.roles.map((role) => [role.id, role]));
         const contextTaskIds = isTeamRevisionInput(revisionTask.input) ? revisionTask.input.sourceTaskIds : [];
         const delegatedTasks = delegated.tasks.map((task): WorkflowTask => ({
-          id: `delegated_${task.id}`, runId, kind: task.tool === 'web_search' ? 'agent_web_search' : 'agent_text',
+          id: `delegated_${task.id}`, runId, kind: task.tool === 'web_search' ? 'agent_web_search' : task.tool === 'video_generation' ? 'agent_video' : 'agent_text',
           input: { task, goal: snapshot.run.goal, role: delegatedRoles.get(task.roleId)!, sourcePlanTaskId: revisionTask.id, contextTaskIds } satisfies TeamTaskInput,
           dependsOn: [revisionTask.id, ...contextTaskIds, ...task.dependsOn.map((id) => `delegated_${id}`)],
           status: 'waiting_dependency', attempt: 0, updatedAt: Date.now(),
@@ -285,6 +301,48 @@ const teamListeners = new Set<() => void>();
 let teamRevision = 0;
 const notifyTeam = () => { teamRevision += 1; teamListeners.forEach((listener) => listener()); };
 const activeTeamRuns = new Set<string>();
+let videoWakePending = false;
+const videoWakeKeys = new Set<string>();
+const deferredVideoWakeRuns = new Set<string>();
+function completedTeamVideoKeys(state: ReturnType<typeof useMessageStore.getState>) {
+  const keys = new Set<string>();
+  for (const message of [...state.messages, ...Object.values(state.messageWindowsByChatId).flatMap((window) => window.messages)]) {
+    const team = message.metadata?.agentTeamMedia;
+    if (!team || message.isDeleted) continue;
+    if (message.metadata?.attachments?.some((attachment) => attachment.kind === 'video' && (attachment.status === 'ready' || attachment.status === 'failed'))) {
+      keys.add(`${team.runId}:${team.taskId}`);
+    }
+  }
+  return keys;
+}
+useMessageStore.subscribe((next, previous) => {
+  if (next.messages === previous.messages && next.messageWindowsByChatId === previous.messageWindowsByChatId) return;
+  const previousCompleted = completedTeamVideoKeys(previous);
+  const newlyCompleted = completedTeamVideoKeys(next);
+  for (const key of previousCompleted) newlyCompleted.delete(key);
+  if (!newlyCompleted.size) return;
+  for (const key of newlyCompleted) videoWakeKeys.add(key);
+  if (videoWakePending) return;
+  videoWakePending = true;
+  queueMicrotask(() => {
+    videoWakePending = false;
+    const wakeKeys = new Set(videoWakeKeys);
+    videoWakeKeys.clear();
+    void listAgentTeamRuns().then((runs) => {
+      for (const run of runs) {
+        if (run.run.status !== 'active') continue;
+        if (!run.tasks.some((task) => task.kind === 'agent_video' && task.status === 'waiting_external'
+          && wakeKeys.has(`${task.runId}:${task.id}`))) continue;
+        if (activeTeamRuns.has(run.run.id)) {
+          deferredVideoWakeRuns.add(run.run.id);
+          continue;
+        }
+        void runAgentTeam({ chatId: run.run.chatId, goal: run.run.goal, runId: run.run.id })
+          .catch((error) => console.error('[agent-team:video-resume-failed]', error));
+      }
+    }).catch((error) => console.error('[agent-team:video-wake-failed]', error));
+  });
+});
 
 export function subscribeAgentTeamRuns(listener: () => void) {
   teamListeners.add(listener);
@@ -323,6 +381,18 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
   } finally {
     activeTeamRuns.delete(runId);
     notifyTeam();
+    if (deferredVideoWakeRuns.delete(runId)) {
+      queueMicrotask(() => {
+        void listAgentTeamRuns(params.chatId).then((runs) => {
+          const run = runs.find((item) => item.run.id === runId);
+          if (!run || run.run.status !== 'active' || activeTeamRuns.has(runId)) return;
+          if (!run.tasks.some((task) => task.kind === 'agent_video' && task.status === 'waiting_external'
+            && ['completed', 'failed'].includes(inspectAgentTeamVideoAttachment(runId, task.id)?.status || ''))) return;
+          void runAgentTeam({ chatId: run.run.chatId, goal: run.run.goal, runId })
+            .catch((error) => console.error('[agent-team:video-deferred-resume-failed]', error));
+        }).catch((error) => console.error('[agent-team:video-deferred-wake-failed]', error));
+      });
+    }
   }
 }
 
@@ -371,9 +441,15 @@ export async function recoverAgentTeamRuns() {
         const snapshot: WorkflowSnapshot = {
           ...current,
           run: { ...current.run, status: 'paused', generation: current.run.generation + 1, updatedAt: Date.now() },
-          tasks: current.tasks.map((task) => task.status === 'running'
-            ? { ...task, status: 'result_unknown', error: '程序关闭前的模型请求结果无法确认', updatedAt: Date.now() }
-            : task),
+          tasks: current.tasks.map((task) => {
+            if (task.status !== 'running') return task;
+            const video = task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(task.runId, task.id) : null;
+            if (video?.status === 'queued') return { ...task, status: 'queued', updatedAt: Date.now() };
+            if (video?.status === 'waiting_external') return { ...task, status: 'waiting_external', externalTaskId: video.externalTaskId, updatedAt: Date.now() };
+            if (video?.status === 'completed') return { ...task, status: 'completed', output: video.output, updatedAt: Date.now() };
+            if (video?.status === 'failed') return { ...task, status: 'failed', error: video.error, updatedAt: Date.now() };
+            return { ...task, status: 'result_unknown', error: '程序关闭前的请求结果无法确认', updatedAt: Date.now() };
+          }),
         };
         return { snapshot, value: true };
       });

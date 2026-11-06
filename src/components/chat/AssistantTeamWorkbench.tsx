@@ -56,10 +56,10 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
   const details = task ? taskDetails(task) : null;
   const plan = teamPlan(run);
   const summary = summarizeWorkflowRun(run);
-  const childTasks = run.tasks.filter((item) => item.kind === 'agent_text' || item.kind === 'agent_web_search');
+  const childTasks = run.tasks.filter((item) => item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_video');
   const blocked = summary.blocked.length > 0;
   const running = isRunActive(run.run.id);
-  const editable = Boolean(task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search') && task.attempt === 0
+  const editable = Boolean(task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_video') && task.attempt === 0
     && (task.status === 'queued' || task.status === 'waiting_dependency'));
 
   return <>

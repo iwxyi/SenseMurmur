@@ -7,6 +7,13 @@ import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
 import { api as appApi } from './api';
+import { useSettingsStore } from '../stores/useSettingsStore';
+import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTeamVideoTask';
+
+vi.mock('./agentTeamVideoTask', () => ({
+  inspectAgentTeamVideoAttachment: vi.fn(),
+  queueAgentTeamVideo: vi.fn(),
+}));
 
 vi.spyOn(appApi, 'searchWeb');
 const search = vi.mocked(appApi.searchWeb);
@@ -20,9 +27,37 @@ beforeEach(() => {
   vi.stubGlobal('navigator', { locks: { request: async (_name: string, _options: unknown, callback?: (lock: object) => Promise<unknown>) => (callback || _options as (lock: object) => Promise<unknown>)({}) } });
   generate.mockReset();
   search.mockReset();
+  vi.mocked(inspectAgentTeamVideoAttachment).mockReset();
+  vi.mocked(queueAgentTeamVideo).mockReset();
 });
 
 describe('agent team workflow', () => {
+  it('waits for a submitted video and runs dependent writing only after the attachment is ready', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `video-chat-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
+    generate.mockResolvedValueOnce(JSON.stringify({
+      summary: '制作短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '按脚本拍摄', acceptance: '可播放', allowedTools: ['video_generation', 'text_generation'] }],
+      tasks: [
+        { id: 'shot', roleId: 'director', goal: '森林里的追逐镜头', dependsOn: [], tool: 'video_generation', acceptance: '视频可播放' },
+        { id: 'summary', roleId: 'director', goal: '总结成片', dependsOn: ['shot'], tool: 'text_generation', acceptance: '简短总结' },
+      ], finalAcceptance: '成片和摘要',
+    })).mockResolvedValueOnce('视频制作完成');
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'task-1' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'task-1' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-video-test');
+    const pending = await workflow.start(runId, chatId, '制作短片');
+    expect(pending.snapshot.tasks.map((task) => task.status)).toEqual(['completed', 'waiting_external', 'waiting_dependency']);
+    expect(queueAgentTeamVideo).toHaveBeenCalledTimes(1);
+    expect(generate).toHaveBeenCalledTimes(1);
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'completed', output: '视频已生成' });
+    const completed = await workflow.resume(runId);
+    expect(completed.snapshot.run.status).toBe('completed');
+    expect(completed.snapshot.tasks.map((task) => task.status)).toEqual(['completed', 'completed', 'completed']);
+    expect(queueAgentTeamVideo).toHaveBeenCalledTimes(1);
+    expect(generate.mock.calls[1][2][0].content).toContain('视频已生成');
+  });
   it('does not start child tasks when pause was requested during planning', async () => {
     const runId = crypto.randomUUID();
     let finishPlan!: (value: string) => void;

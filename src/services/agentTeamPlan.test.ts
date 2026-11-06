@@ -34,6 +34,15 @@ describe('agent team plan', () => {
     expect(() => validateAgentTeamPlan(plan)).toThrow('未获授权');
   });
 
+  it('accepts video only when the role declares the tool', () => {
+    const plan = valid();
+    plan.roles[0].allowedTools = ['text_generation', 'video_generation'];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation' } as typeof plan.tasks[1];
+    expect(validateAgentTeamPlan(plan).tasks[1].tool).toBe('video_generation');
+    plan.roles[0].allowedTools = ['text_generation'];
+    expect(() => validateAgentTeamPlan(plan)).toThrow('未获授权');
+  });
+
   it('rejects cycles, duplicate IDs and oversized teams', () => {
     const cycle = valid();
     cycle.tasks[0].dependsOn = ['report'];

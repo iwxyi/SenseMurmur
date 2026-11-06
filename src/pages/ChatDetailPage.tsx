@@ -1256,6 +1256,7 @@ export default function ChatDetailPage() {
   }, [api, chat, currentChatMessages, id, updateChat]);
   const cloudRichMediaRequiresServerId = authMode === 'cloud' && isCloudSyncEnabled();
   const queuedRichMediaSignature = useMemo(() => currentChatMessages
+    .filter((message) => !message.metadata?.agentTeamMedia)
     .flatMap((message) => (message.metadata?.attachments || [])
       .filter(isRecoverableRichMediaAttachment)
       .map((attachment) => `${message.id}:${message.serverId || 'pending'}:${attachment.id}:${attachment.updatedAt || attachment.createdAt || 0}`))
@@ -1263,6 +1264,8 @@ export default function ChatDetailPage() {
   useEffect(() => {
     if (!queuedRichMediaSignature) return undefined;
     const messagesWithQueuedMedia = currentChatMessages.filter((message) => (
+      !message.metadata?.agentTeamMedia
+      &&
       (!cloudRichMediaRequiresServerId || Boolean(message.serverId))
       && message.metadata?.attachments?.some(isRecoverableRichMediaAttachment)
     ));
