@@ -387,7 +387,7 @@ describe('agent team workflow', () => {
     const reopened = await scoped.addRevisionRequest(runId, completed.snapshot.run.planVersion, '补一份报告');
     expect(reopened.run.status).toBe('paused');
     expect(reopened.run.planOpen).toBe(true);
-    await expect(scoped.addRevisionRequest(runId, completed.snapshot.run.planVersion, '重复追加')).rejects.toThrow();
+    await expect(scoped.addRevisionRequest(runId, completed.snapshot.run.planVersion, '重复追加')).rejects.toThrow('计划已更新');
     generate.mockResolvedValueOnce(JSON.stringify(extraPlan)).mockResolvedValueOnce('第二阶段报告');
     const finished = await scoped.resume(runId);
     expect(finished.snapshot.run.status).toBe('completed');
@@ -400,6 +400,31 @@ describe('agent team workflow', () => {
     const repeated = await scoped.publish(runId);
     expect(repeated.currentVersionId).toBe(second.currentVersionId);
     expect(generate).toHaveBeenCalledTimes(4);
+  });
+
+  it('accepts a second revision and publishes all rounds in one artifact', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `multiple-revisions-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '交付', memberIds: [], deletedAt: null } as (typeof state.chats)[number]] }));
+    const plan = (id: string, goal: string) => ({ summary: goal,
+      roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '有交付', allowedTools: ['text_generation'] }],
+      tasks: [{ id, roleId: 'writer', goal, dependsOn: [], acceptance: '有内容' }], finalAcceptance: '内容完整' });
+    generate.mockResolvedValueOnce(JSON.stringify(plan('research', '研究'))).mockResolvedValueOnce('研究结论');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-multiple-revisions-test');
+    const first = await workflow.start(runId, chatId, '研究并形成报告');
+    await workflow.addRevisionRequest(runId, first.snapshot.run.planVersion, '补充报告');
+    generate.mockResolvedValueOnce(JSON.stringify(plan('report', '报告'))).mockResolvedValueOnce('报告内容');
+    const second = await workflow.resume(runId);
+    expect(second.snapshot.tasks.find((task) => task.id === 'delegated_report')?.output).toBe('报告内容');
+    await workflow.addRevisionRequest(runId, second.snapshot.run.planVersion, '补充摘要');
+    generate.mockResolvedValueOnce(JSON.stringify(plan('summary', '摘要'))).mockResolvedValueOnce('摘要内容');
+    const third = await workflow.resume(runId);
+    expect(third.snapshot.tasks.find((task) => task.id === 'delegate_2_summary')?.output).toBe('摘要内容');
+    const artifact = await workflow.publish(runId);
+    const content = artifact.versions.find((version) => version.id === artifact.currentVersionId)?.content;
+    expect(content).toContain('研究结论');
+    expect(content).toContain('报告内容');
+    expect(content).toContain('摘要内容');
   });
 
   it('keeps delegated children queued when paused during delegated planning', async () => {
