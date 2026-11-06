@@ -90,6 +90,24 @@ function isTeamTaskInput(value: unknown): value is TeamTaskInput {
   return Boolean(candidate.task && candidate.role && typeof candidate.goal === 'string');
 }
 
+function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<ReturnType<typeof teamMediaCapabilities>>, webSearch: boolean) {
+  if (!webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索');
+  if (!capabilities.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');
+  if (!capabilities.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
+  const byId = new Map(plan.tasks.map((task) => [task.id, task]));
+  const hasImageUpstream = (task: AgentTeamTask, seen = new Set<string>()): boolean => task.dependsOn.some((id) => {
+    if (seen.has(id)) return false;
+    const upstream = byId.get(id);
+    if (!upstream) return false;
+    if (upstream.tool === 'image_generation') return true;
+    seen.add(id);
+    return hasImageUpstream(upstream, seen);
+  });
+  if (!capabilities.videoReferenceImages && plan.tasks.some((task) => task.tool === 'video_generation' && hasImageUpstream(task))) {
+    throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换视频模型或调整追加要求');
+  }
+}
+
 export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
   const runtime: ReturnType<typeof createWorkflowRunRuntime> = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
     async execute(task: WorkflowTask, signal) {
@@ -97,7 +115,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (typeof task.input !== 'string') throw new WorkflowPreflightError('团队目标无效');
         const snapshot = await runtime.read(task.runId);
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot?.run.chatId);
-        return { output: await planAgentTeam({ api, goal: task.input, webSearch: Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch), ...await teamMediaCapabilities(), signal }) };
+        const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
+        const capabilities = await teamMediaCapabilities();
+        const plan = await planAgentTeam({ api, goal: task.input, webSearch, ...capabilities, signal });
+        validateAvailableTeamTools(plan, capabilities, webSearch);
+        return { output: plan };
       }
       if (task.kind === 'team_plan_revision') {
         if (!isTeamRevisionInput(task.input)) throw new WorkflowPreflightError('追加委派输入无效');
@@ -110,7 +132,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         });
         const recentPrior = prior.slice(-8);
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId);
-        return { output: await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, webSearch: Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch), ...await teamMediaCapabilities(), signal }) };
+        const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
+        const capabilities = await teamMediaCapabilities();
+        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, webSearch, ...capabilities, signal });
+        validateAvailableTeamTools(plan, capabilities, webSearch);
+        return { output: plan };
       }
       if (task.kind === 'team_review') {
         const input = task.input as TeamReviewInput;
