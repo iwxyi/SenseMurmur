@@ -86,6 +86,7 @@ export interface VideoGenerationAdapterOptions {
   referenceImages?: ImageReferenceInput[];
   signal?: AbortSignal;
   aiUsage?: AiUsageMetadata;
+  clientRequestKey?: string;
 }
 
 function profileToApi(profile: AIModelProfile | APIConfig): APIConfig {
@@ -220,6 +221,7 @@ export async function generateVideoWithAdapter(params: VideoGenerationAdapterOpt
     parameters: resolveVideoGenerationParameters(params),
     signal: params.signal,
     aiUsage: params.aiUsage || { type: 'video_generation', label: '聊天视频生成' },
+    clientRequestKey: params.clientRequestKey,
   }).catch((error: unknown) => {
     reportMultimediaPermissionError(error);
     throw error;

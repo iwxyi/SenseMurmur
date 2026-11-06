@@ -27,12 +27,15 @@ function message(id: string, status: 'generating' | 'queued', taskId?: string): 
 describe('background video recovery', () => {
   it('selects each accepted task once without restarting queued generation', () => {
     const accepted = message('accepted', 'generating', 'task-1');
+    const submitting: Message = { ...message('submitting', 'generating'), metadata: { attachments: [{
+      ...message('submitting', 'generating').metadata!.attachments![0], generationJobId: 'media-gen-saved',
+    }] } };
     expect(findPendingVideoMessages([
       { ...message('accepted', 'queued'), metadata: { attachments: [{ ...message('accepted', 'queued').metadata!.attachments![0], updatedAt: 0 }] } },
-      accepted, accepted, message('queued', 'queued'), message('missing-task', 'generating'),
+      accepted, accepted, submitting, message('queued', 'queued'), message('missing-task', 'generating'),
       { ...message('deleted', 'generating', 'task-2'), isDeleted: true },
       { ...message('other-chat', 'generating', 'task-3'), chatId: 'other' },
-    ], new Set(['chat']), true)).toEqual([accepted]);
+    ], new Set(['chat']), true)).toEqual([accepted, submitting]);
   });
 
   it('does not revive a task after a newer message copy marks it complete', () => {
@@ -71,5 +74,22 @@ describe('background video recovery', () => {
     useMessageStore.setState({ messages: [{ ...pending, serverId: 'server-late-sync' }] });
     await Promise.resolve();
     expect(processRichMessageMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it('schedules a persisted submitting request key for server reconciliation', async () => {
+    vi.mocked(processRichMessageMedia).mockClear();
+    vi.mocked(readAuthSnapshot).mockReturnValue({ mode: 'cloud' } as ReturnType<typeof readAuthSnapshot>);
+    vi.mocked(isCloudSyncEnabled).mockReturnValue(true);
+    vi.spyOn(useChatStore.persist, 'hasHydrated').mockReturnValue(true);
+    vi.spyOn(useMessageStore.persist, 'hasHydrated').mockReturnValue(true);
+    vi.spyOn(useSettingsStore.persist, 'hasHydrated').mockReturnValue(true);
+    useChatStore.setState({ chats: [{ id: 'chat', deletedAt: null } as ReturnType<typeof useChatStore.getState>['chats'][number]] });
+    const submitting = message('request-key', 'generating');
+    submitting.metadata!.attachments![0].generationJobId = 'media-gen-original';
+    useMessageStore.setState({ messages: [submitting], messageWindowsByChatId: {} });
+    await recoverBackgroundVideoTasks();
+    await vi.waitFor(() => expect(processRichMessageMedia).toHaveBeenCalledWith(expect.objectContaining({
+      message: submitting, attachmentIds: ['video-request-key'],
+    })));
   });
 });

@@ -1,7 +1,7 @@
 import type { AICharacter } from '../types/character';
 import type { Message, MessageAttachment, MessageAttachmentKind, MessageMetadata } from '../types/message';
 import { isAIProfileUsable, type AIModelProfile } from '../types/settings';
-import { api } from './api';
+import { api, ApiError } from './api';
 import { workspaceFetch as fetch } from './workspaceLifecycle';
 import { generateImageWithAdapter, generateVideoWithAdapter, synthesizeSpeechWithAdapter } from './aiGenerationAdapter';
 import { waitForAiMediaTask } from './aiClient';
@@ -613,15 +613,23 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
       let taskId = attachment.mediaTaskId;
       if (!taskId) {
         if (!profile || !attachment.promptText) throw new Error('视频模型未配置');
-        const task = await generateVideoWithAdapter({
-          profile,
-          prompt: attachment.promptText,
-          aspectRatio: attachment.aspectRatio,
-          duration: attachment.videoDuration,
-          resolution: attachment.videoResolution,
-          referenceImages,
-          aiUsage: { type: 'video_generation', label: '聊天视频生成', scope: 'chat', resourceId: workingMessage.chatId },
-        });
+        const clientRequestKey = attachment.generationJobId || generationJobId;
+        let task: Awaited<ReturnType<typeof generateVideoWithAdapter>>;
+        try {
+          task = await api.getAiMediaTaskByRequestKey(clientRequestKey);
+        } catch (lookupError) {
+          if (!(lookupError instanceof ApiError) || lookupError.status !== 404) throw lookupError;
+          task = await generateVideoWithAdapter({
+            profile,
+            prompt: attachment.promptText,
+            clientRequestKey,
+            aspectRatio: attachment.aspectRatio,
+            duration: attachment.videoDuration,
+            resolution: attachment.videoResolution,
+            referenceImages,
+            aiUsage: { type: 'video_generation', label: '聊天视频生成', scope: 'chat', resourceId: workingMessage.chatId },
+          });
+        }
         taskId = task.task_id;
         if (taskId && task.aspectRatio) {
           workingMessage = updateRichMediaMessage({
@@ -906,7 +914,14 @@ export async function retryRichMessageMedia(params: {
     try { reuseVideoTask = (await api.getAiMediaTask(target.mediaTaskId)).status !== 'failed'; }
     catch { reuseVideoTask = true; }
   }
-  const generationJobId = createGenerationJobId();
+  if (target.kind === 'video' && !target.mediaTaskId && target.generationJobId) {
+    try {
+      reuseVideoTask = (await api.getAiMediaTaskByRequestKey(target.generationJobId)).status !== 'failed';
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) reuseVideoTask = true;
+    }
+  }
+  const generationJobId = reuseVideoTask && target.generationJobId ? target.generationJobId : createGenerationJobId();
   const retryMetadata = retryAttachmentMetadata(params.message.metadata, params.attachmentId, generationJobId, reuseVideoTask);
   const retryMessage = { ...params.message, metadata: retryMetadata };
   params.upsertMessage(retryMessage);

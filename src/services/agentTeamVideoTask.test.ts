@@ -95,6 +95,25 @@ describe('agent team video task', () => {
     expect(useMessageStore.getState().messages.filter((message) => message.metadata?.agentTeamMedia?.runId === params.runId)).toHaveLength(1);
   });
 
+  it('recovers a submitting attachment through its saved request key', async () => {
+    const params = { runId: 'submitting-run', taskId: 'shot', chatId: 'team-video-chat', prompt: '森林追逐', signal: new AbortController().signal };
+    const submitting: Message = { id: 'team-video-submitting-run-shot', chatId: params.chatId, type: 'ai', senderId: 'assistant', senderName: '助手', content: '视频', emotion: 0,
+      timestamp: 1, isDeleted: false, metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, attachments: [{
+        id: 'team-video-shot', kind: 'video', status: 'generating', altText: '团队生成视频', promptText: params.prompt,
+        generationJobId: 'media-gen-saved', createdAt: 1, updatedAt: 2,
+      }] } };
+    useMessageStore.setState({ messages: [submitting] });
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
+      expect(message.metadata?.attachments?.[0]?.generationJobId).toBe('media-gen-saved');
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'generating', mediaTaskId: 'original-task', updatedAt: 3,
+      })) } });
+    });
+    expect(await queueAgentTeamVideo(params)).toEqual({ externalTaskId: 'original-task' });
+    expect(processRichMessageMedia).toHaveBeenCalledOnce();
+    expect(useMessageStore.getState().messages).toHaveLength(1);
+  });
+
   it('waits for cloud message confirmation before submitting the media task', async () => {
     vi.mocked(isLocalOnlyMediaMode).mockReturnValue(false);
     vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {

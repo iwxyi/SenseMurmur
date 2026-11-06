@@ -12,8 +12,8 @@ const scheduledTasks = new Set<string>();
 
 function videoTaskKeys(message: Message) {
   return (message.metadata?.attachments || []).filter((attachment) => attachment.kind === 'video'
-    && attachment.status === 'generating' && attachment.mediaTaskId)
-    .map((attachment) => `${message.id}:${attachment.id}:${attachment.mediaTaskId}`);
+    && attachment.status === 'generating' && (attachment.mediaTaskId || attachment.generationJobId))
+    .map((attachment) => `${message.id}:${attachment.id}:${attachment.mediaTaskId || attachment.generationJobId}`);
 }
 
 export function findPendingVideoMessages(messages: Message[], activeChatIds: Set<string>, requiresServerId: boolean) {
@@ -29,10 +29,11 @@ export function findPendingVideoMessages(messages: Message[], activeChatIds: Set
   }
   return [...latest.values()].filter((message) => !message.isDeleted && activeChatIds.has(message.chatId)
     && (!requiresServerId || Boolean(message.serverId))
-    && (message.metadata?.attachments?.some((attachment) => attachment.kind === 'video' && attachment.status === 'generating' && Boolean(attachment.mediaTaskId)) || false));
+    && (message.metadata?.attachments?.some((attachment) => attachment.kind === 'video' && attachment.status === 'generating'
+      && Boolean(attachment.mediaTaskId || attachment.generationJobId)) || false));
 }
 
-/** Resume only video tasks already accepted by the server. Queued generations remain user controlled. */
+/** Reconcile submitting videos by their saved request key, then resume accepted tasks. */
 export async function recoverBackgroundVideoTasks() {
   const workspaceSignal = getWorkspaceSignal();
   await Promise.all([
@@ -63,7 +64,8 @@ export async function recoverBackgroundVideoTasks() {
       void processRichMessageMedia({
         message,
         attachmentIds: message.metadata?.attachments?.filter((attachment) => attachment.kind === 'video' && attachment.status === 'generating'
-          && attachment.mediaTaskId && fresh.includes(`${message.id}:${attachment.id}:${attachment.mediaTaskId}`)).map((attachment) => attachment.id),
+          && (attachment.mediaTaskId || attachment.generationJobId)
+          && fresh.includes(`${message.id}:${attachment.id}:${attachment.mediaTaskId || attachment.generationJobId}`)).map((attachment) => attachment.id),
         aiProfiles: useSettingsStore.getState().aiProfiles,
         upsertMessage: (next) => useMessageStore.getState().upsertMessage(next),
       }).catch((error) => console.error('[video-task:recovery-processing-failed]', error));

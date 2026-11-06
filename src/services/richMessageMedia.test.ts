@@ -5,14 +5,16 @@ import type { AIModelProfile } from '../types/settings';
 import { getRichMediaQueueSnapshot, processRichMessageMedia, resetRichMediaQueueForTests, retryRichMessageMedia, scrubLocalMediaUrlsForCloud } from './richMessageMedia';
 import { generateImageWithAdapter, generateVideoWithAdapter } from './aiGenerationAdapter';
 import { waitForAiMediaTask } from './aiClient';
-import { api } from './api';
+import { api, ApiError } from './api';
 
 vi.mock('./api', () => ({
+  ApiError: class ApiError extends Error { status: number; constructor(message: string, options: { status: number }) { super(message); this.status = options.status; } },
   api: {
     createMediaAsset: vi.fn(),
     createMediaAssetFromAiTask: vi.fn(),
     downloadAiMediaTaskContent: vi.fn(),
     getAiMediaTask: vi.fn(),
+    getAiMediaTaskByRequestKey: vi.fn(),
     updateMessageMetadata: vi.fn(),
     searchDoutu: vi.fn(),
   },
@@ -142,6 +144,7 @@ describe('processRichMessageMedia', () => {
     chatStoreState.chats = [];
     artifactStoreState.createImageArtifactFromAttachment.mockReset();
     vi.mocked(api.updateMessageMetadata).mockResolvedValue({});
+    vi.mocked(api.getAiMediaTaskByRequestKey).mockRejectedValue(new ApiError('任务不存在', { status: 404 }));
   });
 
   it.each([false, true])('polls video tasks and stores the playable result (resume: %s)', async (resume) => {
@@ -261,6 +264,21 @@ describe('processRichMessageMedia', () => {
     expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({
       status: 'failed', error: 'ACE 请求失败 (403)：ACE 上游可用余额不足，错误码 used_up',
     });
+  });
+
+  it('recovers a submitted video by request key without submitting or charging again', async () => {
+    vi.mocked(api.getAiMediaTaskByRequestKey).mockResolvedValue({ task_id: 'saved-task', model: 'MiniMax-H3', status: 'running', result: null,
+      chargedAmount: null, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+    vi.mocked(waitForAiMediaTask).mockResolvedValue({ task_id: 'saved-task', model: 'MiniMax-H3', status: 'failed', result: { error: '上游任务失败' },
+      chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 3 });
+    const message = buildQueuedImageMessage({ metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'generating', generationJobId: 'media-gen-recovery', promptText: '追逐场景', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    await processRichMessageMedia({ message, aiProfiles: [{ ...imageProfile, type: 'video', model: 'MiniMax-H3' }], upsertMessage: (next) => upserts.push(next) });
+    expect(api.getAiMediaTaskByRequestKey).toHaveBeenCalledWith('media-gen-recovery');
+    expect(generateVideoWithAdapter).not.toHaveBeenCalled();
+    expect(upserts.some((item) => item.metadata?.attachments?.[0]?.mediaTaskId === 'saved-task')).toBe(true);
   });
 
   it('writes a concrete image failure after the generating metadata update completes', async () => {
@@ -702,6 +720,25 @@ describe('processRichMessageMedia', () => {
     polled.resolve({ task_id: 'new-task', model: 'video-model', status: 'failed', result: { error: 'ACE 任务生成失败：错误码 bad_request，视频输入参数无效' }, chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
     await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('failed'));
     expect(upserts.at(-1)?.metadata?.attachments?.[0]?.error).toContain('视频输入参数无效');
+  });
+
+  it('reuses the original request key when submission response was lost', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const polled = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(api.getAiMediaTaskByRequestKey).mockResolvedValue({ task_id: 'accepted-task', model: 'MiniMax-H3', status: 'running', result: null,
+      chargedAmount: null, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+    vi.mocked(waitForAiMediaTask).mockReturnValue(polled.promise);
+    const failedMessage = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'failed', promptText: '森林追逐', generationJobId: 'media-gen-original', error: '网络中断', createdAt: 123, updatedAt: 124,
+    }] } });
+    const upserts: Message[] = [];
+    await retryRichMessageMedia({ message: failedMessage, attachmentId: 'video-1', aiProfiles: [{ ...imageProfile, type: 'video', model: 'MiniMax-H3' }], upsertMessage: (next) => upserts.push(next) });
+    await waitForExpectation(() => expect(api.getAiMediaTaskByRequestKey).toHaveBeenCalledWith('media-gen-original'));
+    await waitForExpectation(() => expect(waitForAiMediaTask).toHaveBeenCalledWith('accepted-task'));
+    expect(generateVideoWithAdapter).not.toHaveBeenCalled();
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]?.generationJobId).toBe('media-gen-original');
+    polled.resolve({ task_id: 'accepted-task', model: 'MiniMax-H3', status: 'failed', result: { error: '上游失败' }, chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 3 });
   });
 
   it('reuses a successful video task when saving its file fails', async () => {

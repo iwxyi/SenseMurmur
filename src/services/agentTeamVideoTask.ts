@@ -32,6 +32,7 @@ export function inspectAgentTeamVideoAttachment(runId: string, taskId: string) {
   if (attachment.status === 'failed') return { status: 'failed' as const, error: attachment.error || '视频生成失败' };
   if (attachment.mediaTaskId) return { status: 'waiting_external' as const, externalTaskId: attachment.mediaTaskId };
   if (attachment.status === 'queued') return { status: 'queued' as const };
+  if (attachment.status === 'generating' && attachment.generationJobId) return { status: 'queued' as const };
   return null;
 }
 

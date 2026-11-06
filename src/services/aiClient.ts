@@ -163,12 +163,14 @@ export async function submitAiMediaTask(options: {
   parameters?: Record<string, unknown>;
   signal?: AbortSignal;
   aiUsage?: AiUsageMetadata;
+  clientRequestKey?: string;
 }) {
   const result = await api.generateAiMedia({
     provider: options.profile.provider,
     model: options.profile.model,
     prompt: options.prompt,
     async: true,
+    ...(options.clientRequestKey ? { client_request_key: options.clientRequestKey } : {}),
     ...(options.parameters || {}),
     ...(options.aiUsage ? { metadata: { aiUsage: options.aiUsage } } : {}),
   });
