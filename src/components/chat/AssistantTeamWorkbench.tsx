@@ -56,6 +56,9 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
   const details = task ? taskDetails(task) : null;
   const plan = teamPlan(run);
   const summary = summarizeWorkflowRun(run);
+  const latestReview = run.tasks.filter((item) => item.kind === 'team_review' && item.status === 'completed').at(-1);
+  const reviewResult = latestReview?.output && typeof latestReview.output === 'object' && !Array.isArray(latestReview.output)
+    ? latestReview.output as { complete?: unknown; reason?: unknown } : null;
   const childTasks = run.tasks.filter((item) => item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_video');
   const blocked = summary.blocked.length > 0;
   const running = isRunActive(run.run.id);
@@ -105,6 +108,7 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
         </Box> : <Box sx={{ display: 'grid', gap: 1.25, overflowWrap: 'anywhere' }}>
           <Typography variant="body2"><strong>目标</strong> {run.run.goal}</Typography>
           {plan?.finalAcceptance && <Typography variant="body2"><strong>最终验收</strong> {plan.finalAcceptance}</Typography>}
+          {reviewResult && typeof reviewResult.reason === 'string' && <Typography variant="body2" color={reviewResult.complete === true ? 'text.secondary' : 'warning.main'}><strong>主 Agent 验收</strong> {reviewResult.reason}</Typography>}
           {summary.blocked.length > 0 && <Typography variant="body2" color="warning.main"><strong>需要处理</strong> {summary.blocked.map((item) => item.reason).join('；')}</Typography>}
           {pauseError && <Typography variant="body2" color="error.main">{pauseError}</Typography>}
           {(run.run.status === 'paused' || run.run.status === 'completed') && run.tasks.length < 24 && <Box sx={{ display: 'grid', gap: 1 }}>
