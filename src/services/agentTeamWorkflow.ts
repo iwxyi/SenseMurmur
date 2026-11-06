@@ -485,6 +485,7 @@ export async function delegateAgentTeamTask(params: { runId: string; expectedPla
 
 export async function recoverAgentTeamRuns() {
   if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务恢复');
+  if (!useMessageStore.persist.hasHydrated()) await useMessageStore.persist.rehydrate();
   const storageScope = currentWorkflowScope();
   const runs = await listAgentTeamRuns();
   let changed = false;
