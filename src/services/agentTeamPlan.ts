@@ -1,5 +1,6 @@
 import type { APIConfig } from '../types/settings';
 import { generateResponse } from './aiClient';
+import { WorkflowPreflightError } from './workflowRunRuntime';
 
 export interface AgentTeamRole {
   id: string;
@@ -119,12 +120,14 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; webS
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    throw new Error('团队规划返回了无效 JSON', { cause: error });
+    throw new WorkflowPreflightError(`团队规划返回了无效 JSON：${error instanceof Error ? error.message : '解析失败'}`);
   }
-  const plan = validateAgentTeamPlan(parsed);
-  if (!params.webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new Error('当前会话未开启网页搜索');
-  if (!params.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new Error('当前未配置图片模型');
-  if (!params.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new Error(params.videoUnavailableReason || '当前未配置视频模型');
+  let plan: AgentTeamPlan;
+  try { plan = validateAgentTeamPlan(parsed); }
+  catch (error) { throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队计划无效'); }
+  if (!params.webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索');
+  if (!params.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');
+  if (!params.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(params.videoUnavailableReason || '当前未配置视频模型');
   const tasksById = new Map(plan.tasks.map((task) => [task.id, task]));
   const dependsOnImage = (task: AgentTeamTask, visited = new Set<string>()): boolean => task.dependsOn.some((dependency) => {
     if (visited.has(dependency)) return false;
@@ -135,7 +138,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; webS
     return dependsOnImage(upstream, visited);
   });
   if (!params.videoReferenceImages && plan.tasks.some((task) => task.tool === 'video_generation' && dependsOnImage(task))) {
-    throw new Error('当前视频模型不支持参考图片，请改用文字脚本到视频或切换视频模型');
+    throw new WorkflowPreflightError('当前视频模型不支持参考图片，请改用文字脚本到视频或切换视频模型');
   }
   return plan;
 }

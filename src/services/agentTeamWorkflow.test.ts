@@ -115,6 +115,17 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks.find((task) => task.id === 'write')?.output).toBe('摘要内容');
     expect(generate.mock.calls[0][1]).toContain('视频模型目录暂不可用');
   });
+  it('rejects a video plan when the selected model is missing from the live directory', async () => {
+    const runId = crypto.randomUUID();
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'removed-video', isDefault: true }] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '生成视频', method: '生成', acceptance: '成片', allowedTools: ['video_generation'] }],
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-removed-video-test');
+    const result = await workflow.start(runId, 'chat', '生成短片');
+    expect(result.snapshot.tasks[0].status).toBe('failed');
+    expect(result.snapshot.tasks[0].error).toContain('未在可用模型列表中');
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+  });
   it('does not reuse the automatic acceptance verdict after an explicit new task', async () => {
     const runId = crypto.randomUUID();
     const plan = { summary: '研究', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '成稿', allowedTools: ['text_generation'] }],
