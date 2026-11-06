@@ -10,8 +10,9 @@ export function findPendingVideoMessages(messages: Message[], activeChatIds: Set
   const seen = new Set<string>();
   return messages.filter((message) => {
     if (seen.has(message.id) || message.isDeleted || !activeChatIds.has(message.chatId) || (requiresServerId && !message.serverId)) return false;
-    seen.add(message.id);
-    return message.metadata?.attachments?.some((attachment) => attachment.kind === 'video' && attachment.status === 'generating' && Boolean(attachment.mediaTaskId)) || false;
+    const pending = message.metadata?.attachments?.some((attachment) => attachment.kind === 'video' && attachment.status === 'generating' && Boolean(attachment.mediaTaskId)) || false;
+    if (pending) seen.add(message.id);
+    return pending;
   });
 }
 
