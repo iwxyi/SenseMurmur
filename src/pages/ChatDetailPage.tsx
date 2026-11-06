@@ -4913,7 +4913,7 @@ export default function ChatDetailPage() {
       <Dialog open={teamGoalOpen} onClose={() => setTeamGoalOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>创建团队任务</DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>主 Agent 会按目标规划岗位和步骤。目前团队执行支持文本研究与文档交付。</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>主 Agent 会规划步骤、调度可用工具并验收结果。当前支持文本、已开启的网页搜索，以及已配置的图片和单段视频生成；不支持音乐或视频合成。</Typography>
           <TextField autoFocus multiline minRows={4} fullWidth label="目标与验收要求" value={teamGoal} onChange={(event) => setTeamGoal(event.target.value)} />
         </DialogContent>
         <DialogActions>
