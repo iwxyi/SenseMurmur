@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { validateAgentTeamPlan } from './agentTeamPlan';
+import { planAgentTeam, validateAgentTeamPlan } from './agentTeamPlan';
+import { generateResponse } from './aiClient';
+
+vi.mock('./aiClient', () => ({ generateResponse: vi.fn() }));
 
 const valid = () => ({
   summary: '先研究，再写报告',
@@ -41,6 +44,17 @@ describe('agent team plan', () => {
     expect(validateAgentTeamPlan(plan).tasks[1].tool).toBe('video_generation');
     plan.roles[0].allowedTools = ['text_generation'];
     expect(() => validateAgentTeamPlan(plan)).toThrow('未获授权');
+  });
+
+  it('rejects an image to video plan when the selected model cannot receive reference images', async () => {
+    const plan = valid();
+    plan.roles[0].allowedTools = ['image_generation', 'video_generation'];
+    plan.tasks[0] = { ...plan.tasks[0], tool: 'image_generation' } as typeof plan.tasks[0];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation' } as typeof plan.tasks[1];
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(plan));
+    await expect(planAgentTeam({ api: { provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'gpt' },
+      goal: '先生成图片再制作视频', imageGeneration: true, videoGeneration: true, videoReferenceImages: false }))
+      .rejects.toThrow('不支持参考图片');
   });
 
   it('rejects cycles, duplicate IDs and oversized teams', () => {

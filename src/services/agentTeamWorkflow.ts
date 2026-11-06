@@ -18,6 +18,25 @@ import { api as appApi } from './api';
 import { resolveChatAgentCapabilities } from './chatAgentCapabilities';
 import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTeamVideoTask';
 import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReference } from './agentTeamImageTask';
+import { listAvailableModels } from './aiClient';
+
+async function teamMediaCapabilities() {
+  const profiles = useSettingsStore.getState().aiProfiles;
+  const imageProfile = getUsablePreferredAIProfile(profiles, 'image');
+  const videoProfile = getUsablePreferredAIProfile(profiles, 'video');
+  if (!videoProfile) return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false };
+  let videoReferenceImages = false;
+  if (videoProfile.provider.startsWith('official')) {
+    const models = await listAvailableModels(videoProfile, 'video');
+    const selected = models.find((item) => item.id === videoProfile.model);
+    if (!selected) throw new WorkflowPreflightError('当前视频模型未在可用模型列表中');
+    const raw = selected.raw;
+    const options = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw.aceVideoOptions : undefined;
+    videoReferenceImages = Boolean(options && typeof options === 'object' && !Array.isArray(options)
+      && (options as Record<string, unknown>).acceptsReferenceImages === true);
+  }
+  return { imageGeneration: Boolean(imageProfile), videoGeneration: true, videoReferenceImages };
+}
 
 interface TeamTaskInput {
   task: AgentTeamTask;
@@ -50,7 +69,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (typeof task.input !== 'string') throw new WorkflowPreflightError('团队目标无效');
         const snapshot = await runtime.read(task.runId);
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot?.run.chatId);
-        return { output: await planAgentTeam({ api, goal: task.input, webSearch: Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch), imageGeneration: Boolean(getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image')), videoGeneration: Boolean(getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video')), signal }) };
+        return { output: await planAgentTeam({ api, goal: task.input, webSearch: Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch), ...await teamMediaCapabilities(), signal }) };
       }
       if (task.kind === 'team_plan_revision') {
         if (!isTeamRevisionInput(task.input)) throw new WorkflowPreflightError('追加委派输入无效');
@@ -62,7 +81,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return { task: id, output: source.output.slice(0, 8000) };
         });
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId);
-        return { output: await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}\n追加要求：${task.input.request}\n已有交付：${JSON.stringify(prior)}\n只规划新增且尚未完成的工作。`, webSearch: Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch), imageGeneration: Boolean(getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image')), videoGeneration: Boolean(getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video')), signal }) };
+        return { output: await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}\n追加要求：${task.input.request}\n已有交付：${JSON.stringify(prior)}\n只规划新增且尚未完成的工作。`, webSearch: Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch), ...await teamMediaCapabilities(), signal }) };
       }
       if ((task.kind !== 'agent_text' && task.kind !== 'agent_web_search' && task.kind !== 'agent_image' && task.kind !== 'agent_video') || !isTeamTaskInput(task.input)) throw new WorkflowPreflightError('团队任务类型无效');
       const input = task.input;
@@ -94,6 +113,15 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           prompt: [input.task.goal, ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), signal });
       }
       if (selectedTool === 'video_generation') {
+        const existingVideo = inspectAgentTeamVideoAttachment(task.runId, task.id);
+        const hasImageDependency = input.task.dependsOn.some((id) => {
+          const dependencyId = input.sourcePlanTaskId ? `delegated_${id}` : id;
+          return snapshot.tasks.find((item) => item.id === dependencyId)?.kind === 'agent_image';
+        });
+        if (hasImageDependency && (!existingVideo || existingVideo.status === 'queued')
+          && !(await teamMediaCapabilities()).videoReferenceImages) {
+          throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换支持参考图的视频模型后继续');
+        }
         const referenceImages = input.task.dependsOn.flatMap((id) => {
           const dependencyId = input.sourcePlanTaskId ? `delegated_${id}` : id;
           const dependency = snapshot.tasks.find((item) => item.id === dependencyId);

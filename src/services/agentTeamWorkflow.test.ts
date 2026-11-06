@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { generateResponse } from './aiClient';
+import { generateResponse, listAvailableModels } from './aiClient';
 import { createAgentTeamWorkflow, recoverAgentTeamRuns } from './agentTeamWorkflow';
 import { currentWorkflowScope, indexedDbWorkflowRepository } from './workflowRunRuntime';
 import { useChatStore } from '../stores/useChatStore';
@@ -24,7 +24,7 @@ vi.mock('./agentTeamImageTask', () => ({
 vi.spyOn(appApi, 'searchWeb');
 const search = vi.mocked(appApi.searchWeb);
 
-vi.mock('./aiClient', () => ({ generateResponse: vi.fn() }));
+vi.mock('./aiClient', () => ({ generateResponse: vi.fn(), listAvailableModels: vi.fn() }));
 const generate = vi.mocked(generateResponse);
 
 beforeEach(() => {
@@ -32,6 +32,8 @@ beforeEach(() => {
   vi.stubGlobal('IDBKeyRange', IDBKeyRange);
   vi.stubGlobal('navigator', { locks: { request: async (_name: string, _options: unknown, callback?: (lock: object) => Promise<unknown>) => (callback || _options as (lock: object) => Promise<unknown>)({}) } });
   generate.mockReset();
+  vi.mocked(listAvailableModels).mockReset();
+  vi.mocked(listAvailableModels).mockResolvedValue([{ id: 'MiniMax-H3', label: 'MiniMax H3', raw: { aceVideoOptions: { acceptsReferenceImages: true } } }]);
   search.mockReset();
   vi.mocked(inspectAgentTeamVideoAttachment).mockReset();
   vi.mocked(queueAgentTeamVideo).mockReset();
