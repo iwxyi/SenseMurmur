@@ -377,7 +377,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       }
       if (snapshot.run.autoReview && snapshot.run.status === 'active') {
         for (let round = 1; round <= 3; round += 1) {
-          if (!snapshot.tasks.every((task) => task.status === 'completed')) break;
+          if (!snapshot.tasks.every((task) => task.status === 'completed' || task.status === 'abandoned')) break;
           const reviewId = `review_${round}`;
           const review = snapshot.tasks.find((task) => task.id === reviewId);
           if (!review) {
@@ -430,7 +430,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, getWorkspaceSignal());
         }
       }
-      if (snapshot.run.status === 'active' && snapshot.tasks.every((task) => task.status === 'completed')) snapshot = await runtime.closePlan(runId, snapshot.run.planVersion);
+      if (snapshot.run.status === 'active' && snapshot.tasks.every((task) => task.status === 'completed' || task.status === 'abandoned')) snapshot = await runtime.closePlan(runId, snapshot.run.planVersion);
       return { snapshot, summary: summarizeWorkflowRun(snapshot) };
     },
     async publish(runId: string) {

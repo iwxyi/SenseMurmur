@@ -426,12 +426,16 @@ describe('agent team workflow', () => {
     await recoverAgentTeamRuns();
     const paused = await workflow.read(runId);
     const handled = await workflow.abandonUnknownReview(runId, 'review_1', paused!.run.planVersion);
-    expect(handled.tasks.find((task) => task.id === 'review_1')?.status).toBe('cancelled');
+    expect(handled.tasks.find((task) => task.id === 'review_1')?.status).toBe('abandoned');
     expect(handled.tasks.find((task) => task.id === 'review_needs_user')?.status).toBe('waiting_user');
     expect(handled.run.autoReview).toBe(false);
     await expect(workflow.abandonUnknownReview(runId, 'review_1', paused!.run.planVersion)).rejects.toThrow('计划已更新');
     const continued = await workflow.addRevisionRequest(runId, handled.run.planVersion, '按新要求完成报告');
     expect(continued.tasks.some((task) => task.id === 'review_needs_user')).toBe(false);
+    generate.mockResolvedValueOnce(JSON.stringify({ ...plan, tasks: [{ ...plan.tasks[0], id: 'followup', goal: '按新要求完成报告' }] })).mockResolvedValueOnce('新报告正文');
+    const delivered = await workflow.resume(runId);
+    expect(delivered.snapshot.run.status).toBe('completed');
+    expect(delivered.snapshot.tasks.find((task) => task.id === 'delegated_followup')?.output).toBe('新报告正文');
   });
 
   it('stores an instruction only for a paused unstarted child task and uses it on resume', async () => {

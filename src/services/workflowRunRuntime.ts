@@ -1,7 +1,7 @@
 import { scopedStorageKey } from '../constants/brand';
 import { getLocalDataUserId } from './authStorageScope';
 
-export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled';
+export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
 export interface WorkflowTask {
   id: string;
@@ -47,7 +47,7 @@ export function summarizeWorkflowRun(snapshot: WorkflowSnapshot): WorkflowResume
   const byId = new Map(snapshot.tasks.map((task) => [task.id, task]));
   const result: WorkflowResumeSummary = { completed: [], waiting: [], blocked: [], runnable: [] };
   for (const task of snapshot.tasks) {
-    if (task.status === 'completed') {
+    if (task.status === 'completed' || task.status === 'abandoned') {
       result.completed.push(task.id);
       continue;
     }
@@ -253,7 +253,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
   async function addTeamRevision(runId: string, expectedPlanVersion: number, task: WorkflowTask) {
     return mutate(scope(), runId, (current) => {
       if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
-      const completed = current.run.status === 'completed' && !current.run.planOpen && current.tasks.every((item) => item.status === 'completed');
+      const completed = current.run.status === 'completed' && !current.run.planOpen && current.tasks.every((item) => item.status === 'completed' || item.status === 'abandoned');
       if (!completed && current.run.status !== 'paused') throw new Error('请先暂停整个团队任务');
       if (task.runId !== runId || task.kind !== 'team_plan_revision' || task.attempt !== 0 || task.status !== 'waiting_dependency') throw new Error('追加任务状态无效');
       const tasks = [...current.tasks, task];
@@ -285,7 +285,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
       const now = Date.now();
       const block: WorkflowTask = { id: 'review_needs_user', runId, kind: 'team_review_block', input: null,
         dependsOn: [], status: 'waiting_user', error: '上次主 Agent 验收结果无法核对。请追加明确指示或新建团队任务。', attempt: 0, updatedAt: now };
-      const tasks = [...current.tasks.map((task) => task.id === reviewId ? { ...task, status: 'cancelled' as const,
+      const tasks = [...current.tasks.map((task) => task.id === reviewId ? { ...task, status: 'abandoned' as const,
         error: '用户已放弃核对本次验收，原结果仍未知', updatedAt: now } : task), block];
       assertTaskGraph(tasks);
       const snapshot: WorkflowSnapshot = { ...current, tasks,
@@ -330,7 +330,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     return mutate(scope(), runId, (current) => {
       if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
       if (current.run.status !== 'active' && current.run.status !== 'paused') throw new Error('工作流已结束');
-      const allCompleted = current.tasks.every((task) => task.status === 'completed');
+      const allCompleted = current.tasks.every((task) => task.status === 'completed' || task.status === 'abandoned');
       const snapshot: WorkflowSnapshot = {
         ...current,
         run: { ...current.run, planOpen: false, status: allCompleted ? 'completed' : current.run.status, planVersion: current.run.planVersion + 1, updatedAt: Date.now() },
@@ -432,7 +432,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
             ? { ...task, status: 'result_unknown' as const, error: '请求已中断，结果需要核对', updatedAt: Date.now() }
             : task)
           : current.tasks;
-        const completed = !current.run.planOpen && tasks.every((task) => task.status === 'completed');
+        const completed = !current.run.planOpen && tasks.every((task) => task.status === 'completed' || task.status === 'abandoned');
         const failed = tasks.some((task) => task.status === 'failed');
         const snapshot = { ...current, tasks, run: { ...current.run, status: current.run.status !== 'active' ? current.run.status : signal.aborted || current.run.pauseRequested ? 'paused' as const : completed ? 'completed' as const : failed ? 'failed' as const : current.run.status, pauseRequested: false, updatedAt: Date.now() } };
         return { snapshot, value: snapshot };

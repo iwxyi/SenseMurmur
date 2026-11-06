@@ -17,7 +17,7 @@ interface Props {
 
 const taskStatus: Record<WorkflowTask['status'], string> = {
   queued: '排队', running: '执行中', waiting_dependency: '等待前置步骤', waiting_external: '等待生成',
-  waiting_user: '等待用户', result_unknown: '待核对', completed: '已完成', failed: '失败', cancelled: '已取消',
+  waiting_user: '等待用户', result_unknown: '待核对', completed: '已完成', failed: '失败', cancelled: '已取消', abandoned: '已放弃',
 };
 
 function teamPlan(run: WorkflowSnapshot) {
