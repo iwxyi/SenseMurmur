@@ -50,7 +50,7 @@ import { useChatSurfaceActions } from '../hooks/useChatSurfaceActions';
 import { useReplyOperation } from '../hooks/useReplyOperation';
 import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, getAssistantBackgroundStreamingSnapshot, listAssistantBackgroundReplies, resumeAssistantBackgroundReply, subscribeAssistantBackgroundReplies, subscribeAssistantBackgroundRunChanges, subscribeAssistantBackgroundStreaming } from '../services/assistantBackgroundReply';
 import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
-import { abandonAgentTeamReview, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamReview, runAgentTeam, subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
+import { abandonAgentTeamReview, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamPlan, retryAgentTeamReview, runAgentTeam, subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
 import { getDirectBackgroundRevision, isDirectBackgroundActive, listDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply, subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
 import { getAiDirectBackgroundRevision, isAiDirectBackgroundActive, listAiDirectBackgroundReplies, resumeAiDirectBackgroundReply, startAiDirectBackgroundReply, subscribeAiDirectBackgroundReplies } from '../services/aiDirectBackgroundReply';
 import { getGroupBackgroundRevision, listGroupBackgroundConversations, subscribeGroupBackgroundConversations } from '../services/groupBackgroundConversation';
@@ -4518,6 +4518,10 @@ export default function ChatDetailPage() {
           onAbandonReview={async (selected, task) => { await abandonAgentTeamReview({ runId: selected.run.id, reviewId: task.id, expectedPlanVersion: selected.run.planVersion }); }}
           onResumeAfterReviewRetry={async (selected, task) => {
             await retryAgentTeamReview({ runId: selected.run.id, reviewId: task.id, expectedPlanVersion: selected.run.planVersion });
+            await runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id });
+          }}
+          onResumeAfterPlanRetry={async (selected, task) => {
+            await retryAgentTeamPlan({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion });
             await runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id });
           }}
           onResume={(selected) => { void runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id }).catch((error) => showErrorToast(error instanceof Error ? error.message : '恢复团队任务失败')); }}

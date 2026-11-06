@@ -309,6 +309,20 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
+  async function retryFailedTeamPlan(runId: string, expectedPlanVersion: number, taskId: string) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.planVersion !== expectedPlanVersion || current.run.status !== 'failed') throw new Error('团队计划已更新，请刷新后重试');
+      const target = current.tasks.find((task) => task.id === taskId && (task.kind === 'team_plan' || task.kind === 'team_plan_revision') && task.status === 'failed');
+      if (!target || current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown')) throw new Error('当前规划任务不能重试');
+      const now = Date.now();
+      const snapshot: WorkflowSnapshot = { ...current,
+        run: { ...current.run, status: 'paused', planVersion: current.run.planVersion + 1, updatedAt: now },
+        tasks: current.tasks.map((task) => task.id === taskId ? { ...task, status: 'queued', error: undefined, updatedAt: now } : task),
+      };
+      return { snapshot, value: snapshot };
+    });
+  }
+
   async function addTasksOnce(runId: string, expectedPlanVersion: number, additions: WorkflowTask[]) {
     if (!additions.length) throw new Error('工作流计划修订不能为空');
     return mutate(scope(), runId, (current) => {
@@ -476,5 +490,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamPlan, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }

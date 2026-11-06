@@ -170,6 +170,17 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks[0].status).toBe('failed');
     expect(result.snapshot.tasks[0].error).toContain('未在可用模型列表中');
     expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
+    const retry = await workflow.retryFailedPlan(runId, 'plan', result.snapshot.run.planVersion);
+    expect(retry.run.status).toBe('paused');
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '生成视频', method: '生成', acceptance: '成片', allowedTools: ['video_generation'] }],
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' }));
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'restored-video' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'restored-video' });
+    const resumed = await workflow.resume(runId);
+    expect(resumed.snapshot.tasks[0].status).toBe('completed');
+    expect(resumed.snapshot.tasks[0].attempt).toBe(2);
+    expect(resumed.snapshot.tasks.find((task) => task.id === 'shot')?.status).toBe('waiting_external');
   });
   it('does not reuse the automatic acceptance verdict after an explicit new task', async () => {
     const runId = crypto.randomUUID();
