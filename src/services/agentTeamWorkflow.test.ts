@@ -6,6 +6,10 @@ import { currentWorkflowScope, indexedDbWorkflowRepository } from './workflowRun
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
+import { api as appApi } from './api';
+
+vi.spyOn(appApi, 'searchWeb');
+const search = vi.mocked(appApi.searchWeb);
 
 vi.mock('./aiClient', () => ({ generateResponse: vi.fn() }));
 const generate = vi.mocked(generateResponse);
@@ -15,6 +19,7 @@ beforeEach(() => {
   vi.stubGlobal('IDBKeyRange', IDBKeyRange);
   vi.stubGlobal('navigator', { locks: { request: async (_name: string, _options: unknown, callback?: (lock: object) => Promise<unknown>) => (callback || _options as (lock: object) => Promise<unknown>)({}) } });
   generate.mockReset();
+  search.mockReset();
 });
 
 describe('agent team workflow', () => {
@@ -62,6 +67,57 @@ describe('agent team workflow', () => {
     expect(generate.mock.calls[2][2][0].content).toContain('需求结论');
     await scoped.resume(runId);
     expect(generate).toHaveBeenCalledTimes(3);
+  });
+
+  it('uses real search results as evidence for a dependent text task', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `search-chat-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, {
+      id: chatId, type: 'assistant', deletedAt: null, modeState: { agentCapabilities: { enabled: true, webSearch: true } },
+    } as (typeof state.chats)[number]] }));
+    generate.mockResolvedValueOnce(JSON.stringify({
+      summary: '搜索后写摘要',
+      roles: [{ id: 'researcher', name: '研究员', responsibility: '查证', method: '检索并核对', acceptance: '提供来源', allowedTools: ['web_search', 'text_generation'] }],
+      tasks: [
+        { id: 'lookup', roleId: 'researcher', goal: 'MirageTea 最新资料', dependsOn: [], tool: 'web_search', acceptance: '给出来源' },
+        { id: 'report', roleId: 'researcher', goal: '写摘要', dependsOn: ['lookup'], tool: 'text_generation', acceptance: '引用来源' },
+      ], finalAcceptance: '摘要可核对',
+    })).mockResolvedValueOnce('已核对摘要');
+    search.mockResolvedValueOnce({ query: 'MirageTea 最新资料', providerCode: 'test', pointCost: 0, results: [{ title: '资料', url: 'https://example.test/source', snippet: '可信线索' }] });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-search-test');
+    const result = await workflow.start(runId, chatId, '调研并写摘要');
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks.map((task) => task.kind)).toEqual(['team_plan', 'agent_web_search', 'agent_text']);
+    expect(search).toHaveBeenCalledWith('MirageTea 最新资料', expect.objectContaining({ source: 'assistant_agent', resourceId: chatId }));
+    expect(generate.mock.calls[1][2][0].content).toContain('https://example.test/source');
+  });
+
+  it('refuses a planned search when the chat search capability was revoked', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `search-revoked-${runId}`;
+    const chat = { id: chatId, type: 'assistant', deletedAt: null, modeState: { agentCapabilities: { enabled: true, webSearch: true } } } as (ReturnType<typeof useChatStore.getState>['chats'])[number];
+    useChatStore.setState((state) => ({ chats: [...state.chats, chat] }));
+    let finishPlan!: (value: string) => void;
+    generate.mockImplementationOnce(() => new Promise<string>((resolve) => { finishPlan = resolve; }));
+    const planned = JSON.stringify({
+      summary: '搜索资料',
+      roles: [{ id: 'researcher', name: '研究员', responsibility: '查证', method: '检索', acceptance: '提供来源', allowedTools: ['web_search'] }],
+      tasks: [{ id: 'lookup', roleId: 'researcher', goal: '资料', dependsOn: [], tool: 'web_search', acceptance: '给出来源' }],
+      finalAcceptance: '资料可核对',
+    });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-search-revoked-test');
+    const pending = workflow.start(runId, chatId, '搜集资料');
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    await workflow.requestPauseAfterCurrentBatch(runId);
+    finishPlan(planned);
+    const paused = await pending;
+    expect(paused.snapshot.tasks[1].status).toBe('queued');
+    useChatStore.setState((state) => ({ chats: state.chats.map((item) => item.id === chatId
+      ? { ...item, modeState: { ...item.modeState, agentCapabilities: { ...item.modeState.agentCapabilities, webSearch: false } } }
+      : item) }));
+    const resumed = await workflow.resume(runId);
+    expect(resumed.snapshot.tasks[1].status).toBe('failed');
+    expect(search).not.toHaveBeenCalled();
   });
 
   it('publishes one visible message and one document across repeated deliveries', async () => {
