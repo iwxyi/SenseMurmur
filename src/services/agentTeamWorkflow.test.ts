@@ -61,6 +61,30 @@ describe('agent team workflow', () => {
     await workflow.resume(runId);
     expect(generate).toHaveBeenCalledTimes(6);
   });
+  it('retains early media evidence when a long run has later text results', async () => {
+    const runId = crypto.randomUUID();
+    const now = Date.now();
+    const plan = { summary: '短片说明', roles: [{ id: 'writer', name: '写作者', responsibility: '整理', method: '撰写', acceptance: '有内容', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'note_0', roleId: 'writer', goal: '写说明', dependsOn: [], acceptance: '可读' }], finalAcceptance: '视频与说明齐全' };
+    const scope = 'team-review-media-evidence-test';
+    const sourceTaskIds = ['shot', ...Array.from({ length: 13 }, (_, index) => `note_${index}`)];
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
+      run: { id: runId, chatId: 'chat', goal: '生成视频并附说明', status: 'active', generation: 1, planVersion: 2, planOpen: true, autoReview: true, updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '生成视频并附说明', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        { id: 'shot', runId, kind: 'agent_video', input: {}, output: '视频附件已保存', dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
+        ...sourceTaskIds.slice(1).map((id) => ({ id, runId, kind: 'agent_text', input: {}, output: '说明已写', dependsOn: ['plan'], status: 'completed' as const, attempt: 1, updatedAt: now })),
+        { id: 'review_1', runId, kind: 'team_review', input: { sourceTaskIds }, dependsOn: sourceTaskIds, status: 'queued', attempt: 0, updatedAt: now },
+      ],
+    }, value: undefined }));
+    generate.mockResolvedValueOnce(JSON.stringify({ complete: true, reason: '已交付' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const result = await workflow.resume(runId);
+    expect(result.snapshot.run.status).toBe('completed');
+    const evidence = generate.mock.calls[0][2][0].content;
+    expect(evidence).toContain('视频附件已保存');
+    expect(evidence).toContain('另有 2 项已完成记录未列出');
+  });
   it('resumes an already expanded automatic plan near the task limit without blocking it again', async () => {
     const runId = crypto.randomUUID();
     const chatId = `auto-limit-${runId}`;

@@ -63,6 +63,19 @@ interface TeamTaskInput {
 interface TeamRevisionInput { request: string; sourceTaskIds: string[] }
 interface TeamReviewInput { sourceTaskIds: string[] }
 
+function selectReviewEvidence(snapshot: WorkflowSnapshot, taskIds: string[]) {
+  const sources = taskIds.map((id) => {
+    const source = snapshot.tasks.find((item) => item.id === id);
+    if (!source || source.status !== 'completed' || typeof source.output !== 'string') throw new WorkflowPreflightError('验收证据尚未就绪');
+    return source;
+  });
+  const media = sources.filter((source) => source.kind === 'agent_image' || source.kind === 'agent_video').slice(-6);
+  const selected = new Set(media.map((source) => source.id));
+  sources.filter((source) => !selected.has(source.id)).slice(-(12 - media.length)).forEach((source) => selected.add(source.id));
+  return { omitted: sources.length - selected.size,
+    evidence: sources.filter((source) => selected.has(source.id)).map((source) => ({ task: source.id, output: source.output!.slice(0, 1800) })) };
+}
+
 function countImageUpstream(task: AgentTeamTask, byId: Map<string, AgentTeamTask>) {
   const visited = new Set<string>();
   const visit = (current: AgentTeamTask) => current.dependsOn.forEach((id) => {
@@ -164,12 +177,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         let finalAcceptance: string;
         try { finalAcceptance = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === 'plan')?.output).finalAcceptance; }
         catch (error) { throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队验收标准无效'); }
-        const evidence = input.sourceTaskIds.map((id) => {
-          const source = snapshot.tasks.find((item) => item.id === id);
-          if (!source || source.status !== 'completed' || typeof source.output !== 'string') throw new WorkflowPreflightError('验收证据尚未就绪');
-          return { task: id, output: source.output.slice(0, 1800) };
-        }).slice(-12);
-        const raw = await generateResponse(api, '你是主 Agent 的交付验收员。根据原目标、最终验收标准和真实完成记录判断是否已达到可用交付。只能基于现有工具能力提出最多一步必要补做，不得重复已完成工作。图片和视频的文字记录只证明附件已保存，并不证明画面质量或内容符合描述；不得声称自己看过或检查过媒体画面。缺失的音乐、剪辑、代码执行等能力不得伪装为已完成。仅输出 JSON：{"complete":true,"reason":"..."} 或 {"complete":false,"reason":"...","nextRequest":"需要补做的具体工作"}。', [{ role: 'user', content: `原目标：${snapshot.run.goal}\n最终验收标准：${finalAcceptance}\n已完成任务：${JSON.stringify(evidence)}` }], undefined, {
+        const { evidence, omitted } = selectReviewEvidence(snapshot, input.sourceTaskIds);
+        const raw = await generateResponse(api, '你是主 Agent 的交付验收员。根据原目标、最终验收标准和真实完成记录判断是否已达到可用交付。只能基于现有工具能力提出最多一步必要补做，不得重复已完成工作。图片和视频的文字记录只证明附件已保存，并不证明画面质量或内容符合描述；不得声称自己看过或检查过媒体画面。缺失的音乐、剪辑、代码执行等能力不得伪装为已完成。仅输出 JSON：{"complete":true,"reason":"..."} 或 {"complete":false,"reason":"...","nextRequest":"需要补做的具体工作"}。', [{ role: 'user', content: `原目标：${snapshot.run.goal}\n最终验收标准：${finalAcceptance}\n已完成任务摘要（另有 ${omitted} 项已完成记录未列出）：${JSON.stringify(evidence)}` }], undefined, {
           responseFormat: 'json', maxTokens: 600, signal,
           aiUsage: { type: 'assistant_chat', label: '团队交付验收', scope: 'chat' },
         });
