@@ -59,6 +59,7 @@ import { subscribeBackgroundExecution } from '../services/backgroundExecutionSch
 import { subscribeAssistantBackgroundRunChanges } from '../services/assistantBackgroundReply';
 import { subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
 import { subscribeAiDirectBackgroundReplies } from '../services/aiDirectBackgroundReply';
+import { subscribeGroupBackgroundConversations } from '../services/groupBackgroundConversation';
 import { subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
 
 interface HomeOverviewCard {
@@ -596,6 +597,7 @@ export default function HomePage() {
       subscribeAssistantBackgroundRunChanges(refresh),
       subscribeDirectBackgroundReplies(refresh),
       subscribeAiDirectBackgroundReplies(refresh),
+      subscribeGroupBackgroundConversations(refresh),
       subscribeAgentTeamRuns(refresh),
     ];
     refresh();

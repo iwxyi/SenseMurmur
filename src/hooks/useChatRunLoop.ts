@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createTurnWorkTracker } from '../services/turnWorkTracker';
 import type { AICharacter } from '../types/character';
 import type { DriverMessageCommitResult, GroupChat } from '../types/chat';
@@ -21,6 +21,7 @@ import { runSessionLoop as runChatLoop } from '../services/sessionRunner';
 import { currentWorkflowScope } from '../services/workflowRunRuntime';
 import { readSessionLoopContinuation, writeSessionLoopContinuation } from '../services/sessionLoopContinuationStore';
 import { runWithConversationExecutionLock } from '../services/conversationExecutionLock';
+import { resolveSessionFamilyKey } from '../services/sessionEngineKeys';
 
 export type ConversationLoopStartBlockReason = 'direct_chat' | 'waiting_story_choice' | 'already_active';
 type ConversationLoopStartOptions = { ignoreReaderPositionOnce?: boolean; immediate?: boolean; allowDirect?: boolean };
@@ -62,6 +63,11 @@ export function shouldStartConversationLoop(params: {
 
 export function shouldCreateSpeakerStreamingPlaceholder(chat?: Pick<GroupChat, 'sessionKind'> | null) {
   return chat?.sessionKind?.scenarioId !== 'story-reader';
+}
+
+export function usesBackgroundGroupConversation(chat: GroupChat) {
+  return chat.type === 'group' && chat.sessionKind?.scenarioId !== 'story-reader'
+    && resolveSessionFamilyKey(chat) === 'conversation';
 }
 
 export function resolveConversationLoopStartDelayMs(options: ConversationLoopStartOptions = {}) {
@@ -127,6 +133,33 @@ export function useChatRunLoop(params: {
   const activeAbortControllerRef = useRef<AbortController | null>(null);
 
   paramsRef.current = params;
+  useEffect(() => {
+    const chat = params.chat;
+    if (!chat || !usesBackgroundGroupConversation(chat)) return undefined;
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+    void import('../services/groupBackgroundConversation').then((service) => {
+      if (disposed) return;
+      const sync = () => {
+        if (disposed || paramsRef.current.chatId !== chat.id) return;
+        const running = service.isGroupBackgroundActive(chat.id);
+        if (running && !paramsRef.current.isRunningRef.current) {
+          const token = `background-group-${chat.id}`;
+          paramsRef.current.loopTokenRef.current = token;
+          paramsRef.current.isRunningRef.current = true;
+          paramsRef.current.isPausedRef.current = false;
+          paramsRef.current.start(token);
+        } else if (!running && paramsRef.current.loopTokenRef.current?.startsWith('background-group-')) {
+          paramsRef.current.loopTokenRef.current = null;
+          paramsRef.current.isRunningRef.current = false;
+          paramsRef.current.stop();
+        }
+      };
+      unsubscribe = service.subscribeGroupBackgroundConversations(sync);
+      sync();
+    });
+    return () => { disposed = true; unsubscribe?.(); };
+  }, [params.chat]);
   const isCommitSettled = useCallback(() => workTracker.getSnapshot().commit === 0, [workTracker]);
   const hasPendingTurnWork = useCallback(() => Boolean(
     paramsRef.current.streamingMessageRef.current
@@ -497,6 +530,27 @@ export function useChatRunLoop(params: {
       return null;
     }
     if (blockReason) return blockReason;
+    if (usesBackgroundGroupConversation(conversationChat)) {
+      const token = `background-group-${conversationChat.id}`;
+      current.loopTokenRef.current = token;
+      current.activeChatIdRef.current = conversationChat.id;
+      current.isRunningRef.current = true;
+      current.isPausedRef.current = false;
+      current.start(token);
+      setIsWaitingForInput(false);
+      void import('../services/groupBackgroundConversation')
+        .then(({ startGroupBackgroundConversation }) => startGroupBackgroundConversation(conversationChat.id))
+        .catch((error: unknown) => {
+          if (paramsRef.current.loopTokenRef.current !== token || paramsRef.current.chatId !== conversationChat.id) return;
+          const message = error instanceof Error ? error.message : String(error);
+          setRunLoopError(message);
+          paramsRef.current.showErrorToast(message);
+          paramsRef.current.loopTokenRef.current = null;
+          paramsRef.current.isRunningRef.current = false;
+          paramsRef.current.stop();
+        });
+      return null;
+    }
     const run = runLoopRef.current;
     if (!run) return null;
     current.resetAllCooldowns();
@@ -555,6 +609,11 @@ export function useChatRunLoop(params: {
     setIsWaitingForInput(false);
     const current = paramsRef.current;
     const loopToken = current.loopTokenRef.current;
+    if (current.chat && usesBackgroundGroupConversation(current.chat)) {
+      void import('../services/groupBackgroundConversation')
+        .then(({ pauseGroupBackgroundConversation }) => pauseGroupBackgroundConversation(current.chat!.id))
+        .catch((error: unknown) => current.showErrorToast(error instanceof Error ? error.message : String(error)));
+    }
     logDeveloperDiagnostic('chat-run:cancel', {
       chatId: current.chatId,
       loopToken,

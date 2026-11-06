@@ -263,6 +263,20 @@ describe('runSessionLoop', () => {
     expect(committed).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ directReplyToUserMessageId: 'user-1' }) }));
   });
 
+  it('tags every committed group turn for recovery', async () => {
+    const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
+    const committed = vi.fn();
+    runSessionCommitPipelineMock.mockImplementation(async (args) => buildCommitPipelineResult(args));
+    runOneRoundMock.mockImplementation(async (_chat, _characters, _messages, _api, hooks) => {
+      await hooks.onMessageComplete({ id: 'reply', chatId: 'chat-1', type: 'ai', senderId: 'a', senderName: '甲', content: '已回复', emotion: 0 });
+    });
+    await runSessionLoop({ ...params, executionMode: 'single_turn', groupTurnTaskId: 'turn-1', onCommittedMessage: committed } as never);
+    expect(runSessionCommitPipelineMock).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.objectContaining({ metadata: expect.objectContaining({ groupTurnTaskId: 'turn-1' }) }),
+    }));
+    expect(committed).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ groupTurnTaskId: 'turn-1' }) }));
+  });
+
   it('releases a single-turn execution slot when the engine has no speaking turn', async () => {
     const params = buildLoopParams(buildChat({ mode: 'werewolf', sessionKind: { topology: 'group', family: 'werewolf', scenarioId: 'werewolf-classic', surfaceProfile: 'text' } }));
 
@@ -275,8 +289,10 @@ describe('runSessionLoop', () => {
   it('releases a single-turn execution slot when input is temporarily held', async () => {
     const params = buildLoopParams(buildChat({ mode: 'open_chat', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } }));
     params.getCurrentMessages = () => [{ id: 'draft', type: 'user', content: '新输入', timestamp: Date.now() } as Message];
-    await runSessionLoop({ ...params, executionMode: 'single_turn', getUserDraftActivity: () => ({ active: true, updatedAt: Date.now() }) } as never);
+    const waiting = vi.fn();
+    await runSessionLoop({ ...params, executionMode: 'single_turn', getUserDraftActivity: () => ({ active: true, updatedAt: Date.now() }), onWaitingForInput: waiting } as never);
     expect(runOneRoundMock).not.toHaveBeenCalled();
+    expect(waiting).toHaveBeenCalledOnce();
   });
 
   it('does not hold a single-turn slot while another commit is unsettled', async () => {

@@ -270,6 +270,7 @@ export interface CharacterMention {
 
 export interface MessageMetadata {
   directReplyToUserMessageId?: string;
+  groupTurnTaskId?: string;
   mentions?: CharacterMention[];
   conversationUpdate?: import('./conversationContinuity').ConversationUpdate;
   voice?: {

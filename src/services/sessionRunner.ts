@@ -299,6 +299,7 @@ export async function runSessionLoop(params: {
   loopId: string;
   executionMode?: 'continuous' | 'single_turn';
   replyToUserMessageId?: string;
+  groupTurnTaskId?: string;
   onCommittedMessage?: (message: Message) => void;
   continuation?: SessionLoopContinuation;
   onContinuation?: (continuation: SessionLoopContinuation) => void | Promise<void>;
@@ -465,7 +466,10 @@ export async function runSessionLoop(params: {
         }, 'info', 'chat-run');
         turnWorkActive = false;
         params.onTurnWorkFinished?.();
-        if (params.executionMode === 'single_turn') return;
+        if (params.executionMode === 'single_turn') {
+          params.onWaitingForInput?.();
+          return;
+        }
         markSessionLoop(params.loopId, { phase: 'sleeping' });
         await new Promise((resolve) => setTimeout(resolve, inputHold.delayMs));
         continue;
@@ -733,8 +737,11 @@ export async function runSessionLoop(params: {
                 chatId: params.chatId,
                 chat: currentChat,
                 characters: currentCharacters,
-                message: params.replyToUserMessageId
-                  ? { ...message, metadata: { ...message.metadata, directReplyToUserMessageId: params.replyToUserMessageId } }
+                message: params.replyToUserMessageId || params.groupTurnTaskId
+                  ? { ...message, metadata: { ...message.metadata,
+                    ...(params.replyToUserMessageId ? { directReplyToUserMessageId: params.replyToUserMessageId } : {}),
+                    ...(params.groupTurnTaskId ? { groupTurnTaskId: params.groupTurnTaskId } : {}),
+                  } }
                   : message,
                 streamingMessage: params.getDisplayedStreamingMessage?.() || roundStreamingMessage || params.getStreamingMessage?.() || null,
                 currentMessages: params.getCurrentMessages(),

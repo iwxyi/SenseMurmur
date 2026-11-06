@@ -365,6 +365,9 @@ function DataLoader({ children }: { children: React.ReactNode }) {
       void import('./services/aiDirectBackgroundReply').then(({ recoverAiDirectBackgroundReplies }) => recoverAiDirectBackgroundReplies()).catch((error) => {
         console.error('[ai-direct-workflow:recovery-failed]', error);
       });
+      void import('./services/groupBackgroundConversation').then(({ recoverGroupBackgroundConversations }) => recoverGroupBackgroundConversations()).catch((error) => {
+        console.error('[group-workflow:recovery-failed]', error);
+      });
       void import('./services/agentTeamWorkflow').then(({ recoverAgentTeamRuns }) => recoverAgentTeamRuns()).catch((error) => {
         console.error('[agent-team:recovery-failed]', error);
       });

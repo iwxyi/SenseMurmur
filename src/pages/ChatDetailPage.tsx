@@ -53,6 +53,7 @@ import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
 import { delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, runAgentTeam, subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
 import { getDirectBackgroundRevision, isDirectBackgroundActive, listDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply, subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
 import { getAiDirectBackgroundRevision, isAiDirectBackgroundActive, listAiDirectBackgroundReplies, resumeAiDirectBackgroundReply, startAiDirectBackgroundReply, subscribeAiDirectBackgroundReplies } from '../services/aiDirectBackgroundReply';
+import { getGroupBackgroundRevision, listGroupBackgroundConversations, subscribeGroupBackgroundConversations } from '../services/groupBackgroundConversation';
 import AssistantTeamWorkbench from '../components/chat/AssistantTeamWorkbench';
 import ChatBackground from '../components/chat/ChatBackground';
 import { getSyncableCharacterMemberIds } from '../services/pageSyncScopeContract';
@@ -1169,6 +1170,25 @@ export default function ChatDetailPage() {
 
   const remoteDeletedChat = remoteDeletedChats.find((c) => c.id === id);
   const chat = chats.find((c) => c.id === id) || remoteDeletedChat;
+  const groupBackgroundRevision = useSyncExternalStore(subscribeGroupBackgroundConversations, getGroupBackgroundRevision, getGroupBackgroundRevision);
+  const [groupBackgroundError, setGroupBackgroundError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!id || chat?.type !== 'group' || resolveSessionFamilyKey(chat) !== 'conversation' || chat.sessionKind?.scenarioId === 'story-reader') {
+      setGroupBackgroundError(null);
+      return;
+    }
+    let cancelled = false;
+    void listGroupBackgroundConversations(id).then((runs) => {
+      if (cancelled) return;
+      const task = runs[0]?.tasks.find((item) => item.status === 'result_unknown' || item.status === 'failed');
+      setGroupBackgroundError(task?.status === 'result_unknown'
+        ? '上次群聊请求的结果无法确认，已停止自动运行。请查看聊天记录后处理。'
+        : task?.error || null);
+    }).catch((error: unknown) => {
+      if (!cancelled) setGroupBackgroundError(error instanceof Error ? error.message : '群聊任务状态读取失败');
+    });
+    return () => { cancelled = true; };
+  }, [id, chat, groupBackgroundRevision]);
   const groupBackgroundUrl = chat?.groupVisual?.backgroundUrl?.trim() || '';
   const groupBackgroundOpacity = Math.min(1, Math.max(0.05, Number(chat?.groupVisual?.backgroundOpacity ?? 0.16)));
   const sessionInfoCards = useMemo(() => {
@@ -3346,14 +3366,14 @@ export default function ChatDetailPage() {
     ? null
     : displayedStoryChoiceVisual?.selectedValue || null;
   const isSingleSpeakableMemberStop = Boolean(runLoopError?.startsWith('群里已无多人在线'));
-  const runLoopStatusContent = (chatError || runLoopError) ? (
+  const runLoopStatusContent = (chatError || runLoopError || groupBackgroundError) ? (
     <Alert
       severity={chatError || !isSingleSpeakableMemberStop ? 'error' : 'warning'}
       variant="outlined"
       role="status"
       sx={{ mx: { xs: 1.25, sm: 2 }, mt: 1, borderRadius: 2 }}
     >
-      {chatError || runLoopError}
+      {chatError || runLoopError || groupBackgroundError}
     </Alert>
   ) : null;
   const handleChooseStoryBranch = useCallback(async (optionValue: string) => {
