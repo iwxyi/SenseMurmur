@@ -277,6 +277,23 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
+  async function abandonUnknownReview(runId: string, expectedPlanVersion: number, reviewId: string) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.status !== 'paused' || current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
+      const target = current.tasks.find((task) => task.id === reviewId && task.kind === 'team_review' && task.status === 'result_unknown');
+      if (!target || current.tasks.some((task) => task.id === 'review_needs_user')) throw new Error('当前没有可放弃的待核对验收');
+      const now = Date.now();
+      const block: WorkflowTask = { id: 'review_needs_user', runId, kind: 'team_review_block', input: null,
+        dependsOn: [], status: 'waiting_user', error: '上次主 Agent 验收结果无法核对。请追加明确指示或新建团队任务。', attempt: 0, updatedAt: now };
+      const tasks = [...current.tasks.map((task) => task.id === reviewId ? { ...task, status: 'cancelled' as const,
+        error: '用户已放弃核对本次验收，原结果仍未知', updatedAt: now } : task), block];
+      assertTaskGraph(tasks);
+      const snapshot: WorkflowSnapshot = { ...current, tasks,
+        run: { ...current.run, autoReview: false, planVersion: current.run.planVersion + 1, updatedAt: now } };
+      return { snapshot, value: snapshot };
+    });
+  }
+
   async function addTasksOnce(runId: string, expectedPlanVersion: number, additions: WorkflowTask[]) {
     if (!additions.length) throw new Error('工作流计划修订不能为空');
     return mutate(scope(), runId, (current) => {
@@ -444,5 +461,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }

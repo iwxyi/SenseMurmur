@@ -423,6 +423,15 @@ describe('agent team workflow', () => {
     expect(resumed.snapshot.tasks.find((task) => task.id === 'review_1')?.status).toBe('result_unknown');
     expect(resumed.summary.blocked.some((item) => item.taskId === 'review_1')).toBe(true);
     expect(generate).not.toHaveBeenCalled();
+    await recoverAgentTeamRuns();
+    const paused = await workflow.read(runId);
+    const handled = await workflow.abandonUnknownReview(runId, 'review_1', paused!.run.planVersion);
+    expect(handled.tasks.find((task) => task.id === 'review_1')?.status).toBe('cancelled');
+    expect(handled.tasks.find((task) => task.id === 'review_needs_user')?.status).toBe('waiting_user');
+    expect(handled.run.autoReview).toBe(false);
+    await expect(workflow.abandonUnknownReview(runId, 'review_1', paused!.run.planVersion)).rejects.toThrow('计划已更新');
+    const continued = await workflow.addRevisionRequest(runId, handled.run.planVersion, '按新要求完成报告');
+    expect(continued.tasks.some((task) => task.id === 'review_needs_user')).toBe(false);
   });
 
   it('stores an instruction only for a paused unstarted child task and uses it on resume', async () => {

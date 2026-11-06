@@ -12,6 +12,7 @@ interface Props {
   onInstruct: (run: WorkflowSnapshot, task: WorkflowTask, instruction: string) => Promise<void>;
   onPause: (run: WorkflowSnapshot) => Promise<void>;
   onDelegate: (run: WorkflowSnapshot, request: string) => Promise<void>;
+  onAbandonReview: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
 }
 
 const taskStatus: Record<WorkflowTask['status'], string> = {
@@ -39,7 +40,7 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate, onInstruct, onPause, onDelegate }: Props) {
+export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate, onInstruct, onPause, onDelegate, onAbandonReview }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -50,6 +51,8 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
   const [delegateRequest, setDelegateRequest] = useState('');
   const [delegateError, setDelegateError] = useState<string | null>(null);
   const [savingDelegate, setSavingDelegate] = useState(false);
+  const [reviewActionError, setReviewActionError] = useState<string | null>(null);
+  const [savingReviewAction, setSavingReviewAction] = useState(false);
   if (!runs.length) return null;
   const run = runs.find((item) => item.run.id === selectedRunId) || runs[0];
   const task = run.tasks.find((item) => item.id === selectedTaskId) || null;
@@ -64,6 +67,7 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
   const running = isRunActive(run.run.id);
   const editable = Boolean(task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_video') && task.attempt === 0
     && (task.status === 'queued' || task.status === 'waiting_dependency'));
+  const unknownReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'result_unknown');
 
   return <>
     <Box role="status" sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, left: 12, right: 12, zIndex: 5, display: 'flex', alignItems: 'center', gap: 1, px: 1.25, py: 0.5, borderRadius: 1.5, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider', boxShadow: 1, minWidth: 0 }}>
@@ -110,6 +114,16 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
           {plan?.finalAcceptance && <Typography variant="body2"><strong>最终验收</strong> {plan.finalAcceptance}</Typography>}
           {reviewResult && typeof reviewResult.reason === 'string' && <Typography variant="body2" color={reviewResult.complete === true ? 'text.secondary' : 'warning.main'}><strong>主 Agent 验收</strong> {reviewResult.reason}</Typography>}
           {summary.blocked.length > 0 && <Typography variant="body2" color="warning.main"><strong>需要处理</strong> {summary.blocked.map((item) => item.reason).join('；')}</Typography>}
+          {unknownReview && run.run.status === 'paused' && <Box sx={{ display: 'grid', gap: 0.75 }}>
+            <Typography variant="body2" color="text.secondary">上次验收请求的结果无法核对。放弃本次验收后，仍需追加明确任务才能继续；原结果会保留为未知记录。</Typography>
+            {reviewActionError && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
+            <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
+              setSavingReviewAction(true);
+              void onAbandonReview(run, unknownReview).then(() => setReviewActionError(null)).catch((error: unknown) => {
+                setReviewActionError(error instanceof Error ? error.message : '处理验收失败');
+              }).finally(() => setSavingReviewAction(false));
+            }}>放弃本次验收，改由我指定下一步</Button>
+          </Box>}
           {pauseError && <Typography variant="body2" color="error.main">{pauseError}</Typography>}
           {(run.run.status === 'paused' || run.run.status === 'completed') && run.tasks.length < 24 && <Box sx={{ display: 'grid', gap: 1 }}>
             <TextField multiline minRows={2} fullWidth size="small" label="交给主 Agent 追加任务" value={delegateRequest} onChange={(event) => { setDelegateRequest(event.target.value); setDelegateError(null); }} slotProps={{ htmlInput: { maxLength: 4000 } }} disabled={savingDelegate} />
