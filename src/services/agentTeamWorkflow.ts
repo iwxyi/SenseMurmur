@@ -452,7 +452,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const revisionId = `auto_delegate_${round}`;
           if (!snapshot.tasks.some((task) => task.id === revisionId)) {
             const sourceTaskIds = snapshot.tasks.filter((task) => ['agent_text', 'agent_web_search', 'agent_image', 'agent_video'].includes(task.kind)).map((task) => task.id);
-            if (snapshot.tasks.length >= 22) {
+            if (snapshot.tasks.length >= 23) {
               snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '团队任务已达到自动追加上限，请检查结果并决定后续步骤。'));
               break;
             }
