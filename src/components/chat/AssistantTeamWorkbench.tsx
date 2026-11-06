@@ -56,10 +56,10 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
   const details = task ? taskDetails(task) : null;
   const plan = teamPlan(run);
   const summary = summarizeWorkflowRun(run);
-  const childTasks = run.tasks.filter((item) => item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_video');
+  const childTasks = run.tasks.filter((item) => item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_video');
   const blocked = summary.blocked.length > 0;
   const running = isRunActive(run.run.id);
-  const editable = Boolean(task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_video') && task.attempt === 0
+  const editable = Boolean(task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_video') && task.attempt === 0
     && (task.status === 'queued' || task.status === 'waiting_dependency'));
 
   return <>
@@ -121,7 +121,7 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
       <DialogActions>
         <Button onClick={() => { setOpen(false); onCreate(); }}>新建团队任务</Button>
         {running && !run.run.pauseRequested && <Button onClick={() => { void onPause(run).then(() => setPauseError(null)).catch((error: unknown) => setPauseError(error instanceof Error ? error.message : '暂停任务失败')); }}>当前步骤完成后暂停</Button>}
-        {!running && ((!blocked && run.run.status !== 'failed') || (run.run.status === 'failed' && run.tasks.some((item) => item.kind === 'agent_video' && item.status === 'failed'))) && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : run.run.status === 'failed' ? '核对视频重试结果' : '继续整个任务'}</Button>}
+        {!running && ((!blocked && run.run.status !== 'failed') || (run.run.status === 'failed' && run.tasks.some((item) => (item.kind === 'agent_video' || item.kind === 'agent_image') && item.status === 'failed'))) && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : run.run.status === 'failed' ? '核对媒体重试结果' : '继续整个任务'}</Button>}
         <Button onClick={() => setOpen(false)}>关闭</Button>
       </DialogActions>
     </Dialog>

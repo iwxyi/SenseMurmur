@@ -60,7 +60,7 @@ function waitForVideoState(runId: string, taskId: string, signal: AbortSignal, p
   });
 }
 
-export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; signal: AbortSignal }): Promise<WorkflowTaskResult> {
+export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -70,6 +70,7 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
   if (!chat) throw new WorkflowPreflightError('助手会话已删除');
   const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video');
   if (!profile) throw new WorkflowPreflightError('视频模型未配置');
+  if (params.signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
   const existing = teamVideoMessage(params.runId, params.taskId);
   if (existing) {
     const result = inspectAgentTeamVideoAttachment(params.runId, params.taskId);
@@ -87,7 +88,7 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
     timestamp: now, isDeleted: false,
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId },
       attachments: [{ id: `team-video-${params.taskId}`, kind: 'video' as const, status: 'queued' as const,
-        altText: '团队生成视频', promptText: params.prompt, createdAt: now, updatedAt: now }] },
+        altText: '团队生成视频', promptText: params.prompt, referenceImages: params.referenceImages, createdAt: now, updatedAt: now }] },
   }) as Message;
   if (!existing) {
     state.upsertMessage(message);
@@ -96,6 +97,7 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
   }
   const synced = isLocalOnlyMediaMode() ? message : await waitForVideoState(params.runId, params.taskId, params.signal,
     (current) => Boolean(current.serverId), 60_000);
+  if (params.signal.aborted) throw new Error('视频任务已中断，提交结果需要核对');
   await processRichMessageMedia({ message: synced, aiProfiles: useSettingsStore.getState().aiProfiles,
     upsertMessage: (next) => useMessageStore.getState().upsertMessage(next) });
   const result = inspectAgentTeamVideoAttachment(params.runId, params.taskId);

@@ -7,7 +7,7 @@ export interface AgentTeamRole {
   responsibility: string;
   method: string;
   acceptance: string;
-  allowedTools: Array<'text_generation' | 'web_search' | 'video_generation'>;
+  allowedTools: Array<'text_generation' | 'web_search' | 'image_generation' | 'video_generation'>;
 }
 
 export interface AgentTeamTask {
@@ -16,7 +16,7 @@ export interface AgentTeamTask {
   goal: string;
   dependsOn: string[];
   acceptance: string;
-  tool?: 'text_generation' | 'web_search' | 'video_generation';
+  tool?: 'text_generation' | 'web_search' | 'image_generation' | 'video_generation';
 }
 
 export interface AgentTeamPlan {
@@ -50,7 +50,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   if (source.roles.length < 1 || source.roles.length > 6 || source.tasks.length < 1 || source.tasks.length > 16) throw new Error('团队计划规模超出限制');
   const roles = source.roles.map((item): AgentTeamRole => {
     const value = record(item);
-    if (!Array.isArray(value.allowedTools) || value.allowedTools.some((tool) => tool !== 'text_generation' && tool !== 'web_search' && tool !== 'video_generation')) throw new Error('岗位申请了不可用工具');
+    if (!Array.isArray(value.allowedTools) || value.allowedTools.some((tool) => tool !== 'text_generation' && tool !== 'web_search' && tool !== 'image_generation' && tool !== 'video_generation')) throw new Error('岗位申请了不可用工具');
     return {
       id: identifier(value.id, '岗位 ID'),
       name: requiredText(value.name, '岗位名称', 60),
@@ -68,7 +68,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     const roleId = identifier(value.roleId, '任务岗位 ID');
     if (!roleIds.has(roleId)) throw new Error('任务引用了不存在的岗位');
     const tool = value.tool === undefined ? 'text_generation' : value.tool;
-    if (tool !== 'text_generation' && tool !== 'web_search' && tool !== 'video_generation') throw new Error('任务申请了不可用工具');
+    if (tool !== 'text_generation' && tool !== 'web_search' && tool !== 'image_generation' && tool !== 'video_generation') throw new Error('任务申请了不可用工具');
     if (!rolesById.get(roleId)?.allowedTools.includes(tool)) throw new Error('任务使用了岗位未获授权的工具');
     if (!Array.isArray(value.dependsOn) || value.dependsOn.length > 8) throw new Error('任务依赖无效');
     return {
@@ -104,11 +104,11 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   };
 }
 
-export async function planAgentTeam(params: { api: APIConfig; goal: string; webSearch?: boolean; videoGeneration?: boolean; signal?: AbortSignal }) {
+export async function planAgentTeam(params: { api: APIConfig; goal: string; webSearch?: boolean; imageGeneration?: boolean; videoGeneration?: boolean; signal?: AbortSignal }) {
   const goal = requiredText(params.goal, '用户目标', 12_000);
   const raw = await generateResponse(params.api, [
     '你是通用任务的主 Agent。根据用户目标设计最小可行的团队与无环任务图。简单任务只用一个岗位。',
-    `当前开放工具：text_generation${params.webSearch ? '、web_search' : ''}${params.videoGeneration ? '、video_generation' : ''}。网页搜索任务的 goal 是搜索词；视频任务的 goal 是精炼成片提示词，可以依赖先完成的脚本任务。视频由系统异步生成，不能声称立即成片。不得承诺未开放的图片、音乐、音视频合成、文件写入或代码执行；能力不足时在摘要说明。`,
+    `当前开放工具：text_generation${params.webSearch ? '、web_search' : ''}${params.imageGeneration ? '、image_generation' : ''}${params.videoGeneration ? '、video_generation' : ''}。网页搜索任务的 goal 是搜索词；图片任务的 goal 是可生成的画面提示词；视频任务的 goal 是精炼成片提示词，可以依赖脚本和图片任务，依赖图片时系统把图片作为参考素材。视频由系统异步生成，不能声称立即成片。不得承诺未开放的音乐、音视频合成、文件写入或代码执行；能力不足时在摘要说明。`,
     '岗位必须有具体职责、方法和可检查的验收标准；任务必须有唯一 ID、岗位归属、明确目标和依赖。不要用岗位名称冒充专业能力。',
     '只输出 JSON：{"summary":"...","roles":[{"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"..."}],"finalAcceptance":"..."}',
   ].join('\n'), [{ role: 'user', content: goal }], undefined, {
@@ -123,6 +123,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; webS
   }
   const plan = validateAgentTeamPlan(parsed);
   if (!params.webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new Error('当前会话未开启网页搜索');
+  if (!params.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new Error('当前未配置图片模型');
   if (!params.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new Error('当前未配置视频模型');
   return plan;
 }
