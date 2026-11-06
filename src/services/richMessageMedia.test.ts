@@ -297,7 +297,7 @@ describe('processRichMessageMedia', () => {
       id: 'video-1', kind: 'video', status: 'generating', generationJobId: 'media-gen-recovery', promptText: '追逐场景', createdAt: 123, updatedAt: 123,
     }] } });
     const upserts: Message[] = [];
-    await processRichMessageMedia({ message, aiProfiles: [{ ...imageProfile, type: 'video', model: 'MiniMax-H3' }], upsertMessage: (next) => upserts.push(next) });
+    await processRichMessageMedia({ message, aiProfiles: [], upsertMessage: (next) => upserts.push(next) });
     expect(api.getAiMediaTaskByRequestKey).toHaveBeenCalledWith('media-gen-recovery');
     expect(generateVideoWithAdapter).not.toHaveBeenCalled();
     expect(upserts.some((item) => item.metadata?.attachments?.[0]?.mediaTaskId === 'saved-task')).toBe(true);

@@ -69,8 +69,6 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
   ]);
   const chat = useChatStore.getState().chats.find((item) => item.id === params.chatId && item.type === 'assistant' && item.deletedAt == null);
   if (!chat) throw new WorkflowPreflightError('助手会话已删除');
-  const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video');
-  if (!profile) throw new WorkflowPreflightError('视频模型未配置');
   if (params.signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
   const existing = teamVideoMessage(params.runId, params.taskId);
   if (existing) {
@@ -79,6 +77,10 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
     if (result?.status === 'completed') return { output: result.output };
     if (result?.status === 'failed') throw new WorkflowPreflightError(result.error);
     if (result?.status !== 'queued') throw new Error('视频任务已开始提交，但结果尚未确认，请核对后继续');
+  }
+  const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video');
+  if (!profile && !existing?.metadata?.attachments?.some((item) => item.kind === 'video' && (item.mediaTaskId || item.generationJobId))) {
+    throw new WorkflowPreflightError('视频模型未配置');
   }
   const now = Date.now();
   const state = useMessageStore.getState();

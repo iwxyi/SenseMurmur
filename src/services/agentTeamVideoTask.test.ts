@@ -103,6 +103,7 @@ describe('agent team video task', () => {
         generationJobId: 'media-gen-saved', createdAt: 1, updatedAt: 2,
       }] } };
     useMessageStore.setState({ messages: [submitting] });
+    useSettingsStore.setState({ aiProfiles: [] });
     vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
       expect(message.metadata?.attachments?.[0]?.generationJobId).toBe('media-gen-saved');
       upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({

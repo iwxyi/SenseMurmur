@@ -633,13 +633,14 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
       ]);
       let taskId = attachment.mediaTaskId;
       if (!taskId) {
-        if (!profile || !attachment.promptText) throw new Error('视频模型未配置');
         const clientRequestKey = attachment.generationJobId || generationJobId;
         let task: Awaited<ReturnType<typeof generateVideoWithAdapter>>;
         try {
           task = await api.getAiMediaTaskByRequestKey(clientRequestKey);
         } catch (lookupError) {
           if (!(lookupError instanceof ApiError) || lookupError.status !== 404) throw lookupError;
+          if (!profile) throw new Error('视频模型未配置');
+          if (!attachment.promptText) throw new Error('视频提示词缺失');
           task = await generateVideoWithAdapter({
             profile,
             prompt: attachment.promptText,
