@@ -24,23 +24,28 @@ async function teamMediaCapabilities() {
   const profiles = useSettingsStore.getState().aiProfiles;
   const imageProfile = getUsablePreferredAIProfile(profiles, 'image');
   const videoProfile = getUsablePreferredAIProfile(profiles, 'video');
-  if (!videoProfile) return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false, videoUnavailableReason: '当前未配置视频模型' };
+  if (!videoProfile) return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false, maxVideoReferenceImages: 0, videoUnavailableReason: '当前未配置视频模型' };
   let videoReferenceImages = false;
+  let maxVideoReferenceImages: number | undefined = 0;
   if (videoProfile.provider.startsWith('official')) {
     let models: Awaited<ReturnType<typeof listAvailableModels>>;
     try { models = await listAvailableModels(videoProfile, 'video'); }
     catch (error) {
-      return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false,
+      return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false, maxVideoReferenceImages: 0,
         videoUnavailableReason: `视频模型目录暂不可用：${error instanceof Error ? error.message : '查询失败'}` };
     }
     const selected = models.find((item) => item.id === videoProfile.model);
-    if (!selected) return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false, videoUnavailableReason: '当前视频模型未在可用模型列表中' };
+    if (!selected) return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false, maxVideoReferenceImages: 0, videoUnavailableReason: '当前视频模型未在可用模型列表中' };
     const raw = selected.raw;
     const options = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw.aceVideoOptions : undefined;
     videoReferenceImages = Boolean(options && typeof options === 'object' && !Array.isArray(options)
       && (options as Record<string, unknown>).acceptsReferenceImages === true);
+    const advertisedLimit = options && typeof options === 'object' && !Array.isArray(options)
+      ? (options as Record<string, unknown>).maxReferenceImages : undefined;
+    maxVideoReferenceImages = videoReferenceImages && typeof advertisedLimit === 'number' && Number.isInteger(advertisedLimit)
+      ? advertisedLimit : videoReferenceImages ? undefined : 0;
   }
-  return { imageGeneration: Boolean(imageProfile), videoGeneration: true, videoReferenceImages, videoUnavailableReason: undefined };
+  return { imageGeneration: Boolean(imageProfile), videoGeneration: true, videoReferenceImages, maxVideoReferenceImages, videoUnavailableReason: undefined };
 }
 
 interface TeamTaskInput {
@@ -54,6 +59,18 @@ interface TeamTaskInput {
 
 interface TeamRevisionInput { request: string; sourceTaskIds: string[] }
 interface TeamReviewInput { sourceTaskIds: string[] }
+
+function countImageUpstream(task: AgentTeamTask, byId: Map<string, AgentTeamTask>) {
+  const visited = new Set<string>();
+  const visit = (current: AgentTeamTask) => current.dependsOn.forEach((id) => {
+    if (visited.has(id)) return;
+    visited.add(id);
+    const upstream = byId.get(id);
+    if (upstream) visit(upstream);
+  });
+  visit(task);
+  return [...visited].filter((id) => byId.get(id)?.tool === 'image_generation').length;
+}
 
 function parseTeamReview(value: unknown): { complete: boolean; reason: string; nextRequest?: string } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new WorkflowPreflightError('主 Agent 验收结果无效');
@@ -95,16 +112,12 @@ function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<R
   if (!capabilities.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');
   if (!capabilities.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
   const byId = new Map(plan.tasks.map((task) => [task.id, task]));
-  const hasImageUpstream = (task: AgentTeamTask, seen = new Set<string>()): boolean => task.dependsOn.some((id) => {
-    if (seen.has(id)) return false;
-    const upstream = byId.get(id);
-    if (!upstream) return false;
-    if (upstream.tool === 'image_generation') return true;
-    seen.add(id);
-    return hasImageUpstream(upstream, seen);
-  });
-  if (!capabilities.videoReferenceImages && plan.tasks.some((task) => task.tool === 'video_generation' && hasImageUpstream(task))) {
+  if (!capabilities.videoReferenceImages && plan.tasks.some((task) => task.tool === 'video_generation' && countImageUpstream(task, byId) > 0)) {
     throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换视频模型或调整追加要求');
+  }
+  if (capabilities.maxVideoReferenceImages !== undefined && plan.tasks.some((task) => task.tool === 'video_generation'
+    && countImageUpstream(task, byId) > capabilities.maxVideoReferenceImages!)) {
+    throw new WorkflowPreflightError(`当前视频模型最多支持 ${capabilities.maxVideoReferenceImages} 张参考图片，请减少素材或调整计划`);
   }
 }
 
@@ -206,6 +219,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const capabilities = await teamMediaCapabilities();
           if (!capabilities.videoGeneration) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
           if (!capabilities.videoReferenceImages) throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换支持参考图的视频模型后继续');
+          if (capabilities.maxVideoReferenceImages !== undefined && imageTaskIds.length > capabilities.maxVideoReferenceImages) {
+            throw new WorkflowPreflightError(`当前视频模型最多支持 ${capabilities.maxVideoReferenceImages} 张参考图片，请减少素材或更换模型`);
+          }
         }
         const referenceImages = imageTaskIds.flatMap((dependencyId) => {
           const reference = teamImageReference(task.runId, dependencyId);
