@@ -1,6 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Message } from '../types/message';
-import { findPendingVideoMessages } from './backgroundVideoRecovery';
+import { findPendingVideoMessages, recoverBackgroundVideoTasks } from './backgroundVideoRecovery';
+import { useChatStore } from '../stores/useChatStore';
+import { useMessageStore } from '../stores/useMessageStore';
+import { useSettingsStore } from '../stores/useSettingsStore';
+import { processRichMessageMedia } from './richMessageMedia';
+import { readAuthSnapshot } from './authSnapshot';
+import { isCloudSyncEnabled } from './cloudSyncPreference';
+
+vi.mock('./richMessageMedia', () => ({ processRichMessageMedia: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('./authSnapshot', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./authSnapshot')>(),
+  readAuthSnapshot: vi.fn(() => ({ mode: 'cloud' })),
+}));
+vi.mock('./cloudSyncPreference', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./cloudSyncPreference')>(),
+  isCloudSyncEnabled: vi.fn(() => true),
+}));
 
 function message(id: string, status: 'generating' | 'queued', taskId?: string): Message {
   return { id, chatId: 'chat', type: 'ai', senderId: 'assistant', senderName: '助手', content: '', emotion: 0, timestamp: 1,
@@ -25,5 +41,24 @@ describe('background video recovery', () => {
       ...generating.metadata!.attachments![0], status: 'ready', mediaTaskId: undefined, updatedAt: 2,
     }] } };
     expect(findPendingVideoMessages([generating, ready], new Set(['chat']), true)).toEqual([]);
+  });
+
+  it('resumes after cloud sync supplies the server message ID and schedules the task once', async () => {
+    vi.mocked(processRichMessageMedia).mockClear();
+    vi.mocked(readAuthSnapshot).mockReturnValue({ mode: 'cloud' } as ReturnType<typeof readAuthSnapshot>);
+    vi.mocked(isCloudSyncEnabled).mockReturnValue(true);
+    vi.spyOn(useChatStore.persist, 'hasHydrated').mockReturnValue(true);
+    vi.spyOn(useMessageStore.persist, 'hasHydrated').mockReturnValue(true);
+    vi.spyOn(useSettingsStore.persist, 'hasHydrated').mockReturnValue(true);
+    useChatStore.setState({ chats: [{ id: 'chat', deletedAt: null } as ReturnType<typeof useChatStore.getState>['chats'][number]] });
+    const pending = { ...message('late-sync', 'generating', 'task-1'), serverId: undefined };
+    useMessageStore.setState({ messages: [pending], messageWindowsByChatId: {} });
+    expect(await recoverBackgroundVideoTasks()).toBe(0);
+    expect(processRichMessageMedia).not.toHaveBeenCalled();
+    useMessageStore.setState({ messages: [{ ...pending, serverId: 'server-late-sync' }] });
+    await vi.waitFor(() => expect(processRichMessageMedia).toHaveBeenCalledTimes(1));
+    useMessageStore.setState({ messages: [{ ...pending, serverId: 'server-late-sync' }] });
+    await Promise.resolve();
+    expect(processRichMessageMedia).toHaveBeenCalledTimes(1);
   });
 });
