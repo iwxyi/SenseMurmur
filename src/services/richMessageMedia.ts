@@ -937,7 +937,8 @@ export async function retryRichMessageMedia(params: {
   }
   if (target.kind === 'video' && !target.mediaTaskId && target.generationJobId) {
     try {
-      reuseVideoTask = (await api.getAiMediaTaskByRequestKey(target.generationJobId)).status !== 'failed';
+      const task = await api.getAiMediaTaskByRequestKey(target.generationJobId);
+      reuseVideoTask = task.status !== 'failed';
     } catch (error) {
       if (!(error instanceof ApiError) || error.status !== 404) reuseVideoTask = true;
     }

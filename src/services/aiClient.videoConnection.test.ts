@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from './api';
-import { testConnection } from './aiClient';
+import { testConnection, waitForAiMediaTask } from './aiClient';
 
 const config = {
   provider: 'official-ace', apiKey: '', baseUrl: '/api/ai',
@@ -36,4 +36,12 @@ describe('video connection test', () => {
     expect(result.success).toBe(false);
     expect((result.error as Error).message).toContain('当前账号无权访问该渠道');
   });
+});
+
+it('stops polling when the server cannot confirm whether ACE accepted a task', async () => {
+  const request = vi.spyOn(api, 'getAiMediaTask').mockResolvedValue({ task_id: 'saved-task', model: config.model,
+    status: 'submission_unknown', result: null, chargedAmount: null, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+  await expect(waitForAiMediaTask('saved-task')).rejects.toThrow('提交结果尚未确认');
+  expect(request).toHaveBeenCalledOnce();
+  request.mockRestore();
 });

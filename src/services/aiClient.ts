@@ -209,6 +209,9 @@ export async function waitForAiMediaTask(taskId: string, options: {
     const task = await api.getAiMediaTask(taskId);
     options.onUpdate?.(task);
     if (task.status === 'succeeded' || task.status === 'failed') return task;
+    if (task.status === 'submission_unknown') {
+      throw new Error('视频提交结果尚未确认，请等待管理员核对原任务；重试不会重新提交。');
+    }
     await new Promise<void>((resolve, reject) => {
       const abort = () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); reject(options.signal?.reason || new DOMException('Aborted', 'AbortError')); };
       const timer = setTimeout(() => { options.signal?.removeEventListener('abort', abort); resolve(); }, delay);
