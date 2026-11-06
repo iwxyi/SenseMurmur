@@ -436,7 +436,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const existing = useAssistantArtifactStore.getState().getArtifactsForChat(chat.id).find((item) => item.sourceMessageId === sourceId);
       const existingVersion = existing?.versions.find((item) => item.id === existing.currentVersionId);
       const plan = validateAgentTeamPlan(snapshot.tasks.find((task) => task.id === 'plan')?.output);
-      const delegatedPlans = snapshot.tasks.filter((task) => task.kind === 'team_plan_revision').map((task) => ({
+      const delegatedPlans = snapshot.tasks.filter((task) => task.kind === 'team_plan_revision' && task.status === 'completed'
+        && snapshot.tasks.some((item) => item.id.startsWith(delegatedTaskId(task.id, '')))).map((task) => ({
         sourceId: task.id, plan: validateAgentTeamPlan(task.output),
       }));
       const content = [
