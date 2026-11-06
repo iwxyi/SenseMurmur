@@ -68,6 +68,10 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
   const editable = Boolean(task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_video') && task.attempt === 0
     && (task.status === 'queued' || task.status === 'waiting_dependency'));
   const unknownReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'result_unknown');
+  const canAddRevision = (run.run.status === 'paused' || run.run.status === 'completed')
+    && run.tasks.length < 24
+    && !run.tasks.some((item) => item.status === 'running' || item.status === 'result_unknown' || item.status === 'failed'
+      || (item.kind === 'team_plan_revision' && item.status !== 'completed'));
 
   return <>
     <Box role="status" sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, left: 12, right: 12, zIndex: 5, display: 'flex', alignItems: 'center', gap: 1, px: 1.25, py: 0.5, borderRadius: 1.5, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider', boxShadow: 1, minWidth: 0 }}>
@@ -125,7 +129,7 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
             }}>放弃本次验收，改由我指定下一步</Button>
           </Box>}
           {pauseError && <Typography variant="body2" color="error.main">{pauseError}</Typography>}
-          {(run.run.status === 'paused' || run.run.status === 'completed') && run.tasks.length < 24 && <Box sx={{ display: 'grid', gap: 1 }}>
+          {canAddRevision && <Box sx={{ display: 'grid', gap: 1 }}>
             <TextField multiline minRows={2} fullWidth size="small" label="交给主 Agent 追加任务" value={delegateRequest} onChange={(event) => { setDelegateRequest(event.target.value); setDelegateError(null); }} slotProps={{ htmlInput: { maxLength: 4000 } }} disabled={savingDelegate} />
             {delegateError && <Typography variant="caption" color="error.main">{delegateError}</Typography>}
             <Button size="small" variant="outlined" disabled={!delegateRequest.trim() || savingDelegate} onClick={() => {
