@@ -49,6 +49,11 @@ describe('background video recovery', () => {
     expect(findPendingVideoMessages([local, synced], new Set(['chat']), true)).toEqual([synced]);
   });
 
+  it('does not resume a deleted copy with the same attachment version', () => {
+    const generating = message('deleted-copy', 'generating', 'task-1');
+    expect(findPendingVideoMessages([generating, { ...generating, isDeleted: true }], new Set(['chat']), true)).toEqual([]);
+  });
+
   it('resumes after cloud sync supplies the server message ID and schedules the task once', async () => {
     vi.mocked(processRichMessageMedia).mockClear();
     vi.mocked(readAuthSnapshot).mockReturnValue({ mode: 'cloud' } as ReturnType<typeof readAuthSnapshot>);

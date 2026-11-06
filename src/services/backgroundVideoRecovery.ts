@@ -22,7 +22,8 @@ export function findPendingVideoMessages(messages: Message[], activeChatIds: Set
     const previous = latest.get(message.id);
     const updatedAt = Math.max(0, ...(message.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0));
     const previousUpdatedAt = previous ? Math.max(0, ...(previous.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0)) : -1;
-    if (!previous || updatedAt > previousUpdatedAt || (updatedAt === previousUpdatedAt && !previous.serverId && message.serverId)) {
+    if (!previous || updatedAt > previousUpdatedAt || (updatedAt === previousUpdatedAt
+      && ((!previous.isDeleted && message.isDeleted) || (!previous.serverId && Boolean(message.serverId) && !message.isDeleted)))) {
       latest.set(message.id, message);
     }
   }
