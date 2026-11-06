@@ -24,18 +24,23 @@ async function teamMediaCapabilities() {
   const profiles = useSettingsStore.getState().aiProfiles;
   const imageProfile = getUsablePreferredAIProfile(profiles, 'image');
   const videoProfile = getUsablePreferredAIProfile(profiles, 'video');
-  if (!videoProfile) return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false };
+  if (!videoProfile) return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false, videoUnavailableReason: '当前未配置视频模型' };
   let videoReferenceImages = false;
   if (videoProfile.provider.startsWith('official')) {
-    const models = await listAvailableModels(videoProfile, 'video');
+    let models: Awaited<ReturnType<typeof listAvailableModels>>;
+    try { models = await listAvailableModels(videoProfile, 'video'); }
+    catch (error) {
+      return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false,
+        videoUnavailableReason: `视频模型目录暂不可用：${error instanceof Error ? error.message : '查询失败'}` };
+    }
     const selected = models.find((item) => item.id === videoProfile.model);
-    if (!selected) throw new WorkflowPreflightError('当前视频模型未在可用模型列表中');
+    if (!selected) return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false, videoUnavailableReason: '当前视频模型未在可用模型列表中' };
     const raw = selected.raw;
     const options = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw.aceVideoOptions : undefined;
     videoReferenceImages = Boolean(options && typeof options === 'object' && !Array.isArray(options)
       && (options as Record<string, unknown>).acceptsReferenceImages === true);
   }
-  return { imageGeneration: Boolean(imageProfile), videoGeneration: true, videoReferenceImages };
+  return { imageGeneration: Boolean(imageProfile), videoGeneration: true, videoReferenceImages, videoUnavailableReason: undefined };
 }
 
 interface TeamTaskInput {
@@ -159,9 +164,10 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
           return snapshot.tasks.find((item) => item.id === dependencyId)?.kind === 'agent_image';
         });
-        if (hasImageDependency && (!existingVideo || existingVideo.status === 'queued')
-          && !(await teamMediaCapabilities()).videoReferenceImages) {
-          throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换支持参考图的视频模型后继续');
+        if (hasImageDependency && (!existingVideo || existingVideo.status === 'queued')) {
+          const capabilities = await teamMediaCapabilities();
+          if (!capabilities.videoGeneration) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
+          if (!capabilities.videoReferenceImages) throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换支持参考图的视频模型后继续');
         }
         const referenceImages = input.task.dependsOn.flatMap((id) => {
           const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;

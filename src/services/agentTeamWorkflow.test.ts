@@ -103,6 +103,18 @@ describe('agent team workflow', () => {
     expect(finished.snapshot.tasks.filter((task) => task.kind === 'team_review')).toHaveLength(1);
     expect(generate).toHaveBeenCalledTimes(3);
   });
+  it('runs a text team when the configured video model directory is unavailable', async () => {
+    const runId = crypto.randomUUID();
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'missing-video', isDefault: true }] });
+    vi.mocked(listAvailableModels).mockRejectedValueOnce(new Error('模型目录请求失败'));
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '写摘要', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '有摘要', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '写摘要', dependsOn: [], acceptance: '有摘要' }], finalAcceptance: '摘要完整' })).mockResolvedValueOnce('摘要内容');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-text-video-unavailable-test');
+    const result = await workflow.start(runId, 'chat', '写一份摘要');
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'write')?.output).toBe('摘要内容');
+    expect(generate.mock.calls[0][1]).toContain('视频模型目录暂不可用');
+  });
   it('does not reuse the automatic acceptance verdict after an explicit new task', async () => {
     const runId = crypto.randomUUID();
     const plan = { summary: '研究', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '成稿', allowedTools: ['text_generation'] }],
