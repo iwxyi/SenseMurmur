@@ -276,6 +276,32 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks.find((task) => task.id === 'shot')?.status).toBe('waiting_external');
     expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ referenceImages: [{ url: '/uploads/media/scene.png', mimeType: 'image/png', label: '场景图' }] }));
   });
+  it('passes an upstream script through an image dependency to the video prompt', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `script-image-video-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true },
+      { id: 'video', name: '视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true },
+    ] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '按脚本制作', acceptance: '成片', allowedTools: ['text_generation', 'image_generation', 'video_generation'] }],
+      tasks: [
+        { id: 'script', roleId: 'director', goal: '写镜头脚本', dependsOn: [], tool: 'text_generation', acceptance: '有脚本' },
+        { id: 'scene', roleId: 'director', goal: '画关键帧', dependsOn: ['script'], tool: 'image_generation', acceptance: '有图片' },
+        { id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: ['scene'], tool: 'video_generation', acceptance: '可播放' },
+      ], finalAcceptance: '视频可播放' })).mockResolvedValueOnce('黄昏森林中恐龙追逐机器猫，镜头向右跟拍');
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '关键帧已保存' });
+    vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/frame.png', mimeType: 'image/png', label: '关键帧' });
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'video-task' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'video-task' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-script-image-video-test');
+    const result = await workflow.start(runId, chatId, '先写脚本再画图并生成视频');
+    expect(result.snapshot.tasks.find((task) => task.id === 'shot')?.status).toBe('waiting_external');
+    expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: expect.stringContaining('黄昏森林中恐龙追逐机器猫，镜头向右跟拍'),
+      referenceImages: [{ url: '/uploads/media/frame.png', mimeType: 'image/png', label: '关键帧' }],
+    }));
+  });
   it('rejects a two-image video plan when the selected model permits one reference', async () => {
     const runId = crypto.randomUUID();
     const chatId = `one-reference-${runId}`;

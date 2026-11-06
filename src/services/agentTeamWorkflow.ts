@@ -235,12 +235,12 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           if (!reference) throw new WorkflowPreflightError('参考图片文件尚未就绪');
           return [reference];
         });
-        const upstream = input.task.dependsOn.map((id) => {
-          const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
+        const upstream = [...upstreamTaskIds].map((dependencyId) => {
           const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
           if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('视频的上游素材尚未就绪');
-          return dependency.output.slice(0, 12_000);
-        });
+          return dependency.kind === 'agent_text' || dependency.kind === 'agent_web_search'
+            ? dependency.output.slice(0, 12_000) : null;
+        }).filter((content): content is string => content !== null);
         return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           prompt: [input.task.goal, ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), referenceImages, signal });
       }
