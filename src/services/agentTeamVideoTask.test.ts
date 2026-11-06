@@ -60,6 +60,15 @@ describe('agent team video task', () => {
     expect(JSON.stringify(result)).not.toContain('private-task-id');
   });
 
+  it('does not deliver a video whose file URL is missing', () => {
+    const message: Message = { id: 'video-missing-file', chatId: 'team-video-chat', type: 'ai', senderId: 'assistant', senderName: '助手', content: '视频', emotion: 0,
+      timestamp: 1, isDeleted: false, metadata: { agentTeamMedia: { runId: 'missing-file-run', taskId: 'shot' }, attachments: [{
+        id: 'attachment', kind: 'video', status: 'ready', altText: '团队生成视频', createdAt: 1, updatedAt: 2,
+      }] } };
+    useMessageStore.setState({ messages: [message] });
+    expect(inspectAgentTeamVideoAttachment('missing-file-run', 'shot')).toEqual({ status: 'failed', error: '视频任务已完成，但文件尚未保存到聊天，请在附件中重试获取文件' });
+  });
+
   it('reuses a queued message after interruption without creating another attachment', async () => {
     vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
       upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({

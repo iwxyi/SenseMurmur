@@ -25,7 +25,10 @@ export function inspectAgentTeamVideoAttachment(runId: string, taskId: string) {
   const message = teamVideoMessage(runId, taskId);
   const attachment = message?.metadata?.attachments?.find((item) => item.kind === 'video');
   if (!message || !attachment) return null;
-  if (attachment.status === 'ready') return { status: 'completed' as const, output: `视频已生成并保存在当前聊天附件。内容：${(attachment.promptText || attachment.altText).slice(0, 2000)}` };
+  if (attachment.status === 'ready') {
+    if (!attachment.url) return { status: 'failed' as const, error: '视频任务已完成，但文件尚未保存到聊天，请在附件中重试获取文件' };
+    return { status: 'completed' as const, output: `视频已生成并保存在当前聊天附件。内容：${(attachment.promptText || attachment.altText).slice(0, 2000)}` };
+  }
   if (attachment.status === 'failed') return { status: 'failed' as const, error: attachment.error || '视频生成失败' };
   if (attachment.mediaTaskId) return { status: 'waiting_external' as const, externalTaskId: attachment.mediaTaskId };
   if (attachment.status === 'queued') return { status: 'queued' as const };
