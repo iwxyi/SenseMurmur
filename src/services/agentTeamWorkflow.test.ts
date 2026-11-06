@@ -60,6 +60,28 @@ describe('agent team workflow', () => {
     await workflow.resume(runId);
     expect(generate).toHaveBeenCalledTimes(6);
   });
+  it('reviews an asynchronously generated video after its saved attachment completes', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `review-video-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '制作视频', method: '生成', acceptance: '可播放', allowedTools: ['video_generation'] }],
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成短片', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '短片可播放' }));
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'saved-video-task' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'saved-video-task' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-review-video-test');
+    const waiting = await workflow.start(runId, chatId, '生成一段短片', true);
+    expect(waiting.snapshot.run.status).toBe('active');
+    expect(waiting.snapshot.tasks.some((task) => task.kind === 'team_review')).toBe(false);
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'completed', output: '视频已生成' });
+    generate.mockResolvedValueOnce(JSON.stringify({ complete: true, reason: '视频已交付' }));
+    const finished = await workflow.resume(runId);
+    expect(finished.snapshot.run.status).toBe('completed');
+    expect(finished.snapshot.tasks.find((task) => task.id === 'review_1')?.status).toBe('completed');
+    expect(queueAgentTeamVideo).toHaveBeenCalledTimes(1);
+    await workflow.resume(runId);
+    expect(generate).toHaveBeenCalledTimes(2);
+  });
   it('keeps unmet acceptance blocked and lets the user replace the block with an explicit task', async () => {
     const runId = crypto.randomUUID();
     const plan = { summary: '研究', roles: [{ id: 'writer', name: '写作者', responsibility: '研究', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
