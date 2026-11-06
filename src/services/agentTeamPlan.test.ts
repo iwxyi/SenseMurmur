@@ -67,6 +67,11 @@ describe('agent team plan', () => {
     const reserved = valid();
     reserved.tasks[0].id = 'plan';
     expect(() => validateAgentTeamPlan(reserved)).toThrow('内部规划步骤冲突');
+    for (const id of ['delegate', 'delegated_report', 'review_1', 'auto_delegate_1_report', 'review_needs_user']) {
+      const internal = valid();
+      internal.tasks[0].id = id;
+      expect(() => validateAgentTeamPlan(internal)).toThrow('内部规划步骤冲突');
+    }
     const oversized = valid();
     oversized.roles = Array.from({ length: 7 }, (_, index) => ({ ...oversized.roles[0], id: `role_${index}` }));
     expect(() => validateAgentTeamPlan(oversized)).toThrow('规模超出限制');

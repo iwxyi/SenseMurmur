@@ -83,7 +83,10 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   });
   const tasksById = new Map(tasks.map((task) => [task.id, task]));
   if (tasksById.size !== tasks.length) throw new Error('任务 ID 重复');
-  if (tasksById.has('plan')) throw new Error('任务 ID 与内部规划步骤冲突');
+  if (tasks.some((task) => task.id === 'plan' || task.id === 'delegate' || task.id === 'review_needs_user'
+    || /^(?:review|delegate|auto_delegate)_\d+(?:_|$)/.test(task.id) || task.id.startsWith('delegated_'))) {
+    throw new Error('任务 ID 与内部规划步骤冲突');
+  }
   const visiting = new Set<string>();
   const visited = new Set<string>();
   const visit = (id: string) => {
