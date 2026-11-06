@@ -56,6 +56,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const [savingDelegate, setSavingDelegate] = useState(false);
   const [reviewActionError, setReviewActionError] = useState<string | null>(null);
   const [savingReviewAction, setSavingReviewAction] = useState(false);
+  const [reviewActionRunId, setReviewActionRunId] = useState<string | null>(null);
   if (!runs.length) return null;
   const run = runs.find((item) => item.run.id === selectedRunId) || runs[0];
   const task = run.tasks.find((item) => item.id === selectedTaskId) || null;
@@ -88,7 +89,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
       <DialogTitle id="team-workbench-title">团队工作台</DialogTitle>
       <DialogContent dividers sx={{ display: 'grid', gap: 2, minHeight: 260 }}>
         {runs.length > 1 && <Stack direction="row" spacing={0.75} sx={{ overflowX: 'auto', pb: 0.5 }}>
-          {runs.map((item, index) => <Chip key={item.run.id} size="small" clickable color={item.run.id === run.run.id ? 'primary' : 'default'} label={teamPlan(item)?.summary || `任务 ${index + 1}`} onClick={() => { setSelectedRunId(item.run.id); setSelectedTaskId(null); }} />)}
+          {runs.map((item, index) => <Chip key={item.run.id} size="small" clickable color={item.run.id === run.run.id ? 'primary' : 'default'} label={teamPlan(item)?.summary || `任务 ${index + 1}`} onClick={() => { setSelectedRunId(item.run.id); setSelectedTaskId(null); setReviewActionError(null); }} />)}
         </Stack>}
         <Box>
           <Typography variant="subtitle1" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{plan?.summary || run.run.goal}</Typography>
@@ -125,30 +126,36 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           {summary.blocked.length > 0 && <Typography variant="body2" color="warning.main"><strong>需要处理</strong> {summary.blocked.map((item) => item.reason).join('；')}</Typography>}
           {unknownReview && canRun && run.run.status === 'paused' && <Box sx={{ display: 'grid', gap: 0.75 }}>
             <Typography variant="body2" color="text.secondary">上次验收请求的结果无法核对。放弃本次验收后，仍需追加明确任务才能继续；原结果会保留为未知记录。</Typography>
-            {reviewActionError && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
+            {reviewActionError && reviewActionRunId === run.run.id && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
             <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
               setSavingReviewAction(true);
+              setReviewActionRunId(run.run.id);
               void onAbandonReview(run, unknownReview).then(() => setReviewActionError(null)).catch((error: unknown) => {
+                setReviewActionRunId(run.run.id);
                 setReviewActionError(error instanceof Error ? error.message : '处理验收失败');
               }).finally(() => setSavingReviewAction(false));
             }}>放弃本次验收，改由我指定下一步</Button>
           </Box>}
           {failedReview && canRun && run.run.status === 'failed' && <Box sx={{ display: 'grid', gap: 0.75 }}>
             <Typography variant="body2" color="text.secondary">本次验收已明确失败。修正模型或要求后，可以只重试主 Agent 验收；之前完成的任务会保留。</Typography>
-            {reviewActionError && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
+            {reviewActionError && reviewActionRunId === run.run.id && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
             <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
               setSavingReviewAction(true);
+              setReviewActionRunId(run.run.id);
               void onResumeAfterReviewRetry(run, failedReview).then(() => setReviewActionError(null)).catch((error: unknown) => {
+                setReviewActionRunId(run.run.id);
                 setReviewActionError(error instanceof Error ? error.message : '重试验收失败');
               }).finally(() => setSavingReviewAction(false));
             }}>重试主 Agent 验收</Button>
           </Box>}
           {failedPlan && canRun && run.run.status === 'failed' && <Box sx={{ display: 'grid', gap: 0.75 }}>
             <Typography variant="body2" color="text.secondary">规划结果已明确失败。修正模型或目标后，可以只重试这轮规划；之前完成的步骤会保留。</Typography>
-            {reviewActionError && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
+            {reviewActionError && reviewActionRunId === run.run.id && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
             <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
               setSavingReviewAction(true);
+              setReviewActionRunId(run.run.id);
               void onResumeAfterPlanRetry(run, failedPlan).then(() => setReviewActionError(null)).catch((error: unknown) => {
+                setReviewActionRunId(run.run.id);
                 setReviewActionError(error instanceof Error ? error.message : '重试规划失败');
               }).finally(() => setSavingReviewAction(false));
             }}>重试主 Agent 规划</Button>
