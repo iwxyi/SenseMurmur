@@ -347,7 +347,7 @@ useMessageStore.subscribe((next, previous) => {
     void listAgentTeamRuns().then((runs) => {
       for (const run of runs) {
         if (run.run.status !== 'active') continue;
-        if (!run.tasks.some((task) => task.kind === 'agent_video' && task.status === 'waiting_external'
+        if (!run.tasks.some((task) => task.kind === 'agent_video' && (task.status === 'waiting_external' || task.status === 'running')
           && wakeKeys.has(`${task.runId}:${task.id}`))) continue;
         if (activeTeamRuns.has(run.run.id)) {
           deferredVideoWakeRuns.add(run.run.id);
