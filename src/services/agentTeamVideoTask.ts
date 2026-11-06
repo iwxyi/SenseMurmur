@@ -25,7 +25,7 @@ export function inspectAgentTeamVideoAttachment(runId: string, taskId: string) {
   const message = teamVideoMessage(runId, taskId);
   const attachment = message?.metadata?.attachments?.find((item) => item.kind === 'video');
   if (!message || !attachment) return null;
-  if (attachment.status === 'ready') return { status: 'completed' as const, output: `视频已生成：${attachment.altText}` };
+  if (attachment.status === 'ready') return { status: 'completed' as const, output: `视频已生成并保存在当前聊天附件。内容：${(attachment.promptText || attachment.altText).slice(0, 2000)}` };
   if (attachment.status === 'failed') return { status: 'failed' as const, error: attachment.error || '视频生成失败' };
   if (attachment.mediaTaskId) return { status: 'waiting_external' as const, externalTaskId: attachment.mediaTaskId };
   if (attachment.status === 'queued') return { status: 'queued' as const };
@@ -80,7 +80,7 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
   const known = [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])];
   const message = existing || attachMessageToActiveBranch(chat, known, {
     id: `team-video-${params.runId}-${params.taskId}`, chatId: chat.id, type: 'ai' as const,
-    senderId: 'assistant', senderName: '助手', content: '视频生成中', emotion: 0,
+    senderId: 'assistant', senderName: '助手', content: '视频', emotion: 0,
     timestamp: now, isDeleted: false,
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId },
       attachments: [{ id: `team-video-${params.taskId}`, kind: 'video' as const, status: 'queued' as const,

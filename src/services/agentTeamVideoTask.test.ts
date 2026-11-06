@@ -49,6 +49,17 @@ describe('agent team video task', () => {
     expect(inspectAgentTeamVideoAttachment('failed-run', 'shot')).toEqual({ status: 'failed', error: '上游额度不足' });
   });
 
+  it('describes a completed video to downstream tasks without exposing internal IDs', () => {
+    const message: Message = { id: 'video-ready', chatId: 'team-video-chat', type: 'ai', senderId: 'assistant', senderName: '助手', content: '视频', emotion: 0,
+      timestamp: 1, isDeleted: false, metadata: { agentTeamMedia: { runId: 'ready-run', taskId: 'shot' }, attachments: [{
+        id: 'attachment', kind: 'video', status: 'ready', altText: '团队生成视频', promptText: '森林追逐短片', mediaTaskId: 'private-task-id', url: '/private/video', createdAt: 1, updatedAt: 2,
+      }] } };
+    useMessageStore.setState({ messages: [message] });
+    const result = inspectAgentTeamVideoAttachment('ready-run', 'shot');
+    expect(result).toEqual({ status: 'completed', output: '视频已生成并保存在当前聊天附件。内容：森林追逐短片' });
+    expect(JSON.stringify(result)).not.toContain('private-task-id');
+  });
+
   it('reuses a queued message after interruption without creating another attachment', async () => {
     vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
       upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
