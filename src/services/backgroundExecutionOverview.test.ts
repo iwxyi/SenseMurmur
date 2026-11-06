@@ -18,6 +18,7 @@ describe('background execution overview', () => {
       sample('blocked', 'paused', 'result_unknown'),
       sample('done', 'completed', 'completed'),
       sample('awaiting-close', 'active', 'completed'),
+      sample('abandoned-review', 'paused', 'abandoned'),
     ], ['active']);
     expect(overview).toEqual({ running: 1, queued: 1, interrupted: 1, blocked: 1, chatId: 'active' });
   });

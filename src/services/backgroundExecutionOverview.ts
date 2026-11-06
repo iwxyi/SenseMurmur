@@ -21,7 +21,7 @@ export function projectBackgroundExecutionOverview(
   const activeRuns = new Set(activeRunIds);
   const overview: BackgroundExecutionOverview = { running: 0, queued: 0, interrupted: 0, blocked: 0, chatId: null };
   const relevant = runs.filter(({ run, tasks }) => run.status !== 'completed' && run.status !== 'cancelled'
-    && tasks.some((task) => task.status !== 'completed' && task.status !== 'cancelled'));
+    && tasks.some((task) => task.status !== 'completed' && task.status !== 'cancelled' && task.status !== 'abandoned'));
   for (const { run, tasks } of relevant) {
     if (tasks.some((task) => task.status === 'failed' || task.status === 'result_unknown' || task.status === 'waiting_user')) {
       overview.blocked += 1;

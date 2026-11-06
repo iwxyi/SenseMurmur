@@ -47,7 +47,8 @@ export function summarizeWorkflowRun(snapshot: WorkflowSnapshot): WorkflowResume
   const byId = new Map(snapshot.tasks.map((task) => [task.id, task]));
   const result: WorkflowResumeSummary = { completed: [], waiting: [], blocked: [], runnable: [] };
   for (const task of snapshot.tasks) {
-    if (task.status === 'completed' || task.status === 'abandoned') {
+    if (task.status === 'abandoned') continue;
+    if (task.status === 'completed') {
       result.completed.push(task.id);
       continue;
     }
