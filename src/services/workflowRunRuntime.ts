@@ -26,6 +26,7 @@ export interface WorkflowRun {
   planVersion: number;
   resumeCommandIds?: string[];
   planOpen?: boolean;
+  autoReview?: boolean;
   pauseRequested?: boolean;
   updatedAt: number;
 }
@@ -236,6 +237,40 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
+  async function replaceUserBlockWithTasks(runId: string, expectedPlanVersion: number, additions: WorkflowTask[]) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.status !== 'paused' || current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
+      const block = current.tasks.find((task) => task.id === 'review_needs_user' && task.status === 'waiting_user');
+      if (!block || additions.length !== 1) throw new Error('当前没有可处理的验收阻塞');
+      const tasks = [...current.tasks.filter((task) => task.id !== block.id), ...additions];
+      assertTaskGraph(tasks);
+      const snapshot: WorkflowSnapshot = { ...current,
+        run: { ...current.run, autoReview: false, planVersion: current.run.planVersion + 1, updatedAt: Date.now() }, tasks };
+      return { snapshot, value: snapshot };
+    });
+  }
+
+  async function pauseForUser(runId: string, expectedPlanVersion: number) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
+      if (!current.tasks.some((task) => task.id === 'review_needs_user' && task.status === 'waiting_user')) throw new Error('当前没有验收阻塞');
+      const snapshot: WorkflowSnapshot = { ...current, run: { ...current.run, status: 'paused', updatedAt: Date.now() } };
+      return { snapshot, value: snapshot };
+    });
+  }
+
+  async function blockForUser(runId: string, expectedPlanVersion: number, block: WorkflowTask) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.planVersion !== expectedPlanVersion || current.run.status !== 'active') throw new Error('工作流计划版本冲突');
+      if (current.tasks.some((task) => task.id === block.id) || block.runId !== runId || block.status !== 'waiting_user') throw new Error('验收阻塞状态无效');
+      const tasks = [...current.tasks, block];
+      assertTaskGraph(tasks);
+      const snapshot: WorkflowSnapshot = { ...current, tasks,
+        run: { ...current.run, status: 'paused', planVersion: current.run.planVersion + 1, updatedAt: Date.now() } };
+      return { snapshot, value: snapshot };
+    });
+  }
+
   async function reopenWithTasks(runId: string, expectedPlanVersion: number, additions: WorkflowTask[]) {
     if (!additions.length) throw new Error('工作流计划修订不能为空');
     return mutate(scope(), runId, (current) => {
@@ -420,5 +455,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, addTasks, reopenWithTasks, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, addTasks, replaceUserBlockWithTasks, blockForUser, reopenWithTasks, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }

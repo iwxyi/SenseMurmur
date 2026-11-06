@@ -115,7 +115,7 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
               void onDelegate(run, delegateRequest).then(() => { setDelegateRequest(''); setDelegateError(null); }).catch((error: unknown) => setDelegateError(error instanceof Error ? error.message : '追加任务失败')).finally(() => setSavingDelegate(false));
             }}>保存追加任务</Button>
           </Box>}
-          {run.tasks.map((item, index) => <Typography key={item.id} variant="body2" color="text.secondary">{index + 1}. {item.kind === 'team_plan' ? '规划团队' : item.kind === 'team_plan_revision' ? '规划追加任务' : taskDetails(item)?.goal || '执行任务'} · {taskStatus[item.status]}</Typography>)}
+          {run.tasks.map((item, index) => <Typography key={item.id} variant="body2" color="text.secondary">{index + 1}. {item.kind === 'team_plan' ? '规划团队' : item.kind === 'team_plan_revision' ? '规划追加任务' : item.kind === 'team_review' ? '主 Agent 验收交付' : item.kind === 'team_review_block' ? '等待用户决定' : taskDetails(item)?.goal || '执行任务'} · {taskStatus[item.status]}</Typography>)}
         </Box>}
       </DialogContent>
       <DialogActions>

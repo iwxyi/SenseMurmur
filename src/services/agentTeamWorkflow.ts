@@ -48,6 +48,20 @@ interface TeamTaskInput {
 }
 
 interface TeamRevisionInput { request: string; sourceTaskIds: string[] }
+interface TeamReviewInput { sourceTaskIds: string[] }
+
+function parseTeamReview(value: unknown): { complete: boolean; reason: string; nextRequest?: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('主 Agent 验收结果无效');
+  const result = value as Record<string, unknown>;
+  if (typeof result.complete !== 'boolean' || typeof result.reason !== 'string' || !result.reason.trim() || result.reason.length > 1000) throw new Error('主 Agent 验收结果无效');
+  if (!result.complete && (typeof result.nextRequest !== 'string' || !result.nextRequest.trim() || result.nextRequest.length > 2000)) throw new Error('主 Agent 缺少后续任务说明');
+  return { complete: result.complete, reason: result.reason.trim(), ...(!result.complete ? { nextRequest: (result.nextRequest as string).trim() } : {}) };
+}
+
+function reviewBlockTask(runId: string, reviewId: string, reason: string): WorkflowTask {
+  return { id: 'review_needs_user', runId, kind: 'team_review_block', input: null, dependsOn: [reviewId],
+    status: 'waiting_user', error: reason, attempt: 0, updatedAt: Date.now() };
+}
 
 function delegatedTaskId(sourcePlanTaskId: string, taskId: string) {
   return sourcePlanTaskId === 'delegate' ? `delegated_${taskId}` : `${sourcePlanTaskId}_${taskId}`;
@@ -92,6 +106,23 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const recentPrior = prior.slice(-8);
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId);
         return { output: await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, webSearch: Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch), ...await teamMediaCapabilities(), signal }) };
+      }
+      if (task.kind === 'team_review') {
+        const input = task.input as TeamReviewInput;
+        const snapshot = await runtime.read(task.runId);
+        if (!snapshot || !Array.isArray(input?.sourceTaskIds)) throw new WorkflowPreflightError('主 Agent 验收输入无效');
+        const evidence = input.sourceTaskIds.map((id) => {
+          const source = snapshot.tasks.find((item) => item.id === id);
+          if (!source || source.status !== 'completed' || typeof source.output !== 'string') throw new WorkflowPreflightError('验收证据尚未就绪');
+          return { task: id, output: source.output.slice(0, 3000) };
+        });
+        const raw = await generateResponse(api, '你是主 Agent 的交付验收员。根据原目标和真实完成记录判断是否已达到可用交付。只能基于现有工具能力提出最多一步必要补做，不得重复已完成工作，不得把缺失的音乐、剪辑、代码执行等能力伪装为已完成。仅输出 JSON：{"complete":true,"reason":"..."} 或 {"complete":false,"reason":"...","nextRequest":"需要补做的具体工作"}。', [{ role: 'user', content: `原目标：${snapshot.run.goal}\n已完成任务：${JSON.stringify(evidence)}` }], undefined, {
+          responseFormat: 'json', maxTokens: 600, signal,
+          aiUsage: { type: 'assistant_chat', label: '团队交付验收', scope: 'chat' },
+        });
+        let parsed: unknown;
+        try { parsed = JSON.parse(raw); } catch (error) { throw new Error('主 Agent 验收返回了无效 JSON', { cause: error }); }
+        return { output: parseTeamReview(parsed) };
       }
       if ((task.kind !== 'agent_text' && task.kind !== 'agent_web_search' && task.kind !== 'agent_image' && task.kind !== 'agent_video') || !isTeamTaskInput(task.input)) throw new WorkflowPreflightError('团队任务类型无效');
       const input = task.input;
@@ -216,7 +247,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (!current || current.tasks[0]?.kind !== 'team_plan') throw new Error('团队任务不存在');
         if (current.run.status !== 'paused' && current.run.status !== 'completed') throw new Error('请先暂停整个团队任务');
         if (current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
-        if (current.tasks.length >= 24) throw new Error('团队任务规模超出限制');
+        const hasReviewBlock = current.tasks.some((task) => task.id === 'review_needs_user' && task.status === 'waiting_user');
+        if (current.tasks.length - (hasReviewBlock ? 1 : 0) >= 24) throw new Error('团队任务规模超出限制');
         if (current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown' || task.status === 'failed')) throw new Error('请先处理未完成或待核对的步骤');
         const sourceTaskIds = current.tasks.filter((task) => task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_video').map((task) => task.id);
         if (!sourceTaskIds.length) throw new Error('团队规划尚未完成');
@@ -226,7 +258,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           input: { request: trimmed, sourceTaskIds } satisfies TeamRevisionInput,
           dependsOn: sourceTaskIds, status: 'waiting_dependency', attempt: 0, updatedAt: Date.now(),
         };
-        return current.run.status === 'completed'
+        return hasReviewBlock
+          ? runtime.replaceUserBlockWithTasks(runId, expectedPlanVersion, [task])
+          : current.run.status === 'completed'
           ? runtime.reopenWithTasks(runId, expectedPlanVersion, [task])
           : runtime.addTasks(runId, expectedPlanVersion, [task]);
       });
@@ -260,10 +294,10 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       });
       return snapshot;
     },
-    async start(runId: string, chatId: string, goal: string) {
+    async start(runId: string, chatId: string, goal: string, autoReview = false) {
       const now = Date.now();
       const initial: WorkflowSnapshot = {
-        run: { id: runId, chatId, goal, status: 'active', generation: 0, planVersion: 1, planOpen: true, updatedAt: now },
+        run: { id: runId, chatId, goal, status: 'active', generation: 0, planVersion: 1, planOpen: true, autoReview, updatedAt: now },
         tasks: [{ id: 'plan', runId, kind: 'team_plan', input: goal, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
       };
       if (!await runtime.read(runId)) await runtime.create(initial);
@@ -271,6 +305,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
     },
     async resume(runId: string) {
       const beforeResume = await runtime.read(runId);
+      if (beforeResume?.tasks.some((task) => task.id === 'review_needs_user' && task.status === 'waiting_user')) {
+        return { snapshot: beforeResume, summary: summarizeWorkflowRun(beforeResume) };
+      }
       if (beforeResume && beforeResume.tasks.some((task) => (task.status === 'failed' || task.status === 'result_unknown')
         && (task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(runId, task.id)?.status : task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(runId, task.id)?.status : null) === 'completed')) {
         await indexedDbWorkflowRepository.transact(scope(), runId, (current) => {
@@ -314,6 +351,61 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         }));
         snapshot = await runtime.expandPlanOnce(runId, snapshot.run.planVersion, revisionTask.id, delegatedTasks);
         if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, getWorkspaceSignal());
+      }
+      if (snapshot.run.autoReview && snapshot.run.status === 'active') {
+        for (let round = 1; round <= 3; round += 1) {
+          if (!snapshot.tasks.every((task) => task.status === 'completed')) break;
+          const reviewId = `review_${round}`;
+          const review = snapshot.tasks.find((task) => task.id === reviewId);
+          if (!review) {
+            const sourceTaskIds = snapshot.tasks.filter((task) => ['agent_text', 'agent_web_search', 'agent_image', 'agent_video'].includes(task.kind)).map((task) => task.id);
+            if (!sourceTaskIds.length) break;
+            snapshot = await runtime.addTasksOnce(runId, snapshot.run.planVersion, [{
+              id: reviewId, runId, kind: 'team_review', input: { sourceTaskIds } satisfies TeamReviewInput,
+              dependsOn: sourceTaskIds, status: 'queued', attempt: 0, updatedAt: Date.now(),
+            }]);
+            snapshot = await runtime.resume(runId, getWorkspaceSignal());
+          }
+          const completedReview = snapshot.tasks.find((task) => task.id === reviewId);
+          if (completedReview?.status !== 'completed') break;
+          const verdict = parseTeamReview(completedReview.output);
+          if (verdict.complete) break;
+          if (round === 3) {
+            snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, `自动验收仍未通过：${verdict.reason}。请检查目标或追加指示。`));
+            break;
+          }
+          const revisionId = `auto_delegate_${round}`;
+          if (!snapshot.tasks.some((task) => task.id === revisionId)) {
+            const sourceTaskIds = snapshot.tasks.filter((task) => ['agent_text', 'agent_web_search', 'agent_image', 'agent_video'].includes(task.kind)).map((task) => task.id);
+            if (snapshot.tasks.length >= 22) {
+              snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '团队任务已达到自动追加上限，请检查结果并决定后续步骤。'));
+              break;
+            }
+            snapshot = await runtime.addTasksOnce(runId, snapshot.run.planVersion, [{
+              id: revisionId, runId, kind: 'team_plan_revision',
+              input: { request: verdict.nextRequest!, sourceTaskIds } satisfies TeamRevisionInput,
+              dependsOn: [reviewId, ...sourceTaskIds], status: 'queued', attempt: 0, updatedAt: Date.now(),
+            }]);
+            snapshot = await runtime.resume(runId, getWorkspaceSignal());
+          }
+          const revision = snapshot.tasks.find((task) => task.id === revisionId);
+          if (revision?.status !== 'completed') break;
+          const delegated = validateAgentTeamPlan(revision.output);
+          if (snapshot.tasks.length + delegated.tasks.length > 23) {
+            snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '新增任务超过团队规模上限，请缩小目标后追加指示。'));
+            break;
+          }
+          const roles = new Map(delegated.roles.map((role) => [role.id, role]));
+          const contextTaskIds = isTeamRevisionInput(revision.input) ? revision.input.sourceTaskIds : [];
+          snapshot = await runtime.expandPlanOnce(runId, snapshot.run.planVersion, revisionId, delegated.tasks.map((task): WorkflowTask => ({
+            id: delegatedTaskId(revisionId, task.id), runId,
+            kind: task.tool === 'web_search' ? 'agent_web_search' : task.tool === 'image_generation' ? 'agent_image' : task.tool === 'video_generation' ? 'agent_video' : 'agent_text',
+            input: { task, goal: snapshot.run.goal, role: roles.get(task.roleId)!, sourcePlanTaskId: revisionId, contextTaskIds } satisfies TeamTaskInput,
+            dependsOn: [revisionId, ...contextTaskIds, ...task.dependsOn.map((id) => delegatedTaskId(revisionId, id))],
+            status: 'waiting_dependency', attempt: 0, updatedAt: Date.now(),
+          })));
+          if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, getWorkspaceSignal());
+        }
       }
       if (snapshot.run.status !== 'completed' && snapshot.tasks.every((task) => task.status === 'completed')) snapshot = await runtime.closePlan(runId, snapshot.run.planVersion);
       return { snapshot, summary: summarizeWorkflowRun(snapshot) };
@@ -468,7 +560,7 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
     return await scheduleBackgroundExecution(params.chatId, () => runWithConversationExecutionLock(originalScope, params.chatId, async () => {
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队任务已暂停');
       const workflow = currentTeamWorkflow();
-      const result = params.runId ? await workflow.resume(runId) : await workflow.start(runId, params.chatId, params.goal);
+      const result = params.runId ? await workflow.resume(runId) : await workflow.start(runId, params.chatId, params.goal, true);
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队交付已暂停');
       if (result.snapshot.run.status === 'completed') await workflow.publish(runId);
       return result;

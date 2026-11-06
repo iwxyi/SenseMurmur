@@ -43,6 +43,43 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('automatically reviews delivery, delegates one missing step, and does not repeat it on resume', async () => {
+    const runId = crypto.randomUUID();
+    const basePlan = { summary: '研究', roles: [{ id: 'writer', name: '写作者', responsibility: '研究', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'research', roleId: 'writer', goal: '研究问题', dependsOn: [], acceptance: '有结论' }], finalAcceptance: '报告可读' };
+    const followup = { ...basePlan, summary: '补写报告', tasks: [{ id: 'report', roleId: 'writer', goal: '根据研究写报告', dependsOn: [], acceptance: '报告可读' }] };
+    generate.mockResolvedValueOnce(JSON.stringify(basePlan)).mockResolvedValueOnce('研究结论')
+      .mockResolvedValueOnce(JSON.stringify({ complete: false, reason: '缺少报告', nextRequest: '根据研究结论写报告' }))
+      .mockResolvedValueOnce(JSON.stringify(followup)).mockResolvedValueOnce('完整报告')
+      .mockResolvedValueOnce(JSON.stringify({ complete: true, reason: '报告已完成' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-auto-review-test');
+    const finished = await workflow.start(runId, 'chat', '研究并写报告', true);
+    expect(finished.snapshot.run.status).toBe('completed');
+    expect(finished.snapshot.tasks.find((task) => task.id === 'auto_delegate_1_report')?.output).toBe('完整报告');
+    expect(finished.snapshot.tasks.filter((task) => task.kind === 'team_review')).toHaveLength(2);
+    await workflow.resume(runId);
+    expect(generate).toHaveBeenCalledTimes(6);
+  });
+  it('keeps unmet acceptance blocked and lets the user replace the block with an explicit task', async () => {
+    const runId = crypto.randomUUID();
+    const plan = { summary: '研究', roles: [{ id: 'writer', name: '写作者', responsibility: '研究', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'research', roleId: 'writer', goal: '研究问题', dependsOn: [], acceptance: '有结论' }], finalAcceptance: '完整交付' };
+    generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('阶段结论');
+    for (let round = 0; round < 3; round += 1) {
+      generate.mockResolvedValueOnce(JSON.stringify({ complete: false, reason: '仍不完整', nextRequest: `补做步骤 ${round + 1}` }));
+      if (round < 2) generate.mockResolvedValueOnce(JSON.stringify({ ...plan, tasks: [{ ...plan.tasks[0], id: `extra_${round + 1}` }] })).mockResolvedValueOnce(`补做结果 ${round + 1}`);
+    }
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-auto-block-test');
+    const blocked = await workflow.start(runId, 'chat', '完成复杂目标', true);
+    expect(blocked.snapshot.run.status).toBe('paused');
+    expect(blocked.snapshot.tasks.find((task) => task.id === 'review_needs_user')?.status).toBe('waiting_user');
+    const calls = generate.mock.calls.length;
+    await workflow.resume(runId);
+    expect(generate).toHaveBeenCalledTimes(calls);
+    const updated = await workflow.addRevisionRequest(runId, blocked.snapshot.run.planVersion, '按我的新要求补做');
+    expect(updated.tasks.some((task) => task.id === 'review_needs_user')).toBe(false);
+    expect(updated.run.autoReview).toBe(false);
+  });
   it('passes a completed image attachment to the dependent video task', async () => {
     const runId = crypto.randomUUID();
     const chatId = `image-video-${runId}`;
