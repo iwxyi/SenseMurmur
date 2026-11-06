@@ -13,7 +13,7 @@ interface Props {
   onPause: (run: WorkflowSnapshot) => Promise<void>;
   onDelegate: (run: WorkflowSnapshot, request: string) => Promise<void>;
   onAbandonReview: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
-  onRetryReview: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
+  onResumeAfterReviewRetry: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
 }
 
 const taskStatus: Record<WorkflowTask['status'], string> = {
@@ -41,7 +41,7 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate, onInstruct, onPause, onDelegate, onAbandonReview, onRetryReview }: Props) {
+export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate, onInstruct, onPause, onDelegate, onAbandonReview, onResumeAfterReviewRetry }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -135,7 +135,7 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
             {reviewActionError && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
             <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
               setSavingReviewAction(true);
-              void onRetryReview(run, failedReview).then(() => setReviewActionError(null)).catch((error: unknown) => {
+              void onResumeAfterReviewRetry(run, failedReview).then(() => setReviewActionError(null)).catch((error: unknown) => {
                 setReviewActionError(error instanceof Error ? error.message : '重试验收失败');
               }).finally(() => setSavingReviewAction(false));
             }}>重试主 Agent 验收</Button>
