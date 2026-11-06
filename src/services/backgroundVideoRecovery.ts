@@ -7,13 +7,16 @@ import { readAuthSnapshot } from './authSnapshot';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
 
 export function findPendingVideoMessages(messages: Message[], activeChatIds: Set<string>, requiresServerId: boolean) {
-  const seen = new Set<string>();
-  return messages.filter((message) => {
-    if (seen.has(message.id) || message.isDeleted || !activeChatIds.has(message.chatId) || (requiresServerId && !message.serverId)) return false;
-    const pending = message.metadata?.attachments?.some((attachment) => attachment.kind === 'video' && attachment.status === 'generating' && Boolean(attachment.mediaTaskId)) || false;
-    if (pending) seen.add(message.id);
-    return pending;
-  });
+  const latest = new Map<string, Message>();
+  for (const message of messages) {
+    const previous = latest.get(message.id);
+    const updatedAt = Math.max(0, ...(message.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0));
+    const previousUpdatedAt = previous ? Math.max(0, ...(previous.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0)) : -1;
+    if (!previous || updatedAt > previousUpdatedAt) latest.set(message.id, message);
+  }
+  return [...latest.values()].filter((message) => !message.isDeleted && activeChatIds.has(message.chatId)
+    && (!requiresServerId || Boolean(message.serverId))
+    && (message.metadata?.attachments?.some((attachment) => attachment.kind === 'video' && attachment.status === 'generating' && Boolean(attachment.mediaTaskId)) || false));
 }
 
 /** Resume only video tasks already accepted by the server. Queued generations remain user controlled. */
