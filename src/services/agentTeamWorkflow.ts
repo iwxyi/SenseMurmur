@@ -415,7 +415,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, getWorkspaceSignal());
         }
       }
-      if (snapshot.run.status !== 'completed' && snapshot.tasks.every((task) => task.status === 'completed')) snapshot = await runtime.closePlan(runId, snapshot.run.planVersion);
+      if (snapshot.run.status === 'active' && snapshot.tasks.every((task) => task.status === 'completed')) snapshot = await runtime.closePlan(runId, snapshot.run.planVersion);
       return { snapshot, summary: summarizeWorkflowRun(snapshot) };
     },
     async publish(runId: string) {

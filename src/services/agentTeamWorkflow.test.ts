@@ -82,6 +82,27 @@ describe('agent team workflow', () => {
     await workflow.resume(runId);
     expect(generate).toHaveBeenCalledTimes(2);
   });
+  it('recovers a saved automatic review after a new workflow instance is created', async () => {
+    const runId = crypto.randomUUID();
+    const scope = 'team-review-restart-test';
+    const plan = { summary: '报告', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '撰写报告', dependsOn: [], acceptance: '报告完整' }], finalAcceptance: '报告完整' };
+    let finishReview!: (value: string) => void;
+    generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('报告正文')
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { finishReview = resolve; }));
+    const first = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const pending = first.start(runId, 'chat', '写报告', true);
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(3));
+    await first.requestPauseAfterCurrentBatch(runId);
+    finishReview(JSON.stringify({ complete: true, reason: '报告完整' }));
+    const paused = await pending;
+    expect(paused.snapshot.run.status).toBe('paused');
+    const recovered = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const finished = await recovered.resume(runId);
+    expect(finished.snapshot.run.status).toBe('completed');
+    expect(finished.snapshot.tasks.filter((task) => task.kind === 'team_review')).toHaveLength(1);
+    expect(generate).toHaveBeenCalledTimes(3);
+  });
   it('keeps unmet acceptance blocked and lets the user replace the block with an explicit task', async () => {
     const runId = crypto.randomUUID();
     const plan = { summary: '研究', roles: [{ id: 'writer', name: '写作者', responsibility: '研究', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
