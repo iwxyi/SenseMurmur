@@ -60,6 +60,16 @@ describe('agent team workflow', () => {
     await workflow.resume(runId);
     expect(generate).toHaveBeenCalledTimes(6);
   });
+  it('reports malformed completed review output as a definite failure', async () => {
+    const runId = crypto.randomUUID();
+    const plan = { summary: '报告', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '成稿' }], finalAcceptance: '成稿' };
+    generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('报告正文').mockResolvedValueOnce('{bad json');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-invalid-review-test');
+    const result = await workflow.start(runId, 'chat', '写报告', true);
+    expect(result.snapshot.tasks.find((task) => task.id === 'review_1')?.status).toBe('failed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'review_1')?.error).toContain('无效 JSON');
+  });
   it('reviews an asynchronously generated video after its saved attachment completes', async () => {
     const runId = crypto.randomUUID();
     const chatId = `review-video-${runId}`;

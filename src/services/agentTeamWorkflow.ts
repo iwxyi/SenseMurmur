@@ -56,10 +56,10 @@ interface TeamRevisionInput { request: string; sourceTaskIds: string[] }
 interface TeamReviewInput { sourceTaskIds: string[] }
 
 function parseTeamReview(value: unknown): { complete: boolean; reason: string; nextRequest?: string } {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('主 Agent 验收结果无效');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new WorkflowPreflightError('主 Agent 验收结果无效');
   const result = value as Record<string, unknown>;
-  if (typeof result.complete !== 'boolean' || typeof result.reason !== 'string' || !result.reason.trim() || result.reason.length > 1000) throw new Error('主 Agent 验收结果无效');
-  if (!result.complete && (typeof result.nextRequest !== 'string' || !result.nextRequest.trim() || result.nextRequest.length > 2000)) throw new Error('主 Agent 缺少后续任务说明');
+  if (typeof result.complete !== 'boolean' || typeof result.reason !== 'string' || !result.reason.trim() || result.reason.length > 1000) throw new WorkflowPreflightError('主 Agent 验收结果无效');
+  if (!result.complete && (typeof result.nextRequest !== 'string' || !result.nextRequest.trim() || result.nextRequest.length > 2000)) throw new WorkflowPreflightError('主 Agent 缺少后续任务说明');
   return { complete: result.complete, reason: result.reason.trim(), ...(!result.complete ? { nextRequest: (result.nextRequest as string).trim() } : {}) };
 }
 
@@ -152,7 +152,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           aiUsage: { type: 'assistant_chat', label: '团队交付验收', scope: 'chat' },
         });
         let parsed: unknown;
-        try { parsed = JSON.parse(raw); } catch (error) { throw new Error('主 Agent 验收返回了无效 JSON', { cause: error }); }
+        try { parsed = JSON.parse(raw); } catch (error) { throw new WorkflowPreflightError(`主 Agent 验收返回了无效 JSON：${error instanceof Error ? error.message : '解析失败'}`); }
         return { output: parseTeamReview(parsed) };
       }
       if ((task.kind !== 'agent_text' && task.kind !== 'agent_web_search' && task.kind !== 'agent_image' && task.kind !== 'agent_video') || !isTeamTaskInput(task.input)) throw new WorkflowPreflightError('团队任务类型无效');
