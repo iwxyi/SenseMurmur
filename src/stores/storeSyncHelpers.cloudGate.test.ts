@@ -3,6 +3,7 @@ import { storageKey } from '../constants/brand';
 import { setCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { getCloudSyncSkipDiagnostics, shouldSkipCloudSync } from './storeSyncHelpers';
 import { useAuthStore } from './useAuthStore';
+import { markAccountCloudBootstrapReady } from '../services/accountCloudBootstrap';
 
 const storage = new Map<string, string>();
 
@@ -54,10 +55,12 @@ describe('storeSyncHelpers cloud sync gate', () => {
     });
   });
 
-  it('recovers stale disabled cloud sync for an authenticated entitled cloud user', () => {
+  it('recovers stale disabled cloud sync after account bootstrap completes', () => {
     setCloudSyncEnabled(false, { source: 'entitlement' });
     setCloudUser(true);
 
+    expect(shouldSkipCloudSync()).toBe(true);
+    markAccountCloudBootstrapReady('user-1');
     expect(shouldSkipCloudSync()).toBe(false);
     expect(localStorage.getItem(storageKey('cloud-sync-enabled'))).toBe('1');
     expect(getCloudSyncSkipDiagnostics()).toMatchObject({
@@ -76,7 +79,7 @@ describe('storeSyncHelpers cloud sync gate', () => {
     expect(shouldSkipCloudSync()).toBe(true);
     expect(getCloudSyncSkipDiagnostics()).toMatchObject({
       skipCloudSync: true,
-      reasons: ['cloud-sync-user-disabled'],
+      reasons: ['cloud-sync-user-disabled', 'account-bootstrap-pending'],
       cloudSyncEnabled: false,
       cloudSyncUserDisabled: true,
     });
@@ -89,7 +92,7 @@ describe('storeSyncHelpers cloud sync gate', () => {
     expect(shouldSkipCloudSync()).toBe(true);
     expect(getCloudSyncSkipDiagnostics()).toMatchObject({
       skipCloudSync: true,
-      reasons: ['cloud-sync-not-entitled'],
+      reasons: ['cloud-sync-not-entitled', 'account-bootstrap-pending'],
       cloudSyncEnabled: false,
       cloudSyncEntitlementDisabled: true,
     });

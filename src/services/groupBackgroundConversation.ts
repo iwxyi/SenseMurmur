@@ -144,6 +144,11 @@ function nextTask(snapshot: WorkflowSnapshot): WorkflowTask {
 
 export async function startGroupBackgroundConversation(chatId: string) {
   if (!navigator.locks?.request) throw new Error('此设备不支持安全的群聊后台运行');
+  const running = active.get(groupConversationRunId(chatId));
+  if (running) {
+    if (useChatStore.getState().chats.find((item) => item.id === chatId)?.isActive) return running;
+    await running;
+  }
   const chat = useChatStore.getState().chats.find((item) => item.id === chatId && item.type === 'group' && item.deletedAt == null);
   if (!chat) throw new Error('群聊不可用');
   const runId = groupConversationRunId(chatId);
@@ -168,11 +173,7 @@ export async function startGroupBackgroundConversation(chatId: string) {
 export async function resumeGroupBackgroundConversation(chatId: string) {
   const runId = groupConversationRunId(chatId);
   const existing = active.get(runId);
-  if (existing) {
-    await existing;
-    await useChatStore.getState().updateChat(chatId, { isActive: true });
-    return resumeGroupBackgroundConversation(chatId);
-  }
+  if (existing) return existing;
   const run = await runtime.read(runId);
   if (!run) throw new Error('群聊后台任务不存在');
   if (run.tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed')) throw new Error('群聊上次请求结果需要核对');

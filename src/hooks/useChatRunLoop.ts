@@ -22,6 +22,7 @@ import { currentWorkflowScope } from '../services/workflowRunRuntime';
 import { readSessionLoopContinuation, writeSessionLoopContinuation } from '../services/sessionLoopContinuationStore';
 import { runWithConversationExecutionLock } from '../services/conversationExecutionLock';
 import { resolveSessionFamilyKey } from '../services/sessionEngineKeys';
+import { isGroupBackgroundActive } from '../services/groupBackgroundConversation';
 
 export type ConversationLoopStartBlockReason = 'direct_chat' | 'waiting_story_choice' | 'already_active';
 type ConversationLoopStartOptions = { ignoreReaderPositionOnce?: boolean; immediate?: boolean; allowDirect?: boolean };
@@ -496,8 +497,9 @@ export function useChatRunLoop(params: {
     });
     const storyChoiceGate = getStoryChoiceGateState(conversationChat, latestMessages);
     const isStoryChoiceBlocked = storyChoiceGate.waiting;
-    const hasActiveLoop = Boolean(activeRunLoopTokenRef.current)
-      && current.loopTokenRef.current === activeRunLoopTokenRef.current;
+    const hasActiveLoop = (Boolean(activeRunLoopTokenRef.current)
+      && current.loopTokenRef.current === activeRunLoopTokenRef.current)
+      || (usesBackgroundGroupConversation(conversationChat) && isGroupBackgroundActive(conversationChat.id));
     const blockReason = getConversationLoopStartBlockReason({
       conversationType: conversationChat.type,
       isRunning: current.isRunningRef.current,

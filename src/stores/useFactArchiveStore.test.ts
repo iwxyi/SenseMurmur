@@ -11,7 +11,8 @@ function evidence(overrides: Partial<FactEvidence> = {}): FactEvidence {
 }
 
 describe('useFactArchiveStore', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await useFactArchiveStore.persist.rehydrate();
     useFactArchiveStore.setState({ chats: {} });
   });
 

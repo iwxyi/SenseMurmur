@@ -135,4 +135,29 @@ describe('background group conversation', () => {
     expect(saved.run.status).toBe('paused');
     expect(runLoop).toHaveBeenCalledTimes(1);
   });
+
+  it('reopening an active chat does not restart its in-flight turn or undo pause', async () => {
+    const chatId = setup();
+    let releaseTurn: (() => void) | undefined;
+    let enteredTurn: (() => void) | undefined;
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    const entered = new Promise<void>((resolve) => { enteredTurn = resolve; });
+    runLoop.mockImplementation(async (params: { groupTurnTaskId: string; onCommittedMessage: (message: Message) => void }) => {
+      enteredTurn?.();
+      await turnGate;
+      params.onCommittedMessage({ id: crypto.randomUUID(), chatId, type: 'ai', senderId: 'a', senderName: 'a', content: '已完成', emotion: 0,
+        timestamp: Date.now(), metadata: { groupTurnTaskId: params.groupTurnTaskId } });
+    });
+    const running = startGroupBackgroundConversation(chatId);
+    await entered;
+    const reopened = startGroupBackgroundConversation(chatId);
+    await pauseGroupBackgroundConversation(chatId);
+    releaseTurn?.();
+    await Promise.all([running, reopened]);
+    const saved = (await listGroupBackgroundConversations(chatId))[0];
+    expect(runLoop).toHaveBeenCalledTimes(1);
+    expect(saved.tasks).toHaveLength(1);
+    expect(saved.run.status).toBe('paused');
+    expect(useChatStore.getState().chats.find((item) => item.id === chatId)?.isActive).toBe(false);
+  });
 });

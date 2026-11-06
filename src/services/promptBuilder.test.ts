@@ -1487,7 +1487,7 @@ describe('buildSystemPromptWithContext', () => {
       [speaker.id, speaker],
       [target.id, target],
     ]));
-    expect(trace.sharedSecretGuards).toContain('AI私聊可召回：阿远 · 一个只有熟人懂的暗号 · sealed');
+    expect(trace.sharedSecretGuards).toContain('角色私聊可召回：阿远 · 一个只有熟人懂的暗号 · sealed');
   });
 
   it('uses user shared anchors as high-priority private-channel memory candidates', () => {
