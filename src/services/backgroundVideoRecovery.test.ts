@@ -43,6 +43,12 @@ describe('background video recovery', () => {
     expect(findPendingVideoMessages([generating, ready], new Set(['chat']), true)).toEqual([]);
   });
 
+  it('prefers the synced copy when attachment versions match', () => {
+    const synced = message('same-version', 'generating', 'task-1');
+    const local = { ...synced, serverId: undefined };
+    expect(findPendingVideoMessages([local, synced], new Set(['chat']), true)).toEqual([synced]);
+  });
+
   it('resumes after cloud sync supplies the server message ID and schedules the task once', async () => {
     vi.mocked(processRichMessageMedia).mockClear();
     vi.mocked(readAuthSnapshot).mockReturnValue({ mode: 'cloud' } as ReturnType<typeof readAuthSnapshot>);
