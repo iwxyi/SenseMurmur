@@ -70,7 +70,8 @@ export async function recoverBackgroundVideoTasks() {
     return dispatched;
   };
   let pending = false;
-  const unsubscribe = useMessageStore.subscribe(() => {
+  const unsubscribe = useMessageStore.subscribe((next, previous) => {
+    if (next.messages === previous.messages && next.messageWindowsByChatId === previous.messageWindowsByChatId) return;
     if (pending) return;
     pending = true;
     queueMicrotask(() => { pending = false; scan(); });
