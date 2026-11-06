@@ -311,8 +311,18 @@ let videoWakePending = false;
 const videoWakeKeys = new Set<string>();
 const deferredVideoWakeRuns = new Set<string>();
 function completedTeamVideoKeys(state: ReturnType<typeof useMessageStore.getState>) {
-  const keys = new Set<string>();
+  const latest = new Map<string, Message>();
   for (const message of [...state.messages, ...Object.values(state.messageWindowsByChatId).flatMap((window) => window.messages)]) {
+    const team = message.metadata?.agentTeamMedia;
+    if (!team) continue;
+    const key = `${team.runId}:${team.taskId}`;
+    const previous = latest.get(key);
+    const updatedAt = Math.max(0, ...(message.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0));
+    const previousUpdatedAt = Math.max(0, ...(previous?.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0));
+    if (!previous || updatedAt > previousUpdatedAt || (updatedAt === previousUpdatedAt && Boolean(message.serverId) && !previous.serverId)) latest.set(key, message);
+  }
+  const keys = new Set<string>();
+  for (const message of latest.values()) {
     const team = message.metadata?.agentTeamMedia;
     if (!team || message.isDeleted) continue;
     if (message.metadata?.attachments?.some((attachment) => attachment.kind === 'video' && (attachment.status === 'ready' || attachment.status === 'failed'))) {
