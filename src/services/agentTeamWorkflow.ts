@@ -244,7 +244,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         responseFormat: 'text', signal,
         aiUsage: { type: 'assistant_chat', label: '团队文本任务', scope: 'chat' },
       });
-      if (!output.trim()) throw new Error('子 Agent 未提交内容');
+      if (!output.trim()) throw new WorkflowPreflightError('子 Agent 未提交内容');
       return { output: output.trim() };
     },
     async inspectExternal(task) {

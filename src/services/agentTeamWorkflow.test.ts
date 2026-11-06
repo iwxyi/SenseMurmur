@@ -106,6 +106,16 @@ describe('agent team workflow', () => {
     expect(finished.snapshot.tasks.find((task) => task.id === 'write')?.attempt).toBe(1);
     expect(finished.snapshot.tasks.find((task) => task.id === 'review_1')?.attempt).toBe(2);
   });
+  it('reports an empty completed child response as a definite failure', async () => {
+    const runId = crypto.randomUUID();
+    const plan = { summary: '报告', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '成稿' }], finalAcceptance: '成稿' };
+    generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('   ');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-empty-child-test');
+    const result = await workflow.start(runId, 'chat', '写报告');
+    expect(result.snapshot.tasks.find((task) => task.id === 'write')?.status).toBe('failed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'write')?.error).toContain('未提交内容');
+  });
   it('reviews an asynchronously generated video after its saved attachment completes', async () => {
     const runId = crypto.randomUUID();
     const chatId = `review-video-${runId}`;
