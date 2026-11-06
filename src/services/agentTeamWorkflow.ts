@@ -338,9 +338,17 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       snapshot = await runtime.expandPlanOnce(runId, snapshot.run.planVersion, 'plan', additions);
       if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, getWorkspaceSignal());
       for (const revisionTask of snapshot.tasks.filter((task) => task.kind === 'team_plan_revision' && task.status === 'completed')) {
+        if (revisionTask.id.startsWith('auto_delegate_') && snapshot.run.autoReview === false) continue;
         const delegated = validateAgentTeamPlan(revisionTask.output);
         const alreadyExpanded = snapshot.tasks.some((task) => task.id === delegatedTaskId(revisionTask.id, delegated.tasks[0]?.id || ''));
-        if (!alreadyExpanded && snapshot.tasks.length + delegated.tasks.length > 24) throw new Error('团队任务规模超出限制');
+        if (!alreadyExpanded && snapshot.tasks.length + delegated.tasks.length > 24) {
+          if (revisionTask.id.startsWith('auto_delegate_')) {
+            const reviewId = `review_${revisionTask.id.slice('auto_delegate_'.length)}`;
+            snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '新增任务超过团队规模上限，请缩小目标后追加指示。'));
+            break;
+          }
+          throw new Error('团队任务规模超出限制');
+        }
         const delegatedRoles = new Map(delegated.roles.map((role) => [role.id, role]));
         const contextTaskIds = isTeamRevisionInput(revisionTask.input) ? revisionTask.input.sourceTaskIds : [];
         const delegatedTasks = delegated.tasks.map((task): WorkflowTask => ({

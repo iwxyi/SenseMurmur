@@ -250,15 +250,6 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  async function pauseForUser(runId: string, expectedPlanVersion: number) {
-    return mutate(scope(), runId, (current) => {
-      if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
-      if (!current.tasks.some((task) => task.id === 'review_needs_user' && task.status === 'waiting_user')) throw new Error('当前没有验收阻塞');
-      const snapshot: WorkflowSnapshot = { ...current, run: { ...current.run, status: 'paused', updatedAt: Date.now() } };
-      return { snapshot, value: snapshot };
-    });
-  }
-
   async function blockForUser(runId: string, expectedPlanVersion: number, block: WorkflowTask) {
     return mutate(scope(), runId, (current) => {
       if (current.run.planVersion !== expectedPlanVersion || current.run.status !== 'active') throw new Error('工作流计划版本冲突');
