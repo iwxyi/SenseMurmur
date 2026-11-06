@@ -40,6 +40,15 @@ describe('agent team video task', () => {
     expect(processRichMessageMedia).toHaveBeenCalledTimes(1);
   });
 
+  it('saves reference images on the video attachment before queue submission', async () => {
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
+      expect(message.metadata?.attachments?.[0]?.referenceImages).toEqual([{ url: 'https://example.test/scene.png', mimeType: 'image/png', label: '场景图' }]);
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({ ...item, status: 'generating', mediaTaskId: 'reference-task', updatedAt: item.updatedAt + 1 })) } });
+    });
+    const result = await queueAgentTeamVideo({ runId: 'reference-run', taskId: 'shot', chatId: 'team-video-chat', prompt: '森林追逐', referenceImages: [{ url: 'https://example.test/scene.png', mimeType: 'image/png', label: '场景图' }], signal: new AbortController().signal });
+    expect(result).toEqual({ externalTaskId: 'reference-task' });
+  });
+
   it('passes the saved failure reason to the team run', () => {
     const message: Message = { id: 'video', chatId: 'team-video-chat', type: 'ai', senderId: 'assistant', senderName: '助手', content: '', emotion: 0,
       timestamp: 1, isDeleted: false, metadata: { agentTeamMedia: { runId: 'failed-run', taskId: 'shot' }, attachments: [{

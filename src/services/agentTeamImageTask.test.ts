@@ -63,4 +63,9 @@ describe('agent team image task', () => {
       attachments: [{ ...imageMessage('failed').metadata!.attachments![0], error: '上游额度不足' }] } }] });
     expect(inspectAgentTeamImageAttachment('run', 'shot')).toEqual({ status: 'failed', error: '上游额度不足' });
   });
+
+  it('turns a saved backend path into a fully qualified reference URL', () => {
+    useMessageStore.setState({ messages: [imageMessage('ready', '/uploads/media/scene.png')] });
+    expect(teamImageReference('run', 'shot')?.url).toMatch(/^https?:\/\/[^/]+\/uploads\/media\/scene\.png$/);
+  });
 });
