@@ -7,7 +7,6 @@ import { attachMessageToActiveBranch } from './messageBranching';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { isLocalOnlyMediaMode, processRichMessageMedia } from './richMessageMedia';
 import { WorkflowPreflightError, type WorkflowTaskResult } from './workflowRunRuntime';
-import { backendUrl } from './backendUrl';
 
 function teamImageMessage(runId: string, taskId: string): Message | null {
   const state = useMessageStore.getState();
@@ -22,8 +21,8 @@ function teamImageMessage(runId: string, taskId: string): Message | null {
 export function teamImageReference(runId: string, taskId: string) {
   const attachment = teamImageMessage(runId, taskId)?.metadata?.attachments?.find((item) => item.kind === 'image');
   if (attachment?.status !== 'ready' || !attachment.url) return null;
-  const url = attachment.url.startsWith('/') ? new URL(backendUrl(attachment.url), globalThis.location?.origin || 'http://localhost').href : attachment.url;
-  if (!/^https?:\/\//i.test(url) && !/^data:image\//i.test(url)) return null;
+  const url = attachment.url;
+  if (!/^https?:\/\//i.test(url) && !/^data:image\//i.test(url) && !/^\/uploads\//i.test(url)) return null;
   return { url, mimeType: attachment.mimeType, label: attachment.altText };
 }
 
