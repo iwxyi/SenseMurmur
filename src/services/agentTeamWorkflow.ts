@@ -257,10 +257,12 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           '以上是搜索结果摘要，具体事实仍需核对原始来源。',
         ].join('\n\n') };
       }
-      const upstream = [...input.task.dependsOn.map((id) => input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id), ...(input.contextTaskIds || [])].map((id) => {
+      const directIds = input.task.dependsOn.map((id) => input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id);
+      const contextIds = (input.contextTaskIds || []).filter((id) => !directIds.includes(id)).slice(-8);
+      const upstream = [...directIds, ...contextIds].map((id) => {
         const dependency = snapshot.tasks.find((item) => item.id === id);
         if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('上游交付尚未就绪');
-        return { taskId: id, content: dependency.output.slice(0, 24_000) };
+        return { taskId: id, content: dependency.output.slice(0, directIds.includes(id) ? 12_000 : 1_500) };
       });
       const output = await generateResponse(api, [
         `岗位：${role.name}`,
