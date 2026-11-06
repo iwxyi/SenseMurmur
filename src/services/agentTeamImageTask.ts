@@ -82,7 +82,7 @@ export async function queueAgentTeamImage(params: { runId: string; taskId: strin
   const state = useMessageStore.getState();
   const known = [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])];
   const message = existing || attachMessageToActiveBranch(chat, known, {
-    id: `team-image-${params.runId}-${params.taskId}`, chatId: chat.id, type: 'ai' as const,
+    id: `team-image-${params.runId}-${params.taskId}`, clientKey: `team-image-${params.runId}-${params.taskId}`, chatId: chat.id, type: 'ai' as const,
     senderId: 'assistant', senderName: '助手', content: '图片', emotion: 0, timestamp: now, isDeleted: false,
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, attachments: [{
       id: `team-image-${params.taskId}`, kind: 'image' as const, status: 'queued' as const,
