@@ -276,6 +276,28 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks.find((task) => task.id === 'shot')?.status).toBe('waiting_external');
     expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ referenceImages: [{ url: '/uploads/media/scene.png', mimeType: 'image/png', label: '场景图' }] }));
   });
+  it('rejects a two-image video plan when the selected model permits one reference', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `one-reference-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true },
+      { id: 'video', name: '视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'one-image-model', isDefault: true },
+    ] });
+    vi.mocked(listAvailableModels).mockResolvedValueOnce([{ id: 'one-image-model', label: '单图视频', raw: { aceVideoOptions: { acceptsReferenceImages: true, maxReferenceImages: 1 } } }]);
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '先画后拍', acceptance: '成片', allowedTools: ['image_generation', 'video_generation'] }],
+      tasks: [
+        { id: 'scene_a', roleId: 'director', goal: '场景图', dependsOn: [], tool: 'image_generation', acceptance: '有图片' },
+        { id: 'scene_b', roleId: 'director', goal: '角色图', dependsOn: [], tool: 'image_generation', acceptance: '有图片' },
+        { id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: ['scene_a', 'scene_b'], tool: 'video_generation', acceptance: '可播放' },
+      ], finalAcceptance: '可播放' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-single-reference-test');
+    const result = await workflow.start(runId, chatId, '用两张图生成视频');
+    expect(result.snapshot.tasks[0].status).toBe('failed');
+    expect(result.snapshot.tasks[0].error).toContain('最多支持 1 张参考图片');
+    expect(queueAgentTeamImage).not.toHaveBeenCalled();
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+  });
   it('waits for a submitted video and runs dependent writing only after the attachment is ready', async () => {
     const runId = crypto.randomUUID();
     const chatId = `video-chat-${runId}`;
