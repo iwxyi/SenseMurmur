@@ -298,6 +298,20 @@ describe('agent team workflow', () => {
     expect(queueAgentTeamImage).not.toHaveBeenCalled();
     expect(queueAgentTeamVideo).not.toHaveBeenCalled();
   });
+  it('rejects a text-only video plan when the selected model requires a reference image', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `image-required-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'video', name: '视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'minimax-i2v', isDefault: true }] });
+    vi.mocked(listAvailableModels).mockResolvedValueOnce([{ id: 'minimax-i2v', label: '图生视频', raw: { aceVideoOptions: { acceptsReferenceImages: true, requiresReferenceImage: true, maxReferenceImages: 1 } } }]);
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '生成', acceptance: '成片', allowedTools: ['video_generation'] }],
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-image-required-test');
+    const result = await workflow.start(runId, chatId, '生成视频');
+    expect(result.snapshot.tasks[0].status).toBe('failed');
+    expect(result.snapshot.tasks[0].error).toContain('必须提供参考图片');
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+  });
   it('waits for a submitted video and runs dependent writing only after the attachment is ready', async () => {
     const runId = crypto.randomUUID();
     const chatId = `video-chat-${runId}`;
