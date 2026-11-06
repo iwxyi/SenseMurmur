@@ -250,6 +250,21 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
+  async function addTeamRevision(runId: string, expectedPlanVersion: number, task: WorkflowTask) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
+      const completed = current.run.status === 'completed' && !current.run.planOpen && current.tasks.every((item) => item.status === 'completed');
+      if (!completed && current.run.status !== 'paused') throw new Error('请先暂停整个团队任务');
+      if (task.runId !== runId || task.kind !== 'team_plan_revision' || task.attempt !== 0 || task.status !== 'waiting_dependency') throw new Error('追加任务状态无效');
+      const tasks = [...current.tasks, task];
+      assertTaskGraph(tasks);
+      const snapshot: WorkflowSnapshot = { ...current, tasks,
+        run: { ...current.run, status: 'paused', planOpen: true, autoReview: false,
+          planVersion: current.run.planVersion + 1, generation: completed ? current.run.generation + 1 : current.run.generation, updatedAt: Date.now() } };
+      return { snapshot, value: snapshot };
+    });
+  }
+
   async function blockForUser(runId: string, expectedPlanVersion: number, block: WorkflowTask) {
     return mutate(scope(), runId, (current) => {
       if (current.run.planVersion !== expectedPlanVersion || current.run.status !== 'active') throw new Error('工作流计划版本冲突');
@@ -446,5 +461,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, addTasks, replaceUserBlockWithTasks, blockForUser, reopenWithTasks, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, reopenWithTasks, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }

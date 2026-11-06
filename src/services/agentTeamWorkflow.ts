@@ -260,9 +260,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         };
         return hasReviewBlock
           ? runtime.replaceUserBlockWithTasks(runId, expectedPlanVersion, [task])
-          : current.run.status === 'completed'
-          ? runtime.reopenWithTasks(runId, expectedPlanVersion, [task])
-          : runtime.addTasks(runId, expectedPlanVersion, [task]);
+          : runtime.addTeamRevision(runId, expectedPlanVersion, task);
       });
     },
     async instructQueuedTask(runId: string, taskId: string, expectedPlanVersion: number, instruction: string) {

@@ -103,6 +103,24 @@ describe('agent team workflow', () => {
     expect(finished.snapshot.tasks.filter((task) => task.kind === 'team_review')).toHaveLength(1);
     expect(generate).toHaveBeenCalledTimes(3);
   });
+  it('does not reuse the automatic acceptance verdict after an explicit new task', async () => {
+    const runId = crypto.randomUUID();
+    const plan = { summary: '研究', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'research', roleId: 'writer', goal: '研究', dependsOn: [], acceptance: '有结论' }], finalAcceptance: '有结论' };
+    generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('研究结论')
+      .mockResolvedValueOnce(JSON.stringify({ complete: true, reason: '研究已完成' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-explicit-after-review-test');
+    const first = await workflow.start(runId, 'chat', '研究问题', true);
+    expect(first.snapshot.run.status).toBe('completed');
+    const reopened = await workflow.addRevisionRequest(runId, first.snapshot.run.planVersion, '再写一份报告');
+    expect(reopened.run.autoReview).toBe(false);
+    generate.mockResolvedValueOnce(JSON.stringify({ ...plan, tasks: [{ ...plan.tasks[0], id: 'report', goal: '写报告' }] })).mockResolvedValueOnce('报告正文');
+    const finished = await workflow.resume(runId);
+    expect(finished.snapshot.run.status).toBe('completed');
+    expect(finished.snapshot.tasks.find((task) => task.id === 'delegated_report')?.output).toBe('报告正文');
+    expect(finished.snapshot.tasks.filter((task) => task.kind === 'team_review')).toHaveLength(1);
+    expect(generate).toHaveBeenCalledTimes(5);
+  });
   it('keeps unmet acceptance blocked and lets the user replace the block with an explicit task', async () => {
     const runId = crypto.randomUUID();
     const plan = { summary: '研究', roles: [{ id: 'writer', name: '写作者', responsibility: '研究', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
