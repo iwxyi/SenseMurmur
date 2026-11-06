@@ -160,4 +160,15 @@ describe('background group conversation', () => {
     expect(saved.run.status).toBe('paused');
     expect(useChatStore.getState().chats.find((item) => item.id === chatId)?.isActive).toBe(false);
   });
+
+  it('coalesces simultaneous starts before the run is created', async () => {
+    const chatId = setup();
+    runLoop.mockImplementation(async (params: { onWaitingForInput: () => void }) => params.onWaitingForInput());
+    const first = startGroupBackgroundConversation(chatId);
+    const second = startGroupBackgroundConversation(chatId);
+    expect(second).toBe(first);
+    await Promise.all([first, second]);
+    expect(runLoop).toHaveBeenCalledTimes(1);
+    expect((await listGroupBackgroundConversations(chatId))).toHaveLength(1);
+  });
 });

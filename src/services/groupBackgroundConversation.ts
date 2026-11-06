@@ -18,6 +18,7 @@ import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope'
 import { createWorkflowRunRuntime, currentWorkflowScope, indexedDbWorkflowRepository, workflowRunLockName, WorkflowPreflightError, type WorkflowSnapshot, type WorkflowTask } from './workflowRunRuntime';
 
 const active = new Map<string, Promise<void>>();
+const starting = new Map<string, Promise<void>>();
 const listeners = new Set<() => void>();
 let revision = 0;
 function publish() { revision += 1; listeners.forEach((listener) => listener()); }
@@ -142,7 +143,7 @@ function nextTask(snapshot: WorkflowSnapshot): WorkflowTask {
     dependsOn: snapshot.tasks.length ? [snapshot.tasks.at(-1)!.id] : [], status: 'queued', attempt: 0, updatedAt: Date.now() };
 }
 
-export async function startGroupBackgroundConversation(chatId: string) {
+async function startGroupBackgroundConversationOnce(chatId: string) {
   if (!navigator.locks?.request) throw new Error('此设备不支持安全的群聊后台运行');
   const running = active.get(groupConversationRunId(chatId));
   if (running) {
@@ -168,6 +169,18 @@ export async function startGroupBackgroundConversation(chatId: string) {
   }
   await useChatStore.getState().updateChat(chatId, { isActive: true });
   return resumeGroupBackgroundConversation(chatId);
+}
+
+export function startGroupBackgroundConversation(chatId: string) {
+  const runId = groupConversationRunId(chatId);
+  const pending = starting.get(runId);
+  if (pending) return pending;
+  const operation = startGroupBackgroundConversationOnce(chatId);
+  starting.set(runId, operation);
+  void operation.finally(() => {
+    if (starting.get(runId) === operation) starting.delete(runId);
+  }).catch(() => undefined);
+  return operation;
 }
 
 export async function resumeGroupBackgroundConversation(chatId: string) {
