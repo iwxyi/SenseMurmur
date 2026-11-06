@@ -34,6 +34,21 @@ describe('workflow run runtime', () => {
     expect(execute).toHaveBeenCalledTimes(2);
   });
 
+  it('reconciles an interrupted submitted task before deciding whether to resend', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.tasks = [{ ...plan.tasks[0], status: 'running', attempt: 1 }];
+    const execute = vi.fn();
+    const reconcileInterrupted = vi.fn().mockResolvedValue({ status: 'waiting_external', externalTaskId: 'task-saved' });
+    const inspectExternal = vi.fn().mockResolvedValue({ status: 'completed', output: '已保存的视频' });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute, reconcileInterrupted, inspectExternal }, () => 'reconcile-submitted-test');
+    await runtime.create(plan);
+    const result = await runtime.resume(id);
+    expect(result.tasks[0]).toMatchObject({ status: 'completed', externalTaskId: 'task-saved', output: '已保存的视频', attempt: 1 });
+    expect(execute).not.toHaveBeenCalled();
+    expect(reconcileInterrupted).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps uncertain results blocked across repeated resume calls', async () => {
     const id = crypto.randomUUID();
     const execute = vi.fn().mockRejectedValue(new Error('连接中断'));

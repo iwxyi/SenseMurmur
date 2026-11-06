@@ -78,6 +78,7 @@ export interface WorkflowTaskResult {
 export interface WorkflowExecutor {
   execute(task: WorkflowTask, signal: AbortSignal): Promise<WorkflowTaskResult>;
   inspectExternal?(task: WorkflowTask, signal: AbortSignal): Promise<{ status: 'pending' | 'completed' | 'failed'; output?: unknown; error?: string }>;
+  reconcileInterrupted?(task: WorkflowTask): Promise<{ status: 'waiting_external' | 'completed' | 'failed'; externalTaskId?: string; output?: unknown; error?: string } | null>;
 }
 
 export class WorkflowPreflightError extends Error {
@@ -313,6 +314,20 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     const existing = active.get(activeKey);
     if (existing) return existing;
     const operation = runWithLock(runId, storageScope, async () => {
+      if (executor.reconcileInterrupted) {
+        const interrupted = await repository.read(storageScope, runId);
+        for (const task of interrupted?.tasks.filter((item) => item.status === 'running') || []) {
+          const result = await executor.reconcileInterrupted(task);
+          if (!result) continue;
+          await mutate(storageScope, runId, (current) => ({ snapshot: {
+            ...current,
+            tasks: current.tasks.map((item) => item.id === task.id && item.status === 'running' ? {
+              ...item, status: result.status, externalTaskId: result.externalTaskId ?? item.externalTaskId,
+              output: result.output ?? item.output, error: result.error, updatedAt: Date.now(),
+            } : item),
+          }, value: undefined }));
+        }
+      }
       const inspectedExternalIds = new Set<string>();
       const concurrency = Math.max(1, Math.min(8, Math.floor(maxConcurrentTasks) || 1));
       const alreadyApplied = await mutate(storageScope, runId, (current) => {
