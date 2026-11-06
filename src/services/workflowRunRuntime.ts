@@ -277,23 +277,6 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  async function reopenWithTasks(runId: string, expectedPlanVersion: number, additions: WorkflowTask[]) {
-    if (!additions.length) throw new Error('工作流计划修订不能为空');
-    return mutate(scope(), runId, (current) => {
-      if (current.run.status !== 'completed' || current.run.planOpen || !current.tasks.every((task) => task.status === 'completed')) throw new Error('只有已完成的工作流可以重新打开');
-      if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
-      if (additions.some((task) => task.runId !== runId || (task.status !== 'queued' && task.status !== 'waiting_dependency') || task.attempt !== 0)) throw new Error('新任务状态无效');
-      const tasks = [...current.tasks, ...additions];
-      assertTaskGraph(tasks);
-      const snapshot: WorkflowSnapshot = {
-        ...current,
-        run: { ...current.run, status: 'paused', planOpen: true, planVersion: current.run.planVersion + 1, generation: current.run.generation + 1, updatedAt: Date.now() },
-        tasks,
-      };
-      return { snapshot, value: snapshot };
-    });
-  }
-
   async function addTasksOnce(runId: string, expectedPlanVersion: number, additions: WorkflowTask[]) {
     if (!additions.length) throw new Error('工作流计划修订不能为空');
     return mutate(scope(), runId, (current) => {
@@ -461,5 +444,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, reopenWithTasks, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }
