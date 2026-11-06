@@ -13,6 +13,7 @@ interface Props {
   onPause: (run: WorkflowSnapshot) => Promise<void>;
   onDelegate: (run: WorkflowSnapshot, request: string) => Promise<void>;
   onAbandonReview: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
+  onRetryReview: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
 }
 
 const taskStatus: Record<WorkflowTask['status'], string> = {
@@ -40,7 +41,7 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate, onInstruct, onPause, onDelegate, onAbandonReview }: Props) {
+export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, onCreate, onInstruct, onPause, onDelegate, onAbandonReview, onRetryReview }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -68,6 +69,7 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
   const editable = Boolean(task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_video') && task.attempt === 0
     && (task.status === 'queued' || task.status === 'waiting_dependency'));
   const unknownReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'result_unknown');
+  const failedReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'failed');
   const canAddRevision = (run.run.status === 'paused' || run.run.status === 'completed')
     && run.tasks.length < 24
     && !run.tasks.some((item) => item.status === 'running' || item.status === 'result_unknown' || item.status === 'failed'
@@ -127,6 +129,16 @@ export default function AssistantTeamWorkbench({ runs, isRunActive, onResume, on
                 setReviewActionError(error instanceof Error ? error.message : '处理验收失败');
               }).finally(() => setSavingReviewAction(false));
             }}>放弃本次验收，改由我指定下一步</Button>
+          </Box>}
+          {failedReview && run.run.status === 'failed' && <Box sx={{ display: 'grid', gap: 0.75 }}>
+            <Typography variant="body2" color="text.secondary">本次验收已明确失败。修正模型或要求后，可以只重试主 Agent 验收；之前完成的任务会保留。</Typography>
+            {reviewActionError && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
+            <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
+              setSavingReviewAction(true);
+              void onRetryReview(run, failedReview).then(() => setReviewActionError(null)).catch((error: unknown) => {
+                setReviewActionError(error instanceof Error ? error.message : '重试验收失败');
+              }).finally(() => setSavingReviewAction(false));
+            }}>重试主 Agent 验收</Button>
           </Box>}
           {pauseError && <Typography variant="body2" color="error.main">{pauseError}</Typography>}
           {canAddRevision && <Box sx={{ display: 'grid', gap: 1 }}>

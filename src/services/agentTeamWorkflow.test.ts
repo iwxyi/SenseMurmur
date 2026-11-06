@@ -69,6 +69,14 @@ describe('agent team workflow', () => {
     const result = await workflow.start(runId, 'chat', '写报告', true);
     expect(result.snapshot.tasks.find((task) => task.id === 'review_1')?.status).toBe('failed');
     expect(result.snapshot.tasks.find((task) => task.id === 'review_1')?.error).toContain('无效 JSON');
+    const retry = await workflow.retryFailedReview(runId, 'review_1', result.snapshot.run.planVersion);
+    expect(retry.tasks.find((task) => task.id === 'review_1')?.status).toBe('queued');
+    expect(retry.run.status).toBe('paused');
+    generate.mockResolvedValueOnce(JSON.stringify({ complete: true, reason: '报告完整' }));
+    const finished = await workflow.resume(runId);
+    expect(finished.snapshot.run.status).toBe('completed');
+    expect(finished.snapshot.tasks.find((task) => task.id === 'write')?.attempt).toBe(1);
+    expect(finished.snapshot.tasks.find((task) => task.id === 'review_1')?.attempt).toBe(2);
   });
   it('reviews an asynchronously generated video after its saved attachment completes', async () => {
     const runId = crypto.randomUUID();

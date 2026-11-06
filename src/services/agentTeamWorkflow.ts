@@ -336,6 +336,17 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return runtime.abandonUnknownReview(runId, expectedPlanVersion, reviewId);
       });
     },
+    async retryFailedReview(runId: string, reviewId: string, expectedPlanVersion: number) {
+      if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务修改');
+      const storageScope = scope();
+      return navigator.locks.request(workflowRunLockName(storageScope, runId), { ifAvailable: true }, async (lock) => {
+        if (!lock) throw new Error('团队任务正在执行，请稍后重试');
+        if (scope() !== storageScope) throw new Error('账号已切换，任务修改已停止');
+        const current = await runtime.read(runId);
+        if (!current || current.tasks[0]?.kind !== 'team_plan') throw new Error('团队任务不存在');
+        return runtime.retryFailedReview(runId, expectedPlanVersion, reviewId);
+      });
+    },
     async start(runId: string, chatId: string, goal: string, autoReview = false) {
       const now = Date.now();
       const initial: WorkflowSnapshot = {
@@ -670,6 +681,14 @@ export async function abandonAgentTeamReview(params: { runId: string; reviewId: 
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
   const result = await currentTeamWorkflow().abandonUnknownReview(params.runId, params.reviewId, params.expectedPlanVersion);
+  notifyTeam();
+  return result;
+}
+
+export async function retryAgentTeamReview(params: { runId: string; reviewId: string; expectedPlanVersion: number }) {
+  const auth = readAuthSnapshot();
+  if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
+  const result = await currentTeamWorkflow().retryFailedReview(params.runId, params.reviewId, params.expectedPlanVersion);
   notifyTeam();
   return result;
 }

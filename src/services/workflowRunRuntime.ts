@@ -295,6 +295,20 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
+  async function retryFailedReview(runId: string, expectedPlanVersion: number, reviewId: string) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.planVersion !== expectedPlanVersion || current.run.status !== 'failed') throw new Error('团队计划已更新，请刷新后重试');
+      const review = current.tasks.find((task) => task.id === reviewId && task.kind === 'team_review' && task.status === 'failed');
+      if (!review || current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown')) throw new Error('当前验收任务不能重试');
+      const now = Date.now();
+      const snapshot: WorkflowSnapshot = { ...current,
+        run: { ...current.run, status: 'paused', planVersion: current.run.planVersion + 1, updatedAt: now },
+        tasks: current.tasks.map((task) => task.id === reviewId ? { ...task, status: 'queued', error: undefined, updatedAt: now } : task),
+      };
+      return { snapshot, value: snapshot };
+    });
+  }
+
   async function addTasksOnce(runId: string, expectedPlanVersion: number, additions: WorkflowTask[]) {
     if (!additions.length) throw new Error('工作流计划修订不能为空');
     return mutate(scope(), runId, (current) => {
@@ -462,5 +476,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }
