@@ -190,6 +190,28 @@ describe('processRichMessageMedia', () => {
     await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('failed'));
   });
 
+  it('saves the video request key before submitting an upstream generation', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const persisted = deferred<Awaited<ReturnType<typeof api.updateMessageMetadata>>>();
+    vi.mocked(api.updateMessageMetadata).mockReturnValueOnce(persisted.promise);
+    vi.mocked(generateVideoWithAdapter).mockResolvedValue({ task_id: 'ordered-task' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>);
+    vi.mocked(waitForAiMediaTask).mockReturnValue(new Promise(() => {}));
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'queued', altText: '视频', promptText: '森林追逐', createdAt: 123, updatedAt: 123,
+    }] } });
+    const processing = processRichMessageMedia({ message, aiProfiles: [{ ...imageProfile, type: 'video', model: 'MiniMax-H3' }], upsertMessage: () => {} });
+    await waitForExpectation(() => expect(api.updateMessageMetadata).toHaveBeenCalledOnce());
+    expect(api.updateMessageMetadata).toHaveBeenCalledOnce();
+    expect(generateVideoWithAdapter).not.toHaveBeenCalled();
+    persisted.resolve({});
+    await processing;
+    await waitForExpectation(() => expect(generateVideoWithAdapter).toHaveBeenCalledOnce());
+    const savedMetadata = vi.mocked(api.updateMessageMetadata).mock.calls[0][1] as Message['metadata'];
+    expect(savedMetadata?.attachments?.[0]).toMatchObject({ status: 'generating', generationJobId: expect.stringMatching(/^media-gen-/) });
+    expect(vi.mocked(generateVideoWithAdapter).mock.calls[0][0].clientRequestKey).toBe(savedMetadata?.attachments?.[0]?.generationJobId);
+  });
+
   it('keeps one video poll and avoids repeated metadata writes while the chat reprocesses a generating task', async () => {
     localStorage.setItem('pneumata-auth-mode', 'cloud');
     localStorage.setItem('pneumata-cloud-sync-enabled', '1');

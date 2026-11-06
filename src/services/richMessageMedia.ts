@@ -11,6 +11,7 @@ import { redactAiDiagnosticValue } from './aiDiagnosticText';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
 import { synthesizeSpeech, usesManagedSpeechProfile } from './speech';
 import { useAuthStore } from '../stores/useAuthStore';
+import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 
 function findProfile(profiles: AIModelProfile[], id?: string | null) {
   const profile = id ? profiles.find((item) => item.id === id) : null;
@@ -260,13 +261,28 @@ function updateRichMediaMessage(params: {
   attachmentId: string;
   patch: Partial<MessageAttachment>;
   upsertMessage: (message: Message) => void;
+  persistMetadata?: boolean;
 }) {
   const nextMetadata = updateAttachment(params.message.metadata, params.attachmentId, params.patch);
   const nextMessage = { ...params.message, metadata: nextMetadata };
   rememberRichMediaMessage(nextMessage);
   params.upsertMessage(nextMessage);
-  persistRichMessageMetadata(nextMessage, nextMetadata, 'rich-message-media.persist-metadata', params.attachmentId);
+  if (params.persistMetadata !== false) persistRichMessageMetadata(nextMessage, nextMetadata, 'rich-message-media.persist-metadata', params.attachmentId);
   return nextMessage;
+}
+
+async function persistVideoSubmissionKey(message: Message) {
+  if (isLocalOnlyMediaMode()) return;
+  if (!message.serverId) throw new Error('云端视频消息尚未同步，不能提交生成任务');
+  const serverId = message.serverId;
+  const previous = richMediaMetadataWritesByMessageId.get(serverId);
+  const pending = (previous || Promise.resolve()).then(() => api.updateMessageMetadata(serverId, message.metadata).then(() => undefined));
+  richMediaMetadataWritesByMessageId.set(serverId, pending);
+  try {
+    await pending;
+  } finally {
+    if (richMediaMetadataWritesByMessageId.get(serverId) === pending) richMediaMetadataWritesByMessageId.delete(serverId);
+  }
 }
 
 function persistRichMessageMetadata(message: Message, metadata: MessageMetadata, location: string, attachmentId?: string) {
@@ -519,9 +535,14 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
       generationJobId,
     },
     upsertMessage: entry.upsertMessage,
+    persistMetadata: attachment.kind !== 'video',
   });
 
   try {
+    if (attachment.kind === 'video') {
+      flushBufferedPersistenceWrites();
+      await persistVideoSubmissionKey(workingMessage);
+    }
     if (attachment.kind === 'sticker') {
       const result = await api.searchDoutu(attachment.promptText || attachment.altText, { chatId: workingMessage.chatId, messageId: workingMessage.serverId || workingMessage.id });
       const latestAttachment = getLatestRichMediaMessage(messageId, workingMessage).metadata?.attachments?.find((item) => item.id === attachment.id);
