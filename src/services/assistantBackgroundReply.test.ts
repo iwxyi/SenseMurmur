@@ -66,9 +66,10 @@ describe('assistant background reply', () => {
     useChatStore.setState({ chats: [chat] });
     useMessageStore.setState({ activeChatId: chatId, messages: [userMessage], messageWindowsByChatId: {} });
     reply.mockResolvedValue({ id: 'reply-1' });
-    const result = await startAssistantBackgroundReply({ chatId, userMessageId: userMessage.id });
+    const result = await startAssistantBackgroundReply({ chatId, userMessageId: userMessage.id, selectedArtifactId: 'html-artifact' });
     expect(reply).toHaveBeenCalledTimes(1);
     expect(reply.mock.calls[0][0].currentMessages).toContainEqual(userMessage);
+    expect(reply.mock.calls[0][0].selectedArtifactId).toBe('html-artifact');
     expect(result.snapshot.run.status).toBe('completed');
     expect(result.snapshot.tasks[0].output).toBe('reply-1');
     expect((await listAssistantBackgroundReplies(chatId))[0].run.id).toBe(assistantReplyRunId(chatId, userMessage.id));

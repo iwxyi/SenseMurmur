@@ -970,7 +970,11 @@ export default function ChatDetailPage() {
       setAssistantRuns(runs.sort((left, right) => right.run.updatedAt - left.run.updatedAt));
       const uncertain = runs.find((run) => run.tasks.some((task) => task.status === 'result_unknown'));
       const resumable = runs.find((run) => run.run.status === 'paused' && run.tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency') && !run.tasks.some((task) => task.status === 'result_unknown'));
-      setAssistantBackgroundNotice(uncertain ? '上次助手请求已中断，结果与费用暂时无法确认。该请求不会自动重试。' : resumable ? '上次助手任务在发出请求前暂停，可继续执行。' : null);
+      const failed = runs.find((run) => run.run.status === 'failed' || run.tasks.some((task) => task.status === 'failed'));
+      const failedTask = failed?.tasks.find((task) => task.status === 'failed');
+      setAssistantBackgroundNotice(uncertain ? '上次助手请求已中断，结果与费用暂时无法确认。该请求不会自动重试。'
+        : failed ? `助手任务失败：${failedTask?.error || '请检查任务状态后重试。'}`
+          : resumable ? '上次助手任务在发出请求前暂停，可继续执行。' : null);
       setAssistantBackgroundResumeRunId(resumable?.run.id || null);
     }).catch((error) => {
       if (!cancelled) {
@@ -2873,6 +2877,17 @@ export default function ChatDetailPage() {
         metadata: { assistantHtmlRuntimeError: { ...runtimeError, reportedAt: Date.now() } },
       });
       void updateChat(id, { lastMessageAt: userMessage.timestamp, latestMessage: userMessage });
+      if (typeof navigator.locks?.request === 'function') {
+        try {
+          const { startAssistantBackgroundReply } = await import('../services/assistantBackgroundReply');
+          const result = await startAssistantBackgroundReply({ chatId: id, userMessageId: userMessage.id, selectedArtifactId: artifact.id });
+          if (result.summary.blocked.length) showErrorToast(result.summary.blocked[0].reason);
+        } catch (error) {
+          console.error('[html-artifact:repair-submit-error]', error);
+          showErrorToast(error instanceof Error ? error.message : '页面修复任务启动失败');
+        }
+        return;
+      }
       await runHtmlRepairReply({ chatId: id, artifactId: artifact.id, runtimeError, userMessage }, [...currentChatMessages, userMessage]);
     });
   }, [addMessageStable, chat, chatInteractionDisabled, currentChatMessages, currentUser?.nickname, enqueueManualInput, getNextMessageTimestamp, id, runHtmlRepairReply, showErrorToast, updateChat]);
