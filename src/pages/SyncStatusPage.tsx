@@ -122,6 +122,7 @@ function syncErrorKindLabel(kind: SyncErrorKind, isZh: boolean) {
     network: isZh ? '网络' : 'Network',
     server_unavailable: isZh ? '服务端' : 'Server',
     conflict_ignored: isZh ? '冲突忽略' : 'Conflict ignored',
+    ownership_conflict: isZh ? '运行权冲突' : 'Execution ownership conflict',
     validation: isZh ? '校验失败' : 'Validation failed',
     unknown: isZh ? '未知' : 'Unknown',
   };

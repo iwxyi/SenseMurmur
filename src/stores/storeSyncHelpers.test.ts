@@ -18,6 +18,12 @@ beforeAll(async () => {
 });
 
 describe('storeSyncHelpers', () => {
+  it('keeps a lost execution fence visible without retrying the stale write', () => {
+    const classified = helpers.classifySyncError(Object.assign(new Error('会话运行权已变化，旧设备的结果未提交'), { code: 'CHAT_EXECUTION_LEASE_LOST' }));
+    expect(helpers.parseSyncErrorClassification(classified)).toMatchObject({ kind: 'ownership_conflict', terminal: true, retryable: false });
+    const failed = [{ id: 'stale-write', status: 'failed' as const, lastError: classified }];
+    expect(helpers.retryFailedOperations(failed, { includeTerminal: false })).toBe(failed);
+  });
   it('tracks persistent retry and lock metadata for pending operations', () => {
     const operation = {
       id: 'op-1',

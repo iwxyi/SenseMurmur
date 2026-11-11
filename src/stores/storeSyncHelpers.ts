@@ -67,9 +67,9 @@ export function canAttemptOnlineSync() {
   return !shouldSkipCloudSync() && (typeof navigator === 'undefined' || navigator.onLine);
 }
 
-export type SyncErrorKind = 'auth' | 'network' | 'server_unavailable' | 'conflict_ignored' | 'validation' | 'unknown';
+export type SyncErrorKind = 'auth' | 'network' | 'server_unavailable' | 'conflict_ignored' | 'ownership_conflict' | 'validation' | 'unknown';
 
-const SYNC_ERROR_KINDS: SyncErrorKind[] = ['auth', 'network', 'server_unavailable', 'conflict_ignored', 'validation'];
+const SYNC_ERROR_KINDS: SyncErrorKind[] = ['auth', 'network', 'server_unavailable', 'conflict_ignored', 'ownership_conflict', 'validation'];
 
 export interface SyncErrorClassification {
   kind: SyncErrorKind;
@@ -81,7 +81,7 @@ export interface SyncErrorClassification {
 function syncErrorFlags(kind: SyncErrorKind) {
   return {
     retryable: kind === 'network' || kind === 'server_unavailable',
-    terminal: kind === 'validation' || kind === 'conflict_ignored',
+    terminal: kind === 'validation' || kind === 'conflict_ignored' || kind === 'ownership_conflict',
   };
 }
 
@@ -101,6 +101,9 @@ export function parseSyncErrorClassification(value: unknown): SyncErrorClassific
 export function classifySyncError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   const code = typeof (error as { code?: unknown })?.code === 'string' ? String((error as { code: string }).code) : '';
+  if (/^CHAT_EXECUTION_(?:LEASE_LOST|OWNED)$/.test(code)) {
+    return `ownership_conflict: ${message}`;
+  }
   if (/BRANCH_PARENT_NOT_FOUND|CHAT_CREATE_PENDING|SYNC_OPERATION_IN_PROGRESS/i.test(code) || /分支父节点尚未同步|同步操作正在处理|对应会话尚未完成云端创建/i.test(message)) {
     return `network: ${message}`;
   }
