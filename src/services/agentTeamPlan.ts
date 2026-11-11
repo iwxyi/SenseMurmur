@@ -108,8 +108,13 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     && task.dependsOn.some((id) => !['text_generation', 'web_search'].includes(tasksById.get(id)?.tool || 'text_generation')))) {
     throw new Error('音乐任务目前只能依赖文字歌词或说明');
   }
-  if (tasks.some((task) => task.tool === 'video_generation'
-    && task.dependsOn.some((id) => tasksById.get(id)?.tool === 'audio_generation'))) {
+  const hasAudioAncestor = (task: AgentTeamTask, visited = new Set<string>()): boolean => task.dependsOn.some((id) => {
+    if (visited.has(id)) return false;
+    visited.add(id);
+    const source = tasksById.get(id);
+    return Boolean(source && (source.tool === 'audio_generation' || hasAudioAncestor(source, visited)));
+  });
+  if (tasks.some((task) => task.tool === 'video_generation' && hasAudioAncestor(task))) {
     throw new Error('视频任务目前不能接收已生成的音乐；需要配乐成片时须使用音视频合成工具');
   }
   return {
