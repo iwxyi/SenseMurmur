@@ -71,6 +71,15 @@ describe('agent team plan', () => {
     expect(() => validateAgentTeamPlan(plan)).toThrow('不能把已生成媒体当作参考素材');
   });
 
+  it('allows image generation to use the written result of an image inspection', () => {
+    const plan = valid();
+    plan.roles[0].allowedTools = ['image_generation', 'image_inspection'];
+    plan.tasks[0] = { ...plan.tasks[0], tool: 'image_generation' } as typeof plan.tasks[0];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'image_inspection' } as typeof plan.tasks[1];
+    plan.tasks.push({ id: 'refined', roleId: 'researcher', goal: '根据检查文字重新生成', dependsOn: ['report'], tool: 'image_generation', acceptance: '新的图片可用' });
+    expect(validateAgentTeamPlan(plan).tasks[2].dependsOn).toEqual(['report']);
+  });
+
   it('rejects video depending on generated music because no audio composition tool exists', () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['audio_generation', 'video_generation'];
