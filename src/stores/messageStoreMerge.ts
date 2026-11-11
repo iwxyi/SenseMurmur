@@ -258,8 +258,9 @@ export function trimMessagesWithBranchContext(messages: Message[]) {
 
 export function hasRecoverableMediaTask(message: Message) {
   return !message.isDeleted && Boolean(message.metadata?.attachments?.some((attachment) =>
-    (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation')) && attachment.status === 'generating'
-    && (attachment.mediaTaskId || attachment.generationJobId)));
+    (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation'))
+    && ((attachment.status === 'generating' && (attachment.mediaTaskId || attachment.generationJobId))
+      || (attachment.status === 'queued' && attachment.mediaTaskId))));
 }
 
 export function trimActiveMessages(messages: Message[]) {

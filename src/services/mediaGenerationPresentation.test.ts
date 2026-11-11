@@ -18,6 +18,12 @@ function buildMessage(patch: Partial<Message>): Message {
 }
 
 describe('mediaGenerationPresentation', () => {
+  it('describes an accepted video check as result lookup', () => {
+    const [item] = projectMediaGenerationItems([buildMessage({ metadata: { attachments: [{
+      id: 'video', kind: 'video', status: 'queued', mediaTaskId: 'accepted-task', altText: '视频', createdAt: 1, updatedAt: 2,
+    }] } })]);
+    expect(item.detailText).toBe('视频任务已提交，正在检查生成结果。');
+  });
   it('projects media attachment generation status with guidance and decision context', () => {
     const [item] = projectMediaGenerationItems([
       buildMessage({

@@ -81,6 +81,12 @@ describe('background video recovery', () => {
     expect(findPendingVideoMessages([music], new Set(['chat']), true)).toEqual([music]);
   });
 
+  it('resumes a queued check for an already accepted video without submitting a new request', () => {
+    const checking = message('checking', 'queued', 'accepted-task');
+    expect(findPendingVideoMessages([checking], new Set(['chat']), true)).toEqual([checking]);
+    expect(findPendingVideoMessages([message('never-submitted', 'queued')], new Set(['chat']), true)).toEqual([]);
+  });
+
   it('does not revive a task after a newer message copy marks it complete', () => {
     const generating = message('same', 'generating', 'task-1');
     const ready: Message = { ...generating, metadata: { attachments: [{

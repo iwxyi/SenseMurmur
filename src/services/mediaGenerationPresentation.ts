@@ -80,6 +80,7 @@ function buildGuidanceChip(message: Message) {
 
 function buildStatusDetail(attachment: MessageAttachment, kindLabel: string) {
   if (attachment.status === 'failed') return `失败原因：${getAttachmentErrorText(attachment)}`;
+  if (attachment.status === 'queued' && attachment.mediaTaskId) return `${kindLabel}任务已提交，正在检查生成结果。`;
   if (attachment.status === 'placeholder' || attachment.status === 'queued') return `${kindLabel}已加入生成队列，等待开始。`;
   if (attachment.status === 'generating') return `正在生成${kindLabel}，完成后会自动更新。`;
   if (attachment.status === 'ready') return attachment.url ? `${kindLabel}已生成。` : `${kindLabel}已生成，但资源地址暂不可用。`;
@@ -94,7 +95,7 @@ function buildQueueProgress(message: Message, attachment: MessageAttachment) {
   const total = attachments.length;
   const position = index + 1;
   const frontCount = attachments.slice(0, index).filter((item) => item.status === 'queued' || item.status === 'generating').length;
-  if (attachment.status === 'queued') return `队列 ${position}/${total}，前面还有 ${frontCount} 张`;
+  if (attachment.status === 'queued') return `队列 ${position}/${total}，前面还有 ${frontCount} 个`;
   if (attachment.status === 'generating') return `队列 ${position}/${total}`;
   return '';
 }

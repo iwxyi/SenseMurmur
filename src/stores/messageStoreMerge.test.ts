@@ -72,6 +72,13 @@ describe('mergeMessages rich media metadata', () => {
     const messages = [pending, ...Array.from({ length: MAX_CACHED_MESSAGES_PER_CHAT }, (_, index) => buildMessage({ id: `later-${index}`, timestamp: index + 2 }))];
     expect(trimMessagesWithBranchContext(messages).some((item) => item.id === pending.id)).toBe(true);
   });
+  it('retains a queued check of an already accepted video task', () => {
+    const pending = buildMessage({ id: 'queued-check', timestamp: 1, metadata: { attachments: [{
+      id: 'video', kind: 'video', status: 'queued', mediaTaskId: 'accepted-task', altText: '视频', createdAt: 1, updatedAt: 1,
+    }] } });
+    const messages = [pending, ...Array.from({ length: MAX_CACHED_MESSAGES_PER_CHAT }, (_, index) => buildMessage({ id: `later-${index}`, timestamp: index + 2 }))];
+    expect(trimMessagesWithBranchContext(messages).some((item) => item.id === pending.id)).toBe(true);
+  });
   it('retains branch edges when cloud metadata only updates media generation', () => {
     const branching = { nodeId: 'node-1', parentNodeId: 'older-parent', rootNodeId: 'root', sequence: 5 };
     const local = buildMessage({ metadata: { branching } });
