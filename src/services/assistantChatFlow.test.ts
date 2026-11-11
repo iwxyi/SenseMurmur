@@ -145,6 +145,7 @@ describe('assistant reply display', () => {
       expect(agentOrchestratorMock.writeAssistantAgentPatchSet.mock.calls[0][0].videoGeneration).toBe(true);
       expect(authorize).not.toHaveBeenCalled();
       const queued = upsertMessage.mock.calls.map(([message]) => message as Message).find((message) => message.metadata?.attachments?.[0]?.kind === 'video');
+      expect(queued?.metadata?.assistantReplyToUserMessageId).toBe(userMessage.id);
       expect(queued?.metadata?.attachments?.[0]).toMatchObject({ kind: 'video', status: 'queued', slotId: 'video-1', promptText: '追逐场景视频提示词', videoDuration: 8, videoResolution: '720p', aspectRatio: '16:9' });
       expect(queued?.content).toContain('视频正在生成中');
       expect(queued?.content).not.toContain('正在发送图片');
@@ -184,6 +185,7 @@ describe('assistant reply display', () => {
       const chat = assistantChat();
       chat.name = '逐字测试';
       chat.modeState.assistantCapabilities = { ...chat.modeState.assistantCapabilities, agent: false, artifacts: false };
+      const userMessage: Message = { id: 'user-stream', chatId: chat.id, type: 'user', senderId: 'user', senderName: '用户', content: '写一句介绍', emotion: 0, timestamp: 1001, isDeleted: false };
       const content = '这是一条逐字显示的助手回复';
       const frames: Message[] = [];
       generateResponseMock.mockImplementation(async (_api, _prompt, _messages, onStream) => {
@@ -195,11 +197,12 @@ describe('assistant reply display', () => {
       });
       const result = await runAssistantChatReplyFlow({
         api: { provider: 'openai', apiKey: 'test', model: 'test', baseUrl: '' }, aiProfiles: [], chat, chatId: chat.id,
-        currentMessages: [], upsertMessage: (message) => frames.push(message), updateChat: vi.fn(async () => undefined),
+        currentMessages: [userMessage], upsertMessage: (message) => frames.push(message), updateChat: vi.fn(async () => undefined),
       });
       expect(result?.content).toBe(content);
       expect(String(generateResponseMock.mock.calls[0]?.[1])).toContain('## Chat preferences');
       expect(frames.at(-1)?.isStreaming).toBe(false);
+      expect(result?.metadata?.assistantReplyToUserMessageId).toBe(userMessage.id);
       expect(new Set(frames.map((frame) => frame.id)).size).toBe(1);
       expect(new Set(frames.map((frame) => frame.metadata?.branching?.nodeId)).size).toBe(1);
     } finally {

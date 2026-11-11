@@ -1119,6 +1119,7 @@ async function persistAssistantFinalMessage(params: {
         mode: 'general',
       },
       ...(params.metadata || {}),
+      assistantReplyToUserMessageId: latestUserMessage(params.currentMessages)?.id,
     },
   };
   const localMessage = createStreamingLocalMessage(
@@ -1503,6 +1504,7 @@ export async function runAssistantChatReplyFlow(params: {
       assistant: {
         mode: 'general',
       },
+      assistantReplyToUserMessageId: latestUserMessage(params.currentMessages)?.id,
       ...(params.revisionOfNodeId ? { branching: { revisionOfNodeId: params.revisionOfNodeId } } : {}),
     },
   };
