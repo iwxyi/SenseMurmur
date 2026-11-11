@@ -71,6 +71,29 @@ describe('agent team plan', () => {
     expect(validateAgentTeamPlan(plan).tasks[1].dependsOn).toEqual(['research']);
   });
 
+  it('rejects image references unsupported by the selected model before queueing', async () => {
+    const plan = valid();
+    plan.roles[0].allowedTools = ['image_generation'];
+    plan.tasks[0] = { ...plan.tasks[0], tool: 'image_generation' } as typeof plan.tasks[0];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'image_generation' } as typeof plan.tasks[1];
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(plan));
+    await expect(planAgentTeam({ api: { provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'gpt' },
+      goal: '根据前一张图继续画', imageGeneration: true, imageReferenceImages: false }))
+      .rejects.toThrow('当前图片模型不支持参考图片');
+  });
+
+  it('rejects more image references than the model accepts', async () => {
+    const plan = valid();
+    plan.roles[0].allowedTools = ['image_generation'];
+    plan.tasks[0] = { ...plan.tasks[0], tool: 'image_generation' } as typeof plan.tasks[0];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'image_generation', dependsOn: [] } as typeof plan.tasks[1];
+    plan.tasks.push({ id: 'combined', roleId: 'researcher', goal: '合并画面', dependsOn: ['research', 'report'], tool: 'image_generation', acceptance: '合并图已生成' });
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(plan));
+    await expect(planAgentTeam({ api: { provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'gpt' },
+      goal: '合并两张图', imageGeneration: true, imageReferenceImages: true, maxImageReferenceImages: 1 }))
+      .rejects.toThrow('最多支持 1 张参考图片');
+  });
+
   it('allows image generation to use the written result of an image inspection', () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['image_generation', 'image_inspection'];
