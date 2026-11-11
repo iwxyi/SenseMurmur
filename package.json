@@ -41,6 +41,7 @@
     "test:assistant-html-browser-smoke": "node scripts/assistant-html-browser-smoke.mjs",
     "test:assistant-team-collaboration-browser-smoke": "node scripts/assistant-team-collaboration-browser-smoke.mjs",
     "test:assistant-run-recovery-browser-smoke": "node scripts/assistant-run-recovery-browser-smoke.mjs",
+    "test:background-execution-home-browser-smoke": "node scripts/background-execution-home-browser-smoke.mjs",
     "test:ai-llm-acceptance": "node scripts/ai-llm-acceptance.mjs",
     "test:ai-chatflow-acceptance": "node scripts/ai-llm-acceptance.mjs --cases=chatflow",
     "test:ai-inner-life-lab": "node scripts/ai-inner-life-lab.mjs",
