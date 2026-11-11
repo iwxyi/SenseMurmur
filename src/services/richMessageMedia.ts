@@ -595,6 +595,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
   if (!attachment) return;
 
   const generationJobId = attachment.generationJobId || createGenerationJobId();
+  if (richMediaGenerationErrors.delete(entry.id)) publishRichMediaQueueSnapshot();
   let workingMessage: Message = updateRichMediaMessage({
     message: currentMessage,
     attachmentId: attachment.id,
