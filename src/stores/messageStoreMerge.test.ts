@@ -49,6 +49,19 @@ describe('mergeMessages rich media metadata', () => {
     });
   });
 
+  it('accepts a newer explicit retry instead of restoring the previous ready file', () => {
+    const local = buildMessage({ metadata: { attachments: [
+      { id: 'video', kind: 'video', status: 'ready', generationJobId: 'old-job', url: '/video-old.mp4', altText: '视频', createdAt: 100, updatedAt: 200 },
+    ] } });
+    const remote = buildMessage({ metadata: { attachments: [
+      { id: 'video', kind: 'video', status: 'queued', generationJobId: 'new-job', altText: '视频', createdAt: 100, updatedAt: 300 },
+    ] } });
+
+    expect(mergeMessages([local], [remote])[0].metadata?.attachments?.[0]).toMatchObject({
+      status: 'queued', generationJobId: 'new-job', updatedAt: 300,
+    });
+  });
+
   it('retains an older unfinished video task beyond the ordinary message window', () => {
     const pending = buildMessage({ id: 'pending-video', timestamp: 1, metadata: { attachments: [{ id: 'video', kind: 'video', status: 'generating', mediaTaskId: 'task-1', altText: '视频', createdAt: 1, updatedAt: 1 }] } });
     const messages = [pending, ...Array.from({ length: MAX_CACHED_MESSAGES_PER_CHAT }, (_, index) => buildMessage({ id: `later-${index}`, timestamp: index + 2 }))];

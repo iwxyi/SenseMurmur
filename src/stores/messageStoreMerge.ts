@@ -123,7 +123,8 @@ function mergeAttachmentPair(local: MessageAttachment | undefined, incoming: Mes
   // advanced the task. Keep the newer attachment, including its task ID.
   if (local.updatedAt > incoming.updatedAt
     || (local.status === 'ready' && hasUsableMediaUrl(local)
-      && (incoming.status === 'queued' || incoming.status === 'generating'
+      && ((incoming.status === 'queued' || incoming.status === 'generating')
+        && (!incoming.generationJobId || incoming.generationJobId === local.generationJobId)
         || (incoming.status === 'ready' && !hasUsableMediaUrl(incoming))))) {
     return {
       ...incoming,
