@@ -5,6 +5,7 @@ import { backendUrl } from './backendUrl';
 import { redactAiDiagnosticText, redactAiDiagnosticValue } from './aiDiagnosticText';
 import { assertWorkspaceActive, getResponseWorkspaceSignal, workspaceFetch as fetch } from './workspaceLifecycle';
 import { assertChatExecutionLease } from './chatExecutionLease';
+import { getChatExecutionFence } from './chatExecutionFence';
 
 type ChatRole = 'user' | 'assistant' | 'system';
 export interface ChatMessageImageAttachment {
@@ -174,6 +175,8 @@ export async function submitAiMediaTask(options: {
     prompt: options.prompt,
     async: true,
     ...(options.clientRequestKey ? { client_request_key: options.clientRequestKey } : {}),
+    ...(options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId && getChatExecutionFence(options.aiUsage.resourceId)
+      ? { executionFence: getChatExecutionFence(options.aiUsage.resourceId) } : {}),
     ...(options.parameters || {}),
     ...(options.aiUsage ? { metadata: { aiUsage: options.aiUsage } } : {}),
   });

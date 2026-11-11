@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_IMAGE_AI_PROFILE } from '../types/settings';
 import { api } from './api';
 import { generateImageWithAdapter, generateVideoWithAdapter, resolveImageGenerationRequest, resolveVideoGenerationParameters } from './aiGenerationAdapter';
+import { clearChatExecutionFence, setChatExecutionFence } from './chatExecutionFence';
 
 describe('video generation defaults', () => {
   const profile = { ...DEFAULT_IMAGE_AI_PROFILE, type: 'video' as const };
@@ -23,6 +24,26 @@ describe('video generation defaults', () => {
     expect(submit.mock.calls[1][0]).not.toHaveProperty('resolution');
     expect(submit.mock.calls[1][0]).not.toHaveProperty('aspect_ratio');
     expect(submit.mock.calls[1][0]).not.toHaveProperty('duration');
+  });
+
+  it('sends the active chat fence with a team video task', async () => {
+    const fence = { ownerId: 'owner-current-123456', generation: 8 };
+    setChatExecutionFence('chat-test', fence);
+    const membership = { vipActive: false, activeSubscription: null, latestSubscription: null, recentOrders: [] };
+    vi.spyOn(api, 'getBillingMembership').mockResolvedValue({
+      ...membership,
+      vipEntitlement: { tierCode: 'free', entitlement: { multimediaGenerationEnabled: true } as NonNullable<Awaited<ReturnType<typeof api.getBillingMembership>>['vipEntitlement']>['entitlement'] },
+    });
+    const submit = vi.spyOn(api, 'generateAiMedia').mockResolvedValue({
+      task_id: 'task-test', model: profile.model, status: 'running', result: null,
+      chargedAmount: null, reservedAmount: 0, createdAt: 0, updatedAt: 0,
+    });
+    try {
+      await generateVideoWithAdapter({ profile, prompt: 'tea', aiUsage: { type: 'video_generation', scope: 'chat', resourceId: 'chat-test' } });
+      expect(submit).toHaveBeenCalledWith(expect.objectContaining({ executionFence: fence }));
+    } finally {
+      clearChatExecutionFence('chat-test', fence);
+    }
   });
 
   it('omits unset parameters so backend defaults can apply', () => {
