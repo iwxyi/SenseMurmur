@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowSnapshot } from './workflowRunRuntime';
 
+let testIndexedDb: IDBFactory | undefined;
+
 function snapshot(id: string): WorkflowSnapshot {
   return {
     run: { id, chatId: 'chat', goal: '制作短片', status: 'active', generation: 0, planVersion: 1, updatedAt: 1 },
@@ -13,7 +15,9 @@ function snapshot(id: string): WorkflowSnapshot {
 }
 
 beforeEach(() => {
-  vi.stubGlobal('indexedDB', new IDBFactory());
+  const currentIndexedDb = new IDBFactory();
+  testIndexedDb ??= currentIndexedDb;
+  vi.stubGlobal('indexedDB', currentIndexedDb);
   vi.stubGlobal('IDBKeyRange', IDBKeyRange);
   vi.stubGlobal('navigator', { locks: { request: async (_name: string, _options: unknown, callback: (lock: object) => Promise<WorkflowSnapshot>) => callback({}) } });
 });
@@ -89,6 +93,38 @@ describe('workflow run runtime', () => {
       return { snapshot: { ...current, tasks: current.tasks.map((task) => task.id === 'script' ? { ...task, attempt: -1 } : task) }, value: undefined };
     })).rejects.toThrow('尝试次数无效');
     expect((await runtime.read(id))?.tasks[0].attempt).toBe(0);
+  });
+
+  it('writes new snapshots with an explicit schema version', async () => {
+    const id = crypto.randomUUID();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'test');
+    await runtime.create(snapshot(id));
+    expect((await runtime.read(id))?.schemaVersion).toBe(1);
+  });
+
+  it('migrates legacy snapshots without rewriting their task history', async () => {
+    const id = crypto.randomUUID();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'test');
+    await runtime.create(snapshot(id));
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = testIndexedDb!.open('pneumata-workflow-runs', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const legacy = snapshot(id);
+    legacy.tasks[0] = { ...legacy.tasks[0], status: 'completed', attempt: 1, output: '已交付' };
+    const tx = db.transaction('runs', 'readwrite');
+    tx.objectStore('runs').put(legacy, `test\n${id}`);
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+    db.close();
+    const migrated = await runtime.read(id);
+    expect(migrated?.schemaVersion).toBe(1);
+    expect(migrated?.tasks[0]).toMatchObject({ status: 'completed', output: '已交付', attempt: 1 });
+    expect(migrated?.tasks).toHaveLength(2);
   });
 
   it('rejects a late result after pause changes the run generation', async () => {

@@ -34,6 +34,7 @@ export interface WorkflowRun {
 }
 
 export interface WorkflowSnapshot {
+  schemaVersion?: 1;
   run: WorkflowRun;
   tasks: WorkflowTask[];
 }
@@ -54,6 +55,7 @@ function assertNonEmptyString(value: unknown, label: string): asserts value is s
 
 function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapshot {
   if (!isRecord(value) || !isRecord(value.run) || !Array.isArray(value.tasks)) throw new Error('工作流快照结构无效');
+  if (value.schemaVersion !== undefined && value.schemaVersion !== 1) throw new Error('工作流快照版本不受支持');
   const run = value.run;
   assertNonEmptyString(run.id, '运行 ID');
   assertNonEmptyString(run.chatId, '会话 ID');
@@ -85,6 +87,11 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
     }
   }
   assertTaskGraph(value.tasks as WorkflowTask[]);
+}
+
+function migrateWorkflowSnapshot(value: unknown): WorkflowSnapshot {
+  assertWorkflowSnapshot(value);
+  return value.schemaVersion === 1 ? value : { ...value, schemaVersion: 1 };
 }
 
 export interface WorkflowResumeSummary {
@@ -193,8 +200,7 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
         if (snapshot === undefined) resolve(null);
         else {
           try {
-            assertWorkflowSnapshot(snapshot);
-            resolve(snapshot);
+            resolve(migrateWorkflowSnapshot(snapshot));
           } catch (error) {
             reject(error);
           }
@@ -218,8 +224,7 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
         }
         if (typeof cursor.key === 'string' && cursor.key.startsWith(prefix)) {
           try {
-            assertWorkflowSnapshot(cursor.value);
-            rows.push(cursor.value);
+            rows.push(migrateWorkflowSnapshot(cursor.value));
           } catch (error) {
             reject(error);
             return;
@@ -240,11 +245,11 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
       request.onsuccess = () => {
         try {
           const current: unknown = request.result;
-          if (current !== undefined) assertWorkflowSnapshot(current);
-          const next = update((current as WorkflowSnapshot | undefined) || null);
-          assertWorkflowSnapshot(next.snapshot);
+          const migratedCurrent = current === undefined ? null : migrateWorkflowSnapshot(current);
+          const next = update(migratedCurrent);
+          const migratedNext = migrateWorkflowSnapshot(next.snapshot);
           value = next.value;
-          store.put(next.snapshot, rowKey(scope, runId));
+          store.put(migratedNext, rowKey(scope, runId));
         } catch (error) {
           tx.abort();
           reject(error);
@@ -286,10 +291,10 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
 
   async function create(snapshot: WorkflowSnapshot) {
-    assertWorkflowSnapshot(snapshot);
+    const versionedSnapshot = migrateWorkflowSnapshot(snapshot);
     return repository.transact(scope(), snapshot.run.id, (current) => {
       if (current) throw new Error('工作流已经存在');
-      return { snapshot, value: snapshot };
+      return { snapshot: versionedSnapshot, value: versionedSnapshot };
     });
   }
 
