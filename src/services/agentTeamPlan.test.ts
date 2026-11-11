@@ -68,11 +68,19 @@ describe('agent team plan', () => {
     plan.roles[0].allowedTools = ['audio_generation', 'video_generation'];
     plan.tasks[0] = { ...plan.tasks[0], tool: 'audio_generation' } as typeof plan.tasks[0];
     plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation' } as typeof plan.tasks[1];
-    expect(() => validateAgentTeamPlan(plan)).toThrow('不能接收已生成的音乐');
+    expect(() => validateAgentTeamPlan(plan)).toThrow('不能接收已生成的音乐或视频片段');
     plan.roles[0].allowedTools.push('text_generation');
     plan.tasks[1] = { ...plan.tasks[1], tool: 'text_generation' } as typeof plan.tasks[1];
     plan.tasks.push({ id: 'video', roleId: 'researcher', goal: '生成成片', dependsOn: ['report'], tool: 'video_generation', acceptance: '视频含音乐' });
-    expect(() => validateAgentTeamPlan(plan)).toThrow('不能接收已生成的音乐');
+    expect(() => validateAgentTeamPlan(plan)).toThrow('不能接收已生成的音乐或视频片段');
+  });
+
+  it('rejects chaining two video tasks as if the second could join the first clip', () => {
+    const plan = valid();
+    plan.roles[0].allowedTools = ['video_generation'];
+    plan.tasks[0] = { ...plan.tasks[0], tool: 'video_generation' } as typeof plan.tasks[0];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation' } as typeof plan.tasks[1];
+    expect(() => validateAgentTeamPlan(plan)).toThrow('不能接收已生成的音乐或视频片段');
   });
 
   it('requires image inspection to directly depend on generated images', () => {
