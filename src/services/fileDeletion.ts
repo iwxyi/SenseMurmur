@@ -50,7 +50,7 @@ export async function deleteFileItems(items: DeletableFile[]) {
     const attachments = current.metadata?.attachments?.filter(attachment => !ids.has(attachment.id)) || [];
     if (useAuthStore.getState().authMode === 'cloud') {
       if (current.serverId) {
-        await api.updateMessageMetadata(current.serverId, { attachments });
+        await api.updateMessageMetadata(current.serverId, { attachments }, current.chatId);
       } else if (!messageState.pendingOperations.some(operation => operation.kind === 'create' && (
         operation.localMessageId === current.id || operation.payload?.clientKey === (current.clientKey || current.id)
       ))) {

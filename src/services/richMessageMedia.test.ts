@@ -297,7 +297,7 @@ describe('processRichMessageMedia', () => {
     }));
     await waitForExpectation(() => expect(api.updateMessageMetadata).toHaveBeenCalledWith('server-video', expect.objectContaining({
       attachments: [expect.objectContaining({ status: 'failed', error: 'ACE 任务生成失败：上游返回 HTTP 400，错误码 INVALID_DURATION' })],
-    })));
+    }), 'chat-1'));
   });
 
   it('shows the ACE upstream balance reason on a failed video placeholder', async () => {

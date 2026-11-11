@@ -30,7 +30,7 @@ describe('file deletion source handling', () => {
   it('persists remote message metadata before updating the local projection', async () => {
     mocks.cloud = true;
     await deleteFileItems([item]);
-    expect(mocks.updateMessageMetadata).toHaveBeenCalledWith('server-message', { attachments: [mocks.messages[0].metadata!.attachments![1]] });
+    expect(mocks.updateMessageMetadata).toHaveBeenCalledWith('server-message', { attachments: [mocks.messages[0].metadata!.attachments![1]] }, mocks.messages[0].chatId);
     expect(mocks.upsertMessage).toHaveBeenCalledOnce();
   });
   it('keeps the local attachment when remote persistence fails', async () => {

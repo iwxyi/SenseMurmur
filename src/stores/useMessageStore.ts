@@ -1663,7 +1663,7 @@ export const useMessageStore = create<MessageStore>()(
         }));
         useFactArchiveStore.getState().invalidate([id, targetMessage.serverId || '', targetMessage.clientKey || '']);
         if (!shouldSkipCloudSync()) {
-          await api.updateMessageMetadata(targetMessage.serverId || targetMessage.id, { withdrawal });
+          await api.updateMessageMetadata(targetMessage.serverId || targetMessage.id, { withdrawal }, targetMessage.chatId);
         }
       },
 

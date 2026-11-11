@@ -1079,6 +1079,6 @@ export async function uploadLocalMessageMediaToCloud(params: {
       checksum: asset.checksum,
     });
   }
-  await api.updateMessageMetadata(params.cloudMessage.serverId || params.cloudMessage.id, nextMetadata);
+  await api.updateMessageMetadata(params.cloudMessage.serverId || params.cloudMessage.id, nextMetadata, params.cloudMessage.chatId);
   return nextMetadata;
 }
