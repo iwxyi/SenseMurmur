@@ -63,6 +63,14 @@ describe('agent team plan', () => {
     expect(() => validateAgentTeamPlan(plan)).toThrow('只能依赖文字歌词或说明');
   });
 
+  it('rejects video depending on generated music because no audio composition tool exists', () => {
+    const plan = valid();
+    plan.roles[0].allowedTools = ['audio_generation', 'video_generation'];
+    plan.tasks[0] = { ...plan.tasks[0], tool: 'audio_generation' } as typeof plan.tasks[0];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation' } as typeof plan.tasks[1];
+    expect(() => validateAgentTeamPlan(plan)).toThrow('不能接收已生成的音乐');
+  });
+
   it('requires image inspection to directly depend on generated images', () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['image_generation', 'image_inspection'];
