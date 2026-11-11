@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AICharacter } from '../types/character';
 import type { Message } from '../types/message';
 import type { AIModelProfile } from '../types/settings';
-import { getRichMediaQueueSnapshot, processRichMessageMedia, resetRichMediaQueueForTests, retryRichMessageMedia, scrubLocalMediaUrlsForCloud } from './richMessageMedia';
+import { getRecentRichMediaGenerationErrors, getRichMediaQueueSnapshot, processRichMessageMedia, resetRichMediaQueueForTests, retryRichMessageMedia, scrubLocalMediaUrlsForCloud, subscribeRichMediaQueue } from './richMessageMedia';
 import { generateAudioWithAdapter, generateImageWithAdapter, generateVideoWithAdapter } from './aiGenerationAdapter';
 import { waitForAiMediaTask } from './aiClient';
 import { api, ApiError } from './api';
@@ -243,10 +243,15 @@ describe('processRichMessageMedia', () => {
       altText: '短片', createdAt: 123, updatedAt: 123,
     }] } });
     const upserts: Message[] = [];
+    const notify = vi.fn();
+    const unsubscribe = subscribeRichMediaQueue(notify);
     await processRichMessageMedia({ message, aiProfiles: [], upsertMessage: (next) => upserts.push(next) });
     await waitForExpectation(() => expect(waitForAiMediaTask).toHaveBeenCalledWith('accepted-task'));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'generating', mediaTaskId: 'accepted-task' });
+    expect(getRecentRichMediaGenerationErrors()).toEqual(expect.arrayContaining([expect.objectContaining({ message: '网络暂时不可用' })]));
+    expect(notify).toHaveBeenCalled();
+    unsubscribe();
   });
 
   it('waits for a fresh lease before committing a completed cloud video', async () => {

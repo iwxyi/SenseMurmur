@@ -722,6 +722,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
         if (latest?.generationJobId !== generationJobId) return;
         const errorText = toMediaGenerationErrorText(error, 'audio');
         richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '聊天音乐生成', message: errorText, createdAt: Date.now() });
+        publishRichMediaQueueSnapshot();
         if (shouldKeepSubmittedMediaPending(error, entry.terminalTaskKnown)) return;
         void runWithMediaResultLease(latestMessage.chatId, latestMessage.serverId, async () => {
           updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id,
@@ -791,6 +792,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
           if (latestAttachment?.generationJobId !== generationJobId) return;
           const errorText = toMediaGenerationErrorText(error, 'video');
           richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '聊天视频生成', message: errorText, createdAt: Date.now() });
+          publishRichMediaQueueSnapshot();
           if (shouldKeepSubmittedMediaPending(error, entry.terminalTaskKnown)) return;
           void runWithMediaResultLease(latestMessage.chatId, latestMessage.serverId, async () => {
             updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id, patch: { status: 'failed', error: errorText, mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
