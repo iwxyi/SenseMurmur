@@ -49,6 +49,18 @@ describe('agent team video task', () => {
     expect(result).toEqual({ externalTaskId: 'reference-task' });
   });
 
+  it('uses the selected profile ratio for the waiting video card', async () => {
+    useSettingsStore.setState({ aiProfiles: [{ ...videoProfile, videoDefaults: { aspectRatio: '16:9' } }] });
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
+      expect(message.metadata?.attachments?.[0]?.aspectRatio).toBe('16:9');
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'generating', mediaTaskId: 'ratio-task', updatedAt: item.updatedAt + 1,
+      })) } });
+    });
+    await queueAgentTeamVideo({ runId: 'ratio-run', taskId: 'shot', chatId: 'team-video-chat', prompt: '森林追逐', signal: new AbortController().signal });
+    expect(useMessageStore.getState().messages[0].metadata?.attachments?.[0]?.aspectRatio).toBe('16:9');
+  });
+
   it('passes the saved failure reason to the team run', () => {
     const message: Message = { id: 'video', chatId: 'team-video-chat', type: 'ai', senderId: 'assistant', senderName: '助手', content: '', emotion: 0,
       timestamp: 1, isDeleted: false, metadata: { agentTeamMedia: { runId: 'failed-run', taskId: 'shot' }, attachments: [{

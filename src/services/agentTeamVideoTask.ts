@@ -91,7 +91,8 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
     timestamp: now, isDeleted: false,
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId },
       attachments: [{ id: `team-video-${params.taskId}`, kind: 'video' as const, status: 'queued' as const,
-        altText: '团队生成视频', promptText: params.prompt, referenceImages: params.referenceImages, createdAt: now, updatedAt: now }] },
+        altText: '团队生成视频', promptText: params.prompt, aspectRatio: profile?.videoDefaults?.aspectRatio,
+        referenceImages: params.referenceImages, createdAt: now, updatedAt: now }] },
   }) as Message;
   if (!existing) {
     state.upsertMessage(message);
