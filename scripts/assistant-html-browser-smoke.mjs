@@ -93,6 +93,7 @@ async function installFrame(cdp, html) {
     document.body.append(frame);
     frame.srcdoc=buildAssistantHtmlDocument({html:${JSON.stringify(html)},manifest:${JSON.stringify(runtimeManifest)},channelToken:'browser-smoke',artifactId:'browser-artifact',versionId:'browser-version',applicationOrigin:location.origin});
     await new Promise((resolve)=>frame.addEventListener('load',resolve,{once:true}));
+    frame.contentWindow.postMessage({type:'host_ready',channelToken:'browser-smoke',artifactId:'browser-artifact',versionId:'browser-version'},'*');
     return true;
   })()`;
   await evaluate(cdp, expression);

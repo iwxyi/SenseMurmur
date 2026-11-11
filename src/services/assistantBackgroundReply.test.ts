@@ -5,7 +5,7 @@ import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import type { Message } from '../types/message';
-import { assistantReplyRunId, listAssistantBackgroundReplies, recoverAssistantBackgroundReplies, resumeAssistantBackgroundReply, startAssistantBackgroundReply } from './assistantBackgroundReply';
+import { assistantReplyRunId, listAssistantBackgroundReplies, recoverAssistantBackgroundReplies, resumeAssistantBackgroundReply, retryAssistantBackgroundReply, startAssistantBackgroundReply } from './assistantBackgroundReply';
 import { currentWorkflowScope, indexedDbWorkflowRepository } from './workflowRunRuntime';
 import { buildBranchStateWithHead } from './messageBranching';
 
@@ -154,6 +154,51 @@ describe('assistant background reply', () => {
     const resumed = await resumeAssistantBackgroundReply(first.snapshot.run.id, crypto.randomUUID());
     expect(resumed.summary.blocked).toHaveLength(1);
     expect(reply).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a failed HTML repair as a new run with its original artifact and branch context', async () => {
+    const chatId = crypto.randomUUID();
+    const userMessageId = crypto.randomUUID();
+    const originalRunId = `html-repair-${crypto.randomUUID()}`;
+    const chat = { ...buildAssistantChatDraft(), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 1,
+      messageBranchState: { enabled: true, activeBranchName: 'main', activeLeafNodeId: 'branch-head' } };
+    const userMessage: Message = { id: userMessageId, chatId, type: 'user', senderId: 'user', senderName: '用户', content: '修复页面', emotion: 0, timestamp: 1, isDeleted: false };
+    useChatStore.setState({ chats: [chat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [userMessage], messageWindowsByChatId: {} });
+    await indexedDbWorkflowRepository.transact(currentWorkflowScope(), originalRunId, () => ({ snapshot: {
+      run: { id: originalRunId, chatId, goal: '修复 HTML 页面', status: 'failed', generation: 1, planVersion: 1, updatedAt: 2 },
+      tasks: [{ id: userMessageId, runId: originalRunId, kind: 'assistant_reply', input: { chatId, userMessageId,
+        replyRunId: originalRunId, selectedArtifactId: 'artifact-1', expectedBranchLeafNodeId: 'branch-head', replyTimestamp: 2 },
+      dependsOn: [], status: 'failed', error: '修复失败', attempt: 1, updatedAt: 2 }],
+    }, value: undefined }));
+    reply.mockResolvedValue({ id: 'repair-reply' });
+
+    const result = await retryAssistantBackgroundReply(originalRunId, 'retry-command');
+
+    expect(result.snapshot.run.id).toContain(`${originalRunId}\nretry\nretry-command`);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(reply.mock.calls[0][0]).toMatchObject({
+      chatId,
+      selectedArtifactId: 'artifact-1',
+      currentMessages: [userMessage],
+    });
+    expect(reply.mock.calls[0][0].replyRunId).not.toBe(originalRunId);
+    expect((await listAssistantBackgroundReplies(chatId))).toHaveLength(2);
+  });
+
+  it('requires explicit confirmation before retrying an uncertain request', async () => {
+    const chatId = crypto.randomUUID();
+    const userMessageId = crypto.randomUUID();
+    const runId = `uncertain-${crypto.randomUUID()}`;
+    await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, () => ({ snapshot: {
+      run: { id: runId, chatId, goal: '生成媒体', status: 'paused', generation: 1, planVersion: 1, updatedAt: 2 },
+      tasks: [{ id: userMessageId, runId, kind: 'assistant_reply', input: { chatId, userMessageId }, dependsOn: [],
+        status: 'result_unknown', error: '请求结果未确认', attempt: 1, updatedAt: 2 }],
+    }, value: undefined }));
+
+    await expect(retryAssistantBackgroundReply(runId, 'retry-command')).rejects.toThrow('必须确认可能重复调用');
+    expect(await listAssistantBackgroundReplies(chatId)).toHaveLength(1);
+    expect(reply).not.toHaveBeenCalled();
   });
 
   it('reconciles an already committed reply before marking an interrupted run unknown', async () => {

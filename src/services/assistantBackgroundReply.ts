@@ -330,3 +330,22 @@ export async function resumeAssistantBackgroundReply(runId: string, commandId: s
   }
   return runAssistantBackgroundReply(runId, run.run.chatId, commandId);
 }
+
+export async function retryAssistantBackgroundReply(runId: string, commandId: string, confirmUncertain = false) {
+  const source = await assistantRuntime.read(runId);
+  if (!source || source.tasks.length !== 1 || source.tasks[0].kind !== 'assistant_reply') throw new Error('助手任务不存在或无法重试');
+  const task = source.tasks[0];
+  if (task.status === 'result_unknown' && !confirmUncertain) throw new Error('请求结果未知，必须确认可能重复调用后才能重试');
+  if (task.status !== 'failed' && task.status !== 'result_unknown') throw new Error('只有失败或结果未知的助手任务可以重试');
+  if (!isAssistantReplyInput(task.input)) throw new Error('助手任务输入无效，无法安全重试');
+  const nextRunId = `${runId}\nretry\n${commandId}`;
+  const input: AssistantReplyInput = { ...task.input, replyRunId: nextRunId };
+  const now = Date.now();
+  const snapshot: WorkflowSnapshot = {
+    run: { id: nextRunId, chatId: source.run.chatId, goal: source.run.goal, status: 'active', generation: 0, planVersion: 1, updatedAt: now },
+    tasks: [{ ...task, id: `${task.id}\n${commandId}`, runId: nextRunId, input, output: undefined, error: undefined, status: 'queued', attempt: 0, updatedAt: now }],
+  };
+  await indexedDbWorkflowRepository.transact(currentWorkflowScope(), nextRunId, (existing) => ({ snapshot: existing || snapshot, value: !existing }));
+  publishRun();
+  return runAssistantBackgroundReply(nextRunId, source.run.chatId, `retry-${commandId}`);
+}

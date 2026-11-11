@@ -48,7 +48,7 @@ import { useChatSidebarProjection } from '../hooks/useChatSidebarProjection';
 import { useMessageAnalysis } from '../hooks/useMessageAnalysis';
 import { useChatSurfaceActions } from '../hooks/useChatSurfaceActions';
 import { useReplyOperation } from '../hooks/useReplyOperation';
-import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, getAssistantBackgroundStreamingSnapshot, listAssistantBackgroundReplies, resumeAssistantBackgroundReply, subscribeAssistantBackgroundReplies, subscribeAssistantBackgroundRunChanges, subscribeAssistantBackgroundStreaming } from '../services/assistantBackgroundReply';
+import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, getAssistantBackgroundStreamingSnapshot, listAssistantBackgroundReplies, resumeAssistantBackgroundReply, retryAssistantBackgroundReply, subscribeAssistantBackgroundReplies, subscribeAssistantBackgroundRunChanges, subscribeAssistantBackgroundStreaming } from '../services/assistantBackgroundReply';
 import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
 import { abandonAgentTeamReview, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamPlan, retryAgentTeamReview, runAgentTeam, subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
 import { getDirectBackgroundRevision, isDirectBackgroundActive, listDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply, subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
@@ -916,6 +916,8 @@ export default function ChatDetailPage() {
   const assistantBackgroundRunRevision = useSyncExternalStore(subscribeAssistantBackgroundRunChanges, getAssistantBackgroundRunRevision, getAssistantBackgroundRunRevision);
   const [assistantBackgroundNotice, setAssistantBackgroundNotice] = useState<string | null>(null);
   const [assistantBackgroundResumeRunId, setAssistantBackgroundResumeRunId] = useState<string | null>(null);
+  const [assistantBackgroundRetryRunId, setAssistantBackgroundRetryRunId] = useState<string | null>(null);
+  const [assistantBackgroundRetryUncertain, setAssistantBackgroundRetryUncertain] = useState(false);
   const [assistantRuns, setAssistantRuns] = useState<WorkflowSnapshot[]>([]);
   const directBackgroundRevision = useSyncExternalStore(subscribeDirectBackgroundReplies, getDirectBackgroundRevision, getDirectBackgroundRevision);
   const [directBackgroundRuns, setDirectBackgroundRuns] = useState<WorkflowSnapshot[]>([]);
@@ -961,6 +963,8 @@ export default function ChatDetailPage() {
     if (!id) {
       setAssistantBackgroundNotice(null);
       setAssistantBackgroundResumeRunId(null);
+      setAssistantBackgroundRetryRunId(null);
+      setAssistantBackgroundRetryUncertain(false);
       setAssistantRuns([]);
       return;
     }
@@ -972,6 +976,8 @@ export default function ChatDetailPage() {
       const resumable = runs.find((run) => run.run.status === 'paused' && run.tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency') && !run.tasks.some((task) => task.status === 'result_unknown'));
       const failed = runs.find((run) => run.run.status === 'failed' || run.tasks.some((task) => task.status === 'failed'));
       const failedTask = failed?.tasks.find((task) => task.status === 'failed');
+      setAssistantBackgroundRetryRunId(uncertain?.run.id || failed?.run.id || null);
+      setAssistantBackgroundRetryUncertain(Boolean(uncertain));
       setAssistantBackgroundNotice(uncertain ? '上次助手请求已中断，结果与费用暂时无法确认。该请求不会自动重试。'
         : failed ? `助手任务失败：${failedTask?.error || '请检查任务状态后重试。'}`
           : resumable ? '上次助手任务在发出请求前暂停，可继续执行。' : null);
@@ -980,6 +986,8 @@ export default function ChatDetailPage() {
       if (!cancelled) {
         setAssistantBackgroundNotice(error instanceof Error ? error.message : '工作流状态读取失败');
         setAssistantBackgroundResumeRunId(null);
+        setAssistantBackgroundRetryRunId(null);
+        setAssistantBackgroundRetryUncertain(false);
       }
     });
     return () => { cancelled = true; };
@@ -2923,8 +2931,26 @@ export default function ChatDetailPage() {
     if (!htmlRepairRetry || htmlRepairRetry.chatId !== id) return;
     const request = htmlRepairRetry;
     setHtmlRepairRetry(null);
+    if (typeof navigator.locks?.request === 'function') {
+      const runId = `${request.chatId}\nhtml-repair-retry\n${request.userMessage.id}\n${crypto.randomUUID()}`;
+      void import('../services/assistantBackgroundReply').then(({ startAssistantBackgroundReply }) => startAssistantBackgroundReply({
+        chatId: request.chatId,
+        userMessageId: request.userMessage.id,
+        selectedArtifactId: request.artifactId,
+        expectedBranchLeafNodeId: chat?.messageBranchState?.activeLeafNodeId,
+        replyTimestamp: request.userMessage.timestamp + 1,
+        runId,
+        replyRunId: runId,
+      })).then((result) => {
+        if (result.summary.blocked.length) showErrorToast(result.summary.blocked[0].reason);
+      }).catch((error) => {
+        console.error('[html-artifact:repair-retry-submit-error]', error);
+        showErrorToast(error instanceof Error ? error.message : '页面修复重试失败');
+      });
+      return;
+    }
     void enqueueManualInput(() => runHtmlRepairReply(request, currentChatMessages));
-  }, [currentChatMessages, enqueueManualInput, htmlRepairRetry, id, runHtmlRepairReply]);
+  }, [chat, currentChatMessages, enqueueManualInput, htmlRepairRetry, id, runHtmlRepairReply, showErrorToast]);
 
   useEffect(() => {
     setHtmlRepairRetry(null);
@@ -4622,13 +4648,21 @@ export default function ChatDetailPage() {
           </Box>
         ) : null}
         {isAssistantChat && assistantBackgroundNotice ? (
-          <Alert severity="warning" role="status" action={assistantBackgroundResumeRunId ? (
-            <Button size="small" color="inherit" onClick={() => {
-              void resumeAssistantBackgroundReply(assistantBackgroundResumeRunId, `resume-${crypto.randomUUID()}`).catch((error) => {
-                showErrorToast(error instanceof Error ? error.message : '恢复助手任务失败');
-              });
-            }}>继续</Button>
-          ) : undefined} sx={{ position: 'absolute', top: { xs: 'calc(112px + env(safe-area-inset-top, 0px))', sm: 104 }, left: 12, right: 12, zIndex: 5, borderRadius: 2, '& .MuiAlert-message': { overflowWrap: 'anywhere' } }}>
+          <Alert severity="warning" role="status" action={(
+            <Stack direction="row" spacing={0.5}>
+              {assistantBackgroundResumeRunId ? <Button size="small" color="inherit" onClick={() => {
+                void resumeAssistantBackgroundReply(assistantBackgroundResumeRunId, `resume-${crypto.randomUUID()}`).catch((error) => {
+                  showErrorToast(error instanceof Error ? error.message : '恢复助手任务失败');
+                });
+              }}>继续</Button> : null}
+              {assistantBackgroundRetryRunId ? <Button size="small" color="inherit" onClick={() => {
+                if (assistantBackgroundRetryUncertain && !window.confirm('上次请求可能已成功并产生费用。重新发送可能重复生成和扣费，仍要重试吗？')) return;
+                void retryAssistantBackgroundReply(assistantBackgroundRetryRunId, crypto.randomUUID(), assistantBackgroundRetryUncertain).catch((error) => {
+                  showErrorToast(error instanceof Error ? error.message : '重试助手任务失败');
+                });
+              }}>重试</Button> : null}
+            </Stack>
+          )} sx={{ position: 'absolute', top: { xs: 'calc(112px + env(safe-area-inset-top, 0px))', sm: 104 }, left: 12, right: 12, zIndex: 5, borderRadius: 2, '& .MuiAlert-message': { overflowWrap: 'anywhere' } }}>
             {assistantBackgroundNotice}
           </Alert>
         ) : null}
