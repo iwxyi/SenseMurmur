@@ -92,6 +92,26 @@ async function waitForAssertion(assertion: () => void, attempts = 20) {
 }
 
 describe('useMessageStore', () => {
+  it('adds the current fence to an unfenced AI outbox item without replacing an older fence', async () => {
+    const { useMessageStore } = await import('./useMessageStore');
+    const { clearChatExecutionFence, setChatExecutionFence } = await import('../services/chatExecutionFence');
+    const message = buildMessage(98);
+    const currentFence = { ownerId: 'owner-current-123456', generation: 8 };
+    setChatExecutionFence(message.chatId, currentFence);
+    try {
+      useMessageStore.setState({ messages: [message], activeChatId: message.chatId,
+        pendingOperations: [{ id: 'pending-ai', kind: 'create', chatId: message.chatId, localMessageId: message.id,
+          messageId: message.id, payload: message, createdAt: Date.now(), attemptCount: 0, status: 'pending' }] });
+      useMessageStore.getState().upsertMessage({ ...message, content: '更新后的回复' });
+      expect(useMessageStore.getState().pendingOperations[0].executionFence).toEqual(currentFence);
+      useMessageStore.setState({ pendingOperations: [{ ...useMessageStore.getState().pendingOperations[0],
+        executionFence: { ownerId: 'owner-old-12345678', generation: 7 } }] });
+      useMessageStore.getState().upsertMessage({ ...message, content: '又一次更新' });
+      expect(useMessageStore.getState().pendingOperations[0].executionFence).toEqual({ ownerId: 'owner-old-12345678', generation: 7 });
+    } finally {
+      clearChatExecutionFence(message.chatId, currentFence);
+    }
+  });
   it('does not requeue a terminal ownership conflict when an attachment changes', async () => {
     const { useMessageStore } = await import('./useMessageStore');
     const message = buildMessage(99);

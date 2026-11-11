@@ -775,8 +775,10 @@ function upsertPendingCreateOperation(queue: PendingMessageOperation[], message:
     operation.localMessageId === message.id || operation.payload?.clientKey === clientKey
   ));
   if (existing) {
+    const currentFence = message.senderId === 'user' ? undefined : getChatExecutionFence(message.chatId);
     return queue.map((operation) => operation.id === existing.id
       ? { ...operation, payload: compactMessage(message, { dropContextText: true }),
+        executionFence: operation.executionFence || currentFence,
         status: operation.status === 'syncing' || (operation.status === 'failed' && isTerminalSyncError(operation.lastError || ''))
           ? operation.status : 'pending' as const }
       : operation);
