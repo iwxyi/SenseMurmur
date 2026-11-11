@@ -600,6 +600,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
     attachmentId: attachment.id,
     patch: {
       status: 'generating',
+      error: undefined,
       generationJobId,
     },
     upsertMessage: entry.upsertMessage,
