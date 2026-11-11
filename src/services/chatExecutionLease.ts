@@ -3,12 +3,33 @@ import { readAuthSnapshot } from './authSnapshot';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
 import { api } from './api';
 import { clearChatExecutionFence, getChatExecutionFence, setChatExecutionFence, type ChatExecutionFence } from './chatExecutionFence';
+import { useMessageStore } from '../stores/useMessageStore';
+import { useChatStore } from '../stores/useChatStore';
 
 const LEASE_RENEW_INTERVAL_MS = 15_000;
 const lostLeases = new Map<string, Error>();
 
 function leaseKey(chatId: string, fence: ChatExecutionFence) {
   return `${chatId}:${fence.ownerId}:${fence.generation}`;
+}
+
+function pendingFencedWrites(chatId: string, fence: ChatExecutionFence) {
+  const matches = (operation: { executionFence?: ChatExecutionFence; chatId?: string; entityId?: string }) => {
+    const operationFence = operation.executionFence;
+    return (operation.chatId === chatId || operation.entityId === chatId)
+      && operationFence?.ownerId === fence.ownerId && operationFence.generation === fence.generation;
+  };
+  return useMessageStore.getState().pendingOperations.filter(matches).length
+    + useChatStore.getState().pendingOperations.filter(matches).length;
+}
+
+async function confirmFencedWrites(chatId: string, fence: ChatExecutionFence) {
+  if (!pendingFencedWrites(chatId, fence)) return;
+  if (typeof navigator !== 'undefined' && !navigator.onLine) throw new Error('本次会话仍有待同步结果；联网后请核对同步状态');
+  await useChatStore.getState().flushPendingOperations();
+  await useMessageStore.getState().flushPendingOperations();
+  await useChatStore.getState().flushPendingOperations();
+  if (pendingFencedWrites(chatId, fence)) throw new Error('本次会话仍有待同步结果，请在同步状态中检查后继续');
 }
 
 export function assertChatExecutionLease(chatId: string) {
@@ -55,6 +76,7 @@ export async function runWithChatExecutionLease<T>(chatId: string, work: () => P
 
   try {
     const result = await work();
+    await confirmFencedWrites(chatId, fence);
     if (pendingRenewal) await pendingRenewal;
     if (leaseError) throw leaseError;
     return result;

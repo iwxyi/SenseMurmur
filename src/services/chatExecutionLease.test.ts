@@ -3,6 +3,8 @@ import { AUTH_SNAPSHOT_KEY } from './authSnapshot';
 import { api } from './api';
 import { getChatExecutionFence } from './chatExecutionFence';
 import { assertChatExecutionLease, runWithChatExecutionLease } from './chatExecutionLease';
+import { useMessageStore } from '../stores/useMessageStore';
+import { useChatStore } from '../stores/useChatStore';
 
 vi.mock('./api', () => ({ api: {
   acquireChatExecutionLease: vi.fn(), renewChatExecutionLease: vi.fn(), releaseChatExecutionLease: vi.fn(),
@@ -23,10 +25,13 @@ beforeEach(() => {
   local.setItem(AUTH_SNAPSHOT_KEY, JSON.stringify({ version: 1, generation: 'test', token: 'token', refreshToken: null, user: { id: 'user-test' }, mode: 'cloud' }));
   vi.stubGlobal('localStorage', local);
   vi.stubGlobal('sessionStorage', storage());
+  vi.stubGlobal('navigator', { onLine: true });
   vi.stubGlobal('window', { setInterval, clearInterval });
   vi.mocked(api.acquireChatExecutionLease).mockResolvedValue({ generation: 1, expiresAt: Date.now() + 45_000 });
   vi.mocked(api.renewChatExecutionLease).mockResolvedValue({ generation: 1, expiresAt: Date.now() + 45_000 });
   vi.mocked(api.releaseChatExecutionLease).mockResolvedValue({ released: true });
+  useMessageStore.setState({ pendingOperations: [] });
+  useChatStore.setState({ pendingOperations: [] });
 });
 
 afterEach(() => {
@@ -59,5 +64,34 @@ describe('chat execution lease', () => {
     finish();
     await expect(running).rejects.toThrow('lease lost');
     expect(getChatExecutionFence('chat-two')).toBeUndefined();
+  });
+
+  it('flushes fenced message writes before releasing the lease', async () => {
+    const sequence: string[] = [];
+    const flush = vi.spyOn(useMessageStore.getState(), 'flushPendingOperations').mockImplementation(async () => {
+      sequence.push('flush');
+      useMessageStore.setState({ pendingOperations: [] });
+    });
+    vi.mocked(api.releaseChatExecutionLease).mockImplementation(async () => {
+      sequence.push('release');
+      return { released: true };
+    });
+    await runWithChatExecutionLease('chat-three', async () => {
+      const fence = getChatExecutionFence('chat-three')!;
+      useMessageStore.setState({ pendingOperations: [{ id: 'message-test', chatId: 'chat-three', executionFence: fence, status: 'pending', attemptCount: 0, createdAt: Date.now(), kind: 'create' }] });
+    });
+    expect(sequence).toEqual(['flush', 'release']);
+    flush.mockRestore();
+  });
+
+  it('keeps an unsynced fenced write visible and reports incomplete delivery', async () => {
+    const flush = vi.spyOn(useMessageStore.getState(), 'flushPendingOperations').mockResolvedValue();
+    await expect(runWithChatExecutionLease('chat-four', async () => {
+      const fence = getChatExecutionFence('chat-four')!;
+      useMessageStore.setState({ pendingOperations: [{ id: 'message-test', chatId: 'chat-four', executionFence: fence, status: 'failed', attemptCount: 1, createdAt: Date.now(), kind: 'create' }] });
+    })).rejects.toThrow('仍有待同步结果');
+    expect(useMessageStore.getState().pendingOperations).toHaveLength(1);
+    expect(api.releaseChatExecutionLease).toHaveBeenCalledOnce();
+    flush.mockRestore();
   });
 });
