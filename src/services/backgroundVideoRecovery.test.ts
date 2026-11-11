@@ -123,6 +123,7 @@ describe('background video recovery', () => {
   it('does not resume a deleted copy with the same attachment version', () => {
     const generating = message('deleted-copy', 'generating', 'task-1');
     expect(findPendingVideoMessages([generating, { ...generating, isDeleted: true }], new Set(['chat']), true)).toEqual([]);
+    expect(findPendingVideoMessages([{ ...generating, isDeleted: true }, generating], new Set(['chat']), true)).toEqual([]);
   });
 
   it('resumes a task from the message window after store rehydration', async () => {

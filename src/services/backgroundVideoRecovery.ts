@@ -20,7 +20,12 @@ export function findPendingVideoMessages(messages: Message[], activeChatIds: Set
   const latest = new Map<string, Message>();
   for (const message of messages) {
     const previous = latest.get(message.id);
-    if (previous && !previous.isDeleted && !message.isDeleted) {
+    if (previous?.isDeleted) continue;
+    if (message.isDeleted) {
+      latest.set(message.id, message);
+      continue;
+    }
+    if (previous) {
       const attachments = new Map((previous.metadata?.attachments || []).map((attachment) => [attachment.id, attachment]));
       for (const attachment of message.metadata?.attachments || []) {
         const prior = attachments.get(attachment.id);
@@ -33,12 +38,7 @@ export function findPendingVideoMessages(messages: Message[], activeChatIds: Set
       latest.set(message.id, { ...preferred, metadata: { ...preferred.metadata, attachments: [...attachments.values()] } });
       continue;
     }
-    const updatedAt = Math.max(0, ...(message.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0));
-    const previousUpdatedAt = previous ? Math.max(0, ...(previous.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0)) : -1;
-    if (!previous || updatedAt > previousUpdatedAt || (updatedAt === previousUpdatedAt
-      && ((!previous.isDeleted && message.isDeleted) || (!previous.serverId && Boolean(message.serverId) && !message.isDeleted)))) {
-      latest.set(message.id, message);
-    }
+    latest.set(message.id, message);
   }
   return [...latest.values()].filter((message) => !message.isDeleted && activeChatIds.has(message.chatId)
     && (!requiresServerId || Boolean(message.serverId))
