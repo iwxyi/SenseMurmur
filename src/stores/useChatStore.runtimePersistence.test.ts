@@ -246,6 +246,19 @@ function message(overrides: Partial<Message>): Message {
 }
 
 describe('chat runtime persistence', () => {
+  it('keeps chat patches from different execution fences as separate outbox operations', async () => {
+    const { __chatRuntimePersistenceForTests } = await import('./useChatStore');
+    const { mergeChatPatchOperations } = __chatRuntimePersistenceForTests;
+    const base = { entityId: 'chat-1', targetIds: ['chat-1'], clientTimestamp: 1, attemptCount: 0, status: 'pending' as const };
+    const operations = mergeChatPatchOperations([
+      { ...base, id: 'old', kind: 'patch' as const, patch: { topic: 'old' }, executionFence: { ownerId: 'device-a', generation: 1 } },
+      { ...base, id: 'new', kind: 'patch' as const, clientTimestamp: 2, patch: { topic: 'new' }, executionFence: { ownerId: 'device-b', generation: 2 } },
+      { ...base, id: 'ordinary', kind: 'patch' as const, clientTimestamp: 3, patch: { name: 'manual' } },
+    ]);
+    expect(operations).toHaveLength(3);
+    expect(operations.map((operation) => operation.executionFence?.generation ?? null)).toEqual([1, 2, null]);
+  });
+
   it('keeps calendar source and incremental patches outside the cloud and local history budget', async () => {
     const { __chatRuntimePersistenceForTests } = await import('./useChatStore');
     const { compactChatPatchForCloud, buildPersistedChatState, limits } = __chatRuntimePersistenceForTests;

@@ -14,6 +14,7 @@ import { readAuthSnapshot } from './authSnapshot';
 import { getWorkspaceSignal } from './workspaceLifecycle';
 import { scheduleBackgroundExecution } from './backgroundExecutionScheduler';
 import { runWithConversationExecutionLock } from './conversationExecutionLock';
+import { assertChatExecutionLease } from './chatExecutionLease';
 import { api as appApi } from './api';
 import { resolveChatAgentCapabilities } from './chatAgentCapabilities';
 import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTeamVideoTask';
@@ -225,6 +226,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const role = input.role;
       const snapshot = await runtime.read(task.runId);
       if (!snapshot) throw new WorkflowPreflightError('团队任务记录不存在');
+      assertChatExecutionLease(snapshot.run.chatId);
       let plan: AgentTeamPlan;
       try {
         plan = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === (input.sourcePlanTaskId || 'plan'))?.output);

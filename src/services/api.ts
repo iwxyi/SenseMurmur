@@ -9,6 +9,7 @@ import { dispatchAuthSessionExpired } from './authSession';
 import { backendUrl } from './backendUrl';
 import { assertWorkspaceActive, getResponseWorkspaceSignal, getWorkspaceSignal, workspaceFetch as fetch } from './workspaceLifecycle';
 import { readAuthSnapshot, updateAuthSnapshot } from './authSnapshot';
+import { getChatExecutionFence } from './chatExecutionFence';
 
 const API_BASE = '/api';
 const AI_BALANCE_CACHE_TTL_MS = 60_000;
@@ -1144,8 +1145,23 @@ class ApiClient {
     return this.request<{ success: boolean; character: Record<string, unknown> }>('PATCH', `/characters/${id}/sync`, data);
   }
 
-  async syncChatPatch(id: string, data: { operationId: string; clientTimestamp: number; patch: Record<string, unknown> }) {
-    return this.request<{ success: boolean; chat: Record<string, unknown> }>('PATCH', `/chats/${id}/sync`, data);
+  async syncChatPatch(id: string, data: { operationId: string; clientTimestamp: number; patch: Record<string, unknown>; executionFence?: { ownerId: string; generation: number } }) {
+    return this.request<{ success: boolean; chat: Record<string, unknown> }>('PATCH', `/chats/${id}/sync`, {
+      ...data,
+      ...(data.executionFence ? {} : getChatExecutionFence(id) ? { executionFence: getChatExecutionFence(id) } : {}),
+    });
+  }
+
+  async acquireChatExecutionLease(chatId: string, ownerId: string) {
+    return this.request<{ generation: number; expiresAt: number }>('POST', `/chats/${encodeURIComponent(chatId)}/execution-lease`, { action: 'acquire', ownerId });
+  }
+
+  async renewChatExecutionLease(chatId: string, fence: { ownerId: string; generation: number }) {
+    return this.request<{ generation: number; expiresAt: number }>('POST', `/chats/${encodeURIComponent(chatId)}/execution-lease`, { action: 'renew', ...fence });
+  }
+
+  async releaseChatExecutionLease(chatId: string, fence: { ownerId: string; generation: number }) {
+    return this.request<{ released: boolean }>('POST', `/chats/${encodeURIComponent(chatId)}/execution-lease`, { action: 'release', ...fence });
   }
 
   async deleteCharacter(id: string) {
@@ -1303,8 +1319,12 @@ class ApiClient {
   async createMessage(chatId: string, data: {
     type: string; senderId: string; senderName: string;
     content: string; emotion?: number; metadata?: unknown; timestamp?: number; clientKey?: string; operationId?: string;
+    executionFence?: { ownerId: string; generation: number };
   }) {
-    return this.request<Record<string, unknown>>('POST', `/chats/${chatId}/messages`, data);
+    return this.request<Record<string, unknown>>('POST', `/chats/${chatId}/messages`, {
+      ...data,
+      ...(data.executionFence ? {} : getChatExecutionFence(chatId) ? { executionFence: getChatExecutionFence(chatId) } : {}),
+    });
   }
 
   async updateMessageMetadata(id: string, metadata: unknown) {

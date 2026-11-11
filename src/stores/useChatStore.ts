@@ -21,6 +21,7 @@ import { createGuestUploadFlag } from './storeGuestUpload';
 import { CLIENT_STORE_SCHEMA_VERSION, migrateChatStoreState } from './storeMigrations';
 import { scopedStorageKey, storageKey } from '../constants/brand';
 import { getLocalDataUserId } from '../services/authStorageScope';
+import { getChatExecutionFence } from '../services/chatExecutionFence';
 import { completeLocalOutboxWorkerOperation, markLocalOutboxWorkerOperation, mirrorLocalOutboxWorkerQueue, removeLocalOutboxWorkerOperation } from '../services/localOutboxWorkerBridge';
 import {
   canAttemptOnlineSync,
@@ -246,6 +247,7 @@ async function createChatRemote(chatData: ChatCreatePayload) {
 interface PendingChatOperation extends SyncPatchOperation<Record<string, unknown>> {
   kind: 'create' | 'patch';
   targetIds: string[];
+  executionFence?: { ownerId: string; generation: number };
 }
 
 function pendingChatOperationPriority(operation: PendingChatOperation) {
@@ -1049,14 +1051,16 @@ function mergeChatPatchOperations(operations: PendingChatOperation[]) {
       ...operation,
       patch: cloudPatch,
     };
-    const existing = merged.get(operation.entityId);
+    const fence = operation.executionFence;
+    const mergeKey = `${operation.entityId}:${fence ? `${fence.ownerId}:${fence.generation}` : 'unfenced'}`;
+    const existing = merged.get(mergeKey);
     if (!existing) {
-      merged.set(operation.entityId, compactedOperation);
+      merged.set(mergeKey, compactedOperation);
       continue;
     }
     const terminalFailure = existing.status === 'failed' && isTerminalSyncError(existing.lastError || '');
     const replacesFailedPatch = terminalFailure && existing.kind === 'patch' && compactedOperation.kind === 'create';
-    merged.set(operation.entityId, {
+    merged.set(mergeKey, {
       ...existing,
       kind: existing.kind === 'create' || compactedOperation.kind === 'create' ? 'create' : 'patch',
       targetLabel: compactedOperation.targetLabel || existing.targetLabel,
@@ -1089,6 +1093,7 @@ async function executeChatOperation(operation: PendingChatOperation) {
     operationId: operation.id,
     clientTimestamp: operation.clientTimestamp,
     patch: operation.patch,
+    ...(operation.executionFence ? { executionFence: operation.executionFence } : {}),
   };
   const accountId = getLocalDataUserId();
   try {
@@ -1736,6 +1741,10 @@ export const useChatStore = create<ChatStore>()(
             ? createPendingChatOperation({ kind, targetIds: entityId ? [entityId] : [], patch: cloudPatch,
               targetLabel: typeof patch.name === 'string' ? patch.name : get().chats.find((item) => item.id === entityId)?.name })
             : null;
+          if (operation && entityId) {
+            const executionFence = getChatExecutionFence(entityId);
+            if (executionFence) operation.executionFence = executionFence;
+          }
           set((state) => {
             const pendingOperations = operation
               ? mergeChatPatchOperations([...state.pendingOperations, operation])
@@ -1997,6 +2006,10 @@ export const useChatStore = create<ChatStore>()(
             const operation = !shouldSkipCloudSync() && Object.keys(cloudPatch).length > 0
               ? createPendingChatOperation({ kind: 'patch', targetIds: [id], patch: cloudPatch, targetLabel: chat.name })
               : null;
+            if (operation) {
+              const executionFence = getChatExecutionFence(id);
+              if (executionFence) operation.executionFence = executionFence;
+            }
             const pendingOperations = operation
               ? mergeChatPatchOperations([...state.pendingOperations, operation])
               : state.pendingOperations;
@@ -2134,6 +2147,7 @@ export const __chatRuntimePersistenceForTests = {
   mergeChats,
   mergeWorldRuntimeRecord,
   buildChatListSignature,
+  mergeChatPatchOperations,
   buildPersistedChatState,
   limits: {
     layeredMemories: DEFAULT_BASIC_RETENTION_LIMITS.chatLayeredMemories.storage,

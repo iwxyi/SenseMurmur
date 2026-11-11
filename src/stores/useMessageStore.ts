@@ -13,6 +13,7 @@ import { createSyncScheduler } from './storeSyncScheduler';
 import { canAttemptOnlineSync, getPendingQueueWorkerPriority, isTerminalSyncError, recoverInterruptedOperations, retryFailedOperations, runPendingOperationQueue } from './storeSyncHelpers';
 import { scopedStorageKey } from '../constants/brand';
 import { getLocalDataUserId } from '../services/authStorageScope';
+import { getChatExecutionFence } from '../services/chatExecutionFence';
 import { isCloudSyncEnabled } from '../services/cloudSyncPreference';
 import { useChatStore } from './useChatStore';
 import { useFactArchiveStore } from './useFactArchiveStore';
@@ -416,6 +417,7 @@ interface PendingMessageOperation {
   localMessageId?: string;
   messageId?: string;
   payload?: Message;
+  executionFence?: { ownerId: string; generation: number };
   createdAt: number;
   attemptCount: number;
   status: 'pending' | 'syncing' | 'failed';
@@ -699,13 +701,14 @@ function createPendingMessageOperation(message: Message): PendingMessageOperatio
     localMessageId: message.id,
     messageId: message.serverId || message.id,
     payload: compactMessage(message, { dropContextText: true }),
+    ...(message.senderId !== 'user' && getChatExecutionFence(message.chatId) ? { executionFence: getChatExecutionFence(message.chatId) } : {}),
     createdAt: Date.now(),
     attemptCount: 0,
     status: 'pending',
   };
 }
 
-function messagePayloadForCloud(message: Message, operationId: string) {
+function messagePayloadForCloud(message: Message, operationId: string, executionFence?: { ownerId: string; generation: number }) {
   const compactedMetadata = compactMessageMetadata(
     hasLocalDataUrlMedia(message) ? scrubLocalMediaUrlsForCloud(message) : message.metadata,
     { dropContextText: true },
@@ -735,6 +738,7 @@ function messagePayloadForCloud(message: Message, operationId: string) {
     timestamp: message.timestamp,
     clientKey: message.clientKey || message.id,
     operationId,
+    ...(executionFence ? { executionFence } : {}),
   };
 }
 
@@ -922,7 +926,7 @@ export const useMessageStore = create<MessageStore>()(
               let savedMessage: unknown;
               const accountId = getLocalDataUserId();
               try {
-                savedMessage = await api.createMessage(localMessage.chatId, messagePayloadForCloud(localMessage, operation.id));
+                savedMessage = await api.createMessage(localMessage.chatId, messagePayloadForCloud(localMessage, operation.id, operation.executionFence));
               } catch (error) {
                 const barrier = getClearBarrier(localMessage.chatId);
                 if (barrier && Number(localMessage.timestamp || 0) <= barrier && error instanceof ApiError && error.code === 'BRANCH_PARENT_NOT_FOUND') {
@@ -940,7 +944,7 @@ export const useMessageStore = create<MessageStore>()(
                 if (accountId !== getLocalDataUserId()) throw new Error('同步期间账号已切换');
                 // A previous missing-chat response is cached under the original
                 // operation key. The message clientKey still prevents duplicates.
-                savedMessage = await api.createMessage(localMessage.chatId, messagePayloadForCloud(localMessage, `${operation.id}:recovered`));
+                savedMessage = await api.createMessage(localMessage.chatId, messagePayloadForCloud(localMessage, `${operation.id}:recovered`, operation.executionFence));
               }
               const persistedMessage = mergeMessageServerConfirmation(localMessage, savedMessage);
               set((current) => ({
