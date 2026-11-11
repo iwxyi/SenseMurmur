@@ -96,6 +96,7 @@ export async function queueAgentTeamImage(params: { runId: string; taskId: strin
   const synced = isLocalOnlyMediaMode() ? message : await waitForServerId(params.runId, params.taskId, params.signal);
   if (params.signal.aborted) throw new Error('图片任务已中断，提交结果需要核对');
   await processRichMessageMedia({ message: synced, aiProfiles: useSettingsStore.getState().aiProfiles,
+    sharesConversationLease: true,
     upsertMessage: (next) => useMessageStore.getState().upsertMessage(next) });
   const result = inspectAgentTeamImageAttachment(params.runId, params.taskId);
   if (result?.status === 'completed') return { output: result.output };

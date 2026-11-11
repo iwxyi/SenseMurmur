@@ -6,6 +6,9 @@ import { getRichMediaQueueSnapshot, processRichMessageMedia, resetRichMediaQueue
 import { generateAudioWithAdapter, generateImageWithAdapter, generateVideoWithAdapter } from './aiGenerationAdapter';
 import { waitForAiMediaTask } from './aiClient';
 import { api, ApiError } from './api';
+import { runWithChatExecutionLease } from './chatExecutionLease';
+
+vi.mock('./chatExecutionLease', () => ({ runWithChatExecutionLease: vi.fn(async (_chatId: string, work: () => Promise<void>) => work()) }));
 
 vi.mock('./api', () => ({
   ApiError: class ApiError extends Error { status: number; constructor(message: string, options: { status: number }) { super(message); this.status = options.status; } },
@@ -138,6 +141,7 @@ describe('processRichMessageMedia', () => {
   })();
 
   beforeEach(() => {
+    vi.stubGlobal('navigator', { locks: { request: async (_name: string, work: () => Promise<void>) => work() } });
     Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, configurable: true });
     vi.clearAllMocks();
     resetRichMediaQueueForTests();
@@ -173,6 +177,42 @@ describe('processRichMessageMedia', () => {
     else expect(generateVideoWithAdapter).toHaveBeenCalledWith(expect.objectContaining({ prompt: '追逐场景', duration: 8, resolution: '720p', aspectRatio: '16:9' }));
     pending.resolve({ task_id: 'video-task', model: 'video-model', status: 'succeeded', result: {}, chargedAmount: 1, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
     await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'ready', assetId: 'video-asset', url: 'https://example.test/video.mp4', mediaTaskId: undefined }));
+  });
+
+  it('waits for the conversation lock and acquires a lease before submitting a cloud video', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const events: string[] = [];
+    let unlock!: () => void;
+    const lockGate = new Promise<void>((resolve) => { unlock = resolve; });
+    vi.stubGlobal('navigator', { locks: { request: async (_name: string, work: () => Promise<void>) => {
+      events.push('wait-lock');
+      await lockGate;
+      events.push('locked');
+      return work();
+    } } });
+    vi.mocked(runWithChatExecutionLease).mockImplementationOnce(async (_chatId, work) => {
+      events.push('leased');
+      return work();
+    });
+    vi.mocked(generateVideoWithAdapter).mockImplementationOnce(async () => {
+      events.push('submit');
+      return { task_id: 'leased-task' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>;
+    });
+    const pending = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(waitForAiMediaTask).mockReturnValue(pending.promise);
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'queued', promptText: '森林追逐', altText: '短片', createdAt: 123, updatedAt: 123,
+    }] } });
+    const processing = processRichMessageMedia({ message, aiProfiles: [{ ...imageProfile, type: 'video', model: 'video-model' }], upsertMessage: vi.fn() });
+    await waitForExpectation(() => expect(events).toContain('wait-lock'));
+    expect(generateVideoWithAdapter).not.toHaveBeenCalled();
+    unlock();
+    await waitForExpectation(() => expect(events).toContain('submit'));
+    expect(events).toEqual(['wait-lock', 'locked', 'leased', 'submit']);
+    await processing;
+    pending.resolve({ task_id: 'leased-task', model: 'video-model', status: 'failed', result: { error: '测试结束' },
+      chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
   });
 
   it('resumes an accepted video task when metadata writes are unavailable', async () => {
@@ -350,13 +390,15 @@ describe('processRichMessageMedia', () => {
     vi.mocked(api.updateMessageMetadata).mockReturnValueOnce(firstWrite.promise);
     vi.mocked(generateImageWithAdapter).mockRejectedValue(new Error('图片供应商请求限流，请稍后重试。'));
     const upserts: Message[] = [];
-    await processRichMessageMedia({
+    const processing = processRichMessageMedia({
       message: buildQueuedImageMessage({ serverId: 'server-image' }),
       aiProfiles: [imageProfile], upsertMessage: (next) => upserts.push(next),
     });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'failed' }));
     expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'failed', error: '图片供应商请求限流，请稍后重试。' });
     expect(api.updateMessageMetadata).toHaveBeenCalledTimes(1);
     firstWrite.resolve({});
+    await processing;
     await waitForExpectation(() => expect(api.updateMessageMetadata).toHaveBeenCalledTimes(2));
     expect(vi.mocked(api.updateMessageMetadata).mock.calls[1]?.[1]).toMatchObject({
       attachments: [expect.objectContaining({ status: 'failed', error: '图片供应商请求限流，请稍后重试。' })],

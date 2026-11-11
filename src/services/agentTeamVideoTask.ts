@@ -102,6 +102,7 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
     (current) => Boolean(current.serverId), 60_000);
   if (params.signal.aborted) throw new Error('视频任务已中断，提交结果需要核对');
   await processRichMessageMedia({ message: synced, aiProfiles: useSettingsStore.getState().aiProfiles,
+    sharesConversationLease: true,
     upsertMessage: (next) => useMessageStore.getState().upsertMessage(next) });
   const result = inspectAgentTeamVideoAttachment(params.runId, params.taskId);
   if (result?.status === 'waiting_external') return { externalTaskId: result.externalTaskId };

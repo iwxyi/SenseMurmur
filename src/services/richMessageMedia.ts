@@ -12,6 +12,11 @@ import { isCloudSyncEnabled } from './cloudSyncPreference';
 import { synthesizeSpeech, usesManagedSpeechProfile } from './speech';
 import { useAuthStore } from '../stores/useAuthStore';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
+import { conversationExecutionLockName } from './conversationExecutionLock';
+import { runWithChatExecutionLease } from './chatExecutionLease';
+import { getChatExecutionFence } from './chatExecutionFence';
+import { currentWorkflowScope } from './workflowRunRuntime';
+import { getWorkspaceSignal } from './workspaceLifecycle';
 
 function findProfile(profiles: AIModelProfile[], id?: string | null) {
   const profile = id ? profiles.find((item) => item.id === id) : null;
@@ -169,6 +174,7 @@ type RichMediaQueueEntry = {
   reject: (error: unknown) => void;
   taskId?: string;
   generationJobId?: string;
+  sharesConversationLease?: boolean;
 };
 
 const pendingRichMediaQueue: RichMediaQueueEntry[] = [];
@@ -859,14 +865,47 @@ function pumpRichMediaQueue() {
   runningRichMediaQueueEntry = entry;
   entry.status = 'generating';
   publishRichMediaQueueSnapshot();
-  void runRichMediaQueueEntry(entry)
-    .then(entry.resolve, entry.reject)
+  void runRichMediaQueueEntryWithLease(entry)
+    .then(entry.resolve, (error) => {
+      const latest = getLatestRichMediaMessage(entry.messageId, entry.message);
+      const attachment = latest.metadata?.attachments?.find((item) => item.id === entry.attachmentId);
+      if (attachment && isRecoverableGenerativeAttachment(attachment)) {
+        const errorText = toMediaGenerationErrorText(error, attachment.kind);
+        richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '媒体生成', message: errorText, createdAt: Date.now() });
+        if (!entry.taskId) {
+          updateRichMediaMessage({ message: latest, attachmentId: attachment.id,
+            patch: { status: 'failed', error: errorText }, upsertMessage: entry.upsertMessage });
+        }
+      }
+      entry.reject(error);
+    })
     .finally(() => {
       activeRichMediaQueueEntriesById.delete(entry.id);
       runningRichMediaQueueEntry = null;
       publishRichMediaQueueSnapshot();
       pumpRichMediaQueue();
     });
+}
+
+async function runRichMediaQueueEntryWithLease(entry: RichMediaQueueEntry) {
+  if (isLocalOnlyMediaMode()) return runRichMediaQueueEntry(entry);
+  const chatId = entry.message.chatId;
+  if (entry.sharesConversationLease && getChatExecutionFence(chatId)) return runRichMediaQueueEntry(entry);
+  if (typeof navigator === 'undefined' || !navigator.locks?.request) {
+    return runRichMediaQueueEntry(entry);
+  }
+  const scope = currentWorkflowScope();
+  const signal = getWorkspaceSignal();
+  return navigator.locks.request(conversationExecutionLockName(scope, chatId), async () => {
+    if (signal.aborted || getWorkspaceSignal() !== signal || currentWorkflowScope() !== scope) {
+      throw new Error('账号已切换，媒体任务已暂停');
+    }
+    return runWithChatExecutionLease(chatId, async () => {
+      await runRichMediaQueueEntry(entry);
+      const serverId = entry.message.serverId;
+      if (serverId) await richMediaMetadataWritesByMessageId.get(serverId);
+    });
+  });
 }
 
 function enqueueRichMediaAttachment(params: {
@@ -878,6 +917,7 @@ function enqueueRichMediaAttachment(params: {
   aiProfiles: AIModelProfile[];
   upsertMessage: (message: Message) => void;
   priority?: 'normal' | 'next';
+  sharesConversationLease?: boolean;
 }) {
   const id = richMediaQueueEntryId(params.message.id, params.attachment.id);
   const existing = activeRichMediaQueueEntriesById.get(id);
@@ -906,6 +946,7 @@ function enqueueRichMediaAttachment(params: {
     messages: params.messages,
     aiProfiles: params.aiProfiles,
     upsertMessage: params.upsertMessage,
+    sharesConversationLease: params.sharesConversationLease,
     promise,
     resolve,
     reject,
@@ -930,6 +971,7 @@ export async function processRichMessageMedia(params: {
   upsertMessage: (message: Message) => void;
   attachmentIds?: string[];
   priority?: 'normal' | 'next';
+  sharesConversationLease?: boolean;
 }) {
   if (!isLocalOnlyMediaMode() && !params.message.serverId) return;
   const attachmentFilter = params.attachmentIds?.length ? new Set(params.attachmentIds) : null;
@@ -973,6 +1015,7 @@ export async function processRichMessageMedia(params: {
       aiProfiles: params.aiProfiles,
       upsertMessage: params.upsertMessage,
       priority: params.priority,
+      sharesConversationLease: params.sharesConversationLease,
     })));
   } finally {
     // Concurrent retries/attachments share the latest message only while in use.
