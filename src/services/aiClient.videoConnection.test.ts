@@ -68,3 +68,18 @@ it('does not keep retrying a rejected task query', async () => {
   await expect(waitForAiMediaTask('missing-task')).rejects.toThrow('任务不存在');
   expect(request).toHaveBeenCalledOnce();
 });
+
+it('stops after bounded temporary failures without submitting another generation', async () => {
+  vi.useFakeTimers();
+  try {
+    const request = vi.spyOn(api, 'getAiMediaTask').mockRejectedValue(new ApiError('暂时不可用', { status: 503 }));
+    const pending = waitForAiMediaTask('saved-task');
+    const failure = expect(pending).rejects.toThrow('暂时不可用');
+    await vi.advanceTimersByTimeAsync(35_000);
+    await failure;
+    expect(request).toHaveBeenCalledTimes(4);
+    expect(request.mock.calls.every(([taskId]) => taskId === 'saved-task')).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
