@@ -1083,6 +1083,10 @@ export async function retryRichMessageMedia(params: {
   const activePoll = longRunningRichMediaEntriesById.get(richMediaQueueEntryId(params.message.id, params.attachmentId));
   if (activePoll && target.mediaTaskId && activePoll.taskId === target.mediaTaskId) return;
   const isAsyncTask = target.kind === 'video' || (target.kind === 'audio' && target.audioPurpose === 'music_generation');
+  if (isAsyncTask && target.status === 'generating' && target.mediaTaskId) {
+    await processRichMessageMedia({ ...params, attachmentIds: [params.attachmentId], priority: 'next' });
+    return;
+  }
   let reuseMediaTask = false;
   if (isAsyncTask && target.mediaTaskId) {
     try { reuseMediaTask = (await api.getAiMediaTask(target.mediaTaskId)).status !== 'failed'; }

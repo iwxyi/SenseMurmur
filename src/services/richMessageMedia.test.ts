@@ -934,6 +934,23 @@ describe('processRichMessageMedia', () => {
       chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
   });
 
+  it('checks a saved generating task directly without a separate status request', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const polled = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(waitForAiMediaTask).mockReturnValue(polled.promise);
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'generating', mediaTaskId: 'accepted-task',
+      generationJobId: 'media-gen-original', promptText: '追逐场景', createdAt: 123, updatedAt: 123,
+    }] } });
+    await retryRichMessageMedia({ message, attachmentId: 'video-1', aiProfiles: [], upsertMessage: vi.fn() });
+    await waitForExpectation(() => expect(waitForAiMediaTask).toHaveBeenCalledWith('accepted-task'));
+    expect(api.getAiMediaTask).not.toHaveBeenCalled();
+    expect(generateVideoWithAdapter).not.toHaveBeenCalled();
+    polled.resolve({ task_id: 'accepted-task', model: 'MiniMax-H3', status: 'failed', result: { error: '上游失败' },
+      chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+  });
+
   it('allows retrying a stuck generating media attachment', async () => {
     vi.mocked(generateImageWithAdapter).mockResolvedValue([{
       dataUrl: 'data:image/png;base64,recovered',
