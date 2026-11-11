@@ -190,7 +190,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         try { finalAcceptance = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === 'plan')?.output).finalAcceptance; }
         catch (error) { throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队验收标准无效'); }
         const { evidence, omitted } = selectReviewEvidence(snapshot, input.sourceTaskIds);
-        const raw = await generateResponse(api, '你是主 Agent 的交付验收员。根据原目标、最终验收标准和真实完成记录判断是否已达到可用交付。只能基于现有工具能力提出最多一步必要补做，不得重复已完成工作。图片和视频的文字记录只证明附件已保存，并不证明画面质量或内容符合描述；不得声称自己看过或检查过媒体画面。缺失的音乐、剪辑、代码执行等能力不得伪装为已完成。仅输出 JSON：{"complete":true,"reason":"..."} 或 {"complete":false,"reason":"...","nextRequest":"需要补做的具体工作"}。', [{ role: 'user', content: `原目标：${snapshot.run.goal}\n最终验收标准：${finalAcceptance}\n已完成任务摘要（另有 ${omitted} 项已完成记录未列出）：${JSON.stringify(evidence)}` }], undefined, {
+        const raw = await generateResponse(api, '你是主 Agent 的交付验收员。根据原目标、最终验收标准和真实完成记录判断是否已达到可用交付。只能基于现有工具能力提出最多一步必要补做，不得重复已完成工作。图片和视频生成任务的文字记录只证明附件已保存；只有明确的图片检查任务才提供实际画面观察，不能把未检查的媒体当作已验证。缺失的音乐、剪辑、代码执行等能力不得伪装为已完成。仅输出 JSON：{"complete":true,"reason":"..."} 或 {"complete":false,"reason":"...","nextRequest":"需要补做的具体工作"}。', [{ role: 'user', content: `原目标：${snapshot.run.goal}\n最终验收标准：${finalAcceptance}\n已完成任务摘要（另有 ${omitted} 项已完成记录未列出）：${JSON.stringify(evidence)}` }], undefined, {
           responseFormat: 'json', maxTokens: 600, signal,
           aiUsage: { type: 'assistant_chat', label: '团队交付验收', scope: 'chat' },
         });
@@ -275,7 +275,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const upstream = [...upstreamTaskIds].map((dependencyId) => {
           const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
           if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('视频的上游素材尚未就绪');
-          return dependency.kind === 'agent_text' || dependency.kind === 'agent_web_search'
+          return dependency.kind === 'agent_text' || dependency.kind === 'agent_web_search' || dependency.kind === 'agent_image_inspection'
             ? dependency.output.slice(0, 12_000) : null;
         }).filter((content): content is string => content !== null);
         return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,

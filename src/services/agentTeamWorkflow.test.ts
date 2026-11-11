@@ -72,6 +72,34 @@ describe('agent team workflow', () => {
     expect(inspectAgentTeamImages).toHaveBeenCalledWith(expect.objectContaining({ references: [{ url: '/uploads/media/forest.png', mimeType: 'image/png' }] }));
     expect(generate.mock.calls[1][2][0].content).toContain('实际画面有森林，无角色');
   });
+  it('uses image inspection observations in a dependent video prompt', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `inspection-video-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true },
+      { id: 'vision', name: '视觉文字', type: 'text', provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o', isDefault: true },
+      { id: 'video', name: '视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true },
+    ] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '制作短片', method: '先画后检查', acceptance: '可播放', allowedTools: ['image_generation', 'image_inspection', 'video_generation'] }],
+      tasks: [
+        { id: 'scene', roleId: 'director', goal: '画森林', dependsOn: [], tool: 'image_generation', acceptance: '森林图' },
+        { id: 'inspect', roleId: 'director', goal: '检查场景', dependsOn: ['scene'], tool: 'image_inspection', acceptance: '有森林' },
+        { id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: ['inspect'], tool: 'video_generation', acceptance: '可播放' },
+      ], finalAcceptance: '短片可播放' }));
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已保存' });
+    vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/forest.png', mimeType: 'image/png' });
+    vi.mocked(inspectAgentTeamImages).mockResolvedValue('实际画面是森林，但光线偏暗');
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'video-task' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'video-task' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o' }, () => `inspection-video-scope-${runId}`);
+    const result = await workflow.start(runId, chatId, '画森林并生成短片');
+    expect(result.snapshot.tasks.find((task) => task.id === 'shot')?.status).toBe('waiting_external');
+    expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: expect.stringContaining('实际画面是森林，但光线偏暗'),
+      referenceImages: [{ url: '/uploads/media/forest.png', mimeType: 'image/png' }],
+    }));
+  });
   it('automatically reviews delivery, delegates one missing step, and does not repeat it on resume', async () => {
     const runId = crypto.randomUUID();
     const basePlan = { summary: '研究', roles: [{ id: 'writer', name: '写作者', responsibility: '研究', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
