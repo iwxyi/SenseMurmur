@@ -15,10 +15,14 @@ interface AssistantReplyInput {
   userMessageId: string;
   replyRunId?: string;
   selectedArtifactId?: string | null;
+  expectedBranchLeafNodeId?: string;
 }
 
 function isAssistantReplyInput(value: unknown): value is AssistantReplyInput {
-  return Boolean(value && typeof value === 'object' && typeof (value as AssistantReplyInput).chatId === 'string' && typeof (value as AssistantReplyInput).userMessageId === 'string');
+  if (!value || typeof value !== 'object') return false;
+  const input = value as AssistantReplyInput;
+  return typeof input.chatId === 'string' && typeof input.userMessageId === 'string'
+    && (input.expectedBranchLeafNodeId === undefined || typeof input.expectedBranchLeafNodeId === 'string');
 }
 
 function messagesForChat(chatId: string) {
@@ -57,6 +61,9 @@ async function executeAssistantReplyUnlocked(task: WorkflowTask, signal: AbortSi
   const chat = useChatStore.getState().chats.find((item) => item.id === chatId);
   if (!chat || chat.type !== 'assistant') throw new WorkflowPreflightError('助手会话已不存在');
   if (chat.deletedAt != null) throw new WorkflowPreflightError('助手会话已删除');
+  if (input.expectedBranchLeafNodeId && chat.messageBranchState?.activeLeafNodeId !== input.expectedBranchLeafNodeId) {
+    throw new WorkflowPreflightError('消息分支已切换，已停止这条助手回复');
+  }
   const allMessages = messagesForChat(chatId);
   const userMessage = allMessages.find((message) => message.id === input.userMessageId);
   if (!userMessage || userMessage.isDeleted) throw new WorkflowPreflightError('原始用户消息已不存在');
@@ -149,7 +156,7 @@ export function assistantReplyRunId(chatId: string, userMessageId: string) {
   return `${chatId}\n${userMessageId}`;
 }
 
-export function startAssistantBackgroundReply(params: { chatId: string; userMessageId: string; selectedArtifactId?: string | null }) {
+export function startAssistantBackgroundReply(params: { chatId: string; userMessageId: string; selectedArtifactId?: string | null; expectedBranchLeafNodeId?: string }) {
   const runId = assistantReplyRunId(params.chatId, params.userMessageId);
   const pending = startingReplies.get(runId);
   if (pending) return pending;
@@ -157,7 +164,7 @@ export function startAssistantBackgroundReply(params: { chatId: string; userMess
     const now = Date.now();
     const snapshot: WorkflowSnapshot = {
       run: { id: runId, chatId: params.chatId, goal: '回复用户消息', status: 'active', generation: 0, planVersion: 1, updatedAt: now },
-      tasks: [{ id: params.userMessageId, runId, kind: 'assistant_reply', input: { chatId: params.chatId, userMessageId: params.userMessageId, replyRunId: runId, selectedArtifactId: params.selectedArtifactId }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
+      tasks: [{ id: params.userMessageId, runId, kind: 'assistant_reply', input: { chatId: params.chatId, userMessageId: params.userMessageId, replyRunId: runId, selectedArtifactId: params.selectedArtifactId, expectedBranchLeafNodeId: params.expectedBranchLeafNodeId }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
     };
     const created = await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, (existing) => ({
       snapshot: existing || snapshot, value: !existing,

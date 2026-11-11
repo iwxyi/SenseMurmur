@@ -2374,45 +2374,59 @@ export default function ChatDetailPage() {
           }
         })();
       } else if (chat.type === 'assistant' && createdRevision.type === 'user') {
-        const { controller: assistantReplyAbortController, epoch: directReplyEpoch } = beginReplyOperation();
-        const shouldContinueAssistantRevision = () => {
-          if (assistantReplyAbortController.signal.aborted) return false;
-          if (directReplyEpochRef.current !== directReplyEpoch) return false;
-          const latestChat = useChatStore.getState().chats.find((item) => item.id === id) || nextChat;
-          if (latestChat.messageBranchState?.activeLeafNodeId !== revisionNodeId) return false;
-          const messageState = useMessageStore.getState();
-          const latestMessages = projectMergedChatMessages({
+        if (typeof navigator.locks?.request === 'function') {
+          void import('../services/assistantBackgroundReply').then(({ startAssistantBackgroundReply }) => startAssistantBackgroundReply({
             chatId: id,
-            activeMessages: messageState.messages,
-            cachedWindow: messageState.messageWindowsByChatId[id],
+            userMessageId: createdRevision.id,
+            selectedArtifactId: selectedAssistantArtifactId,
+            expectedBranchLeafNodeId: revisionNodeId,
+          })).then((result) => {
+            if (result.summary.blocked.length) showErrorToast(result.summary.blocked[0].reason);
+          }).catch((error) => {
+            console.error('[assistant-reply:revision-error]', error);
+            showErrorToast(error instanceof Error ? error.message : '助手分支重答失败');
           });
-          return projectActiveBranchMessages(latestChat, latestMessages).some((message) => message.id === createdRevision.id);
-        };
-        void (async () => {
-          try {
-            const { runAssistantChatReplyFlow } = await import('../services/assistantChatFlow');
-            await runAssistantChatReplyFlow({
-              api,
-              aiProfiles,
+        } else {
+          const { controller: assistantReplyAbortController, epoch: directReplyEpoch } = beginReplyOperation();
+          const shouldContinueAssistantRevision = () => {
+            if (assistantReplyAbortController.signal.aborted) return false;
+            if (directReplyEpochRef.current !== directReplyEpoch) return false;
+            const latestChat = useChatStore.getState().chats.find((item) => item.id === id) || nextChat;
+            if (latestChat.messageBranchState?.activeLeafNodeId !== revisionNodeId) return false;
+            const messageState = useMessageStore.getState();
+            const latestMessages = projectMergedChatMessages({
               chatId: id,
-              chat: nextChat,
-              currentMessages: activeMessagesAfterRevision,
-              selectedArtifactId: selectedAssistantArtifactId,
-              timestamp: createdRevision.timestamp + 1,
-              upsertMessage: upsertMessageStable,
-              updateChat,
-              signal: assistantReplyAbortController.signal,
-              shouldContinue: shouldContinueAssistantRevision,
+              activeMessages: messageState.messages,
+              cachedWindow: messageState.messageWindowsByChatId[id],
             });
-          } catch (error) {
-            if (!isGenerationCancelledError(error)) {
-              console.error('[assistant-reply:revision-error]', error);
-              showErrorToast(error instanceof Error ? error.message : String(error));
+            return projectActiveBranchMessages(latestChat, latestMessages).some((message) => message.id === createdRevision.id);
+          };
+          void (async () => {
+            try {
+              const { runAssistantChatReplyFlow } = await import('../services/assistantChatFlow');
+              await runAssistantChatReplyFlow({
+                api,
+                aiProfiles,
+                chatId: id,
+                chat: nextChat,
+                currentMessages: activeMessagesAfterRevision,
+                selectedArtifactId: selectedAssistantArtifactId,
+                timestamp: createdRevision.timestamp + 1,
+                upsertMessage: upsertMessageStable,
+                updateChat,
+                signal: assistantReplyAbortController.signal,
+                shouldContinue: shouldContinueAssistantRevision,
+              });
+            } catch (error) {
+              if (!isGenerationCancelledError(error)) {
+                console.error('[assistant-reply:revision-error]', error);
+                showErrorToast(error instanceof Error ? error.message : String(error));
+              }
+            } finally {
+              finishReplyOperation(assistantReplyAbortController);
             }
-          } finally {
-            finishReplyOperation(assistantReplyAbortController);
-          }
-        })();
+          })();
+        }
       } else if (createdRevision.type === 'user' || createdRevision.type === 'god') {
         try {
           await commitPersistedManualRuntime(createdRevision, activeMessagesAfterRevision);

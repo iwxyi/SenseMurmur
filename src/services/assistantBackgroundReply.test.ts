@@ -76,6 +76,27 @@ describe('assistant background reply', () => {
     expect(reply).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps an edited reply on its captured branch and refuses to answer after branch switch', async () => {
+    const chatId = crypto.randomUUID();
+    const chat = { ...buildAssistantChatDraft(), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 1,
+      messageBranchState: { enabled: true, activeBranchName: 'main', activeLeafNodeId: 'edited-node' } };
+    const userMessage: Message = { id: crypto.randomUUID(), chatId, type: 'user', senderId: 'user', senderName: '用户', content: '修订后的请求', emotion: 0, timestamp: Date.now(), isDeleted: false };
+    useChatStore.setState({ chats: [chat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [userMessage], messageWindowsByChatId: {} });
+    reply.mockResolvedValue({ id: 'reply-branch' });
+    const result = await startAssistantBackgroundReply({ chatId, userMessageId: userMessage.id, expectedBranchLeafNodeId: 'edited-node' });
+    expect(result.snapshot.tasks[0].input).toMatchObject({ expectedBranchLeafNodeId: 'edited-node' });
+    expect(reply).toHaveBeenCalledTimes(1);
+
+    const switchedChat = { ...chat, messageBranchState: { ...chat.messageBranchState, activeLeafNodeId: 'other-node' } };
+    useChatStore.setState({ chats: [switchedChat] });
+    const otherMessage: Message = { ...userMessage, id: crypto.randomUUID(), content: '另一条分支消息', timestamp: userMessage.timestamp + 1 };
+    useMessageStore.setState({ messages: [userMessage, otherMessage] });
+    const blocked = await startAssistantBackgroundReply({ chatId, userMessageId: otherMessage.id, expectedBranchLeafNodeId: 'edited-node' });
+    expect(blocked.summary.blocked[0]?.reason).toContain('消息分支已切换');
+    expect(reply).toHaveBeenCalledTimes(1);
+  });
+
   it('does not retry an uncertain request after reopening the app', async () => {
     const chatId = crypto.randomUUID();
     const chat = { ...buildAssistantChatDraft(), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 1 };
