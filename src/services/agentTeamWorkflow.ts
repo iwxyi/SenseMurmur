@@ -279,11 +279,12 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       }
       if (selectedTool === 'audio_generation') {
         const upstream = input.task.dependsOn.map((id) => {
-          const dependency = snapshot.tasks.find((item) => item.id === (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id));
+          const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
+          const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
           if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('音乐的上游歌词或说明尚未就绪');
-          return dependency.kind === 'agent_text' || dependency.kind === 'agent_web_search'
-            ? dependency.output.slice(0, 12_000) : null;
-        }).filter((content): content is string => content !== null);
+          if (dependency.kind !== 'agent_text' && dependency.kind !== 'agent_web_search') throw new WorkflowPreflightError('音乐任务目前只能读取文字歌词或说明');
+          return dependency.output.slice(0, 12_000);
+        });
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           prompt: [input.task.goal, ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), signal });
       }

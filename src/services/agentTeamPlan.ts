@@ -104,6 +104,10 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     && !task.dependsOn.some((id) => tasksById.get(id)?.tool === 'image_generation'))) {
     throw new Error('图片检查必须直接依赖图片生成任务');
   }
+  if (tasks.some((task) => task.tool === 'audio_generation'
+    && task.dependsOn.some((id) => !['text_generation', 'web_search'].includes(tasksById.get(id)?.tool || 'text_generation')))) {
+    throw new Error('音乐任务目前只能依赖文字歌词或说明');
+  }
   return {
     summary: requiredText(source.summary, '计划摘要', 800),
     roles,

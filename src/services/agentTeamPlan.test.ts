@@ -55,6 +55,14 @@ describe('agent team plan', () => {
     expect(() => validateAgentTeamPlan(plan)).toThrow('未获授权');
   });
 
+  it('rejects a media dependency that the music adapter cannot consume', () => {
+    const plan = valid();
+    plan.roles[0].allowedTools = ['image_generation', 'audio_generation'];
+    plan.tasks[0] = { ...plan.tasks[0], tool: 'image_generation' } as typeof plan.tasks[0];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'audio_generation' } as typeof plan.tasks[1];
+    expect(() => validateAgentTeamPlan(plan)).toThrow('只能依赖文字歌词或说明');
+  });
+
   it('requires image inspection to directly depend on generated images', () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['image_generation', 'image_inspection'];
