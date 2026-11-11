@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getConversationLoopStartBlockReason, resolveConversationLoopStartDelayMs, shouldCreateSpeakerStreamingPlaceholder, shouldSkipConversationLoopStart, shouldStartConversationLoop, shouldTreatActiveLoopAsSuccessfulStart, usesBackgroundGroupExecution } from './useChatRunLoop';
+import { getConversationLoopStartBlockReason, resolveConversationLoopStartDelayMs, shouldCreateSpeakerStreamingPlaceholder, shouldSkipConversationLoopStart, shouldStartConversationLoop, shouldTreatActiveLoopAsSuccessfulStart, usesPersistentConversationExecution } from './useChatRunLoop';
 
 describe('useChatRunLoop start guard', () => {
   it('reports the root reason that blocks loop start', () => {
@@ -105,10 +105,11 @@ describe('useChatRunLoop start guard', () => {
   });
 
   it('routes conversation story rooms through the persistent group runner', () => {
-    expect(usesBackgroundGroupExecution({ type: 'group', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'story-reader', surfaceProfile: 'hybrid' } } as never)).toBe(true);
-    expect(usesBackgroundGroupExecution({ type: 'group', sessionKind: { topology: 'group', family: 'study', scenarioId: 'learning-progress', surfaceProfile: 'hybrid' } } as never)).toBe(true);
-    expect(usesBackgroundGroupExecution({ type: 'group', sessionKind: { topology: 'group', family: 'analysis', scenarioId: 'opinion-review', surfaceProfile: 'text' } } as never)).toBe(true);
-    expect(usesBackgroundGroupExecution({ type: 'direct', sessionKind: { topology: 'direct', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } } as never)).toBe(false);
+    expect(usesPersistentConversationExecution({ type: 'group', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'story-reader', surfaceProfile: 'hybrid' } } as never)).toBe(true);
+    expect(usesPersistentConversationExecution({ type: 'group', sessionKind: { topology: 'group', family: 'study', scenarioId: 'learning-progress', surfaceProfile: 'hybrid' } } as never)).toBe(true);
+    expect(usesPersistentConversationExecution({ type: 'group', sessionKind: { topology: 'group', family: 'analysis', scenarioId: 'opinion-review', surfaceProfile: 'text' } } as never)).toBe(true);
+    expect(usesPersistentConversationExecution({ type: 'ai_direct', sessionKind: { topology: 'thread', family: 'conversation', scenarioId: 'ai-private-thread', surfaceProfile: 'text' } } as never)).toBe(true);
+    expect(usesPersistentConversationExecution({ type: 'direct', sessionKind: { topology: 'direct', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } } as never)).toBe(false);
   });
 
   it('can bypass the loop start timer for explicit user-triggered generation', () => {

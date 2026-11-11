@@ -59,8 +59,8 @@ try {
   await cdp.send('Page.navigate', { url: clientUrl });
   await waitFor(() => cdp.evaluate(`document.querySelector('#root')?.childElementCount > 0`), 'app mounted');
   const fixture = await cdp.evaluate(`(async () => {
-    const [{ useAuthStore }, { currentWorkflowScope, indexedDbWorkflowRepository }] = await Promise.all([
-      import('/src/stores/useAuthStore.ts'), import('/src/services/workflowRunRuntime.ts'),
+    const [{ useAuthStore }, { useChatStore }, { buildAssistantChatDraft }, { currentWorkflowScope, indexedDbWorkflowRepository }] = await Promise.all([
+      import('/src/stores/useAuthStore.ts'), import('/src/stores/useChatStore.ts'), import('/src/services/chatDraftBuilder.ts'), import('/src/services/workflowRunRuntime.ts'),
     ]);
     localStorage.setItem('pneumata-auth-mode', 'local');
     localStorage.removeItem('pneumata-token');
@@ -69,21 +69,23 @@ try {
     useAuthStore.setState({ authMode: 'local', token: null, user: null, isLoggedIn: false, isLoading: false, isWorkspaceReady: true });
     const runId = 'home-resume-smoke-' + crypto.randomUUID();
     const now = Date.now();
+    const chat = { ...buildAssistantChatDraft(), id: 'home-resume-smoke-chat-' + crypto.randomUUID(), createdAt: now, updatedAt: now, lastMessageAt: now };
+    useChatStore.setState({ chats: [...useChatStore.getState().chats, chat] });
     await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, () => ({ snapshot: {
-      run: { id: runId, chatId: 'synthetic-chat', goal: '仅验证首页恢复入口', status: 'paused', generation: 1, planVersion: 1, updatedAt: now },
-      tasks: [{ id: runId + ':task', runId, kind: 'assistant_reply', input: { chatId: 'synthetic-chat', userMessageId: 'synthetic-message', replyRunId: runId }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
+      run: { id: runId, chatId: chat.id, goal: '仅验证首页恢复入口', status: 'paused', generation: 1, planVersion: 1, updatedAt: now },
+      tasks: [{ id: runId + ':task', runId, kind: 'assistant_reply', input: { chatId: chat.id, userMessageId: 'synthetic-message', replyRunId: runId }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
     }, value: undefined }));
     return runId;
   })()`);
   await cdp.send('Page.reload', { ignoreCache: true });
-  await waitFor(() => cdp.evaluate(`document.body.innerText.includes('工作台概览')`), 'home overview rendered');
+  await waitFor(() => cdp.evaluate(`Boolean(document.body?.innerText.includes('工作台概览'))`), 'home overview rendered');
   await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('[aria-label^="恢复全部可继续任务"]'))`), 'resume button rendered');
   const layout = await cdp.evaluate(`(() => {
     const button = document.querySelector('[aria-label^="恢复全部可继续任务"]');
     const bounds = button.getBoundingClientRect();
     return { label: button.getAttribute('aria-label'), buttonWidth: bounds.width, viewportWidth: innerWidth, pageWidth: document.documentElement.scrollWidth };
   })()`);
-  assert.match(layout.label, /1 个/);
+  assert.match(layout.label, /[1-9]\d* 个/);
   assert.ok(layout.buttonWidth > 0 && layout.buttonWidth < layout.viewportWidth);
   assert.equal(layout.pageWidth, layout.viewportWidth);
   console.log(JSON.stringify({ ok: true, fixture: 'synthetic-only', layout }, null, 2));

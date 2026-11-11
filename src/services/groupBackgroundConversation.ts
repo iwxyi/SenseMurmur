@@ -28,7 +28,12 @@ function publish() { revision += 1; listeners.forEach((listener) => listener());
 export function subscribeGroupBackgroundConversations(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; }
 export function getGroupBackgroundRevision() { return revision; }
 export function groupConversationRunId(chatId: string) { return `group-conversation-${chatId}`; }
+export function aiDirectConversationRunId(chatId: string) { return `ai-direct-conversation-${chatId}`; }
 export function isGroupBackgroundActive(chatId: string) { return active.has(groupConversationRunId(chatId)); }
+export function isAiDirectConversationActive(chatId: string) { return active.has(aiDirectConversationRunId(chatId)); }
+export function isBackgroundConversationActive(chatId: string, type: GroupChat['type']) {
+  return type === 'group' ? isGroupBackgroundActive(chatId) : type === 'ai_direct' ? isAiDirectConversationActive(chatId) : false;
+}
 
 function chatMessages(chatId: string, chat: GroupChat) {
   const state = useMessageStore.getState();
@@ -67,7 +72,7 @@ async function appendEvents(chatId: string, payloads: Parameters<Parameters<type
 }
 
 async function executeTurn(task: WorkflowTask, signal: AbortSignal) {
-  if (task.kind !== 'group_conversation_turn' || !task.input || typeof task.input !== 'object') throw new WorkflowPreflightError('群聊任务输入无效');
+  if ((task.kind !== 'group_conversation_turn' && task.kind !== 'ai_direct_conversation_turn') || !task.input || typeof task.input !== 'object') throw new WorkflowPreflightError('会话任务输入无效');
   const { chatId } = task.input as { chatId?: unknown };
   if (typeof chatId !== 'string') throw new WorkflowPreflightError('群聊任务输入无效');
   await Promise.all([
@@ -77,7 +82,8 @@ async function executeTurn(task: WorkflowTask, signal: AbortSignal) {
     useSettingsStore.persist.hasHydrated() ? Promise.resolve() : useSettingsStore.persist.rehydrate(),
   ]);
   const chat = useChatStore.getState().chats.find((item) => item.id === chatId);
-  if (!chat || chat.type !== 'group' || chat.deletedAt != null || !chat.isActive) throw new WorkflowPreflightError('群聊已停止或不可用');
+  const expectedType = task.kind === 'group_conversation_turn' ? 'group' : 'ai_direct';
+  if (!chat || chat.type !== expectedType || chat.deletedAt != null || !chat.isActive) throw new WorkflowPreflightError('会话已停止或不可用');
   const members = await Promise.all(chat.memberIds.filter((id) => id !== 'user').map(async (id) => useCharacterStore.getState().characters.find((item) => item.id === id)
     || useCharacterStore.getState().loadCharacter(id)));
   if (members.some((item) => !item)) throw new WorkflowPreflightError('群聊角色已不存在');
@@ -108,7 +114,7 @@ async function executeTurn(task: WorkflowTask, signal: AbortSignal) {
     ensureCharacterDetail: (id) => useCharacterStore.getState().loadCharacter(id),
     isRunning: () => running && !signal.aborted,
     isPaused: () => !running || signal.aborted,
-    isActiveLoop: () => running && !signal.aborted && currentChat()?.type === 'group' && currentChat()?.deletedAt == null,
+    isActiveLoop: () => running && !signal.aborted && currentChat()?.type === expectedType && currentChat()?.deletedAt == null,
     pauseLoop: () => { running = false; stopped = true; },
     onSpeakerSelected: () => undefined,
     onMessageChunk: () => undefined,
@@ -147,51 +153,56 @@ export async function listGroupBackgroundConversations(chatId?: string) {
   return (await runtime.list()).filter((item) => item.tasks[0]?.kind === 'group_conversation_turn' && (!chatId || item.run.chatId === chatId));
 }
 
-function nextTask(snapshot: WorkflowSnapshot): WorkflowTask {
+export async function listAiDirectBackgroundConversations(chatId?: string) {
+  return (await runtime.list()).filter((item) => item.tasks[0]?.kind === 'ai_direct_conversation_turn' && (!chatId || item.run.chatId === chatId));
+}
+
+function nextTask(snapshot: WorkflowSnapshot, kind: 'group_conversation_turn' | 'ai_direct_conversation_turn'): WorkflowTask {
   const id = `${snapshot.run.id}:turn:${snapshot.tasks.length + 1}`;
-  return { id, runId: snapshot.run.id, kind: 'group_conversation_turn', input: { chatId: snapshot.run.chatId },
+  return { id, runId: snapshot.run.id, kind, input: { chatId: snapshot.run.chatId },
     dependsOn: snapshot.tasks.length ? [snapshot.tasks.at(-1)!.id] : [], status: 'queued', attempt: 0, updatedAt: Date.now() };
 }
 
 function waitsForReaderOrLearner(chat: GroupChat) {
-  return chat.sessionKind?.scenarioId === 'story-reader' || resolveSessionFamilyKey(chat) === 'study';
+  return chat.type === 'ai_direct' || chat.sessionKind?.scenarioId === 'story-reader' || resolveSessionFamilyKey(chat) === 'study';
 }
 
-async function startGroupBackgroundConversationOnce(chatId: string) {
-  if (!navigator.locks?.request) throw new Error('此设备不支持安全的群聊后台运行');
-  const running = active.get(groupConversationRunId(chatId));
+async function startBackgroundConversationOnce(chatId: string, type: 'group' | 'ai_direct') {
+  if (!navigator.locks?.request) throw new Error('此设备不支持安全的会话后台运行');
+  const runId = type === 'group' ? groupConversationRunId(chatId) : aiDirectConversationRunId(chatId);
+  const running = active.get(runId);
   if (running) {
     if (useChatStore.getState().chats.find((item) => item.id === chatId)?.isActive) return running;
     await running;
   }
-  const chat = useChatStore.getState().chats.find((item) => item.id === chatId && item.type === 'group' && item.deletedAt == null);
-  if (!chat) throw new Error('群聊不可用');
-  const runId = groupConversationRunId(chatId);
+  const chat = useChatStore.getState().chats.find((item) => item.id === chatId && item.type === type && item.deletedAt == null);
+  if (!chat) throw new Error(type === 'group' ? '群聊不可用' : '角色私聊不可用');
   const now = Date.now();
-  const initial: WorkflowSnapshot = { run: { id: runId, chatId, goal: '群聊自动运行', status: 'active', planOpen: true, generation: 0, planVersion: 1, updatedAt: now }, tasks: [] };
-  initial.tasks = [nextTask(initial)];
+  const initial: WorkflowSnapshot = { run: { id: runId, chatId, goal: type === 'group' ? '群聊自动运行' : 'AI 角色私聊自动运行', status: 'active', planOpen: true, generation: 0, planVersion: 1, updatedAt: now }, tasks: [] };
+  const taskKind = type === 'group' ? 'group_conversation_turn' : 'ai_direct_conversation_turn';
+  initial.tasks = [nextTask(initial, taskKind)];
   const created = await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, (existing) => ({
     snapshot: existing || initial, value: !existing,
   }));
   if (!created) {
     const snapshot = await runtime.read(runId);
-    if (!snapshot) throw new Error('群聊后台任务不存在');
-    if (snapshot.tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed')) throw new Error('群聊上次请求结果需要核对');
+    if (!snapshot) throw new Error('会话后台任务不存在');
+    if (snapshot.tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed')) throw new Error('上次会话请求结果需要核对');
     if (snapshot.tasks.length && snapshot.tasks.every((task) => task.status === 'completed')
       && ((snapshot.tasks.at(-1)?.output as { outcome?: string } | undefined)?.outcome === 'stopped'
         || waitsForReaderOrLearner(chat))) {
-      await runtime.addTasksOnce(runId, snapshot.run.planVersion, [nextTask(snapshot)]);
+      await runtime.addTasksOnce(runId, snapshot.run.planVersion, [nextTask(snapshot, taskKind)]);
     }
   }
   await useChatStore.getState().updateChat(chatId, { isActive: true });
-  return resumeGroupBackgroundConversation(chatId);
+  return resumeBackgroundConversation(chatId, type);
 }
 
-export function startGroupBackgroundConversation(chatId: string) {
-  const runId = groupConversationRunId(chatId);
+function startBackgroundConversation(chatId: string, type: 'group' | 'ai_direct') {
+  const runId = type === 'group' ? groupConversationRunId(chatId) : aiDirectConversationRunId(chatId);
   const pending = starting.get(runId);
   if (pending) return pending;
-  const operation = startGroupBackgroundConversationOnce(chatId);
+  const operation = startBackgroundConversationOnce(chatId, type);
   starting.set(runId, operation);
   void operation.finally(() => {
     if (starting.get(runId) === operation) starting.delete(runId);
@@ -199,18 +210,21 @@ export function startGroupBackgroundConversation(chatId: string) {
   return operation;
 }
 
-export async function resumeGroupBackgroundConversation(chatId: string) {
-  const runId = groupConversationRunId(chatId);
+export function startGroupBackgroundConversation(chatId: string) { return startBackgroundConversation(chatId, 'group'); }
+export function startAiDirectBackgroundConversation(chatId: string) { return startBackgroundConversation(chatId, 'ai_direct'); }
+
+async function resumeBackgroundConversation(chatId: string, type: 'group' | 'ai_direct') {
+  const runId = type === 'group' ? groupConversationRunId(chatId) : aiDirectConversationRunId(chatId);
   const existing = active.get(runId);
   if (existing) return existing;
   const run = await runtime.read(runId);
-  if (!run) throw new Error('群聊后台任务不存在');
-  if (run.tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed')) throw new Error('群聊上次请求结果需要核对');
+  if (!run) throw new Error('会话后台任务不存在');
+  if (run.tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed')) throw new Error('上次会话请求结果需要核对');
   const scope = currentWorkflowScope();
   const operation = navigator.locks.request(`${workflowRunLockName(scope, runId)}:driver`, { ifAvailable: true }, async (driver) => {
     if (!driver || currentWorkflowScope() !== scope) return;
     await indexedDbWorkflowRepository.transact(scope, runId, (current) => {
-      if (!current) throw new Error('群聊后台任务不存在');
+      if (!current) throw new Error('会话后台任务不存在');
       return { snapshot: { ...current, run: { ...current.run, pauseRequested: false, updatedAt: Date.now() } }, value: undefined };
     });
     while (!getWorkspaceSignal().aborted && currentWorkflowScope() === scope) {
@@ -220,7 +234,8 @@ export async function resumeGroupBackgroundConversation(chatId: string) {
       let next = current;
       if (current.tasks.every((task) => task.status === 'completed')) {
         if ((current.tasks.at(-1)?.output as { outcome?: string } | undefined)?.outcome === 'stopped') break;
-        next = await runtime.addTasksOnce(runId, current.run.planVersion, [nextTask(current)]);
+        const taskKind = type === 'group' ? 'group_conversation_turn' : 'ai_direct_conversation_turn';
+        next = await runtime.addTasksOnce(runId, current.run.planVersion, [nextTask(current, taskKind)]);
       }
       if (next.tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed')) break;
       try {
@@ -236,8 +251,9 @@ export async function resumeGroupBackgroundConversation(chatId: string) {
         await useChatStore.getState().updateChat(chatId, { isActive: false });
         break;
       }
-      if ((latest.tasks.at(-1)?.output as { outcome?: string } | undefined)?.outcome === 'stopped'
-        || waitsForReaderOrLearner(chat)) {
+      if (type === 'ai_direct'
+        || (latest.tasks.at(-1)?.output as { outcome?: string } | undefined)?.outcome === 'stopped'
+        || (type === 'group' && waitsForReaderOrLearner(chat))) {
         await useChatStore.getState().updateChat(chatId, { isActive: false });
         break;
       }
@@ -253,9 +269,19 @@ export async function resumeGroupBackgroundConversation(chatId: string) {
   return operation;
 }
 
+export async function resumeGroupBackgroundConversation(chatId: string) { return resumeBackgroundConversation(chatId, 'group'); }
+export async function resumeAiDirectBackgroundConversation(chatId: string) { return resumeBackgroundConversation(chatId, 'ai_direct'); }
+
 export async function pauseGroupBackgroundConversation(chatId: string) {
   await useChatStore.getState().updateChat(chatId, { isActive: false });
   const runId = groupConversationRunId(chatId);
+  if (await runtime.read(runId)) await runtime.requestPauseAfterCurrentBatch(runId);
+  publish();
+}
+
+export async function pauseAiDirectBackgroundConversation(chatId: string) {
+  await useChatStore.getState().updateChat(chatId, { isActive: false });
+  const runId = aiDirectConversationRunId(chatId);
   if (await runtime.read(runId)) await runtime.requestPauseAfterCurrentBatch(runId);
   publish();
 }
@@ -267,7 +293,7 @@ export async function recoverGroupBackgroundConversations() {
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
   ]);
-  for (const item of await listGroupBackgroundConversations()) {
+  for (const item of [...await listGroupBackgroundConversations(), ...await listAiDirectBackgroundConversations()]) {
     if (active.has(item.run.id) || item.run.status === 'completed' || item.run.status === 'cancelled') continue;
     await navigator.locks.request(`${workflowRunLockName(scope, item.run.id)}:driver`, { ifAvailable: true }, async (driver) => {
       if (!driver || currentWorkflowScope() !== scope) return;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { isSafelyResumableWorkflow, projectBackgroundExecutionOverview } from './backgroundExecutionOverview';
+import { isSafelyResumableConversation, isSafelyResumableWorkflow, projectBackgroundExecutionOverview } from './backgroundExecutionOverview';
+import { normalizeConversation } from '../types/chat';
 import type { WorkflowSnapshot, WorkflowTaskStatus } from './workflowRunRuntime';
 
 function sample(id: string, status: WorkflowSnapshot['run']['status'], taskStatus: WorkflowTaskStatus): WorkflowSnapshot {
@@ -31,5 +32,20 @@ describe('background execution overview', () => {
     expect(isSafelyResumableWorkflow(sample('failed', 'paused', 'failed'))).toBe(false);
     expect(isSafelyResumableWorkflow(sample('cancelled', 'paused', 'cancelled'))).toBe(false);
     expect(isSafelyResumableWorkflow(sample('active', 'active', 'queued'))).toBe(false);
+  });
+
+  it('resumes committed conversation checkpoints but respects story and study stop gates', () => {
+    const checkpoint = sample('committed', 'paused', 'completed');
+    checkpoint.tasks[0].output = { outcome: 'committed', messageId: 'saved-reply' };
+    const conversation = normalizeConversation({ id: 'conversation', type: 'group', mode: 'group_discussion',
+      sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'open-chat', surfaceProfile: 'text' } });
+    const story = normalizeConversation({ id: 'story', type: 'group', mode: 'group_discussion',
+      sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'story-reader', surfaceProfile: 'hybrid' } });
+    const study = normalizeConversation({ id: 'study', type: 'group', mode: 'classroom',
+      sessionKind: { topology: 'group', family: 'study', scenarioId: 'learning-progress', surfaceProfile: 'hybrid' } });
+    expect(isSafelyResumableConversation(checkpoint, conversation)).toBe(true);
+    expect(isSafelyResumableConversation(checkpoint, story)).toBe(false);
+    expect(isSafelyResumableConversation(checkpoint, study)).toBe(false);
+    expect(isSafelyResumableConversation(sample('no-commit', 'paused', 'completed'), conversation)).toBe(false);
   });
 });

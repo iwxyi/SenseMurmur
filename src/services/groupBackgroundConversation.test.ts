@@ -6,7 +6,7 @@ import { useChatStore } from '../stores/useChatStore';
 import { useCharacterStore } from '../stores/useCharacterStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
-import { groupConversationRunId, isGroupBackgroundTurnBlocked, listGroupBackgroundConversations, pauseGroupBackgroundConversation, recoverGroupBackgroundConversations, resumeGroupBackgroundConversation, startGroupBackgroundConversation } from './groupBackgroundConversation';
+import { aiDirectConversationRunId, groupConversationRunId, isGroupBackgroundTurnBlocked, listAiDirectBackgroundConversations, listGroupBackgroundConversations, pauseAiDirectBackgroundConversation, pauseGroupBackgroundConversation, recoverGroupBackgroundConversations, resumeGroupBackgroundConversation, startAiDirectBackgroundConversation, startGroupBackgroundConversation } from './groupBackgroundConversation';
 import { currentWorkflowScope, indexedDbWorkflowRepository, workflowRunLockName } from './workflowRunRuntime';
 
 const runLoop = vi.hoisted(() => vi.fn());
@@ -107,6 +107,34 @@ describe('background group conversation', () => {
     expect(runLoop).toHaveBeenCalledTimes(1);
     expect(snapshot.tasks[0]).toMatchObject({ status: 'completed', output: { outcome: 'stopped' } });
     expect(useChatStore.getState().chats.find((item) => item.id === chatId)?.isActive).toBe(false);
+  });
+
+  it('runs AI private threads in a persistent turn and honors pause after the current reply', async () => {
+    const chatId = setup();
+    const current = useChatStore.getState().chats[0];
+    useChatStore.setState({ chats: [normalizeConversation({
+      ...current,
+      type: 'ai_direct',
+      sessionKind: { topology: 'thread', family: 'conversation', scenarioId: 'ai-private-thread', surfaceProfile: 'text' },
+      sourceChatId: 'source-group',
+      sourceMemberIds: ['a', 'b'],
+    })] });
+    runLoop.mockImplementation(async (params: { groupTurnTaskId: string; onCommittedMessage: (message: Message) => void }) => {
+      params.onCommittedMessage({ id: 'private-thread-reply', chatId, type: 'ai', senderId: 'b', senderName: 'b', content: '我也想把这件事说清楚。', emotion: 0,
+        timestamp: Date.now(), metadata: { groupTurnTaskId: params.groupTurnTaskId } });
+      await pauseAiDirectBackgroundConversation(chatId);
+    });
+
+    await startAiDirectBackgroundConversation(chatId);
+
+    const saved = (await listAiDirectBackgroundConversations(chatId))[0];
+    expect(saved.run.id).toBe(aiDirectConversationRunId(chatId));
+    expect(saved.tasks).toHaveLength(1);
+    expect(saved.tasks[0]).toMatchObject({ status: 'completed', output: { outcome: 'committed', messageId: 'private-thread-reply' } });
+    expect(saved.run.status).toBe('paused');
+    expect(useChatStore.getState().chats.find((item) => item.id === chatId)?.isActive).toBe(false);
+    expect(runLoop).toHaveBeenCalledTimes(1);
+    expect((await listGroupBackgroundConversations(chatId))).toHaveLength(0);
   });
 
   it('waits for the reader after one committed story chapter and resumes on explicit start', async () => {

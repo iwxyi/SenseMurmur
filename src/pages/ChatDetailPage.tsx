@@ -53,7 +53,7 @@ import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
 import { abandonAgentTeamReview, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamPlan, retryAgentTeamReview, runAgentTeam, subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
 import { getDirectBackgroundRevision, isDirectBackgroundActive, listDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply, subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
 import { getAiDirectBackgroundRevision, isAiDirectBackgroundActive, listAiDirectBackgroundReplies, resumeAiDirectBackgroundReply, startAiDirectBackgroundReply, subscribeAiDirectBackgroundReplies } from '../services/aiDirectBackgroundReply';
-import { getGroupBackgroundRevision, listGroupBackgroundConversations, subscribeGroupBackgroundConversations } from '../services/groupBackgroundConversation';
+import { getGroupBackgroundRevision, listAiDirectBackgroundConversations, listGroupBackgroundConversations, subscribeGroupBackgroundConversations } from '../services/groupBackgroundConversation';
 import AssistantTeamWorkbench from '../components/chat/AssistantTeamWorkbench';
 import ChatBackground from '../components/chat/ChatBackground';
 import { getSyncableCharacterMemberIds } from '../services/pageSyncScopeContract';
@@ -1176,19 +1176,25 @@ export default function ChatDetailPage() {
   const groupBackgroundRevision = useSyncExternalStore(subscribeGroupBackgroundConversations, getGroupBackgroundRevision, getGroupBackgroundRevision);
   const [groupBackgroundError, setGroupBackgroundError] = useState<string | null>(null);
   useEffect(() => {
-    if (!id || chat?.type !== 'group' || !['conversation', 'study'].includes(resolveSessionFamilyKey(chat))) {
+    if (!id || (chat?.type !== 'group' && chat?.type !== 'ai_direct')
+      || (chat.type === 'group' && !['conversation', 'study', 'analysis'].includes(resolveSessionFamilyKey(chat)))) {
       setGroupBackgroundError(null);
       return;
     }
     let cancelled = false;
-    void listGroupBackgroundConversations(id).then((runs) => {
+    const runsPromise = chat.type === 'ai_direct'
+      ? listAiDirectBackgroundConversations(id)
+      : listGroupBackgroundConversations(id);
+    void runsPromise.then((runs) => {
       if (cancelled) return;
       const task = runs[0]?.tasks.find((item) => item.status === 'result_unknown' || item.status === 'failed');
       setGroupBackgroundError(task?.status === 'result_unknown'
-        ? '上次群聊请求的结果无法确认，已停止自动运行。请查看聊天记录后处理。'
+        ? chat.type === 'ai_direct'
+          ? '上次角色私聊请求的结果无法确认，已停止自动运行。请查看聊天记录后处理。'
+          : '上次群聊请求的结果无法确认，已停止自动运行。请查看聊天记录后处理。'
         : task?.error || null);
     }).catch((error: unknown) => {
-      if (!cancelled) setGroupBackgroundError(error instanceof Error ? error.message : '群聊任务状态读取失败');
+      if (!cancelled) setGroupBackgroundError(error instanceof Error ? error.message : chat.type === 'ai_direct' ? '角色私聊任务状态读取失败' : '群聊任务状态读取失败');
     });
     return () => { cancelled = true; };
   }, [id, chat, groupBackgroundRevision]);
@@ -4129,7 +4135,7 @@ export default function ChatDetailPage() {
     }, 'warn');
   }, [id, setSnackbar]);
 
-  const canAutoRunConversation = chat?.type !== 'direct' && chat?.type !== 'ai_direct' && !chatInteractionDisabled;
+  const canAutoRunConversation = chat?.type !== 'direct' && !chatInteractionDisabled;
 
   const handleMessageListBottomPinnedChange = useCallback((pinned: boolean) => {
     isStoryReaderAtTailRef.current = pinned;
@@ -4300,6 +4306,7 @@ export default function ChatDetailPage() {
       isPaused,
       isStoryChoiceBlocked: isStoryWaitingForChoice,
       hasActiveLoop: false,
+      allowDirect: chat.type === 'ai_direct',
     });
     if (blockReason === 'waiting_story_choice') {
       isRunningRef.current = false;
@@ -4336,7 +4343,9 @@ export default function ChatDetailPage() {
 
   const headerPrimaryActionButton = canAutoRunConversation && !isStoryRoom && !isStudyRoom ? (
     <IconButton onClick={handleHeaderPrimaryAction} color={isDirectReplyPending || (isRunning && !isPaused) ? 'primary' : 'default'}
-      aria-label={isDirectReplyPending ? '停止回复' : isRunning && !isPaused ? '暂停群聊' : '继续群聊'}>
+      aria-label={isDirectReplyPending ? '停止回复' : chat?.type === 'ai_direct'
+        ? isRunning && !isPaused ? '暂停角色私聊' : '继续角色私聊'
+        : isRunning && !isPaused ? '暂停群聊' : '继续群聊'}>
       {isDirectReplyPending || (isRunning && !isPaused) ? <PauseIcon /> : <PlayIcon />}
     </IconButton>
   ) : null;
