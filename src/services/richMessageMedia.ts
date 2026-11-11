@@ -604,7 +604,7 @@ async function runWithMediaResultLease<T>(chatId: string, serverMessageId: strin
   });
 }
 
-async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
+async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: AbortSignal) {
   const messageId = entry.messageId;
   const currentMessage = getLatestRichMediaMessage(messageId, entry.message);
   if (!isLocalOnlyMediaMode() && !currentMessage.serverId) {
@@ -674,6 +674,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
         useCharacterReferenceImages: true,
         negativePrompt: visualCharacter?.visualIdentity?.negativePrompt,
         seed: visualCharacter?.visualIdentity?.seed,
+        signal,
         aiUsage: {
           type: 'image_generation',
           label: '聊天图片生成',
@@ -732,7 +733,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
           if (!(lookupError instanceof ApiError) || lookupError.status !== 404) throw lookupError;
           const profile = findGenerationProfile(entry.aiProfiles, 'audio');
           if (!profile) throw new Error('音频模型未配置');
-          const task = await generateAudioWithAdapter({ profile, prompt: attachment.promptText || attachment.altText,
+          const task = await generateAudioWithAdapter({ profile, prompt: attachment.promptText || attachment.altText, signal,
             clientRequestKey, aiUsage: { type: 'audio_generation', label: '聊天音乐生成', scope: 'chat', resourceId: workingMessage.chatId } });
           taskId = task.task_id;
         }
@@ -793,6 +794,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
             duration: attachment.videoDuration,
             resolution: attachment.videoResolution,
             referenceImages,
+            signal,
             aiUsage: { type: 'video_generation', label: '聊天视频生成', scope: 'chat', resourceId: workingMessage.chatId },
           });
         }
@@ -904,10 +906,12 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
   } catch (error) {
     const latestAttachment = getLatestRichMediaMessage(messageId, workingMessage).metadata?.attachments?.find((item) => item.id === attachment.id);
     if (latestAttachment?.generationJobId !== generationJobId) return;
+    const uncertainSubmission = isAbortError(error) && !entry.taskId
+      && (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation'));
     reportRecoverableError({
       location: 'rich-message-media.process',
       error,
-      userMessage: attachment.kind === 'sticker' ? '表情包搜索失败。' : attachment.kind === 'image' ? '图片生成失败。' : attachment.kind === 'video' ? '视频生成失败。' : '语音生成失败。',
+      userMessage: uncertainSubmission ? '媒体任务结果待核对。' : attachment.kind === 'sticker' ? '表情包搜索失败。' : attachment.kind === 'image' ? '图片生成失败。' : attachment.kind === 'video' ? '视频生成失败。' : '语音生成失败。',
       extra: {
         messageId: workingMessage.id,
         attachmentId: attachment.id,
@@ -915,7 +919,9 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
         senderId: workingMessage.senderId,
       },
     });
-    const errorText = toMediaGenerationErrorText(error, attachment.kind);
+    const errorText = uncertainSubmission
+      ? '提交请求已中断，正在核对服务端是否已接收；确认前不会重新生成。'
+      : toMediaGenerationErrorText(error, attachment.kind);
     richMediaGenerationErrors.set(entry.id, {
       id: entry.id,
       title: attachment.kind === 'sticker' ? '聊天表情包搜索' : attachment.kind === 'image' ? '聊天图片生成' : attachment.kind === 'video' ? '聊天视频生成' : '聊天语音生成',
@@ -927,7 +933,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
       message: workingMessage,
       attachmentId: attachment.id,
       patch: {
-        status: 'failed',
+        status: uncertainSubmission ? 'generating' : 'failed',
         error: errorText,
         generationJobId,
       },
@@ -948,11 +954,15 @@ function pumpRichMediaQueue() {
       const latest = getLatestRichMediaMessage(entry.messageId, entry.message);
       const attachment = latest.metadata?.attachments?.find((item) => item.id === entry.attachmentId);
       if (attachment && isRecoverableGenerativeAttachment(attachment)) {
-        const errorText = toMediaGenerationErrorText(error, attachment.kind);
+        const uncertainSubmission = isAbortError(error) && !entry.taskId
+          && (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation'));
+        const errorText = uncertainSubmission
+          ? '提交请求已中断，正在核对服务端是否已接收；确认前不会重新生成。'
+          : toMediaGenerationErrorText(error, attachment.kind);
         richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '媒体生成', message: errorText, createdAt: Date.now() });
         if (!entry.taskId) {
           updateRichMediaMessage({ message: latest, attachmentId: attachment.id,
-            patch: { status: 'failed', error: errorText }, upsertMessage: entry.upsertMessage });
+            patch: { status: uncertainSubmission ? 'generating' : 'failed', error: errorText }, upsertMessage: entry.upsertMessage });
         }
       }
       entry.reject(error);
@@ -979,8 +989,8 @@ async function runRichMediaQueueEntryWithLease(entry: RichMediaQueueEntry) {
     if (signal.aborted || getWorkspaceSignal() !== signal || currentWorkflowScope() !== scope) {
       throw new Error('账号已切换，媒体任务已暂停');
     }
-    return runWithChatExecutionLease(chatId, async () => {
-      await runRichMediaQueueEntry(entry);
+    return runWithChatExecutionLease(chatId, async (leaseSignal) => {
+      await runRichMediaQueueEntry(entry, leaseSignal);
       const serverId = entry.message.serverId;
       if (serverId) await richMediaMetadataWritesByMessageId.get(serverId);
     });

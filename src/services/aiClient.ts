@@ -169,7 +169,7 @@ export async function submitAiMediaTask(options: {
   clientRequestKey?: string;
 }) {
   if (options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId) assertChatExecutionLease(options.aiUsage.resourceId);
-  const result = await api.generateAiMedia({
+  const request = {
     provider: options.profile.provider,
     model: options.profile.model,
     prompt: options.prompt,
@@ -179,7 +179,10 @@ export async function submitAiMediaTask(options: {
       ? { executionFence: getChatExecutionFence(options.aiUsage.resourceId) } : {}),
     ...(options.parameters || {}),
     ...(options.aiUsage ? { metadata: { aiUsage: options.aiUsage } } : {}),
-  });
+  };
+  const result = options.signal
+    ? await api.generateAiMedia(request, { signal: options.signal })
+    : await api.generateAiMedia(request);
   return result;
 }
 

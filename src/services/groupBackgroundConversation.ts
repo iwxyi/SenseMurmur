@@ -239,8 +239,9 @@ async function resumeBackgroundConversation(chatId: string, type: 'group' | 'ai_
       }
       if (next.tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed')) break;
       try {
+        const workspaceSignal = getWorkspaceSignal();
         await scheduleBackgroundExecution(chatId, () => runWithConversationExecutionLock(scope, chatId,
-          () => runtime.resume(runId, getWorkspaceSignal())), getWorkspaceSignal(), runId);
+          (signal) => runtime.resume(runId, signal), workspaceSignal), workspaceSignal, runId);
       } catch (error) {
         await useChatStore.getState().updateChat(chatId, { isActive: false });
         throw error;

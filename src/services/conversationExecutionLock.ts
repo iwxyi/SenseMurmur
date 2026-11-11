@@ -8,11 +8,12 @@ export function conversationExecutionLockName(scope: string, chatId: string) {
 export async function runWithConversationExecutionLock<T>(
   scope: string,
   chatId: string,
-  work: () => Promise<T>,
+  work: (signal: AbortSignal) => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
   if (!navigator.locks?.request) throw new Error('此浏览器不支持安全的多标签页会话运行');
   return navigator.locks.request(conversationExecutionLockName(scope, chatId), { ifAvailable: true }, async (lock) => {
     if (!lock) throw new Error('此会话已在另一个标签页运行');
-    return runWithChatExecutionLease(chatId, work);
+    return runWithChatExecutionLease(chatId, work, signal);
   });
 }

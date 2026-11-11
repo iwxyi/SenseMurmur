@@ -563,6 +563,29 @@ describe('processRichMessageMedia', () => {
     expect(upserts.at(-1)?.metadata?.generation?.status).toBe('failed');
   });
 
+  it('keeps an aborted async video submission pending for request-key reconciliation', async () => {
+    vi.mocked(generateVideoWithAdapter).mockRejectedValueOnce(new DOMException('Aborted', 'AbortError'));
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-uncertain', kind: 'video', status: 'queued', promptText: '森林追逐', altText: '短片', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+
+    await processRichMessageMedia({
+      message,
+      aiProfiles: [{ ...imageProfile, type: 'video', model: 'video-model' }],
+      upsertMessage: (next) => upserts.push(next),
+    });
+
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({
+      status: 'generating',
+      generationJobId: expect.any(String),
+      error: '提交请求已中断，正在核对服务端是否已接收；确认前不会重新生成。',
+    });
+    const requestKey = vi.mocked(generateVideoWithAdapter).mock.calls.at(-1)?.[0].clientRequestKey;
+    expect(requestKey).toEqual(expect.any(String));
+    expect(api.getAiMediaTaskByRequestKey).toHaveBeenCalledWith(requestKey);
+  });
+
   it('marks the message-level generation state as ready after a generated image is attached', async () => {
     vi.mocked(generateImageWithAdapter).mockResolvedValue([{
       dataUrl: 'data:image/png;base64,abc',

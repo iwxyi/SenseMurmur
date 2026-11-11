@@ -775,11 +775,12 @@ class ApiClient {
     return response;
   }
 
-  async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  async request<T>(method: string, path: string, body?: unknown, options: { signal?: AbortSignal } = {}): Promise<T> {
     const response = await this.fetchWithAuth(backendUrl(`${API_BASE}${path}`), {
       method,
       headers: { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     if (!response.ok) {
       const error: { error?: string; detail?: string; code?: string } = await this.parseJsonResponse<{ error?: string; detail?: string; code?: string }>(response).catch(() => ({ error: '请求失败', code: 'REQUEST_FAILED' }));
@@ -966,8 +967,8 @@ class ApiClient {
     return this.request<{ authorized: true; limit: number | null; requested: number; tierCode: string }>('POST', '/ai/images/batches/authorize', { count });
   }
 
-  async generateAiMedia(input: { model: string; provider?: string; operation?: string; client_request_key?: string; [parameter: string]: unknown }) {
-    return this.request<AiMediaTask>('POST', '/ai/media/generations', input);
+  async generateAiMedia(input: { model: string; provider?: string; operation?: string; client_request_key?: string; [parameter: string]: unknown }, options: { signal?: AbortSignal } = {}) {
+    return this.request<AiMediaTask>('POST', '/ai/media/generations', input, options);
   }
 
   async getAiMediaTaskByRequestKey(clientRequestKey: string) {

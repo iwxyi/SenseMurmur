@@ -47,6 +47,21 @@ describe('video generation defaults', () => {
     }
   });
 
+  it('forwards lease cancellation to the media submission request', async () => {
+    const membership = { vipActive: false, activeSubscription: null, latestSubscription: null, recentOrders: [] };
+    vi.spyOn(api, 'getBillingMembership').mockResolvedValue({
+      ...membership,
+      vipEntitlement: { tierCode: 'free', entitlement: { multimediaGenerationEnabled: true } as NonNullable<Awaited<ReturnType<typeof api.getBillingMembership>>['vipEntitlement']>['entitlement'] },
+    });
+    const submit = vi.spyOn(api, 'generateAiMedia').mockResolvedValue({
+      task_id: 'task-abort', model: profile.model, status: 'running', result: null,
+      chargedAmount: null, reservedAmount: 0, createdAt: 0, updatedAt: 0,
+    });
+    const signal = new AbortController().signal;
+    await generateVideoWithAdapter({ profile, prompt: 'tea', signal });
+    expect(submit).toHaveBeenLastCalledWith(expect.anything(), { signal });
+  });
+
   it('omits unset parameters so backend defaults can apply', () => {
     expect(resolveVideoGenerationParameters({ profile, prompt: 'tea' })).toEqual({});
     expect(resolveVideoGenerationParameters({ profile: { ...profile, videoDefaults: { aspectRatio: '', resolution: ' ', duration: NaN } }, prompt: 'tea' })).toEqual({});

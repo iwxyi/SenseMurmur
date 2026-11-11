@@ -235,7 +235,9 @@ async function runAssistantBackgroundReply(runId: string, chatId: string, comman
   publishActive();
   try {
     const scope = currentWorkflowScope();
-    const result = await scheduleBackgroundExecution(chatId, () => runWithConversationExecutionLock(scope, chatId, () => assistantRuntime.resume(runId, getWorkspaceSignal(), commandId)), getWorkspaceSignal(), runId);
+    const workspaceSignal = getWorkspaceSignal();
+    const result = await scheduleBackgroundExecution(chatId, () => runWithConversationExecutionLock(scope, chatId,
+      (signal) => assistantRuntime.resume(runId, signal, commandId), workspaceSignal), workspaceSignal, runId);
     publishRun();
     return { snapshot: result, summary: summarizeWorkflowRun(result) };
   } finally {

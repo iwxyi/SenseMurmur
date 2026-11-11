@@ -54,16 +54,35 @@ describe('chat execution lease', () => {
     vi.mocked(api.renewChatExecutionLease).mockRejectedValue(new Error('lease lost'));
     let finish!: () => void;
     const work = new Promise<void>((resolve) => { finish = resolve; });
-    const running = runWithChatExecutionLease('chat-two', async () => {
+    let leaseSignal: AbortSignal | undefined;
+    const running = runWithChatExecutionLease('chat-two', async (signal) => {
+      leaseSignal = signal;
       await work;
       assertChatExecutionLease('chat-two');
     });
     await vi.waitFor(() => expect(getChatExecutionFence('chat-two')).toBeDefined());
     await vi.advanceTimersByTimeAsync(15_000);
+    expect(leaseSignal?.aborted).toBe(true);
+    expect(leaseSignal?.reason).toMatchObject({ name: 'AbortError', message: 'lease lost' });
     expect(() => assertChatExecutionLease('chat-two')).toThrow('lease lost');
     finish();
     await expect(running).rejects.toThrow('lease lost');
     expect(getChatExecutionFence('chat-two')).toBeUndefined();
+  });
+
+  it('forwards cancellation to the protected work', async () => {
+    const controller = new AbortController();
+    let leaseSignal: AbortSignal | undefined;
+    const running = runWithChatExecutionLease('chat-cancel', async (signal) => {
+      leaseSignal = signal;
+      await new Promise<void>((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    }, controller.signal);
+    await vi.waitFor(() => expect(leaseSignal).toBeDefined());
+    controller.abort(new Error('workspace stopped'));
+    await expect(running).rejects.toThrow('workspace stopped');
+    expect(leaseSignal?.aborted).toBe(true);
   });
 
   it('flushes fenced message writes before releasing the lease', async () => {

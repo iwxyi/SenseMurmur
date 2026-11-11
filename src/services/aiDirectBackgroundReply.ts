@@ -199,8 +199,9 @@ export async function resumeAiDirectBackgroundReply(runId: string) {
   active.add(runId);
   publish();
   try {
+    const workspaceSignal = getWorkspaceSignal();
     const result = await scheduleBackgroundExecution(run.run.chatId, () => runWithConversationExecutionLock(scope, run.run.chatId,
-      () => runtime.resume(runId, getWorkspaceSignal())), getWorkspaceSignal(), runId);
+      (signal) => runtime.resume(runId, signal), workspaceSignal), workspaceSignal, runId);
     publish();
     return result;
   } finally { active.delete(runId); publish(); }

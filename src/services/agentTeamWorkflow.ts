@@ -505,16 +505,16 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return runtime.retryFailedTeamPlan(runId, expectedPlanVersion, taskId);
       });
     },
-    async start(runId: string, chatId: string, goal: string, autoReview = false) {
+    async start(runId: string, chatId: string, goal: string, autoReview = false, signal = getWorkspaceSignal()) {
       const now = Date.now();
       const initial: WorkflowSnapshot = {
         run: { id: runId, chatId, goal, status: 'active', generation: 0, planVersion: 1, planOpen: true, autoReview, updatedAt: now },
         tasks: [{ id: 'plan', runId, kind: 'team_plan', input: goal, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
       };
       if (!await runtime.read(runId)) await runtime.create(initial);
-      return this.resume(runId);
+      return this.resume(runId, signal);
     },
-    async resume(runId: string) {
+    async resume(runId: string, signal = getWorkspaceSignal()) {
       const beforeResume = await runtime.read(runId);
       if (beforeResume?.tasks.some((task) => task.id === 'review_needs_user' && task.status === 'waiting_user')) {
         return { snapshot: beforeResume, summary: summarizeWorkflowRun(beforeResume) };
@@ -531,7 +531,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return { snapshot: { ...current, tasks, run: { ...current.run, status: tasks.some((task) => task.status === 'failed') ? 'failed' : 'paused', updatedAt: Date.now() } }, value: undefined };
         });
       }
-      let snapshot = await runtime.resume(runId, getWorkspaceSignal());
+      let snapshot = await runtime.resume(runId, signal);
       const planner = snapshot.tasks.find((task) => task.id === 'plan');
       if (planner?.status !== 'completed') return { snapshot, summary: summarizeWorkflowRun(snapshot) };
       const plan = validateAgentTeamPlan(planner.output);
@@ -547,7 +547,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         updatedAt: Date.now(),
       }));
       snapshot = await runtime.expandPlanOnce(runId, snapshot.run.planVersion, 'plan', additions);
-      if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, getWorkspaceSignal());
+      if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, signal);
       for (const revisionTask of snapshot.tasks.filter((task) => task.kind === 'team_plan_revision' && task.status === 'completed')) {
         if (revisionTask.id.startsWith('auto_delegate_') && snapshot.run.autoReview === false) continue;
         const delegated = validateAgentTeamPlan(revisionTask.output);
@@ -569,7 +569,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           status: 'waiting_dependency', attempt: 0, updatedAt: Date.now(),
         }));
         snapshot = await runtime.expandPlanOnce(runId, snapshot.run.planVersion, revisionTask.id, delegatedTasks);
-        if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, getWorkspaceSignal());
+        if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, signal);
       }
       if (snapshot.run.autoReview && snapshot.run.status === 'active') {
         for (let round = 1; round <= 3; round += 1) {
@@ -583,7 +583,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
               id: reviewId, runId, kind: 'team_review', input: { sourceTaskIds } satisfies TeamReviewInput,
               dependsOn: sourceTaskIds, status: 'queued', attempt: 0, updatedAt: Date.now(),
             }]);
-            snapshot = await runtime.resume(runId, getWorkspaceSignal());
+            snapshot = await runtime.resume(runId, signal);
           }
           const completedReview = snapshot.tasks.find((task) => task.id === reviewId);
           if (completedReview?.status !== 'completed') break;
@@ -605,7 +605,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
               input: { request: verdict.nextRequest!, sourceTaskIds } satisfies TeamRevisionInput,
               dependsOn: [reviewId, ...sourceTaskIds], status: 'queued', attempt: 0, updatedAt: Date.now(),
             }]);
-            snapshot = await runtime.resume(runId, getWorkspaceSignal());
+            snapshot = await runtime.resume(runId, signal);
           }
           const revision = snapshot.tasks.find((task) => task.id === revisionId);
           if (revision?.status !== 'completed') break;
@@ -624,7 +624,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
             dependsOn: [revisionId, ...contextTaskIds, ...task.dependsOn.map((id) => delegatedTaskId(revisionId, id))],
             status: 'waiting_dependency', attempt: 0, updatedAt: Date.now(),
           })));
-          if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, getWorkspaceSignal());
+          if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, signal);
         }
       }
       if (snapshot.run.status === 'active' && snapshot.tasks.every((task) => task.status === 'completed' || task.status === 'abandoned')) snapshot = await runtime.closePlan(runId, snapshot.run.planVersion);
@@ -785,14 +785,15 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
   activeTeamRuns.add(runId);
   notifyTeam();
   try {
-    return await scheduleBackgroundExecution(params.chatId, () => runWithConversationExecutionLock(originalScope, params.chatId, async () => {
+    const workspaceSignal = getWorkspaceSignal();
+    return await scheduleBackgroundExecution(params.chatId, () => runWithConversationExecutionLock(originalScope, params.chatId, async (signal) => {
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队任务已暂停');
       const workflow = currentTeamWorkflow();
-      const result = params.runId ? await workflow.resume(runId) : await workflow.start(runId, params.chatId, params.goal, true);
+      const result = params.runId ? await workflow.resume(runId, signal) : await workflow.start(runId, params.chatId, params.goal, true, signal);
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队交付已暂停');
       if (result.snapshot.run.status === 'completed') await workflow.publish(runId);
       return result;
-    }), getWorkspaceSignal(), runId);
+    }, workspaceSignal), workspaceSignal, runId);
   } finally {
     activeTeamRuns.delete(runId);
     notifyTeam();

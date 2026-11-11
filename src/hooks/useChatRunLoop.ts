@@ -466,7 +466,12 @@ export function useChatRunLoop(params: {
         });
       };
       if (typeof navigator !== 'undefined' && 'locks' in navigator && navigator.locks) {
-        await runWithConversationExecutionLock(continuationScope, chatId, executeLoop);
+        await runWithConversationExecutionLock(continuationScope, chatId, (leaseSignal) => {
+          const stopForLostLease = () => abortController.abort(leaseSignal.reason || new Error('会话运行权已丢失'));
+          if (leaseSignal.aborted) stopForLostLease();
+          else leaseSignal.addEventListener('abort', stopForLostLease, { once: true });
+          return executeLoop().finally(() => leaseSignal.removeEventListener('abort', stopForLostLease));
+        }, abortController.signal);
       } else {
         // Local HTTP development origins may lack Web Locks. Preserve the
         // existing single-page runner; cross-tab execution is unavailable.

@@ -184,16 +184,17 @@ export async function resumeDirectBackgroundReply(runId: string) {
   const scope = currentWorkflowScope();
   active.add(runId); publish();
   try {
-    return await scheduleBackgroundExecution(run.run.chatId, () => runWithConversationExecutionLock(scope, run.run.chatId, async () => {
+    const workspaceSignal = getWorkspaceSignal();
+    return await scheduleBackgroundExecution(run.run.chatId, () => runWithConversationExecutionLock(scope, run.run.chatId, async (signal) => {
       if (currentWorkflowScope() !== scope || getWorkspaceSignal().aborted) throw new Error('账号已切换，单聊任务已暂停');
       const current = await runtime.read(runId);
       if (!current) throw new Error('单聊任务不存在');
       if (current.run.status === 'completed' || current.tasks.some((task) => task.status === 'result_unknown')) {
         return { snapshot: current, summary: summarizeWorkflowRun(current) };
       }
-      const snapshot = await runtime.resume(runId, getWorkspaceSignal());
+      const snapshot = await runtime.resume(runId, signal);
       return { snapshot, summary: summarizeWorkflowRun(snapshot) };
-    }), getWorkspaceSignal(), runId);
+    }, workspaceSignal), workspaceSignal, runId);
   } finally { active.delete(runId); publish(); }
 }
 
