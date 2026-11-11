@@ -58,7 +58,9 @@ function collectSafelyRecoverableRuns({ assistant, direct, aiDirect, group, aiDi
     ...aiDirect.filter((snapshot) => isSafelyResumableWorkflow(snapshot)
       && chats.some((chat) => chat.id === snapshot.run.chatId && chat.type === 'ai_direct' && chat.deletedAt == null))
       .map((snapshot) => ({ snapshot, start: () => resumeAiDirectBackgroundReply(snapshot.run.id) })),
-    ...team.filter((snapshot) => isSafelyResumableWorkflow(snapshot) && isRecoverableAgentTeamRun(snapshot)).map((snapshot) => ({ snapshot, start: () => runAgentTeam({ chatId: snapshot.run.chatId, goal: snapshot.run.goal, runId: snapshot.run.id }) })),
+    ...team.filter((snapshot) => isSafelyResumableWorkflow(snapshot) && isRecoverableAgentTeamRun(snapshot)
+      && chats.some((chat) => chat.id === snapshot.run.chatId && chat.type === 'assistant' && chat.deletedAt == null))
+      .map((snapshot) => ({ snapshot, start: () => runAgentTeam({ chatId: snapshot.run.chatId, goal: snapshot.run.goal, runId: snapshot.run.id }) })),
     ...aiDirectConversations.filter((snapshot) => {
       const chat = chats.find((item) => item.id === snapshot.run.chatId);
       return Boolean(chat?.type === 'ai_direct' && chat.deletedAt == null
