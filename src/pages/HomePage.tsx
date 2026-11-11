@@ -570,7 +570,7 @@ export default function HomePage() {
     try {
       const result = await resumeAllSafelyRecoverableBackgroundRuns();
       setBackgroundResumeNotice(result.submitted > 0
-        ? `已恢复 ${result.submitted} 个后台任务`
+        ? `已启动 ${result.submitted} 个后台任务`
         : '没有可安全恢复的后台任务');
     } catch (error) {
       setBackgroundResumeNotice(error instanceof Error ? `恢复失败：${error.message}` : '恢复后台任务失败');
