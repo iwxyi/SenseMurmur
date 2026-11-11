@@ -539,7 +539,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
   });
 
   try {
-    if (attachment.kind === 'video') {
+    if (attachment.kind === 'video' && !attachment.mediaTaskId) {
       flushBufferedPersistenceWrites();
       await persistVideoSubmissionKey(workingMessage);
     }

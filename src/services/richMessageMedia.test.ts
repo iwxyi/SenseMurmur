@@ -174,6 +174,25 @@ describe('processRichMessageMedia', () => {
     await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'ready', assetId: 'video-asset', url: 'https://example.test/video.mp4', mediaTaskId: undefined }));
   });
 
+  it('resumes an accepted video task when metadata writes are unavailable', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    vi.mocked(api.updateMessageMetadata).mockRejectedValue(new Error('network unavailable'));
+    const pending = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(waitForAiMediaTask).mockReturnValue(pending.promise);
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'generating', mediaTaskId: 'accepted-task',
+      generationJobId: 'media-gen-accepted', altText: '视频', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    await processRichMessageMedia({ message, aiProfiles: [], upsertMessage: (next) => upserts.push(next) });
+    expect(waitForAiMediaTask).toHaveBeenCalledWith('accepted-task');
+    expect(generateVideoWithAdapter).not.toHaveBeenCalled();
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('generating');
+    pending.resolve({ task_id: 'accepted-task', model: 'video-model', status: 'failed', result: { error: 'ACE 任务生成失败：任务已取消' }, chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('failed'));
+  });
+
   it('uses the submitted video ratio for the waiting card', async () => {
     localStorage.setItem('pneumata-auth-mode', 'cloud');
     localStorage.setItem('pneumata-cloud-sync-enabled', '1');
