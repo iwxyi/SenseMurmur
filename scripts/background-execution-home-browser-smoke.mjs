@@ -134,6 +134,10 @@ try {
   await waitFor(() => cdp.evaluate(`Boolean([...document.querySelectorAll('[role="option"]')].find((item) => item.innerText.includes('2 个会话')))`), 'concurrency options opened');
   await cdp.evaluate(`([...document.querySelectorAll('[role="option"]')].find((item) => item.innerText.includes('2 个会话')))?.click()`);
   await waitFor(() => cdp.evaluate(`(async () => (await import('/src/services/backgroundExecutionPreferences.ts')).getBackgroundExecutionPreferences().maxActiveConversations === 2)()`), 'concurrency preference saved');
+  await cdp.send('Page.navigate', { url: `${clientUrl}/settings?tab=chat` });
+  await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('#settings-card-background-execution'))`), 'settings restored after reload');
+  const persistedConcurrency = await cdp.evaluate(`(async () => (await import('/src/services/backgroundExecutionPreferences.ts')).getBackgroundExecutionPreferences().maxActiveConversations)()`);
+  assert.equal(persistedConcurrency, 2);
   await cdp.evaluate(`document.querySelector('#settings-card-background-execution [role="combobox"]')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))`);
   await waitFor(() => cdp.evaluate(`Boolean([...document.querySelectorAll('[role="option"]')].find((item) => item.innerText.includes('3 个会话')))`), 'default concurrency option reopened');
   await cdp.evaluate(`([...document.querySelectorAll('[role="option"]')].find((item) => item.innerText.includes('3 个会话')))?.click()`);
