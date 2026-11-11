@@ -176,6 +176,7 @@ describe('assistant background reply', () => {
     const result = await retryAssistantBackgroundReply(originalRunId, 'retry-command');
 
     expect(result.snapshot.run.id).toContain(`${originalRunId}\nretry\nretry-command`);
+    expect(result.snapshot.run).toMatchObject({ retryOfRunId: originalRunId, retryRootRunId: originalRunId });
     expect(result.snapshot.run.status).toBe('completed');
     expect(reply.mock.calls[0][0]).toMatchObject({
       chatId,

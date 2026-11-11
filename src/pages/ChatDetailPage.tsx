@@ -972,9 +972,11 @@ export default function ChatDetailPage() {
     void listAssistantBackgroundReplies(id).then((runs) => {
       if (cancelled) return;
       setAssistantRuns(runs.sort((left, right) => right.run.updatedAt - left.run.updatedAt));
-      const uncertain = runs.find((run) => run.tasks.some((task) => task.status === 'result_unknown'));
-      const resumable = runs.find((run) => run.run.status === 'paused' && run.tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency') && !run.tasks.some((task) => task.status === 'result_unknown'));
-      const failed = runs.find((run) => run.run.status === 'failed' || run.tasks.some((task) => task.status === 'failed'));
+      const supersededRunIds = new Set(runs.flatMap((run) => run.run.retryOfRunId ? [run.run.retryOfRunId] : []));
+      const currentRuns = runs.filter((run) => !supersededRunIds.has(run.run.id));
+      const uncertain = currentRuns.find((run) => run.tasks.some((task) => task.status === 'result_unknown'));
+      const resumable = currentRuns.find((run) => run.run.status === 'paused' && run.tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency') && !run.tasks.some((task) => task.status === 'result_unknown'));
+      const failed = currentRuns.find((run) => run.run.status === 'failed' || run.tasks.some((task) => task.status === 'failed'));
       const failedTask = failed?.tasks.find((task) => task.status === 'failed');
       setAssistantBackgroundRetryRunId(uncertain?.run.id || failed?.run.id || null);
       setAssistantBackgroundRetryUncertain(Boolean(uncertain));

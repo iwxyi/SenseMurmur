@@ -21,6 +21,8 @@ export interface WorkflowRun {
   id: string;
   chatId: string;
   goal: string;
+  retryOfRunId?: string;
+  retryRootRunId?: string;
   status: 'active' | 'paused' | 'completed' | 'failed' | 'cancelled';
   generation: number;
   planVersion: number;

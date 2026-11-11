@@ -344,7 +344,8 @@ export async function retryAssistantBackgroundReply(runId: string, commandId: st
   const input: AssistantReplyInput = { ...task.input, replyRunId: nextRunId };
   const now = Date.now();
   const snapshot: WorkflowSnapshot = {
-    run: { id: nextRunId, chatId: source.run.chatId, goal: source.run.goal, status: 'active', generation: 0, planVersion: 1, updatedAt: now },
+    run: { id: nextRunId, chatId: source.run.chatId, goal: source.run.goal, retryOfRunId: source.run.id,
+      retryRootRunId: source.run.retryRootRunId || source.run.id, status: 'active', generation: 0, planVersion: 1, updatedAt: now },
     tasks: [{ ...task, id: `${task.id}\n${commandId}`, runId: nextRunId, input, output: undefined, error: undefined, status: 'queued', attempt: 0, updatedAt: now }],
   };
   await indexedDbWorkflowRepository.transact(currentWorkflowScope(), nextRunId, (existing) => ({ snapshot: existing || snapshot, value: !existing }));
