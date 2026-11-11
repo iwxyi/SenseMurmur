@@ -3,7 +3,7 @@ import type { AICharacter } from '../types/character';
 import type { Message } from '../types/message';
 import type { AIModelProfile } from '../types/settings';
 import { getRichMediaQueueSnapshot, processRichMessageMedia, resetRichMediaQueueForTests, retryRichMessageMedia, scrubLocalMediaUrlsForCloud } from './richMessageMedia';
-import { generateImageWithAdapter, generateVideoWithAdapter } from './aiGenerationAdapter';
+import { generateAudioWithAdapter, generateImageWithAdapter, generateVideoWithAdapter } from './aiGenerationAdapter';
 import { waitForAiMediaTask } from './aiClient';
 import { api, ApiError } from './api';
 
@@ -23,6 +23,7 @@ vi.mock('./api', () => ({
 vi.mock('./aiGenerationAdapter', () => ({
   generateImageWithAdapter: vi.fn(),
   generateVideoWithAdapter: vi.fn(),
+  generateAudioWithAdapter: vi.fn(),
   synthesizeSpeechWithAdapter: vi.fn(),
 }));
 vi.mock('./aiClient', () => ({
@@ -190,6 +191,26 @@ describe('processRichMessageMedia', () => {
     expect(generateVideoWithAdapter).not.toHaveBeenCalled();
     expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('generating');
     pending.resolve({ task_id: 'accepted-task', model: 'video-model', status: 'failed', result: { error: 'ACE 任务生成失败：任务已取消' }, chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('failed'));
+  });
+
+  it('resumes music by saved request key after its model configuration is removed', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    vi.mocked(api.getAiMediaTaskByRequestKey).mockResolvedValue({ task_id: 'saved-music', model: 'old-audio-model', status: 'running',
+      result: null, chargedAmount: null, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+    const pending = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(waitForAiMediaTask).mockReturnValue(pending.promise);
+    const message = buildQueuedImageMessage({ serverId: 'server-music', metadata: { attachments: [{
+      id: 'music-1', kind: 'audio', audioPurpose: 'music_generation', status: 'generating',
+      generationJobId: 'media-gen-music', altText: '歌曲', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    await processRichMessageMedia({ message, aiProfiles: [], upsertMessage: (next) => upserts.push(next) });
+    await waitForExpectation(() => expect(waitForAiMediaTask).toHaveBeenCalledWith('saved-music'));
+    expect(generateAudioWithAdapter).not.toHaveBeenCalled();
+    pending.resolve({ task_id: 'saved-music', model: 'old-audio-model', status: 'failed', result: { error: '上游任务失败' },
+      chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 3 });
     await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('failed'));
   });
 

@@ -657,14 +657,14 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
     if (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation') {
       let taskId = attachment.mediaTaskId;
       if (!taskId) {
-        const profile = findGenerationProfile(entry.aiProfiles, 'audio');
-        if (!profile) throw new Error('音频模型未配置');
         const clientRequestKey = attachment.generationJobId || generationJobId;
         try {
           const task = await api.getAiMediaTaskByRequestKey(clientRequestKey);
           taskId = task.task_id;
         } catch (lookupError) {
           if (!(lookupError instanceof ApiError) || lookupError.status !== 404) throw lookupError;
+          const profile = findGenerationProfile(entry.aiProfiles, 'audio');
+          if (!profile) throw new Error('音频模型未配置');
           const task = await generateAudioWithAdapter({ profile, prompt: attachment.promptText || attachment.altText,
             clientRequestKey, aiUsage: { type: 'audio_generation', label: '聊天音乐生成', scope: 'chat', resourceId: workingMessage.chatId } });
           taskId = task.task_id;
