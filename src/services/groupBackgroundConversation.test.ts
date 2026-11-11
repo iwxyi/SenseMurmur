@@ -186,9 +186,12 @@ describe('background group conversation', () => {
     vi.stubGlobal('navigator', { locks: { request: async (name: string, options: unknown, callback?: (lock: object | null) => Promise<unknown>) =>
       (callback || options as (lock: object | null) => Promise<unknown>)(name === driverLock ? null : {}) } });
     await resumeGroupBackgroundConversation(chatId);
+    await recoverGroupBackgroundConversations();
     expect(runLoop).not.toHaveBeenCalled();
     const saved = (await listGroupBackgroundConversations(chatId))[0];
     expect(saved.tasks).toHaveLength(1);
     expect(saved.tasks[0].status).toBe('queued');
+    expect(saved.run.status).toBe('active');
+    expect(useChatStore.getState().chats.find((item) => item.id === chatId)?.isActive).toBe(true);
   });
 });

@@ -253,24 +253,27 @@ export async function recoverGroupBackgroundConversations() {
   ]);
   for (const item of await listGroupBackgroundConversations()) {
     if (active.has(item.run.id) || item.run.status === 'completed' || item.run.status === 'cancelled') continue;
-    await navigator.locks.request(workflowRunLockName(scope, item.run.id), { ifAvailable: true }, async (lock) => {
-      if (!lock || currentWorkflowScope() !== scope) return;
-      await indexedDbWorkflowRepository.transact(scope, item.run.id, (current) => {
-        if (!current || current.run.status === 'completed' || current.run.status === 'cancelled') return { snapshot: current || item, value: undefined };
-        const now = Date.now();
-        const snapshot: WorkflowSnapshot = { ...current,
-          run: { ...current.run, status: current.run.status === 'active' ? 'paused' : current.run.status, generation: current.run.generation + 1, updatedAt: now },
-          tasks: current.tasks.map((task) => {
-            if (task.status !== 'running' && task.status !== 'result_unknown') return task;
-            const reply = task.attempt > 0 ? committedTurn(current.run.chatId, task.id) : null;
-            return reply ? { ...task, status: 'completed', output: { outcome: 'committed', messageId: reply.id }, updatedAt: now }
-              : task.status === 'result_unknown' ? task
-                : { ...task, status: 'result_unknown', error: '程序关闭前的群聊回合结果无法确认', updatedAt: now };
-          }) };
-        return { snapshot, value: undefined };
+    await navigator.locks.request(`${workflowRunLockName(scope, item.run.id)}:driver`, { ifAvailable: true }, async (driver) => {
+      if (!driver || currentWorkflowScope() !== scope) return;
+      await navigator.locks.request(workflowRunLockName(scope, item.run.id), { ifAvailable: true }, async (lock) => {
+        if (!lock || currentWorkflowScope() !== scope) return;
+        await indexedDbWorkflowRepository.transact(scope, item.run.id, (current) => {
+          if (!current || current.run.status === 'completed' || current.run.status === 'cancelled') return { snapshot: current || item, value: undefined };
+          const now = Date.now();
+          const snapshot: WorkflowSnapshot = { ...current,
+            run: { ...current.run, status: current.run.status === 'active' ? 'paused' : current.run.status, generation: current.run.generation + 1, updatedAt: now },
+            tasks: current.tasks.map((task) => {
+              if (task.status !== 'running' && task.status !== 'result_unknown') return task;
+              const reply = task.attempt > 0 ? committedTurn(current.run.chatId, task.id) : null;
+              return reply ? { ...task, status: 'completed', output: { outcome: 'committed', messageId: reply.id }, updatedAt: now }
+                : task.status === 'result_unknown' ? task
+                  : { ...task, status: 'result_unknown', error: '程序关闭前的群聊回合结果无法确认', updatedAt: now };
+            }) };
+          return { snapshot, value: undefined };
+        });
+        const chat = useChatStore.getState().chats.find((entry) => entry.id === item.run.chatId);
+        if (chat?.isActive) await useChatStore.getState().updateChat(chat.id, { isActive: false });
       });
-      const chat = useChatStore.getState().chats.find((entry) => entry.id === item.run.chatId);
-      if (chat?.isActive) await useChatStore.getState().updateChat(chat.id, { isActive: false });
     });
   }
   publish();
