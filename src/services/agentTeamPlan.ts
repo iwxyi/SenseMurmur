@@ -108,6 +108,10 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     && task.dependsOn.some((id) => !['text_generation', 'web_search'].includes(tasksById.get(id)?.tool || 'text_generation')))) {
     throw new Error('音乐任务目前只能依赖文字歌词或说明');
   }
+  if (tasks.some((task) => task.tool === 'image_generation'
+    && task.dependsOn.some((id) => !['text_generation', 'web_search'].includes(tasksById.get(id)?.tool || 'text_generation')))) {
+    throw new Error('图片任务目前只能依赖文字脚本或说明，不能把已生成媒体当作参考素材');
+  }
   const hasUnsupportedVideoAncestor = (task: AgentTeamTask, visited = new Set<string>()): boolean => task.dependsOn.some((id) => {
     if (visited.has(id)) return false;
     visited.add(id);
@@ -130,7 +134,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; chat
   const goal = requiredText(params.goal, '用户目标', 12_000);
   const raw = await generateResponse(params.api, [
     '你是通用任务的主 Agent。根据用户目标设计最小可行的团队与无环任务图。简单任务只用一个岗位。',
-    `当前开放工具：text_generation${params.webSearch ? '、web_search' : ''}${params.imageGeneration ? '、image_generation' : ''}${params.audioGeneration ? '、audio_generation' : ''}${params.imageInspection ? '、image_inspection' : ''}${params.videoGeneration ? '、video_generation' : ''}。${params.videoUnavailableReason ? `视频生成当前不可用：${params.videoUnavailableReason}。` : ''}网页搜索任务的 goal 是搜索词；图片任务的 goal 是可生成的画面提示词；音乐任务的 goal 是包含风格、情绪、乐器与可选歌词要求的音乐提示词，系统异步生成完整音频。用户要求明确歌词时，先用 text_generation 写歌词，再让 audio_generation 依赖歌词任务；系统会把歌词交付作为音乐提示词的一部分。图片检查必须直接依赖已生成图片，模型会收到真实画面；视频任务的 goal 是精炼成片提示词，可以依赖脚本${params.videoReferenceImages ? '和图片' : ''}任务。视频任务不能依赖音乐或其他视频片段，目前没有音轨合成和视频拼接工具。${params.videoRequiresReferenceImage ? '当前视频模型必须先有参考图片。' : ''}${params.videoReferenceImages ? `依赖图片时系统把图片作为参考素材${params.maxVideoReferenceImages ? `，当前模型最多 ${params.maxVideoReferenceImages} 张` : ''}。` : '当前视频模型不能接收参考图片，不要规划图片到视频的依赖。'}视频由系统异步生成，不能声称立即成片。只安排确实必要的图像、音乐与视频生成，避免为验证或补充说明而反复生成同一媒体。不得承诺音视频剪辑合成、文件写入或代码执行；能力不足时在摘要说明。`,
+    `当前开放工具：text_generation${params.webSearch ? '、web_search' : ''}${params.imageGeneration ? '、image_generation' : ''}${params.audioGeneration ? '、audio_generation' : ''}${params.imageInspection ? '、image_inspection' : ''}${params.videoGeneration ? '、video_generation' : ''}。${params.videoUnavailableReason ? `视频生成当前不可用：${params.videoUnavailableReason}。` : ''}网页搜索任务的 goal 是搜索词；图片任务的 goal 是可生成的画面提示词，只能依赖文字脚本或搜索摘要，不能读取上游媒体附件作为参考图；音乐任务的 goal 是包含风格、情绪、乐器与可选歌词要求的音乐提示词，系统异步生成完整音频。用户要求明确歌词时，先用 text_generation 写歌词，再让 audio_generation 依赖歌词任务；系统会把歌词交付作为音乐提示词的一部分。图片检查必须直接依赖已生成图片，模型会收到真实画面；视频任务的 goal 是精炼成片提示词，可以依赖脚本${params.videoReferenceImages ? '和图片' : ''}任务。视频任务不能依赖音乐或其他视频片段，目前没有音轨合成和视频拼接工具。${params.videoRequiresReferenceImage ? '当前视频模型必须先有参考图片。' : ''}${params.videoReferenceImages ? `依赖图片时系统把图片作为参考素材${params.maxVideoReferenceImages ? `，当前模型最多 ${params.maxVideoReferenceImages} 张` : ''}。` : '当前视频模型不能接收参考图片，不要规划图片到视频的依赖。'}视频由系统异步生成，不能声称立即成片。只安排确实必要的图像、音乐与视频生成，避免为验证或补充说明而反复生成同一媒体。不得承诺音视频剪辑合成、文件写入或代码执行；能力不足时在摘要说明。`,
     '岗位必须有具体职责、方法和可检查的验收标准；任务必须有唯一 ID、岗位归属、明确目标和依赖。不要用岗位名称冒充专业能力。',
     '只输出 JSON：{"summary":"...","roles":[{"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"..."}],"finalAcceptance":"..."}',
   ].join('\n'), [{ role: 'user', content: goal }], undefined, {
