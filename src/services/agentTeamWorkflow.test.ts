@@ -112,6 +112,23 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks.find((task) => task.id === 'theme')).toMatchObject({ kind: 'agent_audio', status: 'waiting_external', externalTaskId: 'music-task' });
     expect(queueAgentTeamAudio).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining('木琴和鼓点') }));
   });
+  it('passes completed lyrics into a dependent music generation task', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `lyrics-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'audio', name: '音乐', type: 'audio', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'music-model', isDefault: true }] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '写歌', roles: [{ id: 'writer', name: '词作者', responsibility: '写歌词', method: '创作', acceptance: '歌词完整', allowedTools: ['text_generation'] },
+      { id: 'composer', name: '作曲', responsibility: '作曲', method: '生成音乐', acceptance: '音频可播放', allowedTools: ['audio_generation'] }],
+    tasks: [{ id: 'lyrics', roleId: 'writer', goal: '写森林追逐主题歌词', dependsOn: [], tool: 'text_generation', acceptance: '有完整歌词' },
+      { id: 'song', roleId: 'composer', goal: '用木琴与鼓点谱曲', dependsOn: ['lyrics'], tool: 'audio_generation', acceptance: '有完整音乐附件' }], finalAcceptance: '歌词和音乐均完成' }))
+      .mockResolvedValueOnce('歌词：沿着森林小径，追逐夕阳的足迹。');
+    vi.mocked(queueAgentTeamAudio).mockResolvedValue({ externalTaskId: 'lyrics-music-task' });
+    vi.mocked(inspectAgentTeamAudioAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'lyrics-music-task' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'text-model' }, () => `lyrics-scope-${runId}`);
+    const result = await workflow.start(runId, chatId, '先写歌词，再生成音乐');
+    expect(result.snapshot.tasks.find((task) => task.id === 'song')?.status).toBe('waiting_external');
+    expect(queueAgentTeamAudio).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining('沿着森林小径，追逐夕阳的足迹') }));
+  });
   it('inspects generated image bytes before passing observations downstream', async () => {
     const runId = crypto.randomUUID();
     const chatId = `inspection-${runId}`;

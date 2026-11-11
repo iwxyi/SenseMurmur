@@ -278,8 +278,14 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return { output };
       }
       if (selectedTool === 'audio_generation') {
+        const upstream = input.task.dependsOn.map((id) => {
+          const dependency = snapshot.tasks.find((item) => item.id === (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id));
+          if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('音乐的上游歌词或说明尚未就绪');
+          return dependency.kind === 'agent_text' || dependency.kind === 'agent_web_search'
+            ? dependency.output.slice(0, 12_000) : null;
+        }).filter((content): content is string => content !== null);
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
-          prompt: [input.task.goal, input.userInstruction].filter(Boolean).join('\n\n'), signal });
+          prompt: [input.task.goal, ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), signal });
       }
       if (selectedTool === 'video_generation') {
         const existingVideo = inspectAgentTeamVideoAttachment(task.runId, task.id);
