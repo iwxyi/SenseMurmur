@@ -210,6 +210,12 @@ function getLatestRichMediaMessage(messageId: string, fallback: Message) {
   return latestRichMediaMessageById.get(messageId) || fallback;
 }
 
+function releaseRichMediaMessageIfIdle(messageId: string) {
+  if (richMediaMessageUsers.has(messageId)) return;
+  if ([...longRunningRichMediaEntriesById.values()].some((entry) => entry.messageId === messageId)) return;
+  latestRichMediaMessageById.delete(messageId);
+}
+
 function richMediaQueueEntryId(messageId: string, attachmentId: string) {
   return `${messageId}:${attachmentId}`;
 }
@@ -491,9 +497,10 @@ async function attachAssistantImageArtifact(params: {
     },
   };
   const nextMessage = { ...params.message, metadata };
-  params.upsertMessage(nextMessage);
-  persistRichMessageMetadata(nextMessage, metadata, 'rich-message-media.persist-assistant-artifact');
-  return nextMessage;
+  const mergedMessage = rememberRichMediaMessage(nextMessage);
+  params.upsertMessage(mergedMessage);
+  persistRichMessageMetadata(mergedMessage, mergedMessage.metadata || metadata, 'rich-message-media.persist-assistant-artifact');
+  return mergedMessage;
 }
 
 async function pollVideoTask(params: {
@@ -756,6 +763,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
         }).catch((commitError) => console.error('[rich-message-media:audio-failure-commit]', commitError));
       }).finally(() => {
         if (longRunningRichMediaEntriesById.get(entry.id) === entry) longRunningRichMediaEntriesById.delete(entry.id);
+        releaseRichMediaMessageIfIdle(entry.messageId);
         publishRichMediaQueueSnapshot();
       });
       return;
@@ -833,6 +841,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
           if (longRunningRichMediaEntriesById.get(entry.id) === entry) {
             longRunningRichMediaEntriesById.delete(entry.id);
           }
+          releaseRichMediaMessageIfIdle(entry.messageId);
           publishRichMediaQueueSnapshot();
         });
       return;
@@ -1089,13 +1098,13 @@ export async function processRichMessageMedia(params: {
       sharesConversationLease: params.sharesConversationLease,
     })));
   } finally {
-    // Concurrent retries/attachments share the latest message only while in use.
-    // Finished jobs must not retain message bodies or generated data URLs.
+    // Polling may continue after submission returns. Retain the merged message
+    // until every task on it has committed, then release media data URLs.
     const users = (richMediaMessageUsers.get(messageId) || 1) - 1;
     if (users) richMediaMessageUsers.set(messageId, users);
     else {
       richMediaMessageUsers.delete(messageId);
-      latestRichMediaMessageById.delete(messageId);
+      releaseRichMediaMessageIfIdle(messageId);
     }
   }
 }

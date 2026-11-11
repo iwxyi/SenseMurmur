@@ -1312,6 +1312,28 @@ describe('processRichMessageMedia', () => {
     await waitForExpectation(() => expect(getRichMediaQueueSnapshot()).toEqual([]));
   });
 
+  it('keeps a finished image when video polling completes after the submission queue released its message', async () => {
+    const pollGate = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(generateImageWithAdapter).mockResolvedValue([{ dataUrl: 'data:image/png;base64,retained', mimeType: 'image/png' }]);
+    vi.mocked(generateVideoWithAdapter).mockResolvedValue({ task_id: 'late-video-task' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>);
+    vi.mocked(waitForAiMediaTask).mockReturnValue(pollGate.promise);
+    const message = buildQueuedImageMessage({ id: 'late-video-message', metadata: { attachments: [
+      { id: 'image-1', kind: 'image', status: 'queued', promptText: '场景图', altText: '图片', createdAt: 123, updatedAt: 123 },
+      { id: 'video-1', kind: 'video', status: 'queued', promptText: '森林追逐', altText: '视频', createdAt: 123, updatedAt: 123 },
+    ] } });
+    const upserts: Message[] = [];
+    await processRichMessageMedia({ message, aiProfiles: [imageProfile, { ...imageProfile, type: 'video', model: 'video-model' }],
+      upsertMessage: (next) => upserts.push(next) });
+    expect(upserts.at(-1)?.metadata?.attachments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'image-1', status: 'ready' }),
+      expect.objectContaining({ id: 'video-1', status: 'generating', mediaTaskId: 'late-video-task' }),
+    ]));
+    pollGate.resolve({ task_id: 'late-video-task', model: 'video-model', status: 'failed', result: { error: '测试结束' },
+      chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.find((item) => item.id === 'video-1')?.status).toBe('failed'));
+    expect(upserts.at(-1)?.metadata?.attachments?.find((item) => item.id === 'image-1')?.status).toBe('ready');
+  });
+
   it('recovers a stale generating attachment into the global queue', async () => {
     vi.mocked(generateImageWithAdapter).mockResolvedValue([{
       dataUrl: 'data:image/png;base64,recovered',
