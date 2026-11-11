@@ -13,6 +13,7 @@ import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope'
 interface AssistantReplyInput {
   chatId: string;
   userMessageId: string;
+  replyRunId?: string;
   selectedArtifactId?: string | null;
 }
 
@@ -32,7 +33,7 @@ function messagesForChat(chatId: string) {
   });
 }
 
-function committedAssistantReply(chatId: string, userMessageId: string) {
+function committedAssistantReply(chatId: string, userMessageId: string, replyRunId?: string) {
   const state = useMessageStore.getState();
   return projectMergedChatMessages({
     chatId,
@@ -40,7 +41,8 @@ function committedAssistantReply(chatId: string, userMessageId: string) {
     cachedWindow: state.messageWindowsByChatId[chatId]
       ? { ...state.messageWindowsByChatId[chatId], preserveBranchContext: true } : undefined,
   }).find((message) => message.type === 'ai' && !message.isDeleted && !message.isStreaming
-    && message.metadata?.assistantReplyToUserMessageId === userMessageId);
+    && message.metadata?.assistantReplyToUserMessageId === userMessageId
+    && (!replyRunId || message.metadata?.assistantReplyRunId === replyRunId));
 }
 
 async function executeAssistantReplyUnlocked(task: WorkflowTask, signal: AbortSignal) {
@@ -58,7 +60,7 @@ async function executeAssistantReplyUnlocked(task: WorkflowTask, signal: AbortSi
   const allMessages = messagesForChat(chatId);
   const userMessage = allMessages.find((message) => message.id === input.userMessageId);
   if (!userMessage || userMessage.isDeleted) throw new WorkflowPreflightError('原始用户消息已不存在');
-  const committed = committedAssistantReply(chatId, input.userMessageId);
+  const committed = committedAssistantReply(chatId, input.userMessageId, input.replyRunId);
   if (committed) return { output: committed.id };
   const messages = allMessages.filter((message) => message.timestamp <= userMessage.timestamp);
   const settings = useSettingsStore.getState();
@@ -69,6 +71,7 @@ async function executeAssistantReplyUnlocked(task: WorkflowTask, signal: AbortSi
     chat,
     chatId,
     currentMessages: messages,
+    replyRunId: input.replyRunId,
     selectedArtifactId: input.selectedArtifactId,
     timestamp: userMessage.timestamp + 1,
     upsertMessage: upsertAssistantBackgroundMessage,
@@ -150,7 +153,7 @@ export async function startAssistantBackgroundReply(params: { chatId: string; us
   const now = Date.now();
   const snapshot: WorkflowSnapshot = {
     run: { id: runId, chatId: params.chatId, goal: '回复用户消息', status: 'active', generation: 0, planVersion: 1, updatedAt: now },
-    tasks: [{ id: params.userMessageId, runId, kind: 'assistant_reply', input: { chatId: params.chatId, userMessageId: params.userMessageId, selectedArtifactId: params.selectedArtifactId }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
+    tasks: [{ id: params.userMessageId, runId, kind: 'assistant_reply', input: { chatId: params.chatId, userMessageId: params.userMessageId, replyRunId: runId, selectedArtifactId: params.selectedArtifactId }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
   };
   const existing = await assistantRuntime.read(runId);
   if (!existing) {
@@ -227,7 +230,8 @@ async function reconcileCommittedAssistantReply(runId: string) {
     if (!run || !task || run.tasks.length !== 1 || task.kind !== 'assistant_reply'
       || task.attempt < 1 || run.run.status === 'completed') return false;
     const chat = useChatStore.getState().chats.find((item) => item.id === run.run.chatId && item.type === 'assistant' && item.deletedAt == null);
-    const reply = chat ? committedAssistantReply(chat.id, task.id) : null;
+    const input = task.input as AssistantReplyInput;
+    const reply = chat ? committedAssistantReply(chat.id, task.id, input.replyRunId) : null;
     if (!reply) return false;
     return indexedDbWorkflowRepository.transact(scope, runId, (current) => {
       if (!current || current.run.status === 'completed' || current.tasks[0]?.id !== task.id) return { snapshot: current || run, value: false };

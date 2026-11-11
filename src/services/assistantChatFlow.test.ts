@@ -139,6 +139,7 @@ describe('assistant reply display', () => {
         api: { provider: 'openai', apiKey: 'k', baseUrl: '', model: 'text' },
         aiProfiles: [{ id: 'video', name: '视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'video-model', isDefault: true }],
         chat, chatId: chat.id, currentMessages: [userMessage], upsertMessage, updateChat: vi.fn(async () => undefined),
+        replyRunId: 'background-video-run',
       });
       await vi.waitFor(() => expect(processRichMessageMediaMock).toHaveBeenCalled());
       expect(agentOrchestratorMock.planAssistantAgentChange.mock.calls[0][0].toolCapabilities.videoGeneration).toBe(true);
@@ -146,6 +147,7 @@ describe('assistant reply display', () => {
       expect(authorize).not.toHaveBeenCalled();
       const queued = upsertMessage.mock.calls.map(([message]) => message as Message).find((message) => message.metadata?.attachments?.[0]?.kind === 'video');
       expect(queued?.metadata?.assistantReplyToUserMessageId).toBe(userMessage.id);
+      expect(queued?.metadata?.assistantReplyRunId).toBe('background-video-run');
       expect(queued?.metadata?.attachments?.[0]).toMatchObject({ kind: 'video', status: 'queued', slotId: 'video-1', promptText: '追逐场景视频提示词', videoDuration: 8, videoResolution: '720p', aspectRatio: '16:9' });
       expect(queued?.content).toContain('视频正在生成中');
       expect(queued?.content).not.toContain('正在发送图片');
@@ -198,11 +200,13 @@ describe('assistant reply display', () => {
       const result = await runAssistantChatReplyFlow({
         api: { provider: 'openai', apiKey: 'test', model: 'test', baseUrl: '' }, aiProfiles: [], chat, chatId: chat.id,
         currentMessages: [userMessage], upsertMessage: (message) => frames.push(message), updateChat: vi.fn(async () => undefined),
+        replyRunId: 'background-text-run',
       });
       expect(result?.content).toBe(content);
       expect(String(generateResponseMock.mock.calls[0]?.[1])).toContain('## Chat preferences');
       expect(frames.at(-1)?.isStreaming).toBe(false);
       expect(result?.metadata?.assistantReplyToUserMessageId).toBe(userMessage.id);
+      expect(result?.metadata?.assistantReplyRunId).toBe('background-text-run');
       expect(new Set(frames.map((frame) => frame.id)).size).toBe(1);
       expect(new Set(frames.map((frame) => frame.metadata?.branching?.nodeId)).size).toBe(1);
     } finally {

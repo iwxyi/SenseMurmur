@@ -95,4 +95,24 @@ describe('assistant background reply', () => {
     await resumeAssistantBackgroundReply(runId, crypto.randomUUID());
     expect(reply).not.toHaveBeenCalled();
   });
+
+  it('does not mistake a regenerated reply for a pending background run result', async () => {
+    const chatId = crypto.randomUUID();
+    const userMessageId = crypto.randomUUID();
+    const runId = assistantReplyRunId(chatId, userMessageId);
+    const chat = { ...buildAssistantChatDraft(), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 2 };
+    const userMessage: Message = { id: userMessageId, chatId, type: 'user', senderId: 'user', senderName: '用户', content: '写介绍', emotion: 0, timestamp: 1, isDeleted: false };
+    const regenerated: Message = { id: crypto.randomUUID(), chatId, type: 'ai', senderId: 'assistant', senderName: '助手', content: '重新回答', emotion: 0,
+      timestamp: 2, isDeleted: false, metadata: { assistantReplyToUserMessageId: userMessageId } };
+    useChatStore.setState({ chats: [chat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [userMessage, regenerated], messageWindowsByChatId: {} });
+    await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, () => ({ snapshot: {
+      run: { id: runId, chatId, goal: '回复用户消息', status: 'active', generation: 1, planVersion: 1, updatedAt: 1 },
+      tasks: [{ id: userMessageId, runId, kind: 'assistant_reply', input: { chatId, userMessageId, replyRunId: runId }, dependsOn: [], status: 'running', attempt: 1, updatedAt: 1 }],
+    }, value: undefined }));
+    await recoverAssistantBackgroundReplies();
+    const recovered = (await listAssistantBackgroundReplies(chatId))[0];
+    expect(recovered.run.status).toBe('paused');
+    expect(recovered.tasks[0].status).toBe('result_unknown');
+  });
 });

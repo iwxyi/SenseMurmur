@@ -507,6 +507,7 @@ async function persistAssistantArtifactsFromReply(params: {
   aiProfiles: AIModelProfile[];
   signal?: AbortSignal;
   replySender?: { id: string; name: string };
+  replyRunId?: string;
   forceArtifact?: boolean;
 }) {
   if (!isAssistantAgentArtifactEnabled(params.chat)) return null;
@@ -659,6 +660,7 @@ async function persistAssistantArtifactsFromReply(params: {
       timestamp: params.timestamp,
       upsertMessage: params.upsertMessage,
       replySender: params.replySender,
+      replyRunId: params.replyRunId,
     });
     await params.updateChat(params.chatId, {
       lastMessageAt: assistantMessage.timestamp,
@@ -706,6 +708,7 @@ async function persistAssistantArtifactsFromReply(params: {
             timestamp: params.timestamp,
             upsertMessage: params.upsertMessage,
             replySender: params.replySender,
+            replyRunId: params.replyRunId,
           });
           await params.updateChat(params.chatId, { lastMessageAt: assistantMessage.timestamp, latestMessage: assistantMessage });
           return { message: assistantMessage, patchesCommitted: 0 };
@@ -720,6 +723,7 @@ async function persistAssistantArtifactsFromReply(params: {
           timestamp: params.timestamp,
           upsertMessage: params.upsertMessage,
           replySender: params.replySender,
+          replyRunId: params.replyRunId,
         });
         await params.updateChat(params.chatId, { lastMessageAt: assistantMessage.timestamp, latestMessage: assistantMessage });
         return { message: assistantMessage, patchesCommitted: 0 };
@@ -733,6 +737,7 @@ async function persistAssistantArtifactsFromReply(params: {
           timestamp: params.timestamp,
           upsertMessage: params.upsertMessage,
           replySender: params.replySender,
+          replyRunId: params.replyRunId,
         });
         await params.updateChat(params.chatId, { lastMessageAt: assistantMessage.timestamp, latestMessage: assistantMessage });
         return { message: assistantMessage, patchesCommitted: 0 };
@@ -756,6 +761,7 @@ async function persistAssistantArtifactsFromReply(params: {
       timestamp: params.timestamp,
       upsertMessage: params.upsertMessage,
       replySender: params.replySender,
+      replyRunId: params.replyRunId,
     });
     await params.updateChat(params.chatId, {
       lastMessageAt: assistantMessage.timestamp,
@@ -801,6 +807,7 @@ async function persistAssistantArtifactsFromReply(params: {
       timestamp: params.timestamp,
       upsertMessage: params.upsertMessage,
       replySender: params.replySender,
+      replyRunId: params.replyRunId,
     });
     await params.updateChat(params.chatId, {
       lastMessageAt: assistantMessage.timestamp,
@@ -920,6 +927,7 @@ async function persistAssistantArtifactsFromReply(params: {
       timestamp: params.timestamp,
       upsertMessage: params.upsertMessage,
       replySender: params.replySender,
+      replyRunId: params.replyRunId,
     });
     if (attachments.length) {
       void processAssistantMediaAttachments({
@@ -990,6 +998,7 @@ async function persistAssistantArtifactsFromReply(params: {
     timestamp: params.timestamp,
     upsertMessage: params.upsertMessage,
     replySender: params.replySender,
+    replyRunId: params.replyRunId,
   });
   await params.updateChat(params.chatId, {
     lastMessageAt: assistantMessage.timestamp,
@@ -1105,6 +1114,7 @@ async function persistAssistantFinalMessage(params: {
   timestamp?: number;
   upsertMessage: (message: Message) => void;
   replySender?: { id: string; name: string };
+  replyRunId?: string;
 }) {
   const assistantDraft: Omit<Message, 'id' | 'timestamp' | 'isDeleted'> = {
     chatId: params.chatId,
@@ -1120,6 +1130,7 @@ async function persistAssistantFinalMessage(params: {
       },
       ...(params.metadata || {}),
       assistantReplyToUserMessageId: latestUserMessage(params.currentMessages)?.id,
+      ...(params.replyRunId ? { assistantReplyRunId: params.replyRunId } : {}),
     },
   };
   const localMessage = createStreamingLocalMessage(
@@ -1395,6 +1406,7 @@ export async function runAssistantChatReplyFlow(params: {
   signal?: AbortSignal;
   shouldContinue?: () => boolean;
   replySender?: { id: string; name: string };
+  replyRunId?: string;
   revisionOfNodeId?: string;
   forceArtifact?: boolean;
 }) {
@@ -1426,6 +1438,7 @@ export async function runAssistantChatReplyFlow(params: {
             },
             timestamp: params.timestamp,
             upsertMessage: params.upsertMessage,
+            replyRunId: params.replyRunId,
           });
           await params.updateChat(params.chatId, {
             lastMessageAt: persisted.timestamp,
@@ -1468,6 +1481,7 @@ export async function runAssistantChatReplyFlow(params: {
         aiProfiles: params.aiProfiles,
         signal: params.signal,
         replySender: params.replySender,
+        replyRunId: params.replyRunId,
         forceArtifact: params.forceArtifact,
       });
       if (agentResult?.message) {
@@ -1505,6 +1519,7 @@ export async function runAssistantChatReplyFlow(params: {
         mode: 'general',
       },
       assistantReplyToUserMessageId: latestUserMessage(params.currentMessages)?.id,
+      ...(params.replyRunId ? { assistantReplyRunId: params.replyRunId } : {}),
       ...(params.revisionOfNodeId ? { branching: { revisionOfNodeId: params.revisionOfNodeId } } : {}),
     },
   };

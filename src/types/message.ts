@@ -271,6 +271,7 @@ export interface CharacterMention {
 export interface MessageMetadata {
   directReplyToUserMessageId?: string;
   assistantReplyToUserMessageId?: string;
+  assistantReplyRunId?: string;
   groupTurnTaskId?: string;
   agentTeamMedia?: { runId: string; taskId: string };
   mentions?: CharacterMention[];
