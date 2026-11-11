@@ -74,7 +74,7 @@ try {
 
   const fixture = await cdp.evaluate(`(async () => {
     const [{ useChatStore }, { useMessageStore }, { useAuthStore }, { buildAssistantChatDraft },
-      { flushBufferedPersistenceWrites }, { indexedDbWorkflowRepository, currentWorkflowScope },
+      { flushBufferedPersistenceWrites }, { currentWorkflowScope },
       { assistantReplyRunId }] = await Promise.all([
         import('/src/stores/useChatStore.ts'), import('/src/stores/useMessageStore.ts'),
         import('/src/stores/useAuthStore.ts'), import('/src/services/chatDraftBuilder.ts'),
@@ -113,13 +113,25 @@ try {
       [chatId]: { messages, lastSyncedAt: now, updatedAt: now + 2, remoteExhausted: true, activeLimit: 80 },
     }, isLoading: false });
     const scope = currentWorkflowScope();
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('pneumata-workflow-runs', 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
     for (const [runId, userMessageId] of [[committedRunId, committedUserId], [unknownRunId, unknownUserId]]) {
-      await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
+      const transaction = database.transaction('runs', 'readwrite');
+      transaction.objectStore('runs').put({
         run: { id: runId, chatId, goal: '回复用户消息', status: 'active', generation: 1, planVersion: 1, updatedAt: now },
         tasks: [{ id: userMessageId, runId, kind: 'assistant_reply',
           input: { chatId, userMessageId, replyRunId: runId }, dependsOn: [], status: 'running', attempt: 1, updatedAt: now }],
-      }, value: undefined }));
+      }, scope + '\\n' + runId);
+      await new Promise((resolve, reject) => {
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
     }
+    database.close();
     flushBufferedPersistenceWrites();
     await new Promise((resolve) => setTimeout(resolve, 1200));
     return { chatId, committedRunId, unknownRunId };
@@ -131,7 +143,7 @@ try {
     const result = await cdp.evaluate(`(async () => {
       const { listAssistantBackgroundReplies } = await import('/src/services/assistantBackgroundReply.ts');
       return (await listAssistantBackgroundReplies(${JSON.stringify(fixture.chatId)})).map((item) => ({
-        id: item.run.id, status: item.run.status, taskStatus: item.tasks[0]?.status,
+        id: item.run.id, schemaVersion: item.schemaVersion, status: item.run.status, taskStatus: item.tasks[0]?.status,
       }));
     })()`);
     return result.find((item) => item.id === fixture.committedRunId)?.status === 'completed'
@@ -141,11 +153,13 @@ try {
   const result = await cdp.evaluate(`(async () => {
     const { listAssistantBackgroundReplies } = await import('/src/services/assistantBackgroundReply.ts');
     return (await listAssistantBackgroundReplies(${JSON.stringify(fixture.chatId)})).map((item) => ({
-      id: item.run.id, status: item.run.status, taskStatus: item.tasks[0]?.status,
+      id: item.run.id, schemaVersion: item.schemaVersion, status: item.run.status, taskStatus: item.tasks[0]?.status,
     }));
   })()`);
   assert.equal(result.find((item) => item.id === fixture.committedRunId)?.taskStatus, 'completed');
   assert.equal(result.find((item) => item.id === fixture.unknownRunId)?.status, 'paused');
+  assert.equal(result.find((item) => item.id === fixture.committedRunId)?.schemaVersion, 1);
+  assert.equal(result.find((item) => item.id === fixture.unknownRunId)?.schemaVersion, 1);
   console.log(JSON.stringify({ ok: true, result }, null, 2));
 } finally {
   cdp.close();
