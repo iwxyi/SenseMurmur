@@ -153,12 +153,13 @@ async function startGroupBackgroundConversationOnce(chatId: string) {
   const chat = useChatStore.getState().chats.find((item) => item.id === chatId && item.type === 'group' && item.deletedAt == null);
   if (!chat) throw new Error('群聊不可用');
   const runId = groupConversationRunId(chatId);
-  if (!await runtime.read(runId)) {
-    const now = Date.now();
-    const snapshot: WorkflowSnapshot = { run: { id: runId, chatId, goal: '群聊自动运行', status: 'active', planOpen: true, generation: 0, planVersion: 1, updatedAt: now }, tasks: [] };
-    snapshot.tasks = [nextTask(snapshot)];
-    await runtime.create(snapshot);
-  } else {
+  const now = Date.now();
+  const initial: WorkflowSnapshot = { run: { id: runId, chatId, goal: '群聊自动运行', status: 'active', planOpen: true, generation: 0, planVersion: 1, updatedAt: now }, tasks: [] };
+  initial.tasks = [nextTask(initial)];
+  const created = await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, (existing) => ({
+    snapshot: existing || initial, value: !existing,
+  }));
+  if (!created) {
     const snapshot = await runtime.read(runId);
     if (!snapshot) throw new Error('群聊后台任务不存在');
     if (snapshot.tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed')) throw new Error('群聊上次请求结果需要核对');
@@ -191,7 +192,8 @@ export async function resumeGroupBackgroundConversation(chatId: string) {
   if (!run) throw new Error('群聊后台任务不存在');
   if (run.tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed')) throw new Error('群聊上次请求结果需要核对');
   const scope = currentWorkflowScope();
-  const operation = (async () => {
+  const operation = navigator.locks.request(`${workflowRunLockName(scope, runId)}:driver`, { ifAvailable: true }, async (driver) => {
+    if (!driver || currentWorkflowScope() !== scope) return;
     await indexedDbWorkflowRepository.transact(scope, runId, (current) => {
       if (!current) throw new Error('群聊后台任务不存在');
       return { snapshot: { ...current, run: { ...current.run, pauseRequested: false, updatedAt: Date.now() } }, value: undefined };
@@ -229,7 +231,7 @@ export async function resumeGroupBackgroundConversation(chatId: string) {
     if (final?.run.status === 'active' && !useChatStore.getState().chats.find((item) => item.id === chatId)?.isActive) {
       await runtime.pause(runId);
     }
-  })().finally(() => { active.delete(runId); publish(); });
+  }).finally(() => { active.delete(runId); publish(); });
   active.set(runId, operation);
   publish();
   return operation;

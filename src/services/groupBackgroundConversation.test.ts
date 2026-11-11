@@ -6,8 +6,8 @@ import { useChatStore } from '../stores/useChatStore';
 import { useCharacterStore } from '../stores/useCharacterStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
-import { groupConversationRunId, listGroupBackgroundConversations, pauseGroupBackgroundConversation, recoverGroupBackgroundConversations, startGroupBackgroundConversation } from './groupBackgroundConversation';
-import { currentWorkflowScope, indexedDbWorkflowRepository } from './workflowRunRuntime';
+import { groupConversationRunId, listGroupBackgroundConversations, pauseGroupBackgroundConversation, recoverGroupBackgroundConversations, resumeGroupBackgroundConversation, startGroupBackgroundConversation } from './groupBackgroundConversation';
+import { currentWorkflowScope, indexedDbWorkflowRepository, workflowRunLockName } from './workflowRunRuntime';
 
 const runLoop = vi.hoisted(() => vi.fn());
 vi.mock('./sessionRunner', () => ({ runSessionLoop: runLoop }));
@@ -170,5 +170,25 @@ describe('background group conversation', () => {
     await Promise.all([first, second]);
     expect(runLoop).toHaveBeenCalledTimes(1);
     expect((await listGroupBackgroundConversations(chatId))).toHaveLength(1);
+  });
+
+  it('does not drive turns when another tab owns the group loop', async () => {
+    const chatId = setup();
+    const runId = groupConversationRunId(chatId);
+    const now = Date.now();
+    await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, () => ({ snapshot: {
+      run: { id: runId, chatId, goal: '群聊自动运行', status: 'active', planOpen: true, generation: 0, planVersion: 1, updatedAt: now },
+      tasks: [{ id: `${runId}:turn:1`, runId, kind: 'group_conversation_turn', input: { chatId },
+        dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
+    }, value: undefined }));
+    await useChatStore.getState().updateChat(chatId, { isActive: true });
+    const driverLock = `${workflowRunLockName(currentWorkflowScope(), runId)}:driver`;
+    vi.stubGlobal('navigator', { locks: { request: async (name: string, options: unknown, callback?: (lock: object | null) => Promise<unknown>) =>
+      (callback || options as (lock: object | null) => Promise<unknown>)(name === driverLock ? null : {}) } });
+    await resumeGroupBackgroundConversation(chatId);
+    expect(runLoop).not.toHaveBeenCalled();
+    const saved = (await listGroupBackgroundConversations(chatId))[0];
+    expect(saved.tasks).toHaveLength(1);
+    expect(saved.tasks[0].status).toBe('queued');
   });
 });
