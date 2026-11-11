@@ -41,7 +41,12 @@ export function getAttachmentStatusDetail(attachment: AttachmentDisplayLike) {
   const kind = formatKind(attachment);
   if (attachment.status === 'failed') return getAttachmentErrorText(attachment);
   if (attachment.status === 'placeholder' || attachment.status === 'queued') return `${actorAction(attachment)}，稍等一下。`;
-  if (attachment.status === 'generating') return `${actorAction(attachment)}，很快就好。`;
+  if (attachment.status === 'generating') {
+    if (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation')) {
+      return `${actorAction(attachment)}，可能需要几分钟；完成后会显示在这里。`;
+    }
+    return `${actorAction(attachment)}，很快就好。`;
+  }
   if (attachment.status === 'ready') return attachment.url ? `${kind}已生成。` : `${kind}已生成，但资源地址暂不可用。`;
   if (attachment.status === 'deleted') return `${kind}已删除。`;
   return `${kind}正在处理。`;

@@ -115,6 +115,7 @@ describe('MessageBubble event rendering', () => {
     expect(getAttachmentStatusLabel({ kind: 'image', status: 'queued' })).toBe('对方正在发送图片…');
     expect(getAttachmentStatusDetail({ kind: 'image', status: 'queued' })).toBe('对方正在发送图片，稍等一下。');
     expect(getAttachmentStatusLabel({ kind: 'audio', status: 'generating' })).toBe('对方正在讲话…');
+    expect(getAttachmentStatusDetail({ kind: 'video', status: 'generating' })).toBe('对方正在生成视频，可能需要几分钟；完成后会显示在这里。');
     expect(getAttachmentStatusDetail({ kind: 'audio', status: 'failed', error: '语音模型未配置' })).toBe('语音模型未配置');
   });
 
