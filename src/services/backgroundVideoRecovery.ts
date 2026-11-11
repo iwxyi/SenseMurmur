@@ -20,6 +20,19 @@ export function findPendingVideoMessages(messages: Message[], activeChatIds: Set
   const latest = new Map<string, Message>();
   for (const message of messages) {
     const previous = latest.get(message.id);
+    if (previous && !previous.isDeleted && !message.isDeleted) {
+      const attachments = new Map((previous.metadata?.attachments || []).map((attachment) => [attachment.id, attachment]));
+      for (const attachment of message.metadata?.attachments || []) {
+        const prior = attachments.get(attachment.id);
+        if (!prior || attachment.updatedAt >= prior.updatedAt) attachments.set(attachment.id, attachment);
+      }
+      const previousUpdatedAt = Math.max(0, ...(previous.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0));
+      const updatedAt = Math.max(0, ...(message.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0));
+      const preferred = updatedAt > previousUpdatedAt || (updatedAt === previousUpdatedAt && !previous.serverId && message.serverId)
+        ? message : previous;
+      latest.set(message.id, { ...preferred, metadata: { ...preferred.metadata, attachments: [...attachments.values()] } });
+      continue;
+    }
     const updatedAt = Math.max(0, ...(message.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0));
     const previousUpdatedAt = previous ? Math.max(0, ...(previous.metadata?.attachments || []).map((attachment) => attachment.updatedAt || 0)) : -1;
     if (!previous || updatedAt > previousUpdatedAt || (updatedAt === previousUpdatedAt

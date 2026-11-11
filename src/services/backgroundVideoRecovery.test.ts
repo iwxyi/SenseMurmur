@@ -73,7 +73,7 @@ describe('background video recovery', () => {
       accepted, accepted, submitting, message('queued', 'queued'), message('missing-task', 'generating'),
       { ...message('deleted', 'generating', 'task-2'), isDeleted: true },
       { ...message('other-chat', 'generating', 'task-3'), chatId: 'other' },
-    ], new Set(['chat']), true)).toEqual([accepted, submitting]);
+    ], new Set(['chat']), true)).toEqual([expect.objectContaining(accepted), submitting]);
   });
 
   it('includes accepted music tasks in the same reload recovery queue', () => {
@@ -89,10 +89,35 @@ describe('background video recovery', () => {
     expect(findPendingVideoMessages([generating, ready], new Set(['chat']), true)).toEqual([]);
   });
 
+  it('recovers a second pending attachment when message copies have different latest updates', () => {
+    const first = message('multi', 'generating', 'task-video');
+    const firstAttachment = first.metadata!.attachments![0];
+    const musicAttachment = { ...musicMessage('multi', 'task-music').metadata!.attachments![0], updatedAt: 5 };
+    const firstCopy = { ...first, metadata: { attachments: [
+      { ...firstAttachment, status: 'ready' as const, url: '/video.mp4', updatedAt: 4 },
+      musicAttachment,
+    ] } };
+    const secondCopy = { ...first, metadata: { attachments: [
+      { ...firstAttachment, status: 'ready' as const, url: '/video.mp4', updatedAt: 6 },
+      { ...musicAttachment, updatedAt: 2 },
+    ] } };
+
+    expect(findPendingVideoMessages([firstCopy, secondCopy], new Set(['chat']), true)[0]?.metadata?.attachments)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: musicAttachment.id, status: 'generating', updatedAt: 5 })]));
+  });
+
+  it('does not revive a completed attachment from an older copy of the same message', () => {
+    const pending = message('completed-copy', 'generating', 'task-video');
+    const newer = { ...pending, metadata: { attachments: [
+      { ...pending.metadata!.attachments![0], status: 'ready' as const, url: '/video.mp4', updatedAt: 7 },
+    ] } };
+    expect(findPendingVideoMessages([newer, pending], new Set(['chat']), true)).toEqual([]);
+  });
+
   it('prefers the synced copy when attachment versions match', () => {
     const synced = message('same-version', 'generating', 'task-1');
     const local = { ...synced, serverId: undefined };
-    expect(findPendingVideoMessages([local, synced], new Set(['chat']), true)).toEqual([synced]);
+    expect(findPendingVideoMessages([local, synced], new Set(['chat']), true)).toEqual([expect.objectContaining(synced)]);
   });
 
   it('does not resume a deleted copy with the same attachment version', () => {
