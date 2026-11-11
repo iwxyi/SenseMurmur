@@ -10,6 +10,9 @@ import { api as appApi } from './api';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTeamVideoTask';
 import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReference } from './agentTeamImageTask';
+import { inspectAgentTeamImages } from './agentTeamImageInspection';
+
+vi.mock('./agentTeamImageInspection', () => ({ inspectAgentTeamImages: vi.fn() }));
 
 vi.mock('./agentTeamVideoTask', () => ({
   inspectAgentTeamVideoAttachment: vi.fn(),
@@ -40,9 +43,35 @@ beforeEach(() => {
   vi.mocked(inspectAgentTeamImageAttachment).mockReset();
   vi.mocked(queueAgentTeamImage).mockReset();
   vi.mocked(teamImageReference).mockReset();
+  vi.mocked(inspectAgentTeamImages).mockReset();
 });
 
 describe('agent team workflow', () => {
+  it('inspects generated image bytes before passing observations downstream', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `inspection-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true },
+      { id: 'vision', name: '视觉文字', type: 'text', provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o', isDefault: true },
+    ] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '检查场景', roles: [
+      { id: 'artist', name: '画师', responsibility: '画场景', method: '生成图片', acceptance: '有图片', allowedTools: ['image_generation'] },
+      { id: 'reviewer', name: '检查员', responsibility: '检查画面', method: '观察图片', acceptance: '有观察', allowedTools: ['image_inspection', 'text_generation'] },
+    ], tasks: [
+      { id: 'scene', roleId: 'artist', goal: '画森林', dependsOn: [], tool: 'image_generation', acceptance: '森林图' },
+      { id: 'inspect', roleId: 'reviewer', goal: '检查森林', dependsOn: ['scene'], tool: 'image_inspection', acceptance: '有森林' },
+      { id: 'report', roleId: 'reviewer', goal: '写检查报告', dependsOn: ['inspect'], tool: 'text_generation', acceptance: '报告可读' },
+    ], finalAcceptance: '报告说明实际画面' })).mockResolvedValueOnce('根据检查观察撰写的报告');
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片附件已保存' });
+    vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/forest.png', mimeType: 'image/png' });
+    vi.mocked(inspectAgentTeamImages).mockResolvedValue('实际画面有森林，无角色');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o' }, () => `inspection-scope-${runId}`);
+    const result = await workflow.start(runId, chatId, '画森林并检查');
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(inspectAgentTeamImages).toHaveBeenCalledWith(expect.objectContaining({ references: [{ url: '/uploads/media/forest.png', mimeType: 'image/png' }] }));
+    expect(generate.mock.calls[1][2][0].content).toContain('实际画面有森林，无角色');
+  });
   it('automatically reviews delivery, delegates one missing step, and does not repeat it on resume', async () => {
     const runId = crypto.randomUUID();
     const basePlan = { summary: '研究', roles: [{ id: 'writer', name: '写作者', responsibility: '研究', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],

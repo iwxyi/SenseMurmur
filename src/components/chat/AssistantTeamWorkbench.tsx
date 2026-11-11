@@ -66,10 +66,10 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const latestReview = run.tasks.filter((item) => item.kind === 'team_review' && item.status === 'completed').at(-1);
   const reviewResult = latestReview?.output && typeof latestReview.output === 'object' && !Array.isArray(latestReview.output)
     ? latestReview.output as { complete?: unknown; reason?: unknown } : null;
-  const childTasks = run.tasks.filter((item) => item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_video');
+  const childTasks = run.tasks.filter((item) => item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_image_inspection' || item.kind === 'agent_video');
   const blocked = summary.blocked.length > 0;
   const running = isRunActive(run.run.id);
-  const editable = Boolean(canRun && task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_video') && task.attempt === 0
+  const editable = Boolean(canRun && task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_image_inspection' || task.kind === 'agent_video') && task.attempt === 0
     && (task.status === 'queued' || task.status === 'waiting_dependency'));
   const unknownReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'result_unknown');
   const failedReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'failed');

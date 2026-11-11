@@ -1,4 +1,4 @@
-import { getUsablePreferredAIProfile, type APIConfig } from '../types/settings';
+import { getUsablePreferredAIProfile, resolveAIModelInputCapabilities, type APIConfig } from '../types/settings';
 import { generateResponse } from './aiClient';
 import { planAgentTeam, validateAgentTeamPlan, type AgentTeamPlan, type AgentTeamTask } from './agentTeamPlan';
 import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
@@ -18,13 +18,24 @@ import { api as appApi } from './api';
 import { resolveChatAgentCapabilities } from './chatAgentCapabilities';
 import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTeamVideoTask';
 import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReference } from './agentTeamImageTask';
+import { inspectAgentTeamImages } from './agentTeamImageInspection';
 import { listAvailableModels } from './aiClient';
+
+const TOOL_TASK_KINDS = {
+  text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image',
+  image_inspection: 'agent_image_inspection', video_generation: 'agent_video',
+} as const;
+
+function teamTaskKind(task: AgentTeamTask) { return TOOL_TASK_KINDS[task.tool || 'text_generation']; }
+function isAgentTaskKind(kind: string) { return Object.values(TOOL_TASK_KINDS).some((value) => value === kind); }
 
 async function teamMediaCapabilities() {
   const profiles = useSettingsStore.getState().aiProfiles;
   const imageProfile = getUsablePreferredAIProfile(profiles, 'image');
+  const textProfile = getUsablePreferredAIProfile(profiles, 'text');
+  const media = { imageGeneration: Boolean(imageProfile), imageInspection: Boolean(imageProfile && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput) };
   const videoProfile = getUsablePreferredAIProfile(profiles, 'video');
-  if (!videoProfile) return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false, videoRequiresReferenceImage: false, maxVideoReferenceImages: 0, videoUnavailableReason: '当前未配置视频模型' };
+  if (!videoProfile) return { ...media, videoGeneration: false, videoReferenceImages: false, videoRequiresReferenceImage: false, maxVideoReferenceImages: 0, videoUnavailableReason: '当前未配置视频模型' };
   let videoReferenceImages = false;
   let videoRequiresReferenceImage = false;
   let maxVideoReferenceImages: number | undefined = 0;
@@ -32,11 +43,11 @@ async function teamMediaCapabilities() {
     let models: Awaited<ReturnType<typeof listAvailableModels>>;
     try { models = await listAvailableModels(videoProfile, 'video'); }
     catch (error) {
-      return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false, videoRequiresReferenceImage: false, maxVideoReferenceImages: 0,
+      return { ...media, videoGeneration: false, videoReferenceImages: false, videoRequiresReferenceImage: false, maxVideoReferenceImages: 0,
         videoUnavailableReason: `视频模型目录暂不可用：${error instanceof Error ? error.message : '查询失败'}` };
     }
     const selected = models.find((item) => item.id === videoProfile.model);
-    if (!selected) return { imageGeneration: Boolean(imageProfile), videoGeneration: false, videoReferenceImages: false, videoRequiresReferenceImage: false, maxVideoReferenceImages: 0, videoUnavailableReason: '当前视频模型未在可用模型列表中' };
+    if (!selected) return { ...media, videoGeneration: false, videoReferenceImages: false, videoRequiresReferenceImage: false, maxVideoReferenceImages: 0, videoUnavailableReason: '当前视频模型未在可用模型列表中' };
     const raw = selected.raw;
     const options = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw.aceVideoOptions : undefined;
     videoReferenceImages = Boolean(options && typeof options === 'object' && !Array.isArray(options)
@@ -48,7 +59,7 @@ async function teamMediaCapabilities() {
     maxVideoReferenceImages = videoReferenceImages && typeof advertisedLimit === 'number' && Number.isInteger(advertisedLimit)
       ? advertisedLimit : videoReferenceImages ? undefined : 0;
   }
-  return { imageGeneration: Boolean(imageProfile), videoGeneration: true, videoReferenceImages, videoRequiresReferenceImage, maxVideoReferenceImages, videoUnavailableReason: undefined };
+  return { ...media, videoGeneration: true, videoReferenceImages, videoRequiresReferenceImage, maxVideoReferenceImages, videoUnavailableReason: undefined };
 }
 
 interface TeamTaskInput {
@@ -126,6 +137,7 @@ function isTeamTaskInput(value: unknown): value is TeamTaskInput {
 function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<ReturnType<typeof teamMediaCapabilities>>, webSearch: boolean) {
   if (!webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索');
   if (!capabilities.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');
+  if (!capabilities.imageInspection && plan.tasks.some((task) => task.tool === 'image_inspection')) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
   if (!capabilities.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
   const byId = new Map(plan.tasks.map((task) => [task.id, task]));
   if (!capabilities.videoReferenceImages && plan.tasks.some((task) => task.tool === 'video_generation' && countImageUpstream(task, byId) > 0)) {
@@ -186,7 +198,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         try { parsed = JSON.parse(raw); } catch (error) { throw new WorkflowPreflightError(`主 Agent 验收返回了无效 JSON：${error instanceof Error ? error.message : '解析失败'}`); }
         return { output: parseTeamReview(parsed) };
       }
-      if ((task.kind !== 'agent_text' && task.kind !== 'agent_web_search' && task.kind !== 'agent_image' && task.kind !== 'agent_video') || !isTeamTaskInput(task.input)) throw new WorkflowPreflightError('团队任务类型无效');
+      if (!isAgentTaskKind(task.kind) || !isTeamTaskInput(task.input)) throw new WorkflowPreflightError('团队任务类型无效');
       const input = task.input;
       const role = input.role;
       const snapshot = await runtime.read(task.runId);
@@ -204,7 +216,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         throw new WorkflowPreflightError('团队任务与已保存计划不一致');
       }
       const selectedTool = input.task.tool || 'text_generation';
-      if (task.kind !== (selectedTool === 'web_search' ? 'agent_web_search' : selectedTool === 'image_generation' ? 'agent_image' : selectedTool === 'video_generation' ? 'agent_video' : 'agent_text')) throw new WorkflowPreflightError('团队任务工具与计划不一致');
+      if (task.kind !== teamTaskKind(input.task)) throw new WorkflowPreflightError('团队任务工具与计划不一致');
       if (signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
       if (selectedTool === 'image_generation') {
         const upstream = input.task.dependsOn.map((id) => {
@@ -214,6 +226,22 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         });
         return queueAgentTeamImage({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           prompt: [input.task.goal, ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), signal });
+      }
+      if (selectedTool === 'image_inspection') {
+        const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'text');
+        const capabilities = resolveAIModelInputCapabilities(profile);
+        if (!profile || !capabilities.imageInput) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
+        const imageTaskIds = input.task.dependsOn.map((id) => input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id)
+          .filter((id) => snapshot.tasks.find((item) => item.id === id)?.kind === 'agent_image');
+        if (!imageTaskIds.length || imageTaskIds.length > capabilities.maxAttachments) throw new WorkflowPreflightError('图片检查的参考图片数量不符合当前模型限制');
+        const references = imageTaskIds.map((id) => teamImageReference(task.runId, id));
+        if (references.some((reference) => !reference)) throw new WorkflowPreflightError('图片检查的参考图片尚未就绪');
+        const output = await inspectAgentTeamImages({
+          api: { provider: profile.provider, apiKey: profile.apiKey, baseUrl: profile.baseUrl, model: profile.model, maxOutputTokens: profile.maxOutputTokens },
+          goal: [input.task.goal, input.userInstruction].filter(Boolean).join('\n'), acceptance: input.task.acceptance,
+          references: references.filter((reference): reference is NonNullable<typeof reference> => Boolean(reference)), signal,
+        });
+        return { output };
       }
       if (selectedTool === 'video_generation') {
         const existingVideo = inspectAgentTeamVideoAttachment(task.runId, task.id);
@@ -326,7 +354,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (current.tasks.length - (hasReviewBlock ? 1 : 0) >= 24) throw new Error('团队任务规模超出限制');
         if (current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown' || task.status === 'failed')) throw new Error('请先处理未完成或待核对的步骤');
         if (current.tasks.some((task) => task.kind === 'team_plan_revision' && task.status !== 'completed')) throw new Error('请先完成已追加的团队任务');
-        const sourceTaskIds = current.tasks.filter((task) => task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_video').map((task) => task.id);
+        const sourceTaskIds = current.tasks.filter((task) => isAgentTaskKind(task.kind)).map((task) => task.id);
         if (!sourceTaskIds.length) throw new Error('团队规划尚未完成');
         const revisionCount = current.tasks.filter((task) => task.kind === 'team_plan_revision').length;
         const task: WorkflowTask = {
@@ -352,7 +380,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           if (current.run.status !== 'paused') throw new Error('请先暂停整个团队任务');
           if (current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
           const target = current.tasks.find((task) => task.id === taskId);
-          if (!target || (target.kind !== 'agent_text' && target.kind !== 'agent_web_search' && target.kind !== 'agent_image' && target.kind !== 'agent_video') || !isTeamTaskInput(target.input) || target.attempt !== 0
+          if (!target || !isAgentTaskKind(target.kind) || !isTeamTaskInput(target.input) || target.attempt !== 0
             || (target.status !== 'queued' && target.status !== 'waiting_dependency')) throw new Error('只能修改尚未执行的子任务');
           const next: WorkflowSnapshot = {
             ...current,
@@ -435,7 +463,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const additions = plan.tasks.map((task): WorkflowTask => ({
         id: task.id,
         runId,
-        kind: task.tool === 'web_search' ? 'agent_web_search' : task.tool === 'image_generation' ? 'agent_image' : task.tool === 'video_generation' ? 'agent_video' : 'agent_text',
+        kind: teamTaskKind(task),
         input: { task, goal: snapshot.run.goal, role: roles.get(task.roleId)! } satisfies TeamTaskInput,
         dependsOn: ['plan', ...task.dependsOn],
         status: task.dependsOn.length ? 'waiting_dependency' : 'queued',
@@ -459,7 +487,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const delegatedRoles = new Map(delegated.roles.map((role) => [role.id, role]));
         const contextTaskIds = isTeamRevisionInput(revisionTask.input) ? revisionTask.input.sourceTaskIds : [];
         const delegatedTasks = delegated.tasks.map((task): WorkflowTask => ({
-          id: delegatedTaskId(revisionTask.id, task.id), runId, kind: task.tool === 'web_search' ? 'agent_web_search' : task.tool === 'image_generation' ? 'agent_image' : task.tool === 'video_generation' ? 'agent_video' : 'agent_text',
+          id: delegatedTaskId(revisionTask.id, task.id), runId, kind: teamTaskKind(task),
           input: { task, goal: snapshot.run.goal, role: delegatedRoles.get(task.roleId)!, sourcePlanTaskId: revisionTask.id, contextTaskIds } satisfies TeamTaskInput,
           dependsOn: [revisionTask.id, ...contextTaskIds, ...task.dependsOn.map((id) => delegatedTaskId(revisionTask.id, id))],
           status: 'waiting_dependency', attempt: 0, updatedAt: Date.now(),
@@ -473,7 +501,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const reviewId = `review_${round}`;
           const review = snapshot.tasks.find((task) => task.id === reviewId);
           if (!review) {
-            const sourceTaskIds = snapshot.tasks.filter((task) => ['agent_text', 'agent_web_search', 'agent_image', 'agent_video'].includes(task.kind)).map((task) => task.id);
+            const sourceTaskIds = snapshot.tasks.filter((task) => isAgentTaskKind(task.kind)).map((task) => task.id);
             if (!sourceTaskIds.length) break;
             snapshot = await runtime.addTasksOnce(runId, snapshot.run.planVersion, [{
               id: reviewId, runId, kind: 'team_review', input: { sourceTaskIds } satisfies TeamReviewInput,
@@ -491,7 +519,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           }
           const revisionId = `auto_delegate_${round}`;
           if (!snapshot.tasks.some((task) => task.id === revisionId)) {
-            const sourceTaskIds = snapshot.tasks.filter((task) => ['agent_text', 'agent_web_search', 'agent_image', 'agent_video'].includes(task.kind)).map((task) => task.id);
+            const sourceTaskIds = snapshot.tasks.filter((task) => isAgentTaskKind(task.kind)).map((task) => task.id);
             if (snapshot.tasks.length >= 23) {
               snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '团队任务已达到自动追加上限，请检查结果并决定后续步骤。'));
               break;
@@ -515,7 +543,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const contextTaskIds = isTeamRevisionInput(revision.input) ? revision.input.sourceTaskIds : [];
           snapshot = await runtime.expandPlanOnce(runId, snapshot.run.planVersion, revisionId, delegated.tasks.map((task): WorkflowTask => ({
             id: delegatedTaskId(revisionId, task.id), runId,
-            kind: task.tool === 'web_search' ? 'agent_web_search' : task.tool === 'image_generation' ? 'agent_image' : task.tool === 'video_generation' ? 'agent_video' : 'agent_text',
+            kind: teamTaskKind(task),
             input: { task, goal: snapshot.run.goal, role: roles.get(task.roleId)!, sourcePlanTaskId: revisionId, contextTaskIds } satisfies TeamTaskInput,
             dependsOn: [revisionId, ...contextTaskIds, ...task.dependsOn.map((id) => delegatedTaskId(revisionId, id))],
             status: 'waiting_dependency', attempt: 0, updatedAt: Date.now(),

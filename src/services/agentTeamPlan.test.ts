@@ -46,6 +46,16 @@ describe('agent team plan', () => {
     expect(() => validateAgentTeamPlan(plan)).toThrow('未获授权');
   });
 
+  it('requires image inspection to directly depend on generated images', () => {
+    const plan = valid();
+    plan.roles[0].allowedTools = ['image_generation', 'image_inspection'];
+    plan.tasks[0] = { ...plan.tasks[0], tool: 'image_generation' } as typeof plan.tasks[0];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'image_inspection' } as typeof plan.tasks[1];
+    expect(validateAgentTeamPlan(plan).tasks[1].tool).toBe('image_inspection');
+    plan.tasks[1].dependsOn = [];
+    expect(() => validateAgentTeamPlan(plan)).toThrow('直接依赖图片生成任务');
+  });
+
   it('rejects an image to video plan when the selected model cannot receive reference images', async () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['image_generation', 'video_generation'];
