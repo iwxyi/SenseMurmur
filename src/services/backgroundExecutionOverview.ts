@@ -42,7 +42,7 @@ function collectSafelyRecoverableRuns({ assistant, direct, aiDirect, group, team
       const chat = chats.find((item) => item.id === snapshot.run.chatId);
       return Boolean(chat && isSafelyResumableWorkflow(snapshot)
         && snapshot.tasks.every((task) => task.kind === 'group_conversation_turn')
-        && ['conversation', 'study'].includes(resolveSessionFamilyKey(chat))
+        && ['conversation', 'study', 'analysis'].includes(resolveSessionFamilyKey(chat))
         && chat.sessionKind?.scenarioId !== 'story-reader');
     }).map((snapshot) => ({ snapshot, start: () => startGroupBackgroundConversation(snapshot.run.chatId) })),
   ];

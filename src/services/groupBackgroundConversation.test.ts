@@ -92,6 +92,23 @@ describe('background group conversation', () => {
     expect(useChatStore.getState().chats.find((item) => item.id === chatId)?.isActive).toBe(false);
   });
 
+  it('runs analysis rooms through the persistent background turn executor', async () => {
+    const chatId = setup();
+    const current = useChatStore.getState().chats[0];
+    useChatStore.setState({ chats: [normalizeConversation({
+      ...current,
+      sessionKind: { topology: 'group', family: 'analysis', scenarioId: 'opinion-review', surfaceProfile: 'text' },
+    })] });
+    runLoop.mockImplementation(async (params: { onIdle: () => void }) => params.onIdle());
+
+    await startGroupBackgroundConversation(chatId);
+
+    const snapshot = (await listGroupBackgroundConversations(chatId))[0];
+    expect(runLoop).toHaveBeenCalledTimes(1);
+    expect(snapshot.tasks[0]).toMatchObject({ status: 'completed', output: { outcome: 'stopped' } });
+    expect(useChatStore.getState().chats.find((item) => item.id === chatId)?.isActive).toBe(false);
+  });
+
   it('waits for the reader after one committed story chapter and resumes on explicit start', async () => {
     const chatId = setup();
     const current = useChatStore.getState().chats[0];

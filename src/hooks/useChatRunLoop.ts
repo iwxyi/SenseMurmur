@@ -68,7 +68,7 @@ export function shouldCreateSpeakerStreamingPlaceholder(chat?: Pick<GroupChat, '
 
 export function usesBackgroundGroupExecution(chat: GroupChat) {
   const family = resolveSessionFamilyKey(chat);
-  return chat.type === 'group' && (family === 'conversation' || family === 'study');
+  return chat.type === 'group' && (family === 'conversation' || family === 'study' || family === 'analysis');
 }
 
 export function resolveConversationLoopStartDelayMs(options: ConversationLoopStartOptions = {}) {
