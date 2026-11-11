@@ -1,5 +1,7 @@
 import type { Message } from '../types/message';
+import type { MessageBranchState } from '../types/chat';
 import { projectCurrentChatMessages, projectMergedChatMessages } from './currentChatMessages';
+import { buildBranchStateWithHead } from './messageBranching';
 import { getWorkspaceSignal } from './workspaceLifecycle';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
@@ -15,14 +17,28 @@ interface AssistantReplyInput {
   userMessageId: string;
   replyRunId?: string;
   selectedArtifactId?: string | null;
-  expectedBranchLeafNodeId?: string;
+  expectedBranchLeafNodeId?: string | null;
+  replyTimestamp?: number;
+  revisionOfNodeId?: string;
+  replySender?: { id: string; name: string };
+  branchRegeneration?: {
+    branchName: string;
+    expectedActiveLeafNodeId: string | null;
+    rewoundState: MessageBranchState;
+  };
 }
 
 function isAssistantReplyInput(value: unknown): value is AssistantReplyInput {
   if (!value || typeof value !== 'object') return false;
   const input = value as AssistantReplyInput;
   return typeof input.chatId === 'string' && typeof input.userMessageId === 'string'
-    && (input.expectedBranchLeafNodeId === undefined || typeof input.expectedBranchLeafNodeId === 'string');
+    && (input.expectedBranchLeafNodeId === undefined || input.expectedBranchLeafNodeId === null || typeof input.expectedBranchLeafNodeId === 'string')
+    && (input.replyTimestamp === undefined || (typeof input.replyTimestamp === 'number' && Number.isFinite(input.replyTimestamp)))
+    && (input.revisionOfNodeId === undefined || typeof input.revisionOfNodeId === 'string')
+    && (input.replySender === undefined || (typeof input.replySender.id === 'string' && typeof input.replySender.name === 'string'))
+    && (input.branchRegeneration === undefined || (typeof input.branchRegeneration.branchName === 'string'
+      && (input.branchRegeneration.expectedActiveLeafNodeId === null || typeof input.branchRegeneration.expectedActiveLeafNodeId === 'string')
+      && typeof input.branchRegeneration.rewoundState === 'object' && input.branchRegeneration.rewoundState !== null));
 }
 
 function messagesForChat(chatId: string) {
@@ -58,11 +74,19 @@ async function executeAssistantReplyUnlocked(task: WorkflowTask, signal: AbortSi
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
     useSettingsStore.persist.hasHydrated() ? Promise.resolve() : useSettingsStore.persist.rehydrate(),
   ]);
-  const chat = useChatStore.getState().chats.find((item) => item.id === chatId);
+  let chat = useChatStore.getState().chats.find((item) => item.id === chatId);
   if (!chat || chat.type !== 'assistant') throw new WorkflowPreflightError('助手会话已不存在');
   if (chat.deletedAt != null) throw new WorkflowPreflightError('助手会话已删除');
-  if (input.expectedBranchLeafNodeId && chat.messageBranchState?.activeLeafNodeId !== input.expectedBranchLeafNodeId) {
+  const expectedBranchLeafNodeId = input.branchRegeneration
+    ? input.branchRegeneration.expectedActiveLeafNodeId
+    : input.expectedBranchLeafNodeId;
+  if (expectedBranchLeafNodeId !== undefined && chat.messageBranchState?.activeLeafNodeId !== expectedBranchLeafNodeId) {
     throw new WorkflowPreflightError('消息分支已切换，已停止这条助手回复');
+  }
+  if (input.branchRegeneration) {
+    await useChatStore.getState().updateChat(chatId, { messageBranchState: input.branchRegeneration.rewoundState });
+    flushBufferedPersistenceWrites();
+    chat = { ...chat, messageBranchState: input.branchRegeneration.rewoundState };
   }
   const allMessages = messagesForChat(chatId);
   const userMessage = allMessages.find((message) => message.id === input.userMessageId);
@@ -80,12 +104,24 @@ async function executeAssistantReplyUnlocked(task: WorkflowTask, signal: AbortSi
     currentMessages: messages,
     replyRunId: input.replyRunId,
     selectedArtifactId: input.selectedArtifactId,
-    timestamp: userMessage.timestamp + 1,
+    timestamp: input.replyTimestamp ?? userMessage.timestamp + 1,
     upsertMessage: upsertAssistantBackgroundMessage,
     updateChat: (id, patch) => useChatStore.getState().updateChat(id, patch),
+    revisionOfNodeId: input.revisionOfNodeId,
+    replySender: input.replySender,
     signal,
-    shouldContinue: () => !signal.aborted && useChatStore.getState().chats.some((item) => item.id === chatId && item.deletedAt == null),
+    shouldContinue: () => !signal.aborted && useChatStore.getState().chats.some((item) => item.id === chatId && item.deletedAt == null
+      && (!input.branchRegeneration || item.messageBranchState?.activeLeafNodeId === input.branchRegeneration.rewoundState.activeLeafNodeId)),
   });
+  if (input.branchRegeneration && result) {
+    const latestChat = useChatStore.getState().chats.find((item) => item.id === chatId);
+    const regeneratedNodeId = result.metadata?.branching?.nodeId || result.clientKey || result.id;
+    if (latestChat?.type === 'assistant' && latestChat.deletedAt == null
+      && latestChat.messageBranchState?.activeLeafNodeId === input.branchRegeneration.rewoundState.activeLeafNodeId) {
+      const messageBranchState = buildBranchStateWithHead(latestChat.messageBranchState, regeneratedNodeId, input.branchRegeneration.branchName);
+      await useChatStore.getState().updateChat(chatId, { messageBranchState, lastMessageAt: result.timestamp, latestMessage: result });
+    }
+  }
   flushBufferedPersistenceWrites();
   return { output: result?.id || null };
 }
@@ -156,15 +192,29 @@ export function assistantReplyRunId(chatId: string, userMessageId: string) {
   return `${chatId}\n${userMessageId}`;
 }
 
-export function startAssistantBackgroundReply(params: { chatId: string; userMessageId: string; selectedArtifactId?: string | null; expectedBranchLeafNodeId?: string }) {
-  const runId = assistantReplyRunId(params.chatId, params.userMessageId);
+export function startAssistantBackgroundReply(params: {
+  chatId: string;
+  userMessageId: string;
+  selectedArtifactId?: string | null;
+  expectedBranchLeafNodeId?: string | null;
+  runId?: string;
+  replyRunId?: string;
+  replyTimestamp?: number;
+  revisionOfNodeId?: string;
+  replySender?: { id: string; name: string };
+  branchRegeneration?: AssistantReplyInput['branchRegeneration'];
+}) {
+  const runId = params.runId || assistantReplyRunId(params.chatId, params.userMessageId);
   const pending = startingReplies.get(runId);
   if (pending) return pending;
   const operation = (async () => {
     const now = Date.now();
     const snapshot: WorkflowSnapshot = {
-      run: { id: runId, chatId: params.chatId, goal: '回复用户消息', status: 'active', generation: 0, planVersion: 1, updatedAt: now },
-      tasks: [{ id: params.userMessageId, runId, kind: 'assistant_reply', input: { chatId: params.chatId, userMessageId: params.userMessageId, replyRunId: runId, selectedArtifactId: params.selectedArtifactId, expectedBranchLeafNodeId: params.expectedBranchLeafNodeId }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
+        run: { id: runId, chatId: params.chatId, goal: params.branchRegeneration ? '重新回答助手消息' : '回复用户消息', status: 'active', generation: 0, planVersion: 1, updatedAt: now },
+      tasks: [{ id: params.userMessageId, runId, kind: 'assistant_reply', input: { chatId: params.chatId, userMessageId: params.userMessageId,
+        replyRunId: params.replyRunId || runId, selectedArtifactId: params.selectedArtifactId, expectedBranchLeafNodeId: params.expectedBranchLeafNodeId,
+        replyTimestamp: params.replyTimestamp, revisionOfNodeId: params.revisionOfNodeId, replySender: params.replySender,
+        branchRegeneration: params.branchRegeneration }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
     };
     const created = await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, (existing) => ({
       snapshot: existing || snapshot, value: !existing,
@@ -246,9 +296,16 @@ async function reconcileCommittedAssistantReply(runId: string) {
     if (!run || !task || run.tasks.length !== 1 || task.kind !== 'assistant_reply'
       || task.attempt < 1 || run.run.status === 'completed') return false;
     const chat = useChatStore.getState().chats.find((item) => item.id === run.run.chatId && item.type === 'assistant' && item.deletedAt == null);
+    if (!chat) return false;
     const input = task.input as AssistantReplyInput;
-    const reply = chat ? committedAssistantReply(chat.id, task.id, input.replyRunId) : null;
+    const reply = committedAssistantReply(chat.id, task.id, input.replyRunId);
     if (!reply) return false;
+    if (input.branchRegeneration && chat.messageBranchState?.activeLeafNodeId === input.branchRegeneration.rewoundState.activeLeafNodeId) {
+      const nodeId = reply.metadata?.branching?.nodeId || reply.clientKey || reply.id;
+      const messageBranchState = buildBranchStateWithHead(chat.messageBranchState, nodeId, input.branchRegeneration.branchName);
+      await useChatStore.getState().updateChat(chat.id, { messageBranchState, lastMessageAt: reply.timestamp, latestMessage: reply });
+      flushBufferedPersistenceWrites();
+    }
     return indexedDbWorkflowRepository.transact(scope, runId, (current) => {
       if (!current || current.run.status === 'completed' || current.tasks[0]?.id !== task.id) return { snapshot: current || run, value: false };
       const snapshot: WorkflowSnapshot = {

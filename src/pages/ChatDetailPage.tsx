@@ -2536,8 +2536,35 @@ export default function ChatDetailPage() {
           }
           nextState = buildBranchStateWithHead(nextState, sourceNode.parentNodeId, activeName);
           const nextChat: GroupChat = { ...chat, messageBranchState: nextState };
-          await updateChat(id, { messageBranchState: nextState });
+          const runInBackground = chat.type === 'assistant' && !shouldResume && typeof navigator.locks?.request === 'function';
+          if (!runInBackground) await updateChat(id, { messageBranchState: nextState });
           if (!shouldContinue()) return;
+          if (runInBackground) {
+            const sourceUserMessage = [...contextMessages].reverse().find((message) => message.type === 'user' || message.type === 'god');
+            if (!sourceUserMessage) throw new Error('找不到需要重新回答的原始用户消息');
+            const runId = `${id}\nregenerate\n${sourceNode.nodeId}\n${crypto.randomUUID()}`;
+            void import('../services/assistantBackgroundReply').then(({ startAssistantBackgroundReply }) => startAssistantBackgroundReply({
+              chatId: id,
+              userMessageId: sourceUserMessage.id,
+              selectedArtifactId: selectedAssistantArtifactId,
+              runId,
+              replyRunId: runId,
+              replyTimestamp: getNextMessageTimestamp(),
+              revisionOfNodeId: sourceNode.nodeId,
+              replySender: { id: sourceMessage.senderId, name: sourceMessage.senderName },
+              branchRegeneration: {
+                branchName: activeName,
+                expectedActiveLeafNodeId: activeRefHead,
+                rewoundState: nextState,
+              },
+            })).then((result) => {
+              if (result.summary.blocked.length) showErrorToast(result.summary.blocked[0].reason);
+            }).catch((error) => {
+              console.error('[assistant-reply:regenerate-background-error]', error);
+              showErrorToast(error instanceof Error ? error.message : '助手重新回答失败');
+            });
+            return undefined;
+          }
           const { runAssistantChatReplyFlow } = await import('../services/assistantChatFlow');
           const regenerated = await runAssistantChatReplyFlow({
             api,

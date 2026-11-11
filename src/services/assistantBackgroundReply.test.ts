@@ -7,6 +7,7 @@ import { useSettingsStore } from '../stores/useSettingsStore';
 import type { Message } from '../types/message';
 import { assistantReplyRunId, listAssistantBackgroundReplies, recoverAssistantBackgroundReplies, resumeAssistantBackgroundReply, startAssistantBackgroundReply } from './assistantBackgroundReply';
 import { currentWorkflowScope, indexedDbWorkflowRepository } from './workflowRunRuntime';
+import { buildBranchStateWithHead } from './messageBranching';
 
 const reply = vi.hoisted(() => vi.fn());
 vi.mock('./assistantChatFlow', () => ({ runAssistantChatReplyFlow: reply }));
@@ -98,6 +99,48 @@ describe('assistant background reply', () => {
     expect(reply).toHaveBeenCalledTimes(1);
   });
 
+  it('rewinds and commits a regenerated assistant reply inside its durable run', async () => {
+    const chatId = crypto.randomUUID();
+    const oldState = { enabled: true, activeBranchName: 'main', activeLeafNodeId: 'assistant-old', refs: {
+      main: { name: 'main', headNodeId: 'assistant-old', createdAt: 1, updatedAt: 1, version: 1 },
+    } };
+    const chat = { ...buildAssistantChatDraft(), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 2, messageBranchState: oldState };
+    const userMessage: Message = { id: 'user-root', chatId, type: 'user', senderId: 'user', senderName: '用户', content: '先回答', emotion: 0, timestamp: 1, isDeleted: false,
+      metadata: { branching: { nodeId: 'user-node', parentNodeId: null, sequence: 0 } } };
+    const oldReply: Message = { id: 'old-reply', chatId, type: 'ai', senderId: 'assistant', senderName: '助手', content: '旧答案', emotion: 0, timestamp: 2, isDeleted: false,
+      metadata: { branching: { nodeId: 'assistant-old', parentNodeId: 'user-node', sequence: 1 } } };
+    const newReply: Message = { id: 'new-reply', chatId, type: 'ai', senderId: 'assistant', senderName: '助手', content: '新答案', emotion: 0, timestamp: 3, isDeleted: false,
+      metadata: { branching: { nodeId: 'assistant-new', parentNodeId: 'user-node', sequence: 2 } } };
+    useChatStore.setState({ chats: [chat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [userMessage, oldReply], messageWindowsByChatId: {} });
+    reply.mockResolvedValue(newReply);
+    const runId = `${chatId}\nregenerate\nassistant-old\nattempt-one`;
+    const result = await startAssistantBackgroundReply({ chatId, userMessageId: userMessage.id, runId, replyRunId: runId,
+      replyTimestamp: 3, revisionOfNodeId: 'assistant-old', replySender: { id: 'assistant', name: '助手' },
+      branchRegeneration: { branchName: 'main', expectedActiveLeafNodeId: 'assistant-old',
+        rewoundState: buildBranchStateWithHead(oldState, 'user-node', 'main') } });
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(reply.mock.calls[0][0].currentMessages).toContainEqual(userMessage);
+    expect(reply.mock.calls[0][0].currentMessages).not.toContainEqual(oldReply);
+    expect(reply.mock.calls[0][0]).toMatchObject({ replyRunId: runId, revisionOfNodeId: 'assistant-old' });
+    expect(useChatStore.getState().chats[0].messageBranchState?.activeLeafNodeId).toBe('assistant-new');
+  });
+
+  it('does not rewind a branch changed while regeneration waits in the scheduler', async () => {
+    const chatId = crypto.randomUUID();
+    const state = { enabled: true, activeBranchName: 'main', activeLeafNodeId: 'different-node' };
+    const chat = { ...buildAssistantChatDraft(), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 2, messageBranchState: state };
+    const userMessage: Message = { id: 'user-root', chatId, type: 'user', senderId: 'user', senderName: '用户', content: '先回答', emotion: 0, timestamp: 1, isDeleted: false };
+    useChatStore.setState({ chats: [chat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [userMessage], messageWindowsByChatId: {} });
+    const rewoundState = buildBranchStateWithHead(state, 'user-root', 'main');
+    const result = await startAssistantBackgroundReply({ chatId, userMessageId: userMessage.id, runId: `${chatId}\nregenerate\nstale`,
+      branchRegeneration: { sourceNodeId: 'assistant-old', branchName: 'main', expectedActiveLeafNodeId: 'assistant-old', rewoundState } });
+    expect(result.summary.blocked[0]?.reason).toContain('消息分支已切换');
+    expect(useChatStore.getState().chats[0].messageBranchState?.activeLeafNodeId).toBe('different-node');
+    expect(reply).not.toHaveBeenCalled();
+  });
+
   it('does not retry an uncertain request after reopening the app', async () => {
     const chatId = crypto.randomUUID();
     const chat = { ...buildAssistantChatDraft(), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 1 };
@@ -132,6 +175,33 @@ describe('assistant background reply', () => {
     expect(recovered.run.status).toBe('completed');
     expect(recovered.tasks[0]).toMatchObject({ status: 'completed', output: committed.id });
     await resumeAssistantBackgroundReply(runId, crypto.randomUUID());
+    expect(reply).not.toHaveBeenCalled();
+  });
+
+  it('restores the regenerated branch head when recovery finds its committed reply', async () => {
+    const chatId = crypto.randomUUID();
+    const userMessageId = 'user-root';
+    const runId = `${chatId}\nregenerate\nassistant-old\nrecover`;
+    const rewoundState = { enabled: true, activeBranchName: 'main', activeLeafNodeId: 'user-node', refs: {
+      main: { name: 'main', headNodeId: 'user-node', createdAt: 1, updatedAt: 1, version: 2 },
+    } };
+    const chat = { ...buildAssistantChatDraft(), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 1, messageBranchState: rewoundState };
+    const userMessage: Message = { id: userMessageId, chatId, type: 'user', senderId: 'user', senderName: '用户', content: '先回答', emotion: 0, timestamp: 1, isDeleted: false,
+      metadata: { branching: { nodeId: 'user-node', parentNodeId: null, sequence: 0 } } };
+    const replyMessage: Message = { id: 'new-reply', chatId, type: 'ai', senderId: 'assistant', senderName: '助手', content: '新答案', emotion: 0, timestamp: 3, isDeleted: false,
+      metadata: { assistantReplyToUserMessageId: userMessageId, assistantReplyRunId: runId,
+        branching: { nodeId: 'assistant-new', parentNodeId: 'user-node', sequence: 2 } } };
+    useChatStore.setState({ chats: [chat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [userMessage, replyMessage], messageWindowsByChatId: {} });
+    await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, () => ({ snapshot: {
+      run: { id: runId, chatId, goal: '重新回答助手消息', status: 'active', generation: 1, planVersion: 1, updatedAt: 2 },
+      tasks: [{ id: userMessageId, runId, kind: 'assistant_reply', input: { chatId, userMessageId, replyRunId: runId,
+      branchRegeneration: { branchName: 'main', expectedActiveLeafNodeId: 'assistant-old', rewoundState } },
+      dependsOn: [], status: 'running', attempt: 1, updatedAt: 2 }],
+    }, value: undefined }));
+    await recoverAssistantBackgroundReplies();
+    expect((await listAssistantBackgroundReplies(chatId)).find((run) => run.run.id === runId)?.run.status).toBe('completed');
+    expect(useChatStore.getState().chats[0].messageBranchState?.activeLeafNodeId).toBe('assistant-new');
     expect(reply).not.toHaveBeenCalled();
   });
 
