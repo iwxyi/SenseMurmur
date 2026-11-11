@@ -60,6 +60,21 @@ describe('background execution scheduler', () => {
     await Promise.all([running[1], running[2]]);
   });
 
+  it('round-robins queued sessions so one busy chat cannot starve another', async () => {
+    setBackgroundExecutionMaxActiveConversations(1);
+    const firstGate = deferred();
+    const order: string[] = [];
+    const first = scheduleBackgroundExecution('fair-a', async () => { order.push('a1'); await firstGate.wait; });
+    const queuedA = scheduleBackgroundExecution('fair-a', async () => { order.push('a2'); });
+    const queuedA2 = scheduleBackgroundExecution('fair-a', async () => { order.push('a3'); });
+    const queuedB = scheduleBackgroundExecution('fair-b', async () => { order.push('b1'); });
+
+    firstGate.release();
+    await Promise.all([first, queuedA, queuedA2, queuedB]);
+
+    expect(order).toEqual(['a1', 'b1', 'a2', 'a3']);
+  });
+
   it('releases a chat slot when a task throws before returning a promise', async () => {
     const first = scheduleBackgroundExecution('sync-throw', () => { throw new Error('启动失败'); }, undefined, 'failed-run');
     const next = scheduleBackgroundExecution('sync-throw', async () => 'recovered', undefined, 'next-run');

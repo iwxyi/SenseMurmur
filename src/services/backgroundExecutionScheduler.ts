@@ -16,6 +16,8 @@ const activeChats = new Set<string>();
 const activeWorkIds = new Set<string>();
 const listeners = new Set<() => void>();
 let activeCount = 0;
+let dispatchSequence = 0;
+const lastDispatchByChat = new Map<string, number>();
 
 function publish() { listeners.forEach((listener) => listener()); }
 
@@ -30,7 +32,17 @@ export function getBackgroundExecutionSummary() {
 
 function pump() {
   while (activeCount < getBackgroundExecutionPreferences().maxActiveConversations) {
-    const index = queue.findIndex((item) => !activeChats.has(item.chatId));
+    let index = -1;
+    let oldestDispatch = Number.POSITIVE_INFINITY;
+    for (let candidate = 0; candidate < queue.length; candidate += 1) {
+      const item = queue[candidate];
+      if (activeChats.has(item.chatId)) continue;
+      const lastDispatch = lastDispatchByChat.get(item.chatId) || 0;
+      if (lastDispatch < oldestDispatch) {
+        index = candidate;
+        oldestDispatch = lastDispatch;
+      }
+    }
     if (index < 0) break;
     const item = queue.splice(index, 1)[0];
     if (item.onAbort) item.signal?.removeEventListener('abort', item.onAbort);
@@ -39,6 +51,15 @@ function pump() {
       continue;
     }
     activeChats.add(item.chatId);
+    lastDispatchByChat.delete(item.chatId);
+    lastDispatchByChat.set(item.chatId, ++dispatchSequence);
+    if (lastDispatchByChat.size > 256) {
+      for (const chatId of lastDispatchByChat.keys()) {
+        if (activeChats.has(chatId)) continue;
+        lastDispatchByChat.delete(chatId);
+        if (lastDispatchByChat.size <= 192) break;
+      }
+    }
     if (item.workId) activeWorkIds.add(item.workId);
     activeCount += 1;
     publish();
