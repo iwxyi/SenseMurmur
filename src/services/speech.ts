@@ -70,8 +70,8 @@ export function speechTextFromMessage(content: string) {
 export type SpeechSynthesisRequest = Parameters<typeof api.synthesizeSpeech>[0];
 export type SpeechTranscriptionRequest = Parameters<typeof api.transcribeSpeech>[0];
 
-export async function synthesizeSpeech(request: SpeechSynthesisRequest) {
-  return api.synthesizeSpeech(request);
+export async function synthesizeSpeech(request: SpeechSynthesisRequest, options: { signal?: AbortSignal } = {}) {
+  return api.synthesizeSpeech(request, options);
 }
 
 export async function transcribeSpeech(request: SpeechTranscriptionRequest) {

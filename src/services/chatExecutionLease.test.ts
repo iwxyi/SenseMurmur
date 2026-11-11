@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AUTH_SNAPSHOT_KEY } from './authSnapshot';
-import { api } from './api';
+import { api, ApiError } from './api';
 import { getChatExecutionFence } from './chatExecutionFence';
-import { assertChatExecutionLease, runWithChatExecutionLease } from './chatExecutionLease';
+import { assertChatExecutionLease, runWithChatExecutionLease, runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useChatStore } from '../stores/useChatStore';
 
-vi.mock('./api', () => ({ api: {
-  acquireChatExecutionLease: vi.fn(), renewChatExecutionLease: vi.fn(), releaseChatExecutionLease: vi.fn(),
-} }));
+vi.mock('./api', () => ({
+  ApiError: class ApiError extends Error { code?: string; constructor(message: string, options?: { code?: string }) { super(message); this.code = options?.code; } },
+  api: {
+    acquireChatExecutionLease: vi.fn(), renewChatExecutionLease: vi.fn(), releaseChatExecutionLease: vi.fn(),
+  },
+}));
 
 function storage() {
   const values = new Map<string, string>();
@@ -83,6 +86,20 @@ describe('chat execution lease', () => {
     controller.abort(new Error('workspace stopped'));
     await expect(running).rejects.toThrow('workspace stopped');
     expect(leaseSignal?.aborted).toBe(true);
+  });
+
+  it('waits for a foreign device lease without invoking work until it can acquire ownership', async () => {
+    vi.mocked(api.acquireChatExecutionLease)
+      .mockRejectedValueOnce(new ApiError('此会话正在另一台设备运行', { code: 'CHAT_EXECUTION_OWNED' }))
+      .mockResolvedValueOnce({ generation: 2, expiresAt: Date.now() + 45_000 });
+    const work = vi.fn(async () => 'completed');
+    const running = runWithChatExecutionLeaseWhenAvailable('chat-owned', work);
+    await vi.waitFor(() => expect(api.acquireChatExecutionLease).toHaveBeenCalledTimes(1));
+    expect(work).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(running).resolves.toBe('completed');
+    expect(api.acquireChatExecutionLease).toHaveBeenCalledTimes(2);
+    expect(work).toHaveBeenCalledOnce();
   });
 
   it('flushes fenced message writes before releasing the lease', async () => {

@@ -6,9 +6,9 @@ import { getRecentRichMediaGenerationErrors, getRichMediaQueueSnapshot, processR
 import { generateAudioWithAdapter, generateImageWithAdapter, generateVideoWithAdapter } from './aiGenerationAdapter';
 import { waitForAiMediaTask } from './aiClient';
 import { api, ApiError } from './api';
-import { runWithChatExecutionLease } from './chatExecutionLease';
+import { runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
 
-vi.mock('./chatExecutionLease', () => ({ runWithChatExecutionLease: vi.fn(async (_chatId: string, work: () => Promise<void>) => work()) }));
+vi.mock('./chatExecutionLease', () => ({ runWithChatExecutionLeaseWhenAvailable: vi.fn(async (_chatId: string, work: (signal: AbortSignal) => Promise<void>) => work(new AbortController().signal)) }));
 
 vi.mock('./api', () => ({
   ApiError: class ApiError extends Error { status: number; constructor(message: string, options: { status: number }) { super(message); this.status = options.status; } },
@@ -191,9 +191,9 @@ describe('processRichMessageMedia', () => {
       events.push('locked');
       return work();
     } } });
-    vi.mocked(runWithChatExecutionLease).mockImplementationOnce(async (_chatId, work) => {
+    vi.mocked(runWithChatExecutionLeaseWhenAvailable).mockImplementationOnce(async (_chatId, work) => {
       events.push('leased');
-      return work();
+      return work(new AbortController().signal);
     });
     vi.mocked(generateVideoWithAdapter).mockImplementationOnce(async () => {
       events.push('submit');
@@ -213,6 +213,26 @@ describe('processRichMessageMedia', () => {
     await processing;
     pending.resolve({ task_id: 'leased-task', model: 'video-model', status: 'failed', result: { error: '测试结束' },
       chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
+  });
+
+  it('acquires the server lease for cloud media when Web Locks are unavailable', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.mocked(generateVideoWithAdapter).mockResolvedValue({ task_id: 'fallback-lease-task' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>);
+    const pending = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(waitForAiMediaTask).mockReturnValue(pending.promise);
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-no-locks', kind: 'video', status: 'queued', promptText: '森林追逐', altText: '短片', createdAt: 123, updatedAt: 123,
+    }] } });
+
+    await processRichMessageMedia({ message, aiProfiles: [{ ...imageProfile, type: 'video', model: 'video-model' }], upsertMessage: vi.fn() });
+
+    expect(runWithChatExecutionLeaseWhenAvailable).toHaveBeenCalledWith('chat-1', expect.any(Function), expect.any(AbortSignal));
+    expect(generateVideoWithAdapter).toHaveBeenCalledOnce();
+    pending.resolve({ task_id: 'fallback-lease-task', model: 'video-model', status: 'failed', result: { error: '测试结束' },
+      chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(getRichMediaQueueSnapshot()).toHaveLength(0));
   });
 
   it('resumes an accepted video task when metadata writes are unavailable', async () => {
@@ -280,7 +300,7 @@ describe('processRichMessageMedia', () => {
     unlock();
     await processing;
     await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('ready'));
-    expect(runWithChatExecutionLease).toHaveBeenCalledWith('chat-1', expect.any(Function));
+    expect(runWithChatExecutionLeaseWhenAvailable).toHaveBeenCalledWith('chat-1', expect.any(Function), expect.any(AbortSignal));
   });
 
   it('resumes music by saved request key after its model configuration is removed', async () => {
@@ -976,7 +996,10 @@ describe('processRichMessageMedia', () => {
     await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'ready', assetId: 'saved-video' }));
     expect(generateVideoWithAdapter).not.toHaveBeenCalled();
     expect(api.createMediaAssetFromAiTask).toHaveBeenCalledTimes(2);
-    expect(api.createMediaAssetFromAiTask).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'completed-video' }));
+    expect(api.createMediaAssetFromAiTask).toHaveBeenLastCalledWith(
+      expect.objectContaining({ taskId: 'completed-video' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 
   it('does not reset an accepted video while its task ID is already being polled', async () => {

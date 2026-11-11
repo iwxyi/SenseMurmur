@@ -13,7 +13,7 @@ import { synthesizeSpeech, usesManagedSpeechProfile } from './speech';
 import { useAuthStore } from '../stores/useAuthStore';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { conversationExecutionLockName } from './conversationExecutionLock';
-import { runWithChatExecutionLease } from './chatExecutionLease';
+import { runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
 import { getChatExecutionFence } from './chatExecutionFence';
 import { currentWorkflowScope } from './workflowRunRuntime';
 import { getWorkspaceSignal } from './workspaceLifecycle';
@@ -512,7 +512,7 @@ async function pollVideoTask(params: {
 }) {
   const task = await waitForAiMediaTask(params.taskId);
   params.entry.terminalTaskKnown = task.status === 'succeeded' || task.status === 'failed';
-  return runWithMediaResultLease(params.message.chatId, params.message.serverId, async () => {
+  return runWithMediaResultLease(params.message.chatId, params.message.serverId, async (signal) => {
   let latestMessage = getLatestRichMediaMessage(params.entry.messageId, params.message);
   const latestAttachment = latestMessage.metadata?.attachments?.find((item) => item.id === params.attachment.id);
   if (latestAttachment?.generationJobId !== params.generationJobId) return;
@@ -540,7 +540,7 @@ async function pollVideoTask(params: {
             taskId: params.taskId,
             description: params.attachment.caption || params.attachment.altText,
             promptText: params.attachment.promptText,
-          });
+          }, { signal });
       } catch (error) {
         throw new Error(`视频已生成，但文件获取或保存失败：${error instanceof Error ? error.message : '网络请求失败'}`);
       }
@@ -559,7 +559,7 @@ async function pollVideoTask(params: {
 async function pollMusicTask(params: { entry: RichMediaQueueEntry; message: Message; attachment: GenerativeAttachment; generationJobId: string; taskId: string }) {
   const task = await waitForAiMediaTask(params.taskId);
   params.entry.terminalTaskKnown = task.status === 'succeeded' || task.status === 'failed';
-  return runWithMediaResultLease(params.message.chatId, params.message.serverId, async () => {
+  return runWithMediaResultLease(params.message.chatId, params.message.serverId, async (signal) => {
   const latestMessage = getLatestRichMediaMessage(params.entry.messageId, params.message);
   const latestAttachment = latestMessage.metadata?.attachments?.find((item) => item.id === params.attachment.id);
   if (latestAttachment?.generationJobId !== params.generationJobId) return;
@@ -575,7 +575,7 @@ async function pollMusicTask(params: { entry: RichMediaQueueEntry; message: Mess
       ? await api.downloadAiMediaTaskContent(params.taskId, 'audio').then(async (blob) => ({ id: undefined, url: await blobToDataUrl(blob), mimeType: blob.type || 'audio/mpeg', sizeBytes: blob.size, checksum: undefined }))
       : await api.createMediaAssetFromAiTask({ chatId: latestMessage.chatId, messageId: latestMessage.serverId || latestMessage.id,
         attachmentId: params.attachment.id, taskId: params.taskId, kind: 'audio', description: params.attachment.caption || params.attachment.altText,
-        promptText: params.attachment.promptText });
+        promptText: params.attachment.promptText }, { signal });
   } catch (error) {
     throw new Error(`音乐已生成，但文件获取或保存失败：${error instanceof Error ? error.message : '网络请求失败'}`);
   }
@@ -586,22 +586,21 @@ async function pollMusicTask(params: { entry: RichMediaQueueEntry; message: Mess
   });
 }
 
-async function runWithMediaResultLease<T>(chatId: string, serverMessageId: string | undefined, work: () => Promise<T>): Promise<T> {
-  if (isLocalOnlyMediaMode()) return work();
-  if (typeof navigator === 'undefined' || !navigator.locks?.request) return work();
+async function runWithMediaResultLease<T>(chatId: string, serverMessageId: string | undefined, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  if (isLocalOnlyMediaMode()) return work(getWorkspaceSignal());
   const scope = currentWorkflowScope();
   const signal = getWorkspaceSignal();
-  return navigator.locks.request(conversationExecutionLockName(scope, chatId), async () => {
+  const run = () => runWithChatExecutionLeaseWhenAvailable(chatId, async (leaseSignal) => {
     if (signal.aborted || getWorkspaceSignal() !== signal || currentWorkflowScope() !== scope) {
       throw new Error('账号已切换，媒体结果等待恢复');
     }
-    return runWithChatExecutionLease(chatId, async () => {
-      const result = await work();
-      const pending = serverMessageId ? richMediaMetadataWritesByMessageId.get(serverMessageId) : undefined;
-      if (pending) await pending;
-      return result;
-    });
-  });
+    const result = await work(leaseSignal);
+    const pending = serverMessageId ? richMediaMetadataWritesByMessageId.get(serverMessageId) : undefined;
+    if (pending) await pending;
+    return result;
+  }, signal);
+  if (typeof navigator === 'undefined' || !navigator.locks?.request) return run();
+  return navigator.locks.request(conversationExecutionLockName(scope, chatId), run);
 }
 
 async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: AbortSignal) {
@@ -698,7 +697,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
             description: attachment.caption || attachment.altText,
             promptText: attachment.promptText,
             sourceType: 'chat-image',
-          });
+          }, { signal });
       workingMessage = updateRichMediaMessage({
         message: workingMessage,
         attachmentId: attachment.id,
@@ -871,7 +870,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
           chatId: workingMessage.chatId,
           messageId: workingMessage.serverId || workingMessage.id,
           attachmentId: attachment.id,
-        })
+        }, { signal })
       : null;
     const latestAttachment = getLatestRichMediaMessage(messageId, workingMessage).metadata?.attachments?.find((item) => item.id === attachment.id);
     if (latestAttachment?.generationJobId !== generationJobId) return;
@@ -885,6 +884,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
       speed: attachment.ttsSpeed,
       pitch: attachment.ttsPitch,
       style: attachment.ttsStyle,
+      signal,
     })).blob);
     const durationMs = await getAudioDurationMs(dataUrl);
     const asset = speechResult?.asset || { id: undefined, url: dataUrl, mimeType: speechResult?.mimeType || 'audio/mpeg', sizeBytes: dataUrl.length, checksum: undefined };
@@ -980,20 +980,19 @@ async function runRichMediaQueueEntryWithLease(entry: RichMediaQueueEntry) {
   if (isLocalOnlyMediaMode()) return runRichMediaQueueEntry(entry);
   const chatId = entry.message.chatId;
   if (entry.sharesConversationLease && getChatExecutionFence(chatId)) return runRichMediaQueueEntry(entry);
-  if (typeof navigator === 'undefined' || !navigator.locks?.request) {
-    return runRichMediaQueueEntry(entry);
-  }
   const scope = currentWorkflowScope();
   const signal = getWorkspaceSignal();
-  return navigator.locks.request(conversationExecutionLockName(scope, chatId), async () => {
+  const run = () => runWithChatExecutionLeaseWhenAvailable(chatId, async (leaseSignal) => {
     if (signal.aborted || getWorkspaceSignal() !== signal || currentWorkflowScope() !== scope) {
       throw new Error('账号已切换，媒体任务已暂停');
     }
-    return runWithChatExecutionLease(chatId, async (leaseSignal) => {
-      await runRichMediaQueueEntry(entry, leaseSignal);
-      const serverId = entry.message.serverId;
-      if (serverId) await richMediaMetadataWritesByMessageId.get(serverId);
-    });
+    await runRichMediaQueueEntry(entry, leaseSignal);
+    const serverId = entry.message.serverId;
+    if (serverId) await richMediaMetadataWritesByMessageId.get(serverId);
+  }, signal);
+  if (typeof navigator === 'undefined' || !navigator.locks?.request) return run();
+  return navigator.locks.request(conversationExecutionLockName(scope, chatId), async () => {
+    return run();
   });
 }
 

@@ -70,6 +70,7 @@ export interface TextGenerationAdapterOptions {
 export interface SpeechGenerationAdapterOptions extends SpeechSynthesisOptions {
   profile: AIModelProfile | APIConfig;
   intent?: GenerationIntent;
+  signal?: AbortSignal;
 }
 
 export interface AudioTranscriptionAdapterOptions extends AudioTranscriptionOptions {

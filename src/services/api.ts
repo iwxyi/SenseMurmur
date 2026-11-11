@@ -988,8 +988,12 @@ class ApiClient {
     return response.blob();
   }
 
-  async createMediaAssetFromAiTask(input: { chatId: string; messageId: string; attachmentId: string; taskId: string; kind?: 'audio' | 'video'; description?: string; promptText?: string }) {
-    return this.request<{ id: string; url: string; mimeType: string; sizeBytes: number; checksum?: string }>('POST', '/media-assets/from-ai-task', input);
+  async createMediaAssetFromAiTask(input: { chatId: string; messageId: string; attachmentId: string; taskId: string; kind?: 'audio' | 'video'; description?: string; promptText?: string }, options: { signal?: AbortSignal } = {}) {
+    const fence = getChatExecutionFence(input.chatId);
+    return this.request<{ id: string; url: string; mimeType: string; sizeBytes: number; checksum?: string }>('POST', '/media-assets/from-ai-task', {
+      ...input,
+      ...(fence ? { executionFence: fence } : {}),
+    }, options);
   }
 
   async claimBillingVipPoints(kind: 'daily' | 'monthly') {
@@ -1337,8 +1341,12 @@ class ApiClient {
 
   async createMediaAsset(data: {
     chatId: string; messageId: string; attachmentId: string; kind: 'image' | 'audio' | 'video' | 'sticker' | 'thumbnail'; dataUrl: string; description?: string; promptText?: string; sourceType?: string; characterId?: string;
-  }) {
-    return this.request<{ id: string; url: string; mimeType: string; sizeBytes: number; checksum?: string }>('POST', '/media-assets', data);
+  }, options: { signal?: AbortSignal } = {}) {
+    const fence = getChatExecutionFence(data.chatId);
+    return this.request<{ id: string; url: string; mimeType: string; sizeBytes: number; checksum?: string }>('POST', '/media-assets', {
+      ...data,
+      ...(fence ? { executionFence: fence } : {}),
+    }, options);
   }
 
   async listFiles(params?: { trash?: boolean | 'unreferenced'; category?: string; from?: number; to?: number; limit?: number; offset?: number }) {
@@ -1370,14 +1378,15 @@ class ApiClient {
     chatId?: string;
     messageId?: string;
     attachmentId?: string;
-  }) {
+  }, options: { signal?: AbortSignal } = {}) {
+    const fence = data.chatId ? getChatExecutionFence(data.chatId) : undefined;
     return this.request<{
       provider: string;
       mimeType: string;
       audioDataUrl: string;
       cached?: boolean;
       asset?: { id: string; url: string; mimeType: string; sizeBytes: number; checksum?: string };
-    }>('POST', '/speech/tts', data);
+    }>('POST', '/speech/tts', { ...data, ...(fence ? { executionFence: fence } : {}) }, options);
   }
 
   async getSpeechPlatforms() {

@@ -58,7 +58,8 @@ async function waitFor(check, label) {
 }
 
 const pages = await (await fetch(`${cdpUrl}/json/list`)).json();
-const page = pages.find((item) => item.type === 'page');
+const clientOrigin = new URL(clientUrl).origin;
+const page = pages.find((item) => item.type === 'page' && item.url.startsWith(clientOrigin));
 if (!page) throw new Error('Start Chrome with a page and remote debugging enabled');
 const cdp = new Cdp(page.webSocketDebuggerUrl);
 await cdp.open();

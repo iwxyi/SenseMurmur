@@ -1,10 +1,10 @@
-import { scopedStorageKey } from '../constants/brand';
 import { readAuthSnapshot } from './authSnapshot';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
-import { api } from './api';
+import { api, ApiError } from './api';
 import { clearChatExecutionFence, getChatExecutionFence, setChatExecutionFence, type ChatExecutionFence } from './chatExecutionFence';
 
 const LEASE_RENEW_INTERVAL_MS = 15_000;
+const LEASE_OWNED_RETRY_MS = 5_000;
 const lostLeases = new Map<string, Error>();
 
 function leaseKey(chatId: string, fence: ChatExecutionFence) {
@@ -54,14 +54,11 @@ export function assertChatExecutionLease(chatId: string) {
   if (error) throw error;
 }
 
-function getOwnerId() {
-  if (typeof sessionStorage === 'undefined') return crypto.randomUUID();
-  const key = scopedStorageKey('chat-execution-owner');
-  const current = sessionStorage.getItem(key);
-  if (current) return current;
-  const next = crypto.randomUUID();
-  sessionStorage.setItem(key, next);
-  return next;
+export class ChatExecutionLeaseOwnedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChatExecutionLeaseOwnedError';
+  }
 }
 
 export async function runWithChatExecutionLease<T>(chatId: string, work: (signal: AbortSignal) => Promise<T>, externalSignal?: AbortSignal): Promise<T> {
@@ -79,8 +76,16 @@ export async function runWithChatExecutionLease<T>(chatId: string, work: (signal
     finally { externalSignal?.removeEventListener('abort', onAbort); }
   }
 
-  const ownerId = getOwnerId();
-  const lease = await api.acquireChatExecutionLease(chatId, ownerId);
+  const ownerId = crypto.randomUUID();
+  let lease: Awaited<ReturnType<typeof api.acquireChatExecutionLease>>;
+  try {
+    lease = await api.acquireChatExecutionLease(chatId, ownerId);
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'CHAT_EXECUTION_OWNED') {
+      throw new ChatExecutionLeaseOwnedError(error.message);
+    }
+    throw error;
+  }
   const fence: ChatExecutionFence = { ownerId, generation: lease.generation };
   lostLeases.delete(leaseKey(chatId, fence));
   setChatExecutionFence(chatId, fence);
@@ -131,6 +136,34 @@ export async function runWithChatExecutionLease<T>(chatId: string, work: (signal
     } finally {
       clearChatExecutionFence(chatId, fence);
       lostLeases.delete(leaseKey(chatId, fence));
+    }
+  }
+}
+
+export async function runWithChatExecutionLeaseWhenAvailable<T>(
+  chatId: string,
+  work: (signal: AbortSignal) => Promise<T>,
+  externalSignal?: AbortSignal,
+): Promise<T> {
+  while (true) {
+    if (externalSignal?.aborted) throw externalSignal.reason || new Error('任务已取消');
+    try {
+      return await runWithChatExecutionLease(chatId, work, externalSignal);
+    } catch (error) {
+      if (!(error instanceof ChatExecutionLeaseOwnedError)) throw error;
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          externalSignal?.removeEventListener('abort', onAbort);
+          resolve();
+        }, LEASE_OWNED_RETRY_MS);
+        const onAbort = () => {
+          clearTimeout(timer);
+          externalSignal?.removeEventListener('abort', onAbort);
+          reject(externalSignal?.reason || new Error('任务已取消'));
+        };
+        externalSignal?.addEventListener('abort', onAbort, { once: true });
+        if (externalSignal?.aborted) onAbort();
+      });
     }
   }
 }
