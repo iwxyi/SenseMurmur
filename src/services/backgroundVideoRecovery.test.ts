@@ -161,4 +161,5 @@ describe('background video recovery', () => {
       message: submitting, attachmentIds: ['video-request-key'],
     })));
   });
+
 });

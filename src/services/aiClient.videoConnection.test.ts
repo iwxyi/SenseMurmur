@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api } from './api';
+import { api, ApiError } from './api';
 import { testConnection, waitForAiMediaTask } from './aiClient';
 
 const config = {
@@ -44,4 +44,27 @@ it('stops polling when the server cannot confirm whether ACE accepted a task', a
   await expect(waitForAiMediaTask('saved-task')).rejects.toThrow('提交结果尚未确认');
   expect(request).toHaveBeenCalledOnce();
   request.mockRestore();
+});
+
+it('rechecks the same accepted task after a temporary server error', async () => {
+  vi.useFakeTimers();
+  try {
+    const request = vi.spyOn(api, 'getAiMediaTask')
+      .mockRejectedValueOnce(new ApiError('暂时不可用', { status: 503 }))
+      .mockResolvedValueOnce({ task_id: 'saved-task', model: config.model, status: 'succeeded',
+        result: {}, chargedAmount: 1, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+    const pending = waitForAiMediaTask('saved-task');
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(pending).resolves.toMatchObject({ task_id: 'saved-task', status: 'succeeded' });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.map(([taskId]) => taskId)).toEqual(['saved-task', 'saved-task']);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('does not keep retrying a rejected task query', async () => {
+  const request = vi.spyOn(api, 'getAiMediaTask').mockRejectedValue(new ApiError('任务不存在', { status: 404 }));
+  await expect(waitForAiMediaTask('missing-task')).rejects.toThrow('任务不存在');
+  expect(request).toHaveBeenCalledOnce();
 });

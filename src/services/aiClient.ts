@@ -1,9 +1,9 @@
 import type { APIConfig, AIModelProfile, AIModelType } from '../types/settings';
 import { normalizeAIModelAdvancedOptions, normalizeMaxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS } from '../types/settings';
-import { api } from './api';
+import { api, ApiError } from './api';
 import { backendUrl } from './backendUrl';
 import { redactAiDiagnosticText, redactAiDiagnosticValue } from './aiDiagnosticText';
-import { assertWorkspaceActive, getResponseWorkspaceSignal, workspaceFetch as fetch } from './workspaceLifecycle';
+import { assertWorkspaceActive, getResponseWorkspaceSignal, getWorkspaceSignal, workspaceFetch as fetch } from './workspaceLifecycle';
 import { assertChatExecutionLease } from './chatExecutionLease';
 import { getChatExecutionFence } from './chatExecutionFence';
 
@@ -207,21 +207,38 @@ export async function waitForAiMediaTask(taskId: string, options: {
   maxAttempts?: number;
   onUpdate?: (task: AiMediaTask) => void;
 } = {}) {
+  const signal = options.signal || getWorkspaceSignal();
   let delay = options.initialDelayMs ?? 5_000;
   const maxDelay = options.maxDelayMs ?? 30_000;
   const maxAttempts = options.maxAttempts ?? 720;
+  let consecutiveRequestFailures = 0;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    options.signal?.throwIfAborted();
-    const task = await api.getAiMediaTask(taskId);
+    signal.throwIfAborted();
+    let task: Awaited<ReturnType<typeof api.getAiMediaTask>>;
+    try {
+      task = await api.getAiMediaTask(taskId);
+      consecutiveRequestFailures = 0;
+    } catch (error) {
+      signal.throwIfAborted();
+      const retryable = error instanceof TypeError || (error instanceof ApiError
+        && (error.status === 408 || error.status === 429 || (error.status != null && error.status >= 500)));
+      if (!retryable || ++consecutiveRequestFailures > 3) throw error;
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(signal.reason || new DOMException('Aborted', 'AbortError')); };
+        const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, Math.min(30_000, 5_000 * 2 ** (consecutiveRequestFailures - 1)));
+        signal.addEventListener('abort', abort, { once: true });
+      });
+      continue;
+    }
     options.onUpdate?.(task);
     if (task.status === 'succeeded' || task.status === 'failed') return task;
     if (task.status === 'submission_unknown') {
       throw new Error('视频提交结果尚未确认，请等待管理员核对原任务；重试不会重新提交。');
     }
     await new Promise<void>((resolve, reject) => {
-      const abort = () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); reject(options.signal?.reason || new DOMException('Aborted', 'AbortError')); };
-      const timer = setTimeout(() => { options.signal?.removeEventListener('abort', abort); resolve(); }, delay);
-      options.signal?.addEventListener('abort', abort, { once: true });
+      const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(signal.reason || new DOMException('Aborted', 'AbortError')); };
+      const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, delay);
+      signal.addEventListener('abort', abort, { once: true });
     });
     delay = Math.min(maxDelay, Math.round(delay * 1.25));
   }

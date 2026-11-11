@@ -68,7 +68,9 @@ export async function recoverBackgroundVideoTasks() {
           && fresh.includes(`${message.id}:${attachment.id}:${attachment.mediaTaskId || attachment.generationJobId}`)).map((attachment) => attachment.id),
         aiProfiles: useSettingsStore.getState().aiProfiles,
         upsertMessage: (next) => useMessageStore.getState().upsertMessage(next),
-      }).catch((error) => console.error('[video-task:recovery-processing-failed]', error));
+      }).catch((error) => {
+        console.error('[video-task:recovery-processing-failed]', error);
+      });
     }
     return dispatched;
   };
