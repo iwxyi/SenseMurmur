@@ -776,7 +776,9 @@ function upsertPendingCreateOperation(queue: PendingMessageOperation[], message:
   ));
   if (existing) {
     return queue.map((operation) => operation.id === existing.id
-      ? { ...operation, payload: compactMessage(message, { dropContextText: true }), status: operation.status === 'syncing' ? 'syncing' as const : 'pending' as const }
+      ? { ...operation, payload: compactMessage(message, { dropContextText: true }),
+        status: operation.status === 'syncing' || (operation.status === 'failed' && isTerminalSyncError(operation.lastError || ''))
+          ? operation.status : 'pending' as const }
       : operation);
   }
   return [...queue, createPendingMessageOperation(message)];

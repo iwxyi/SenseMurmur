@@ -92,6 +92,21 @@ async function waitForAssertion(assertion: () => void, attempts = 20) {
 }
 
 describe('useMessageStore', () => {
+  it('does not requeue a terminal ownership conflict when an attachment changes', async () => {
+    const { useMessageStore } = await import('./useMessageStore');
+    const message = buildMessage(99);
+    useMessageStore.setState({
+      activeChatId: message.chatId, messages: [message],
+      pendingOperations: [{ id: 'fenced-message', kind: 'create', chatId: message.chatId, localMessageId: message.id,
+        messageId: message.id, payload: message, createdAt: Date.now(), attemptCount: 1, status: 'failed',
+        lastError: 'ownership_conflict: 会话运行权已变化' }],
+    });
+    useMessageStore.getState().upsertMessage({ ...message, metadata: { attachments: [{
+      id: 'image-1', kind: 'image', status: 'ready', altText: '图片', createdAt: 1, updatedAt: 2,
+    }] } });
+    expect(useMessageStore.getState().pendingOperations[0]).toMatchObject({ status: 'failed', lastError: 'ownership_conflict: 会话运行权已变化' });
+    expect(useMessageStore.getState().pendingOperations[0].payload?.metadata?.attachments).toHaveLength(1);
+  });
   it('replaces explicitly edited attachments in active messages, cached windows and pending uploads', async () => {
     const { useMessageStore } = await import('./useMessageStore');
     const message: Message = { ...buildMessage(1), metadata: { attachments: ['remove', 'keep'].map(id => ({
