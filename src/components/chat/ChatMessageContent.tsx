@@ -476,7 +476,7 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
       return (
         <Box key={attachment.id} sx={{ width: loadingWidth, minWidth: 0, maxWidth: '100%', overflow: 'hidden', borderRadius: 999, border: '1px solid', borderColor: 'divider', px: 1.25, py: 0.75, bgcolor: 'action.hover' }}>
           <Typography variant="caption" color={attachment.status === 'failed' ? 'error.main' : 'text.secondary'} sx={{ overflowWrap: 'anywhere' }}>
-            {attachment.status === 'failed' ? getAttachmentStatusDetail(attachment) : getAttachmentStatusLabel(attachment)}
+            {attachment.status === 'failed' || attachment.audioPurpose === 'music_generation' ? getAttachmentStatusDetail(attachment) : getAttachmentStatusLabel(attachment)}
           </Typography>
           {attachment.status !== 'failed' ? <LinearProgress sx={{ mt: 0.5 }} /> : null}
           {(attachment.status === 'failed' || (attachment.audioPurpose === 'music_generation' && attachment.status === 'generating' && Boolean(attachment.mediaTaskId))) && onRetryMedia ? (
@@ -498,7 +498,7 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
           <Box sx={{ display: 'grid', placeItems: 'center', minHeight: processing ? 96 : 112, p: 1.5, textAlign: 'center' }}>
             <Box sx={{ display: 'grid', gap: 0.75, minWidth: 0, width: '100%', maxWidth: '85%' }}>
               <Typography variant="caption" color={attachment.status === 'failed' ? 'error' : 'text.secondary'}>
-                {attachment.status === 'failed' ? getAttachmentStatusDetail(attachment) : getAttachmentStatusLabel(attachment)}
+                {getAttachmentStatusDetail(attachment)}
               </Typography>
               {processing ? <LinearProgress /> : null}
               {(attachment.status === 'failed' || (attachment.status === 'generating' && Boolean(attachment.mediaTaskId))) && onRetryMedia ? (
