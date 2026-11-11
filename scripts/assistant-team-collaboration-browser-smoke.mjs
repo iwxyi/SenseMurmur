@@ -71,14 +71,27 @@ try {
       { id: 'plan', runId, kind: 'team_plan', input: '研究市场机会', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
       { id: 'research', runId, kind: 'agent_text', input: { task: plan.tasks[0], role: plan.roles[0], goal: '研究市场机会' }, output: '主要竞争者采用订阅模式', dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
     ] };
+    const resumableRun = { run: { ...run.run, id: 'browser-resume-run', status: 'paused' }, tasks: [
+      { id: 'plan', runId: 'browser-resume-run', kind: 'team_plan', input: '研究市场机会', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+      { id: 'research', runId: 'browser-resume-run', kind: 'agent_text', input: { task: plan.tasks[0], role: plan.roles[0], goal: '研究市场机会' }, dependsOn: ['plan'], status: 'queued', attempt: 0, updatedAt: now },
+    ] };
+    const secondResumableRun = { run: { ...resumableRun.run, id: 'browser-resume-run-2', goal: '验证代码' }, tasks: [
+      { id: 'plan', runId: 'browser-resume-run-2', kind: 'team_plan', input: '验证代码', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+      { id: 'research', runId: 'browser-resume-run-2', kind: 'agent_text', input: { task: plan.tasks[0], role: plan.roles[0], goal: '验证代码' }, dependsOn: ['plan'], status: 'waiting_dependency', attempt: 0, updatedAt: now },
+    ] };
+    const uncertainRun = { run: { ...run.run, id: 'browser-uncertain-run', status: 'paused' }, tasks: [
+      { id: 'plan', runId: 'browser-uncertain-run', kind: 'team_plan', input: '研究市场机会', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+      { id: 'research', runId: 'browser-uncertain-run', kind: 'agent_text', input: { task: plan.tasks[0], role: plan.roles[0], goal: '研究市场机会' }, dependsOn: ['plan'], status: 'result_unknown', attempt: 1, updatedAt: now },
+    ] };
     const container = document.createElement('div');
     container.id = 'assistant-team-smoke-root';
     document.body.append(container);
-    window.__assistantTeamSmoke = { calls: [] };
+    window.__assistantTeamSmoke = { calls: [], resumed: [] };
     const root = createRoot(container);
     window.__assistantTeamSmoke.root = root;
     root.render(React.createElement(Workbench, {
-      runs: [run], canRun: true, isRunActive: () => false, onResume: () => {}, onCreate: () => {},
+      runs: [run, resumableRun, secondResumableRun, uncertainRun], canRun: true, isRunActive: () => false, onResume: () => {},
+      onResumeAll: async (items) => { window.__assistantTeamSmoke.resumed = items.map((item) => item.run.id); }, onCreate: () => {},
       onInstruct: async () => {}, onPause: async () => {},
       onDelegate: async (...args) => { window.__assistantTeamSmoke.calls.push(args); },
       onAbandonReview: async () => {}, onResumeAfterReviewRetry: async () => {}, onResumeAfterPlanRetry: async () => {},
@@ -88,6 +101,11 @@ try {
   await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('#assistant-team-smoke-root button')).some((button) => button.textContent?.includes('工作台'))`), 'workbench mounted');
   await cdp.evaluate(`Array.from(document.querySelectorAll('#assistant-team-smoke-root button')).find((button) => button.textContent?.includes('工作台')).click()`);
   await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).some((button) => button.textContent?.includes('市场分析师'))`), 'child agent selector');
+  await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).some((button) => button.textContent?.includes('恢复所有可恢复任务 (2)'))`), 'bulk resume action');
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent?.includes('恢复所有可恢复任务')).click()`);
+  await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke?.resumed.length === 2`), 'recoverable runs resumed');
+  const resumedIds = await cdp.evaluate(`window.__assistantTeamSmoke.resumed`);
+  assert.deepEqual(resumedIds, ['browser-resume-run', 'browser-resume-run-2']);
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent?.includes('市场分析师')).click()`);
   await waitFor(() => cdp.evaluate(`Boolean(Array.from(document.querySelectorAll('[role="dialog"] label')).find((label) => label.textContent?.includes('与该子 Agent 继续协作')))`), 'child instruction input');
   await cdp.evaluate(`(() => {
@@ -102,7 +120,7 @@ try {
   assert.match(request, /市场分析师/);
   assert.match(request, /原任务：研究市场竞争/);
   assert.match(request, /补充日本市场，并标注数据年份/);
-  console.log(JSON.stringify({ ok: true, childRole: '市场分析师', revisionRequest: request }));
+  console.log(JSON.stringify({ ok: true, childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } finally {
   await cdp.evaluate(`window.__assistantTeamSmoke?.root?.unmount(); document.querySelector('#assistant-team-smoke-root')?.remove();`).catch(() => undefined);
   cdp.close();

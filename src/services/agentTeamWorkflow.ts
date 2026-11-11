@@ -724,6 +724,13 @@ export async function listAgentTeamRuns(chatId?: string) {
   return runs.filter((item) => item.tasks[0]?.kind === 'team_plan' && (!chatId || item.run.chatId === chatId));
 }
 
+export function isRecoverableAgentTeamRun(snapshot: WorkflowSnapshot) {
+  return snapshot.run.status === 'paused'
+    && snapshot.tasks.length > 0
+    && snapshot.tasks.every((task) => task.status !== 'failed' && task.status !== 'result_unknown' && task.status !== 'waiting_user')
+    && snapshot.tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency' || task.status === 'waiting_external');
+}
+
 export async function runAgentTeam(params: { chatId: string; goal: string; runId?: string }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');

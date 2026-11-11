@@ -3,13 +3,14 @@ import { Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, D
 import type { WorkflowSnapshot, WorkflowTask } from '../../services/workflowRunRuntime';
 import { summarizeWorkflowRun } from '../../services/workflowRunRuntime';
 import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
-import { buildAgentTeamTaskRevisionRequest } from '../../services/agentTeamWorkflow';
+import { buildAgentTeamTaskRevisionRequest, isRecoverableAgentTeamRun } from '../../services/agentTeamWorkflow';
 
 interface Props {
   runs: WorkflowSnapshot[];
   canRun: boolean;
   isRunActive: (runId: string) => boolean;
   onResume: (run: WorkflowSnapshot) => void;
+  onResumeAll: (runs: WorkflowSnapshot[]) => Promise<void>;
   onCreate: () => void;
   onInstruct: (run: WorkflowSnapshot, task: WorkflowTask, instruction: string) => Promise<void>;
   onPause: (run: WorkflowSnapshot) => Promise<void>;
@@ -44,7 +45,7 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onCreate, onInstruct, onPause, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterPlanRetry }: Props) {
+export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onResumeAll, onCreate, onInstruct, onPause, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterPlanRetry }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -58,6 +59,8 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const [reviewActionError, setReviewActionError] = useState<string | null>(null);
   const [savingReviewAction, setSavingReviewAction] = useState(false);
   const [reviewActionRunId, setReviewActionRunId] = useState<string | null>(null);
+  const [resumingAll, setResumingAll] = useState(false);
+  const [resumeAllError, setResumeAllError] = useState<string | null>(null);
   if (!runs.length) return null;
   const run = runs.find((item) => item.run.id === selectedRunId) || runs[0];
   const task = run.tasks.find((item) => item.id === selectedTaskId) || null;
@@ -82,6 +85,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const canReviseSelectedTask = Boolean(canAddRevision && task && details && childTasks.includes(task)
     && task.status === 'completed' && task.attempt > 0);
   const canInstructSelectedTask = editable || canReviseSelectedTask;
+  const resumableRuns = runs.filter(isRecoverableAgentTeamRun);
 
   return <>
     <Box role="status" sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, left: 12, right: 12, zIndex: 5, display: 'flex', alignItems: 'center', gap: 1, px: 1.25, py: 0.5, borderRadius: 1.5, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider', boxShadow: 1, minWidth: 0 }}>
@@ -181,11 +185,18 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
         </Box>}
       </DialogContent>
       <DialogActions>
+        {canRun && resumableRuns.length > 1 && <Button disabled={resumingAll} onClick={() => {
+          setResumingAll(true);
+          setResumeAllError(null);
+          void onResumeAll(resumableRuns).catch((error: unknown) => setResumeAllError(error instanceof Error ? error.message : '恢复团队任务失败'))
+            .finally(() => setResumingAll(false));
+        }}>{resumingAll ? '正在恢复…' : `恢复所有可恢复任务 (${resumableRuns.length})`}</Button>}
         {canRun && <Button onClick={() => { setOpen(false); onCreate(); }}>新建团队任务</Button>}
         {canRun && running && !run.run.pauseRequested && <Button onClick={() => { void onPause(run).then(() => setPauseError(null)).catch((error: unknown) => setPauseError(error instanceof Error ? error.message : '暂停任务失败')); }}>当前步骤完成后暂停</Button>}
         {canRun && !running && ((!blocked && run.run.status !== 'failed') || run.tasks.some((item) => (item.kind === 'agent_video' || item.kind === 'agent_image' || item.kind === 'agent_audio') && (item.status === 'failed' || item.status === 'result_unknown'))) && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : blocked ? '核对媒体结果' : '继续整个任务'}</Button>}
         <Button onClick={() => setOpen(false)}>关闭</Button>
       </DialogActions>
+      {resumeAllError && <Typography role="alert" variant="caption" color="error.main" sx={{ px: 3, pb: 1 }}>{resumeAllError}</Typography>}
     </Dialog>
   </>;
 }

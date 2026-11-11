@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { generateResponse, listAvailableModels } from './aiClient';
-import { buildAgentTeamTaskRevisionRequest, createAgentTeamWorkflow, recoverAgentTeamRuns } from './agentTeamWorkflow';
+import { buildAgentTeamTaskRevisionRequest, createAgentTeamWorkflow, isRecoverableAgentTeamRun, recoverAgentTeamRuns } from './agentTeamWorkflow';
 import { currentWorkflowScope, indexedDbWorkflowRepository, type WorkflowSnapshot } from './workflowRunRuntime';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
@@ -17,6 +17,17 @@ vi.mock('./agentTeamImageInspection', () => ({ inspectAgentTeamImages: vi.fn() }
 vi.mock('./agentTeamAudioTask', () => ({ inspectAgentTeamAudioAttachment: vi.fn(), queueAgentTeamAudio: vi.fn() }));
 
 describe('agent team child collaboration', () => {
+  it('selects only paused runs with work that can resume without guessing an unknown result', () => {
+    const base: WorkflowSnapshot = {
+      run: { id: 'run', chatId: 'chat', goal: 'goal', status: 'paused', generation: 1, planVersion: 1, planOpen: true, updatedAt: 1 },
+      tasks: [{ id: 'task', runId: 'run', kind: 'agent_text', input: {}, dependsOn: [], status: 'queued', attempt: 0, updatedAt: 1 }],
+    };
+    expect(isRecoverableAgentTeamRun(base)).toBe(true);
+    expect(isRecoverableAgentTeamRun({ ...base, tasks: [{ ...base.tasks[0], status: 'result_unknown' }] })).toBe(false);
+    expect(isRecoverableAgentTeamRun({ ...base, tasks: [{ ...base.tasks[0], status: 'waiting_user' }] })).toBe(false);
+    expect(isRecoverableAgentTeamRun({ ...base, run: { ...base.run, status: 'completed' } })).toBe(false);
+  });
+
   it('turns a completed child instruction into a role-scoped main-agent revision request', () => {
     const request = buildAgentTeamTaskRevisionRequest({
       id: 'research', runId: 'run', kind: 'agent_text',

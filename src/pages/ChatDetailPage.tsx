@@ -4528,6 +4528,11 @@ export default function ChatDetailPage() {
           runs={teamRuns}
           canRun={agentEntitled}
           isRunActive={isAgentTeamRunActive}
+          onResumeAll={async (selectedRuns) => {
+            const results = await Promise.allSettled(selectedRuns.map((selected) => runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id })));
+            const failures = results.filter((result) => result.status === 'rejected').length;
+            if (failures) throw new Error(`${failures} 个团队任务恢复失败，请检查各 Run 状态`);
+          }}
           onCreate={() => setTeamGoalOpen(true)}
           onInstruct={async (selected, task, instruction) => { await instructAgentTeamTask({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, instruction }); }}
           onPause={async (selected) => { await pauseAgentTeamAfterCurrentBatch(selected.run.id); }}
