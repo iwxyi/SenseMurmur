@@ -1124,6 +1124,8 @@ async function generateOfficialResponse(
     response_format: options.responseFormat === 'json' ? { type: 'json_object' } : undefined,
     ...buildOpenAICompatibleAdvancedRequestFields(config),
     metadata: options.aiUsage ? { aiUsage: options.aiUsage } : undefined,
+    ...(options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId && getChatExecutionFence(options.aiUsage.resourceId)
+      ? { executionFence: getChatExecutionFence(options.aiUsage.resourceId) } : {}),
   };
   const response = await api.fetchWithAuth(backendUrl('/api/ai/v1/chat/completions'), {
     method: 'POST',
@@ -1354,6 +1356,8 @@ async function generateOpenAICompatibleImage(config: APIConfig, options: ImageGe
         negative_prompt: options.negativePrompt || undefined,
         seed: options.seed ?? undefined,
         metadata: officialProxy && options.aiUsage ? { aiUsage: options.aiUsage } : undefined,
+        ...(officialProxy && options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId && getChatExecutionFence(options.aiUsage.resourceId)
+          ? { executionFence: getChatExecutionFence(options.aiUsage.resourceId) } : {}),
       }),
     });
     const result = await parseJsonResponse<{
@@ -1413,6 +1417,8 @@ async function generateGeminiImage(config: APIConfig, options: ImageGenerationOp
       body: JSON.stringify({
         ...(officialProxy ? { provider: resolveOfficialBackendProvider(config.provider), model: config.model } : {}),
         ...(officialProxy && options.aiUsage ? { metadata: { aiUsage: options.aiUsage } } : {}),
+        ...(officialProxy && options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId && getChatExecutionFence(options.aiUsage.resourceId)
+          ? { executionFence: getChatExecutionFence(options.aiUsage.resourceId) } : {}),
         contents: [{ role: 'user', parts }],
         generationConfig: {
           responseModalities: ['IMAGE'],

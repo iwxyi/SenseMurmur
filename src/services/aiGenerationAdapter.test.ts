@@ -3,6 +3,7 @@ import { DEFAULT_IMAGE_AI_PROFILE } from '../types/settings';
 import { api } from './api';
 import { generateImageWithAdapter, generateVideoWithAdapter, resolveImageGenerationRequest, resolveVideoGenerationParameters } from './aiGenerationAdapter';
 import { clearChatExecutionFence, setChatExecutionFence } from './chatExecutionFence';
+import { generateResponse } from './aiClient';
 
 describe('video generation defaults', () => {
   const profile = { ...DEFAULT_IMAGE_AI_PROFILE, type: 'video' as const };
@@ -105,5 +106,38 @@ describe('image generation default resolution', () => {
     await generateImageWithAdapter({ ...params, imageSize: '4K' });
     await generateImageWithAdapter({ ...params, size: '1024x1536' });
     expect(fetchMock.mock.calls.map((call) => JSON.parse(String(call[1].body)).size)).toEqual(['2048x2048', '4096x4096', '1024x1536']);
+  });
+});
+
+describe('official requests carry the active chat lease', () => {
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+  it('includes the fence in an official text request', async () => {
+    const fence = { ownerId: 'owner-current-123456', generation: 8 };
+    setChatExecutionFence('chat-text', fence);
+    const response = new Response(JSON.stringify({ choices: [{ message: { content: '完成' } }] }), { status: 200 });
+    const fetchWithAuth = vi.spyOn(api, 'fetchWithAuth').mockResolvedValue(response);
+    try {
+      await generateResponse({ provider: 'official-ace', model: 'gpt-6-sol', apiKey: '', baseUrl: '/api/ai' }, '助手',
+        [{ role: 'user', content: '你好' }], undefined,
+        { aiUsage: { type: 'chat', scope: 'chat', resourceId: 'chat-text' } });
+      const body = JSON.parse(String(fetchWithAuth.mock.calls[0][1]?.body));
+      expect(body.executionFence).toEqual(fence);
+    } finally { clearChatExecutionFence('chat-text', fence); }
+  });
+
+  it('includes the fence in an official image request', async () => {
+    const fence = { ownerId: 'owner-current-123456', generation: 8 };
+    setChatExecutionFence('chat-image', fence);
+    const fetchWithAuth = vi.spyOn(api, 'fetchWithAuth').mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: 'AQID' } }] } }],
+    }), { status: 200 }));
+    try {
+      await generateImageWithAdapter({ profile: { ...DEFAULT_IMAGE_AI_PROFILE, provider: 'official-ace-nanobanana',
+        model: 'nano-banana-pro:official' }, prompt: '森林', intent: 'chat-image',
+      aiUsage: { type: 'image_generation', scope: 'chat', resourceId: 'chat-image' } });
+      const body = JSON.parse(String(fetchWithAuth.mock.calls[0][1]?.body));
+      expect(body.executionFence).toEqual(fence);
+    } finally { clearChatExecutionFence('chat-image', fence); }
   });
 });
