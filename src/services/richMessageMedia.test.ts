@@ -454,6 +454,44 @@ describe('processRichMessageMedia', () => {
     });
   });
 
+  it('writes the latest combined attachments after a prior cloud metadata write releases', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const firstWrite = deferred<Record<string, unknown>>();
+    const imageGate = deferred<Array<{ dataUrl: string; mimeType: string }>>();
+    const videoGate = deferred<Awaited<ReturnType<typeof generateVideoWithAdapter>>>();
+    const pollGate = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(api.updateMessageMetadata).mockReturnValueOnce(firstWrite.promise);
+    vi.mocked(api.createMediaAsset).mockResolvedValue({ id: 'mixed-image-asset', url: '/uploads/mixed-image.png', mimeType: 'image/png', sizeBytes: 20 } as Awaited<ReturnType<typeof api.createMediaAsset>>);
+    vi.mocked(generateImageWithAdapter).mockReturnValue(imageGate.promise);
+    vi.mocked(generateVideoWithAdapter).mockReturnValue(videoGate.promise);
+    vi.mocked(waitForAiMediaTask).mockReturnValue(pollGate.promise);
+    const message = buildQueuedImageMessage({ id: 'cloud-mixed', serverId: 'server-cloud-mixed', metadata: { attachments: [
+      { id: 'image-1', kind: 'image', status: 'queued', promptText: '场景图', altText: '图片', createdAt: 123, updatedAt: 123 },
+      { id: 'video-1', kind: 'video', status: 'queued', promptText: '森林追逐', altText: '视频', createdAt: 123, updatedAt: 123 },
+    ] } });
+    const run = processRichMessageMedia({ message,
+      aiProfiles: [imageProfile, { ...imageProfile, type: 'video', model: 'video-model' }], upsertMessage: () => undefined });
+    await waitForExpectation(() => expect(api.updateMessageMetadata).toHaveBeenCalledTimes(1));
+    imageGate.resolve([{ dataUrl: 'data:image/png;base64,cloud-mixed', mimeType: 'image/png' }]);
+    await waitForExpectation(() => expect(api.updateMessageMetadata).toHaveBeenCalledTimes(1));
+    firstWrite.resolve({});
+    await waitForExpectation(() => {
+      expect(vi.mocked(api.updateMessageMetadata).mock.calls.length).toBeGreaterThanOrEqual(2);
+      for (const [, metadata] of vi.mocked(api.updateMessageMetadata).mock.calls.slice(1)) {
+        expect((metadata as Message['metadata'])?.attachments).toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: 'image-1', status: 'ready' }),
+          expect.objectContaining({ id: 'video-1', status: 'generating' }),
+        ]));
+      }
+    });
+    videoGate.resolve({ task_id: 'cloud-mixed-task' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>);
+    await run;
+    pollGate.resolve({ task_id: 'cloud-mixed-task', model: 'video-model', status: 'failed', result: { error: '测试结束' },
+      chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(getRichMediaQueueSnapshot()).toEqual([]));
+  });
+
   it('searches stickers without a model profile and preserves the keyword on retry', async () => {
     vi.mocked(api.searchDoutu)
       .mockRejectedValueOnce(new Error('搜索暂时失败'))
