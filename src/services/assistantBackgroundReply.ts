@@ -93,6 +93,7 @@ async function executeAssistantReply(task: WorkflowTask, signal: AbortSignal) {
 const assistantRuntime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: executeAssistantReply });
 const activeChatCounts = new Map<string, number>();
 const activeRunIds = new Set<string>();
+const startingReplies = new Map<string, Promise<{ snapshot: WorkflowSnapshot; summary: ReturnType<typeof summarizeWorkflowRun> }>>();
 const activeListeners = new Set<() => void>();
 const publishActive = () => activeListeners.forEach((listener) => listener());
 const runListeners = new Set<() => void>();
@@ -148,19 +149,27 @@ export function assistantReplyRunId(chatId: string, userMessageId: string) {
   return `${chatId}\n${userMessageId}`;
 }
 
-export async function startAssistantBackgroundReply(params: { chatId: string; userMessageId: string; selectedArtifactId?: string | null }) {
+export function startAssistantBackgroundReply(params: { chatId: string; userMessageId: string; selectedArtifactId?: string | null }) {
   const runId = assistantReplyRunId(params.chatId, params.userMessageId);
-  const now = Date.now();
-  const snapshot: WorkflowSnapshot = {
-    run: { id: runId, chatId: params.chatId, goal: '回复用户消息', status: 'active', generation: 0, planVersion: 1, updatedAt: now },
-    tasks: [{ id: params.userMessageId, runId, kind: 'assistant_reply', input: { chatId: params.chatId, userMessageId: params.userMessageId, replyRunId: runId, selectedArtifactId: params.selectedArtifactId }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
-  };
-  const existing = await assistantRuntime.read(runId);
-  if (!existing) {
-    await assistantRuntime.create(snapshot);
-    publishRun();
-  }
-  return runAssistantBackgroundReply(runId, params.chatId, `start-${params.userMessageId}`);
+  const pending = startingReplies.get(runId);
+  if (pending) return pending;
+  const operation = (async () => {
+    const now = Date.now();
+    const snapshot: WorkflowSnapshot = {
+      run: { id: runId, chatId: params.chatId, goal: '回复用户消息', status: 'active', generation: 0, planVersion: 1, updatedAt: now },
+      tasks: [{ id: params.userMessageId, runId, kind: 'assistant_reply', input: { chatId: params.chatId, userMessageId: params.userMessageId, replyRunId: runId, selectedArtifactId: params.selectedArtifactId }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
+    };
+    const created = await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, (existing) => ({
+      snapshot: existing || snapshot, value: !existing,
+    }));
+    if (created) publishRun();
+    return runAssistantBackgroundReply(runId, params.chatId, `start-${params.userMessageId}`);
+  })();
+  startingReplies.set(runId, operation);
+  void operation.finally(() => {
+    if (startingReplies.get(runId) === operation) startingReplies.delete(runId);
+  }).catch(() => undefined);
+  return operation;
 }
 
 async function runAssistantBackgroundReply(runId: string, chatId: string, commandId: string) {

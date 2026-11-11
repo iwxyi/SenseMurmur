@@ -32,6 +32,23 @@ beforeEach(() => {
 });
 
 describe('assistant background reply', () => {
+  it('coalesces simultaneous starts for the same user message', async () => {
+    const chatId = crypto.randomUUID();
+    const chat = { ...buildAssistantChatDraft(), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 1 };
+    const userMessage: Message = { id: crypto.randomUUID(), chatId, type: 'user', senderId: 'user', senderName: '用户', content: '写一段介绍', emotion: 0, timestamp: 1, isDeleted: false };
+    useChatStore.setState({ chats: [chat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [userMessage], messageWindowsByChatId: {} });
+    reply.mockResolvedValue({ id: 'reply-1' });
+    const [first, second] = await Promise.all([
+      startAssistantBackgroundReply({ chatId, userMessageId: userMessage.id }),
+      startAssistantBackgroundReply({ chatId, userMessageId: userMessage.id }),
+    ]);
+    expect(first.snapshot.run.status).toBe('completed');
+    expect(second.snapshot.run.status).toBe('completed');
+    expect(reply).toHaveBeenCalledTimes(1);
+    expect(await listAssistantBackgroundReplies(chatId)).toHaveLength(1);
+  });
+
   it('excludes other workflow kinds from assistant reply listings', async () => {
     const chatId = crypto.randomUUID();
     const runId = `team-${crypto.randomUUID()}`;
