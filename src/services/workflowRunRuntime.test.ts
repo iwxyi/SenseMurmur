@@ -69,6 +69,28 @@ describe('workflow run runtime', () => {
     expect(await runtime.read(id)).toBeNull();
   });
 
+  it('rejects malformed task contracts before any task is dispatched', async () => {
+    const id = crypto.randomUUID();
+    const execute = vi.fn();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => 'test');
+    const plan = snapshot(id);
+    plan.tasks[0] = { ...plan.tasks[0], status: 'not-a-state' as WorkflowSnapshot['tasks'][number]['status'] };
+    await expect(runtime.create(plan)).rejects.toThrow('任务状态无效');
+    expect(execute).not.toHaveBeenCalled();
+    expect(await runtime.read(id)).toBeNull();
+  });
+
+  it('rejects invalid state transitions at the persistence boundary', async () => {
+    const id = crypto.randomUUID();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'test');
+    await runtime.create(snapshot(id));
+    await expect(indexedDbWorkflowRepository.transact('test', id, (current) => {
+      if (!current) throw new Error('missing');
+      return { snapshot: { ...current, tasks: current.tasks.map((task) => task.id === 'script' ? { ...task, attempt: -1 } : task) }, value: undefined };
+    })).rejects.toThrow('尝试次数无效');
+    expect((await runtime.read(id))?.tasks[0].attempt).toBe(0);
+  });
+
   it('rejects a late result after pause changes the run generation', async () => {
     const id = crypto.randomUUID();
     let finish!: (value: { output: string }) => void;

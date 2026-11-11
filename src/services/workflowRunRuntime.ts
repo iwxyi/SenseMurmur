@@ -38,6 +38,55 @@ export interface WorkflowSnapshot {
   tasks: WorkflowTask[];
 }
 
+const RUN_STATUSES = new Set<WorkflowRun['status']>(['active', 'paused', 'completed', 'failed', 'cancelled']);
+const TASK_STATUSES = new Set<WorkflowTaskStatus>([
+  'queued', 'running', 'waiting_dependency', 'waiting_external', 'waiting_user',
+  'result_unknown', 'completed', 'failed', 'cancelled', 'abandoned',
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function assertNonEmptyString(value: unknown, label: string): asserts value is string {
+  if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`工作流${label}无效`);
+}
+
+function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapshot {
+  if (!isRecord(value) || !isRecord(value.run) || !Array.isArray(value.tasks)) throw new Error('工作流快照结构无效');
+  const run = value.run;
+  assertNonEmptyString(run.id, '运行 ID');
+  assertNonEmptyString(run.chatId, '会话 ID');
+  assertNonEmptyString(run.goal, '目标');
+  if (!RUN_STATUSES.has(run.status as WorkflowRun['status'])) throw new Error('工作流运行状态无效');
+  if (!Number.isSafeInteger(run.generation) || (run.generation as number) < 0) throw new Error('工作流运行代次无效');
+  if (!Number.isSafeInteger(run.planVersion) || (run.planVersion as number) < 1) throw new Error('工作流计划版本无效');
+  if (!Number.isFinite(run.updatedAt)) throw new Error('工作流更新时间无效');
+  if (run.resumeCommandIds !== undefined && (!Array.isArray(run.resumeCommandIds) || run.resumeCommandIds.some((id) => typeof id !== 'string' || !id))) {
+    throw new Error('工作流恢复命令记录无效');
+  }
+
+  const taskIds = new Set<string>();
+  for (const candidate of value.tasks) {
+    if (!isRecord(candidate)) throw new Error('工作流任务结构无效');
+    assertNonEmptyString(candidate.id, '任务 ID');
+    assertNonEmptyString(candidate.runId, '任务运行 ID');
+    assertNonEmptyString(candidate.kind, '任务类型');
+    if (candidate.runId !== run.id) throw new Error('工作流任务不属于当前运行');
+    if (taskIds.has(candidate.id)) throw new Error('工作流任务 ID 重复');
+    taskIds.add(candidate.id);
+    if (!Array.isArray(candidate.dependsOn) || candidate.dependsOn.some((id) => typeof id !== 'string' || !id)) throw new Error('工作流任务依赖无效');
+    if (new Set(candidate.dependsOn).size !== candidate.dependsOn.length) throw new Error('工作流任务依赖重复');
+    if (!TASK_STATUSES.has(candidate.status as WorkflowTaskStatus)) throw new Error('工作流任务状态无效');
+    if (!Number.isSafeInteger(candidate.attempt) || (candidate.attempt as number) < 0) throw new Error('工作流任务尝试次数无效');
+    if (!Number.isFinite(candidate.updatedAt)) throw new Error('工作流任务更新时间无效');
+    for (const field of ['externalTaskId', 'error'] as const) {
+      if (candidate[field] !== undefined && typeof candidate[field] !== 'string') throw new Error(`工作流任务${field}无效`);
+    }
+  }
+  assertTaskGraph(value.tasks as WorkflowTask[]);
+}
+
 export interface WorkflowResumeSummary {
   completed: string[];
   waiting: string[];
@@ -139,7 +188,18 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readonly');
       const request = tx.objectStore(STORE).get(rowKey(scope, runId));
-      request.onsuccess = () => resolve((request.result as WorkflowSnapshot | undefined) || null);
+      request.onsuccess = () => {
+        const snapshot: unknown = request.result;
+        if (snapshot === undefined) resolve(null);
+        else {
+          try {
+            assertWorkflowSnapshot(snapshot);
+            resolve(snapshot);
+          } catch (error) {
+            reject(error);
+          }
+        }
+      };
       request.onerror = () => reject(request.error || new Error('读取工作流失败'));
     });
   },
@@ -156,7 +216,15 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
           resolve(rows);
           return;
         }
-        if (typeof cursor.key === 'string' && cursor.key.startsWith(prefix)) rows.push(cursor.value as WorkflowSnapshot);
+        if (typeof cursor.key === 'string' && cursor.key.startsWith(prefix)) {
+          try {
+            assertWorkflowSnapshot(cursor.value);
+            rows.push(cursor.value);
+          } catch (error) {
+            reject(error);
+            return;
+          }
+        }
         cursor.continue();
       };
       request.onerror = () => reject(request.error || new Error('列出工作流失败'));
@@ -171,7 +239,10 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
       let value: unknown;
       request.onsuccess = () => {
         try {
-          const next = update((request.result as WorkflowSnapshot | undefined) || null);
+          const current: unknown = request.result;
+          if (current !== undefined) assertWorkflowSnapshot(current);
+          const next = update((current as WorkflowSnapshot | undefined) || null);
+          assertWorkflowSnapshot(next.snapshot);
           value = next.value;
           store.put(next.snapshot, rowKey(scope, runId));
         } catch (error) {
@@ -209,12 +280,13 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
   const mutate = <T>(storageScope: string, runId: string, update: (snapshot: WorkflowSnapshot) => { snapshot: WorkflowSnapshot; value: T }) =>
     repository.transact(storageScope, runId, (current) => {
       if (!current) throw new Error('工作流不存在');
-      return update(current);
+      const next = update(current);
+      assertWorkflowSnapshot(next.snapshot);
+      return next;
     });
 
   async function create(snapshot: WorkflowSnapshot) {
-    assertTaskGraph(snapshot.tasks);
-    if (snapshot.tasks.some((task) => task.runId !== snapshot.run.id)) throw new Error('任务不属于当前工作流');
+    assertWorkflowSnapshot(snapshot);
     return repository.transact(scope(), snapshot.run.id, (current) => {
       if (current) throw new Error('工作流已经存在');
       return { snapshot, value: snapshot };
