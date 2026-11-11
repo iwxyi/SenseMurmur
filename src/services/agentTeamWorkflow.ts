@@ -19,10 +19,11 @@ import { resolveChatAgentCapabilities } from './chatAgentCapabilities';
 import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTeamVideoTask';
 import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReference } from './agentTeamImageTask';
 import { inspectAgentTeamImages } from './agentTeamImageInspection';
+import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
 import { listAvailableModels } from './aiClient';
 
 const TOOL_TASK_KINDS = {
-  text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image',
+  text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio',
   image_inspection: 'agent_image_inspection', video_generation: 'agent_video',
 } as const;
 
@@ -32,8 +33,9 @@ function isAgentTaskKind(kind: string) { return Object.values(TOOL_TASK_KINDS).s
 async function teamMediaCapabilities() {
   const profiles = useSettingsStore.getState().aiProfiles;
   const imageProfile = getUsablePreferredAIProfile(profiles, 'image');
+  const audioProfile = getUsablePreferredAIProfile(profiles, 'audio');
   const textProfile = getUsablePreferredAIProfile(profiles, 'text');
-  const media = { imageGeneration: Boolean(imageProfile), imageInspection: Boolean(imageProfile && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput) };
+  const media = { imageGeneration: Boolean(imageProfile), audioGeneration: Boolean(audioProfile), imageInspection: Boolean(imageProfile && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput) };
   const videoProfile = getUsablePreferredAIProfile(profiles, 'video');
   if (!videoProfile) return { ...media, videoGeneration: false, videoReferenceImages: false, videoRequiresReferenceImage: false, maxVideoReferenceImages: 0, videoUnavailableReason: '当前未配置视频模型' };
   let videoReferenceImages = false;
@@ -80,7 +82,7 @@ function selectReviewEvidence(snapshot: WorkflowSnapshot, taskIds: string[]) {
     if (!source || source.status !== 'completed' || typeof source.output !== 'string') throw new WorkflowPreflightError('验收证据尚未就绪');
     return source;
   });
-  const media = sources.filter((source) => source.kind === 'agent_image' || source.kind === 'agent_video').slice(-6);
+  const media = sources.filter((source) => source.kind === 'agent_image' || source.kind === 'agent_audio' || source.kind === 'agent_video').slice(-6);
   const selected = new Set(media.map((source) => source.id));
   sources.filter((source) => !selected.has(source.id)).slice(-(12 - media.length)).forEach((source) => selected.add(source.id));
   return { omitted: sources.length - selected.size,
@@ -137,6 +139,7 @@ function isTeamTaskInput(value: unknown): value is TeamTaskInput {
 function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<ReturnType<typeof teamMediaCapabilities>>, webSearch: boolean) {
   if (!webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索');
   if (!capabilities.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');
+  if (!capabilities.audioGeneration && plan.tasks.some((task) => task.tool === 'audio_generation')) throw new WorkflowPreflightError('当前未配置音乐生成模型');
   if (!capabilities.imageInspection && plan.tasks.some((task) => task.tool === 'image_inspection')) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
   if (!capabilities.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
   const byId = new Map(plan.tasks.map((task) => [task.id, task]));
@@ -243,6 +246,10 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         });
         return { output };
       }
+      if (selectedTool === 'audio_generation') {
+        return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          prompt: [input.task.goal, input.userInstruction].filter(Boolean).join('\n\n'), signal });
+      }
       if (selectedTool === 'video_generation') {
         const existingVideo = inspectAgentTeamVideoAttachment(task.runId, task.id);
         const upstreamTaskIds = new Set<string>();
@@ -321,6 +328,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (result?.status === 'completed' || result?.status === 'failed') return result;
         return { status: 'pending' as const };
       }
+      if (task.kind === 'agent_audio') {
+        const result = inspectAgentTeamAudioAttachment(task.runId, task.id);
+        if (result?.status === 'completed' || result?.status === 'failed') return result;
+        return { status: 'pending' as const };
+      }
       if (task.kind !== 'agent_video') throw new WorkflowPreflightError('外部任务类型无效');
       const result = inspectAgentTeamVideoAttachment(task.runId, task.id);
       if (result?.status === 'completed') return result;
@@ -329,6 +341,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
     },
     async reconcileInterrupted(task) {
       if (task.kind === 'agent_image') return inspectAgentTeamImageAttachment(task.runId, task.id);
+      if (task.kind === 'agent_audio') return inspectAgentTeamAudioAttachment(task.runId, task.id);
       if (task.kind !== 'agent_video') return null;
       return inspectAgentTeamVideoAttachment(task.runId, task.id);
     },
@@ -444,12 +457,12 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return { snapshot: beforeResume, summary: summarizeWorkflowRun(beforeResume) };
       }
       if (beforeResume && beforeResume.tasks.some((task) => (task.status === 'failed' || task.status === 'result_unknown')
-        && (task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(runId, task.id)?.status : task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(runId, task.id)?.status : null) === 'completed')) {
+        && (task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(runId, task.id)?.status : task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(runId, task.id)?.status : task.kind === 'agent_audio' ? inspectAgentTeamAudioAttachment(runId, task.id)?.status : null) === 'completed')) {
         await indexedDbWorkflowRepository.transact(scope(), runId, (current) => {
           if (!current) throw new Error('团队任务记录不存在');
           const tasks = current.tasks.map((task) => {
-            if ((task.kind !== 'agent_video' && task.kind !== 'agent_image') || (task.status !== 'failed' && task.status !== 'result_unknown')) return task;
-            const result = task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(runId, task.id) : inspectAgentTeamImageAttachment(runId, task.id);
+            if ((task.kind !== 'agent_video' && task.kind !== 'agent_image' && task.kind !== 'agent_audio') || (task.status !== 'failed' && task.status !== 'result_unknown')) return task;
+            const result = task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(runId, task.id) : task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(runId, task.id) : inspectAgentTeamAudioAttachment(runId, task.id);
             return result?.status === 'completed' ? { ...task, status: 'completed' as const, output: result.output, error: undefined, updatedAt: Date.now() } : task;
           });
           return { snapshot: { ...current, tasks, run: { ...current.run, status: tasks.some((task) => task.status === 'failed') ? 'failed' : 'paused', updatedAt: Date.now() } }, value: undefined };
@@ -640,7 +653,7 @@ function completedTeamMediaStatuses(state: ReturnType<typeof useMessageStore.get
   for (const [key, message] of latest) {
     const team = message.metadata?.agentTeamMedia;
     if (!team || message.isDeleted) continue;
-    const status = message.metadata?.attachments?.find((attachment) => attachment.kind === 'video' || attachment.kind === 'image')?.status;
+    const status = message.metadata?.attachments?.find((attachment) => attachment.kind === 'video' || attachment.kind === 'image' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation'))?.status;
     if (status === 'ready' || status === 'failed') statuses.set(key, status);
   }
   return statuses;
@@ -661,10 +674,10 @@ useMessageStore.subscribe((next, previous) => {
     void listAgentTeamRuns().then((runs) => {
       for (const run of runs) {
         if (run.run.status !== 'active' && run.run.status !== 'failed') continue;
-        if (!run.tasks.some((task) => (task.kind === 'agent_video' || task.kind === 'agent_image') && (task.status === 'waiting_external' || task.status === 'running' || task.status === 'failed' || task.status === 'result_unknown')
+        if (!run.tasks.some((task) => (task.kind === 'agent_video' || task.kind === 'agent_image' || task.kind === 'agent_audio') && (task.status === 'waiting_external' || task.status === 'running' || task.status === 'failed' || task.status === 'result_unknown')
           && wakeKeys.has(`${task.runId}:${task.id}`))) continue;
         if (run.run.status === 'failed' && !run.tasks.some((task) => (task.status === 'failed' || task.status === 'result_unknown')
-          && (task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(task.runId, task.id)?.status : task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(task.runId, task.id)?.status : null) === 'completed')) continue;
+          && (task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(task.runId, task.id)?.status : task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(task.runId, task.id)?.status : task.kind === 'agent_audio' ? inspectAgentTeamAudioAttachment(task.runId, task.id)?.status : null) === 'completed')) continue;
         if (activeTeamRuns.has(run.run.id)) {
           deferredMediaWakeRuns.add(run.run.id);
           continue;
@@ -718,9 +731,9 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
         void listAgentTeamRuns(params.chatId).then((runs) => {
           const run = runs.find((item) => item.run.id === runId);
           if (!run || (run.run.status !== 'active' && run.run.status !== 'failed') || activeTeamRuns.has(runId)) return;
-          if (!run.tasks.some((task) => (task.kind === 'agent_video' || task.kind === 'agent_image')
+          if (!run.tasks.some((task) => (task.kind === 'agent_video' || task.kind === 'agent_image' || task.kind === 'agent_audio')
             && (task.status === 'waiting_external' || task.status === 'failed')
-            && ['completed', 'failed'].includes((task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(runId, task.id) : inspectAgentTeamImageAttachment(runId, task.id))?.status || ''))) return;
+            && ['completed', 'failed'].includes((task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(runId, task.id) : task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(runId, task.id) : inspectAgentTeamAudioAttachment(runId, task.id))?.status || ''))) return;
           void runAgentTeam({ chatId: run.run.chatId, goal: run.run.goal, runId })
             .catch((error) => console.error('[agent-team:media-deferred-resume-failed]', error));
         }).catch((error) => console.error('[agent-team:media-deferred-wake-failed]', error));
@@ -805,6 +818,11 @@ export async function recoverAgentTeamRuns() {
             if (image?.status === 'queued') return { ...task, status: 'queued', updatedAt: Date.now() };
             if (image?.status === 'completed') return { ...task, status: 'completed', output: image.output, updatedAt: Date.now() };
             if (image?.status === 'failed') return { ...task, status: 'failed', error: image.error, updatedAt: Date.now() };
+            const audio = task.kind === 'agent_audio' ? inspectAgentTeamAudioAttachment(task.runId, task.id) : null;
+            if (audio?.status === 'queued') return { ...task, status: 'queued', updatedAt: Date.now() };
+            if (audio?.status === 'waiting_external') return { ...task, status: 'waiting_external', externalTaskId: audio.externalTaskId, updatedAt: Date.now() };
+            if (audio?.status === 'completed') return { ...task, status: 'completed', output: audio.output, updatedAt: Date.now() };
+            if (audio?.status === 'failed') return { ...task, status: 'failed', error: audio.error, updatedAt: Date.now() };
             const video = task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(task.runId, task.id) : null;
             if (video?.status === 'queued') return { ...task, status: 'queued', updatedAt: Date.now() };
             if (video?.status === 'waiting_external') return { ...task, status: 'waiting_external', externalTaskId: video.externalTaskId, updatedAt: Date.now() };

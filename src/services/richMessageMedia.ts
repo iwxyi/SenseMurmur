@@ -3,7 +3,7 @@ import type { Message, MessageAttachment, MessageAttachmentKind, MessageMetadata
 import { isAIProfileUsable, type AIModelProfile } from '../types/settings';
 import { api, ApiError } from './api';
 import { workspaceFetch as fetch } from './workspaceLifecycle';
-import { generateImageWithAdapter, generateVideoWithAdapter, synthesizeSpeechWithAdapter } from './aiGenerationAdapter';
+import { generateAudioWithAdapter, generateImageWithAdapter, generateVideoWithAdapter, synthesizeSpeechWithAdapter } from './aiGenerationAdapter';
 import { waitForAiMediaTask } from './aiClient';
 import { readAuthSnapshot } from './authSnapshot';
 import { logRecoverableError, reportRecoverableError } from './diagnostics';
@@ -139,6 +139,7 @@ export type RichMediaQueueSnapshotEntry = {
   messageId: string;
   attachmentId: string;
   kind: GenerativeAttachmentKind;
+  audioPurpose?: MessageAttachment['audioPurpose'];
   status: RichMediaQueueEntryStatus;
   position: number;
   total: number;
@@ -205,6 +206,7 @@ function buildRichMediaQueueSnapshot(): RichMediaQueueSnapshotEntry[] {
     messageId: entry.messageId,
     attachmentId: entry.attachmentId,
     kind: entry.kind,
+    audioPurpose: entry.message.metadata?.attachments?.find((attachment) => attachment.id === entry.attachmentId)?.audioPurpose,
     status: entry.status,
     position: index + 1,
     total: entries.length,
@@ -311,7 +313,7 @@ function persistRichMessageMetadata(message: Message, metadata: MessageMetadata,
   });
 }
 
-function retryAttachmentMetadata(metadata: MessageMetadata | undefined, attachmentId: string, generationJobId: string, reuseVideoTask = false): MessageMetadata {
+function retryAttachmentMetadata(metadata: MessageMetadata | undefined, attachmentId: string, generationJobId: string, reuseMediaTask = false): MessageMetadata {
   const attachments = metadata?.attachments || [];
   const target = attachments.find((attachment) => attachment.id === attachmentId);
   if (!target) return metadata || {};
@@ -319,7 +321,7 @@ function retryAttachmentMetadata(metadata: MessageMetadata | undefined, attachme
     ...target,
     status: 'queued',
     error: undefined,
-    mediaTaskId: reuseVideoTask && target.kind === 'video' ? target.mediaTaskId : undefined,
+    mediaTaskId: reuseMediaTask && (target.kind === 'video' || (target.kind === 'audio' && target.audioPurpose === 'music_generation')) ? target.mediaTaskId : undefined,
     assetId: undefined,
     url: undefined,
     thumbnailAssetId: undefined,
@@ -510,6 +512,33 @@ async function pollVideoTask(params: {
   throw new Error('媒体任务未完成');
 }
 
+async function pollMusicTask(params: { entry: RichMediaQueueEntry; message: Message; attachment: GenerativeAttachment; generationJobId: string; taskId: string }) {
+  const task = await waitForAiMediaTask(params.taskId);
+  const latestMessage = getLatestRichMediaMessage(params.entry.messageId, params.message);
+  const latestAttachment = latestMessage.metadata?.attachments?.find((item) => item.id === params.attachment.id);
+  if (latestAttachment?.generationJobId !== params.generationJobId) return;
+  if (task.status === 'failed') {
+    const result = task.result && typeof task.result === 'object' && !Array.isArray(task.result) ? task.result as Record<string, unknown> : {};
+    const reason = typeof result.error === 'string' ? result.error : '音乐生成失败，服务端未返回可展示的失败原因。';
+    throw new Error(reason);
+  }
+  if (task.status !== 'succeeded') throw new Error('音乐任务未完成');
+  let asset: { id?: string; url: string; mimeType: string; sizeBytes?: number; checksum?: string };
+  try {
+    asset = isLocalOnlyMediaMode()
+      ? await api.downloadAiMediaTaskContent(params.taskId, 'audio').then(async (blob) => ({ id: undefined, url: await blobToDataUrl(blob), mimeType: blob.type || 'audio/mpeg', sizeBytes: blob.size, checksum: undefined }))
+      : await api.createMediaAssetFromAiTask({ chatId: latestMessage.chatId, messageId: latestMessage.serverId || latestMessage.id,
+        attachmentId: params.attachment.id, taskId: params.taskId, kind: 'audio', description: params.attachment.caption || params.attachment.altText,
+        promptText: params.attachment.promptText });
+  } catch (error) {
+    throw new Error(`音乐已生成，但文件获取或保存失败：${error instanceof Error ? error.message : '网络请求失败'}`);
+  }
+  const durationMs = isLocalOnlyMediaMode() && asset.url.startsWith('data:') ? await getAudioDurationMs(asset.url) : undefined;
+  updateRichMediaMessage({ message: latestMessage, attachmentId: params.attachment.id,
+    patch: { status: 'ready', mediaTaskId: undefined, assetId: asset.id, url: asset.url, mimeType: asset.mimeType,
+      sizeBytes: asset.sizeBytes, checksum: asset.checksum, durationMs, generationJobId: params.generationJobId }, upsertMessage: params.entry.upsertMessage });
+}
+
 async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
   const messageId = entry.messageId;
   const currentMessage = getLatestRichMediaMessage(messageId, entry.message);
@@ -539,7 +568,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
   });
 
   try {
-    if (attachment.kind === 'video' && !attachment.mediaTaskId) {
+    if ((attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation')) && !attachment.mediaTaskId) {
       flushBufferedPersistenceWrites();
       await persistVideoSubmissionKey(workingMessage);
     }
@@ -622,6 +651,44 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
         upsertMessage: entry.upsertMessage,
       });
       rememberRichMediaMessage(workingMessage);
+      return;
+    }
+
+    if (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation') {
+      let taskId = attachment.mediaTaskId;
+      if (!taskId) {
+        const profile = findGenerationProfile(entry.aiProfiles, 'audio');
+        if (!profile) throw new Error('音频模型未配置');
+        const clientRequestKey = attachment.generationJobId || generationJobId;
+        try {
+          const task = await api.getAiMediaTaskByRequestKey(clientRequestKey);
+          taskId = task.task_id;
+        } catch (lookupError) {
+          if (!(lookupError instanceof ApiError) || lookupError.status !== 404) throw lookupError;
+          const task = await generateAudioWithAdapter({ profile, prompt: attachment.promptText || attachment.altText,
+            clientRequestKey, aiUsage: { type: 'audio_generation', label: '聊天音乐生成', scope: 'chat', resourceId: workingMessage.chatId } });
+          taskId = task.task_id;
+        }
+      }
+      if (!taskId) throw new Error('音乐任务提交失败：未返回任务 ID');
+      workingMessage = updateRichMediaMessage({ message: workingMessage, attachmentId: attachment.id,
+        patch: { status: 'generating', mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
+      entry.taskId = taskId;
+      entry.generationJobId = generationJobId;
+      longRunningRichMediaEntriesById.set(entry.id, entry);
+      publishRichMediaQueueSnapshot();
+      void pollMusicTask({ entry, message: workingMessage, attachment, generationJobId, taskId }).catch((error) => {
+        const latestMessage = getLatestRichMediaMessage(entry.messageId, workingMessage);
+        const latest = latestMessage.metadata?.attachments?.find((item) => item.id === attachment.id);
+        if (latest?.generationJobId !== generationJobId) return;
+        const errorText = toMediaGenerationErrorText(error, 'audio');
+        richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '聊天音乐生成', message: errorText, createdAt: Date.now() });
+        updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id,
+          patch: { status: 'failed', error: errorText, mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
+      }).finally(() => {
+        if (longRunningRichMediaEntriesById.get(entry.id) === entry) longRunningRichMediaEntriesById.delete(entry.id);
+        publishRichMediaQueueSnapshot();
+      });
       return;
     }
 
@@ -931,21 +998,22 @@ export async function retryRichMessageMedia(params: {
   const attachments = params.message.metadata?.attachments || [];
   const target = attachments.find((attachment) => attachment.id === params.attachmentId);
   if (!target || (target.status !== 'failed' && target.status !== 'queued' && target.status !== 'generating' && !(target.status === 'ready' && (!target.url || target.kind === 'sticker')))) return;
-  let reuseVideoTask = false;
-  if (target.kind === 'video' && target.mediaTaskId) {
-    try { reuseVideoTask = (await api.getAiMediaTask(target.mediaTaskId)).status !== 'failed'; }
-    catch { reuseVideoTask = true; }
+  const isAsyncTask = target.kind === 'video' || (target.kind === 'audio' && target.audioPurpose === 'music_generation');
+  let reuseMediaTask = false;
+  if (isAsyncTask && target.mediaTaskId) {
+    try { reuseMediaTask = (await api.getAiMediaTask(target.mediaTaskId)).status !== 'failed'; }
+    catch { reuseMediaTask = true; }
   }
-  if (target.kind === 'video' && !target.mediaTaskId && target.generationJobId) {
+  if (isAsyncTask && !target.mediaTaskId && target.generationJobId) {
     try {
       const task = await api.getAiMediaTaskByRequestKey(target.generationJobId);
-      reuseVideoTask = task.status !== 'failed';
+      reuseMediaTask = task.status !== 'failed';
     } catch (error) {
-      if (!(error instanceof ApiError) || error.status !== 404) reuseVideoTask = true;
+      if (!(error instanceof ApiError) || error.status !== 404) reuseMediaTask = true;
     }
   }
-  const generationJobId = reuseVideoTask && target.generationJobId ? target.generationJobId : createGenerationJobId();
-  const retryMetadata = retryAttachmentMetadata(params.message.metadata, params.attachmentId, generationJobId, reuseVideoTask);
+  const generationJobId = reuseMediaTask && target.generationJobId ? target.generationJobId : createGenerationJobId();
+  const retryMetadata = retryAttachmentMetadata(params.message.metadata, params.attachmentId, generationJobId, reuseMediaTask);
   const retryMessage = { ...params.message, metadata: retryMetadata };
   params.upsertMessage(retryMessage);
   persistRichMessageMetadata(retryMessage, retryMetadata, 'rich-message-media.retry-persist-metadata', params.attachmentId);

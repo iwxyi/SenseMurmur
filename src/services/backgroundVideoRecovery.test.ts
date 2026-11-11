@@ -24,6 +24,11 @@ function message(id: string, status: 'generating' | 'queued', taskId?: string): 
       altText: '视频', mediaTaskId: taskId, createdAt: 1, updatedAt: 1 }] } };
 }
 
+function musicMessage(id: string, taskId: string): Message {
+  return { ...message(id, 'generating', taskId), metadata: { attachments: [{ id: `audio-${id}`, kind: 'audio', audioPurpose: 'music_generation', status: 'generating',
+    altText: '音乐', mediaTaskId: taskId, createdAt: 1, updatedAt: 1 }] } };
+}
+
 describe('background video recovery', () => {
   it('keeps an older generating video visible after cached chat eviction', () => {
     const pending = message('old-video', 'generating', 'task-old');
@@ -59,6 +64,11 @@ describe('background video recovery', () => {
       { ...message('deleted', 'generating', 'task-2'), isDeleted: true },
       { ...message('other-chat', 'generating', 'task-3'), chatId: 'other' },
     ], new Set(['chat']), true)).toEqual([accepted, submitting]);
+  });
+
+  it('includes accepted music tasks in the same reload recovery queue', () => {
+    const music = musicMessage('music', 'music-task');
+    expect(findPendingVideoMessages([music], new Set(['chat']), true)).toEqual([music]);
   });
 
   it('does not revive a task after a newer message copy marks it complete', () => {

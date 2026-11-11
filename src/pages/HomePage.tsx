@@ -1039,7 +1039,9 @@ export default function HomePage() {
       attention: true,
     }] : []),
     ...(richMediaNonVideoQueue.length ? [{
-      label: richMediaNonVideoQueue[0]?.kind === 'audio' ? '正在生成语音' : '正在生成图片',
+      label: richMediaNonVideoQueue[0]?.kind === 'audio'
+        ? richMediaNonVideoQueue[0]?.audioPurpose === 'music_generation' ? '正在生成音乐' : '正在生成语音'
+        : '正在生成图片',
       value: richMediaNonVideoQueue.length > 1 ? `${richMediaNonVideoQueue[0]?.position || 1}/${richMediaNonVideoQueue[0]?.total || richMediaNonVideoQueue.length}` : 1,
       icon: <AutoAwesomeIcon />,
       color: richMediaNonVideoQueue[0]?.kind === 'audio' ? 'primary.main' : 'secondary.main',

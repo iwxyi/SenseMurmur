@@ -228,6 +228,20 @@ export async function generateVideoWithAdapter(params: VideoGenerationAdapterOpt
   });
 }
 
+export async function generateAudioWithAdapter(params: { profile: AIModelProfile; prompt: string; signal?: AbortSignal; aiUsage?: AiUsageMetadata; clientRequestKey?: string }) {
+  await assertMultimediaGenerationPermission();
+  return submitAiMediaTask({
+    profile: profileToApi(params.profile),
+    prompt: params.prompt,
+    signal: params.signal,
+    aiUsage: params.aiUsage || { type: 'audio_generation', label: '聊天音乐生成' },
+    clientRequestKey: params.clientRequestKey,
+  }).catch((error: unknown) => {
+    reportMultimediaPermissionError(error);
+    throw error;
+  });
+}
+
 export async function generateTextWithAdapter(params: TextGenerationAdapterOptions): Promise<string> {
   return generateResponse(
     profileToApi(params.profile),

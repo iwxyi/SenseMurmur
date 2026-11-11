@@ -66,10 +66,10 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const latestReview = run.tasks.filter((item) => item.kind === 'team_review' && item.status === 'completed').at(-1);
   const reviewResult = latestReview?.output && typeof latestReview.output === 'object' && !Array.isArray(latestReview.output)
     ? latestReview.output as { complete?: unknown; reason?: unknown } : null;
-  const childTasks = run.tasks.filter((item) => item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_image_inspection' || item.kind === 'agent_video');
+  const childTasks = run.tasks.filter((item) => item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_image_inspection' || item.kind === 'agent_audio' || item.kind === 'agent_video');
   const blocked = summary.blocked.length > 0;
   const running = isRunActive(run.run.id);
-  const editable = Boolean(canRun && task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_image_inspection' || task.kind === 'agent_video') && task.attempt === 0
+  const editable = Boolean(canRun && task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_image_inspection' || task.kind === 'agent_audio' || task.kind === 'agent_video') && task.attempt === 0
     && (task.status === 'queued' || task.status === 'waiting_dependency'));
   const unknownReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'result_unknown');
   const failedReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'failed');
@@ -175,7 +175,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
       <DialogActions>
         {canRun && <Button onClick={() => { setOpen(false); onCreate(); }}>新建团队任务</Button>}
         {canRun && running && !run.run.pauseRequested && <Button onClick={() => { void onPause(run).then(() => setPauseError(null)).catch((error: unknown) => setPauseError(error instanceof Error ? error.message : '暂停任务失败')); }}>当前步骤完成后暂停</Button>}
-        {canRun && !running && ((!blocked && run.run.status !== 'failed') || run.tasks.some((item) => (item.kind === 'agent_video' || item.kind === 'agent_image') && (item.status === 'failed' || item.status === 'result_unknown'))) && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : blocked ? '核对媒体结果' : '继续整个任务'}</Button>}
+        {canRun && !running && ((!blocked && run.run.status !== 'failed') || run.tasks.some((item) => (item.kind === 'agent_video' || item.kind === 'agent_image' || item.kind === 'agent_audio') && (item.status === 'failed' || item.status === 'result_unknown'))) && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : blocked ? '核对媒体结果' : '继续整个任务'}</Button>}
         <Button onClick={() => setOpen(false)}>关闭</Button>
       </DialogActions>
     </Dialog>

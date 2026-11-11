@@ -42,7 +42,7 @@ export interface MessageAttachment {
   mediaTaskId?: string;
   promptText?: string;
   /** Distinguishes generated learning audio from ordinary character voice messages. */
-  audioPurpose?: 'chat_voice' | 'listening_exercise';
+  audioPurpose?: 'chat_voice' | 'listening_exercise' | 'music_generation';
   /** Per-attachment transcript policy; learning listening audio can override global settings. */
   transcriptVisibility?: 'default' | 'visible' | 'hidden';
   ttsVoice?: string;

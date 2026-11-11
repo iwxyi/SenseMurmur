@@ -977,16 +977,16 @@ class ApiClient {
     return this.request<AiMediaTask>('GET', `/ai/media/tasks/${encodeURIComponent(taskId)}`);
   }
 
-  async downloadAiMediaTaskContent(taskId: string) {
-    const response = await this.fetchWithAuth(backendUrl(`${API_BASE}/media-assets/from-ai-task/${encodeURIComponent(taskId)}/content`), { method: 'GET' });
+  async downloadAiMediaTaskContent(taskId: string, kind: 'audio' | 'video' = 'video') {
+    const response = await this.fetchWithAuth(backendUrl(`${API_BASE}/media-assets/from-ai-task/${encodeURIComponent(taskId)}/content?kind=${kind}`), { method: 'GET' });
     if (!response.ok) {
       const failure = await this.parseJsonResponse<{ error?: string; code?: string }>(response).catch((): { error?: string; code?: string } => ({}));
-      throw new ApiError(failure.error || `视频结果下载失败 (${response.status})`, { code: failure.code, status: response.status });
+      throw new ApiError(failure.error || `媒体结果下载失败 (${response.status})`, { code: failure.code, status: response.status });
     }
     return response.blob();
   }
 
-  async createMediaAssetFromAiTask(input: { chatId: string; messageId: string; attachmentId: string; taskId: string; description?: string; promptText?: string }) {
+  async createMediaAssetFromAiTask(input: { chatId: string; messageId: string; attachmentId: string; taskId: string; kind?: 'audio' | 'video'; description?: string; promptText?: string }) {
     return this.request<{ id: string; url: string; mimeType: string; sizeBytes: number; checksum?: string }>('POST', '/media-assets/from-ai-task', input);
   }
 

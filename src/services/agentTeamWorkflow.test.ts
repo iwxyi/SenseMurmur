@@ -11,8 +11,10 @@ import { useSettingsStore } from '../stores/useSettingsStore';
 import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTeamVideoTask';
 import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReference } from './agentTeamImageTask';
 import { inspectAgentTeamImages } from './agentTeamImageInspection';
+import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
 
 vi.mock('./agentTeamImageInspection', () => ({ inspectAgentTeamImages: vi.fn() }));
+vi.mock('./agentTeamAudioTask', () => ({ inspectAgentTeamAudioAttachment: vi.fn(), queueAgentTeamAudio: vi.fn() }));
 
 vi.mock('./agentTeamVideoTask', () => ({
   inspectAgentTeamVideoAttachment: vi.fn(),
@@ -44,9 +46,25 @@ beforeEach(() => {
   vi.mocked(queueAgentTeamImage).mockReset();
   vi.mocked(teamImageReference).mockReset();
   vi.mocked(inspectAgentTeamImages).mockReset();
+  vi.mocked(inspectAgentTeamAudioAttachment).mockReset();
+  vi.mocked(queueAgentTeamAudio).mockReset();
 });
 
 describe('agent team workflow', () => {
+  it('sends a generated music attachment through a persisted asynchronous team task', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `music-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'audio', name: '音乐', type: 'audio', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'music-model', isDefault: true }] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '生成背景音乐', roles: [{ id: 'composer', name: '作曲', responsibility: '创作配乐', method: '生成音乐', acceptance: '音频可播放', allowedTools: ['audio_generation'] }],
+      tasks: [{ id: 'theme', roleId: 'composer', goal: '创作轻快的森林追逐配乐，包含木琴和鼓点', dependsOn: [], tool: 'audio_generation', acceptance: '有完整音乐附件' }], finalAcceptance: '音乐附件可播放' }));
+    vi.mocked(queueAgentTeamAudio).mockResolvedValue({ externalTaskId: 'music-task' });
+    vi.mocked(inspectAgentTeamAudioAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'music-task' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'text-model' }, () => `music-scope-${runId}`);
+    const result = await workflow.start(runId, chatId, '生成一段森林追逐背景音乐');
+    expect(result.snapshot.tasks.find((task) => task.id === 'theme')).toMatchObject({ kind: 'agent_audio', status: 'waiting_external', externalTaskId: 'music-task' });
+    expect(queueAgentTeamAudio).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining('木琴和鼓点') }));
+  });
   it('inspects generated image bytes before passing observations downstream', async () => {
     const runId = crypto.randomUUID();
     const chatId = `inspection-${runId}`;

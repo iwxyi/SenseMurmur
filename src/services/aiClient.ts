@@ -43,6 +43,7 @@ export type AiUsageType =
   | 'character_artifact'
   | 'moment_generation'
   | 'image_generation'
+  | 'audio_generation'
   | 'video_generation'
   | 'web_search'
   | 'model_test'

@@ -11,7 +11,7 @@ let recoveryWatcher: { signal: AbortSignal; unsubscribe: () => void } | null = n
 const scheduledTasks = new Set<string>();
 
 function videoTaskKeys(message: Message) {
-  return (message.metadata?.attachments || []).filter((attachment) => attachment.kind === 'video'
+  return (message.metadata?.attachments || []).filter((attachment) => (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation'))
     && attachment.status === 'generating' && (attachment.mediaTaskId || attachment.generationJobId))
     .map((attachment) => `${message.id}:${attachment.id}:${attachment.mediaTaskId || attachment.generationJobId}`);
 }
@@ -29,7 +29,7 @@ export function findPendingVideoMessages(messages: Message[], activeChatIds: Set
   }
   return [...latest.values()].filter((message) => !message.isDeleted && activeChatIds.has(message.chatId)
     && (!requiresServerId || Boolean(message.serverId))
-    && (message.metadata?.attachments?.some((attachment) => attachment.kind === 'video' && attachment.status === 'generating'
+    && (message.metadata?.attachments?.some((attachment) => (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation')) && attachment.status === 'generating'
       && Boolean(attachment.mediaTaskId || attachment.generationJobId)) || false));
 }
 
@@ -63,7 +63,7 @@ export async function recoverBackgroundVideoTasks() {
       dispatched += fresh.length;
       void processRichMessageMedia({
         message,
-        attachmentIds: message.metadata?.attachments?.filter((attachment) => attachment.kind === 'video' && attachment.status === 'generating'
+        attachmentIds: message.metadata?.attachments?.filter((attachment) => (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation')) && attachment.status === 'generating'
           && (attachment.mediaTaskId || attachment.generationJobId)
           && fresh.includes(`${message.id}:${attachment.id}:${attachment.mediaTaskId || attachment.generationJobId}`)).map((attachment) => attachment.id),
         aiProfiles: useSettingsStore.getState().aiProfiles,

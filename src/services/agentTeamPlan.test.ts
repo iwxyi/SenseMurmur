@@ -46,6 +46,15 @@ describe('agent team plan', () => {
     expect(() => validateAgentTeamPlan(plan)).toThrow('未获授权');
   });
 
+  it('accepts music generation only when the role declares the tool', () => {
+    const plan = valid();
+    plan.roles[0].allowedTools = ['audio_generation', 'text_generation'];
+    plan.tasks[0] = { ...plan.tasks[0], tool: 'audio_generation' } as typeof plan.tasks[0];
+    expect(validateAgentTeamPlan(plan).tasks[0].tool).toBe('audio_generation');
+    plan.roles[0].allowedTools = ['text_generation'];
+    expect(() => validateAgentTeamPlan(plan)).toThrow('未获授权');
+  });
+
   it('requires image inspection to directly depend on generated images', () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['image_generation', 'image_inspection'];
