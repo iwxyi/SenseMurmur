@@ -72,6 +72,8 @@ beforeEach(() => {
   vi.stubGlobal('indexedDB', new IDBFactory());
   vi.stubGlobal('IDBKeyRange', IDBKeyRange);
   vi.stubGlobal('navigator', { locks: { request: async (_name: string, _options: unknown, callback?: (lock: object) => Promise<unknown>) => (callback || _options as (lock: object) => Promise<unknown>)({}) } });
+  useChatStore.setState((state) => ({ chats: [...state.chats.filter((chat) => chat.id !== 'chat'),
+    { id: 'chat', type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
   generate.mockReset();
   vi.mocked(listAvailableModels).mockReset();
   vi.mocked(listAvailableModels).mockResolvedValue([{ id: 'MiniMax-H3', label: 'MiniMax H3', raw: { aceVideoOptions: { acceptsReferenceImages: true } } }]);
@@ -87,6 +89,15 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('rejects planning for a deleted assistant chat before calling the model', async () => {
+    const runId = crypto.randomUUID();
+    useChatStore.setState((state) => ({ chats: state.chats.map((chat) => chat.id === 'chat' ? { ...chat, deletedAt: Date.now() } : chat) }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `deleted-chat-${runId}`);
+    const result = await workflow.start(runId, 'chat', '写一份报告');
+    expect(result.snapshot.tasks[0]).toMatchObject({ status: 'failed', error: '助手会话已删除或不可用' });
+    expect(generate).not.toHaveBeenCalled();
+  });
+
   it('sends a generated music attachment through a persisted asynchronous team task', async () => {
     const runId = crypto.randomUUID();
     const chatId = `music-${runId}`;

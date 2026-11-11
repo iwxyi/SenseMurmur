@@ -181,10 +181,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (task.kind === 'team_plan') {
         if (typeof task.input !== 'string') throw new WorkflowPreflightError('团队目标无效');
         const snapshot = await runtime.read(task.runId);
-        const chat = useChatStore.getState().chats.find((item) => item.id === snapshot?.run.chatId);
+        if (!snapshot) throw new WorkflowPreflightError('团队任务记录不存在');
+        const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId && item.type === 'assistant' && item.deletedAt == null);
+        if (!chat) throw new WorkflowPreflightError('助手会话已删除或不可用');
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
-        if (!snapshot) throw new WorkflowPreflightError('团队任务记录不存在');
         const plan = await planAgentTeam({ api, goal: task.input, chatId: snapshot.run.chatId, webSearch, ...capabilities, signal });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         return { output: plan };
@@ -199,7 +200,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return { task: id, output: source.output.slice(0, 1500) };
         });
         const recentPrior = prior.slice(-8);
-        const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId);
+        const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId && item.type === 'assistant' && item.deletedAt == null);
+        if (!chat) throw new WorkflowPreflightError('助手会话已删除或不可用');
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
         const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities, signal });
@@ -210,6 +212,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const input = task.input as TeamReviewInput;
         const snapshot = await runtime.read(task.runId);
         if (!snapshot || !Array.isArray(input?.sourceTaskIds)) throw new WorkflowPreflightError('主 Agent 验收输入无效');
+        if (!useChatStore.getState().chats.some((item) => item.id === snapshot.run.chatId && item.type === 'assistant' && item.deletedAt == null)) {
+          throw new WorkflowPreflightError('助手会话已删除或不可用');
+        }
         let finalAcceptance: string;
         try { finalAcceptance = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === 'plan')?.output).finalAcceptance; }
         catch (error) { throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队验收标准无效'); }
@@ -227,6 +232,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const role = input.role;
       const snapshot = await runtime.read(task.runId);
       if (!snapshot) throw new WorkflowPreflightError('团队任务记录不存在');
+      if (!useChatStore.getState().chats.some((item) => item.id === snapshot.run.chatId && item.type === 'assistant' && item.deletedAt == null)) {
+        throw new WorkflowPreflightError('助手会话已删除或不可用');
+      }
       assertChatExecutionLease(snapshot.run.chatId);
       let plan: AgentTeamPlan;
       try {
