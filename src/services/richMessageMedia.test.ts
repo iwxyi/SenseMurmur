@@ -995,6 +995,22 @@ describe('processRichMessageMedia', () => {
       chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
   });
 
+  it('checks a queued accepted task directly after reload without submitting it again', async () => {
+    const polled = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(waitForAiMediaTask).mockReturnValue(polled.promise);
+    const message = buildQueuedImageMessage({ metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'queued', mediaTaskId: 'saved-task',
+      generationJobId: 'saved-job', promptText: '追逐场景', altText: '视频', createdAt: 123, updatedAt: 124,
+    }] } });
+    await processRichMessageMedia({ message, aiProfiles: [], upsertMessage: vi.fn() });
+    await waitForExpectation(() => expect(waitForAiMediaTask).toHaveBeenCalledWith('saved-task'));
+    expect(api.getAiMediaTaskByRequestKey).not.toHaveBeenCalled();
+    expect(generateVideoWithAdapter).not.toHaveBeenCalled();
+    polled.resolve({ task_id: 'saved-task', model: 'MiniMax-H3', status: 'failed', result: { error: '测试结束' },
+      chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(getRichMediaQueueSnapshot()).toEqual([]));
+  });
+
   it('allows retrying a stuck generating media attachment', async () => {
     vi.mocked(generateImageWithAdapter).mockResolvedValue([{
       dataUrl: 'data:image/png;base64,recovered',
