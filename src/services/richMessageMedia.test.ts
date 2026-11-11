@@ -249,6 +249,34 @@ describe('processRichMessageMedia', () => {
     expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'generating', mediaTaskId: 'accepted-task' });
   });
 
+  it('waits for a fresh lease before committing a completed cloud video', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    let unlock!: () => void;
+    const lockGate = new Promise<void>((resolve) => { unlock = resolve; });
+    const lockRequest = vi.fn(async (_name: string, work: () => Promise<void>) => {
+      await lockGate;
+      return work();
+    });
+    vi.stubGlobal('navigator', { locks: { request: lockRequest } });
+    vi.mocked(waitForAiMediaTask).mockResolvedValue({ task_id: 'completed-task', model: 'video-model', status: 'succeeded',
+      result: {}, chargedAmount: 1, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+    vi.mocked(api.createMediaAssetFromAiTask).mockResolvedValue({ id: 'saved-video', url: '/media/saved-video',
+      mimeType: 'video/mp4', sizeBytes: 100 } as Awaited<ReturnType<typeof api.createMediaAssetFromAiTask>>);
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'generating', mediaTaskId: 'completed-task', generationJobId: 'saved-job',
+      altText: '短片', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    const processing = processRichMessageMedia({ message, aiProfiles: [], upsertMessage: (next) => upserts.push(next) });
+    await waitForExpectation(() => expect(lockRequest).toHaveBeenCalled());
+    expect(api.createMediaAssetFromAiTask).not.toHaveBeenCalled();
+    unlock();
+    await processing;
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('ready'));
+    expect(runWithChatExecutionLease).toHaveBeenCalledWith('chat-1', expect.any(Function));
+  });
+
   it('resumes music by saved request key after its model configuration is removed', async () => {
     localStorage.setItem('pneumata-auth-mode', 'cloud');
     localStorage.setItem('pneumata-cloud-sync-enabled', '1');
