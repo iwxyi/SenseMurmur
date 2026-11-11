@@ -1,6 +1,5 @@
 import { onWorkspaceShutdown } from './workspaceLifecycle';
-
-const MAX_ACTIVE_CONVERSATIONS = 3;
+import { getBackgroundExecutionPreferences, subscribeBackgroundExecutionPreferences } from './backgroundExecutionPreferences';
 
 interface QueuedWork<T> {
   chatId: string;
@@ -30,7 +29,7 @@ export function getBackgroundExecutionSummary() {
 }
 
 function pump() {
-  while (activeCount < MAX_ACTIVE_CONVERSATIONS) {
+  while (activeCount < getBackgroundExecutionPreferences().maxActiveConversations) {
     const index = queue.findIndex((item) => !activeChats.has(item.chatId));
     if (index < 0) break;
     const item = queue.splice(index, 1)[0];
@@ -83,3 +82,5 @@ onWorkspaceShutdown(() => {
   }
   publish();
 });
+
+subscribeBackgroundExecutionPreferences(pump);

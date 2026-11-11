@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getBackgroundExecutionSummary, scheduleBackgroundExecution } from './backgroundExecutionScheduler';
+import { setBackgroundExecutionMaxActiveConversations } from './backgroundExecutionPreferences';
 
 function deferred() {
   let release!: () => void;
@@ -8,6 +9,23 @@ function deferred() {
 }
 
 describe('background execution scheduler', () => {
+  beforeEach(() => setBackgroundExecutionMaxActiveConversations(3));
+  it('honors the concurrency preference and starts queued work when the limit increases', async () => {
+    setBackgroundExecutionMaxActiveConversations(1);
+    const firstGate = deferred();
+    const first = scheduleBackgroundExecution('preference-a', async () => { await firstGate.wait; });
+    const second = vi.fn(async () => undefined);
+    const queued = scheduleBackgroundExecution('preference-b', second);
+    await Promise.resolve();
+    expect(getBackgroundExecutionSummary()).toMatchObject({ active: 1, queued: 1 });
+    expect(second).not.toHaveBeenCalled();
+    setBackgroundExecutionMaxActiveConversations(2);
+    await vi.waitFor(() => expect(second).toHaveBeenCalledTimes(1));
+    firstGate.release();
+    await Promise.all([first, queued]);
+    setBackgroundExecutionMaxActiveConversations(3);
+  });
+
   it('serializes one chat while another chat can run', async () => {
     const firstGate = deferred();
     const secondGate = deferred();

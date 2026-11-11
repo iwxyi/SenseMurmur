@@ -18,6 +18,7 @@ import {
   FormControlLabel,
   Switch,
   Tooltip,
+  MenuItem,
 } from '@mui/material';
 import CheckIcon from '@mui/icons-material/Check';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutlineOutlined';
@@ -67,6 +68,7 @@ import { SETTINGS_TAB_KEYS, buildSettingsPath, getSettingsTabForCard, resolveSet
 import { clearAllCachedSpeechPlayback } from '../services/speechPlaybackCache';
 import ChatReplyPreferencesSection from '../components/settings/ChatReplyPreferencesSection';
 import { normalizeChatReplyPreferences } from '../types/chatReplyPreferences';
+import { getBackgroundExecutionPreferences, setBackgroundExecutionMaxActiveConversations, subscribeBackgroundExecutionPreferences } from '../services/backgroundExecutionPreferences';
 
 function buildPageSx(activeTab: SettingsTabKey) {
   return {
@@ -1579,6 +1581,7 @@ export default function SettingsPage() {
   });
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabKey>(() => resolveSettingsTab(new URLSearchParams(window.location.search).get('tab')));
   const [tabTransitionDirection, setTabTransitionDirection] = useState<-1 | 1>(1);
+  const [backgroundConcurrency, setBackgroundConcurrency] = useState(() => getBackgroundExecutionPreferences().maxActiveConversations);
   const userBubbleStyle = useMemo(
     () => resolveCharacterBubbleStyle({
       bubbleStyle: settings.userBubbleStyle,
@@ -1657,6 +1660,12 @@ export default function SettingsPage() {
   useEffect(() => {
     setDeveloperEntitlementRefreshRequested(false);
   }, [user?.id]);
+
+  useEffect(() => {
+    const refreshBackgroundPreference = () => setBackgroundConcurrency(getBackgroundExecutionPreferences().maxActiveConversations);
+    refreshBackgroundPreference();
+    return subscribeBackgroundExecutionPreferences(refreshBackgroundPreference);
+  }, [authMode, user?.id]);
 
   useEffect(() => {
     if (authMode !== 'cloud' || developerEntitlementRefreshRequested) return;
@@ -2451,6 +2460,26 @@ export default function SettingsPage() {
     ),
     chat: (): ReactNode => (
           <>
+
+        <SurfaceCard id="settings-card-background-execution" contentSx={buildCardBodySx()}>
+          <Box sx={buildSectionBodySx()}>
+            <SectionHeader title={i18n.language.startsWith('zh') ? '后台运行' : 'Background execution'} subtitle={i18n.language.startsWith('zh') ? '限制同时运行的后台会话数量；调低上限不会中断当前任务。' : 'Limit concurrent background conversations. Lowering the limit does not interrupt active work.'} />
+            <TextField
+              select
+              size="small"
+              label={i18n.language.startsWith('zh') ? '最多同时运行' : 'Maximum active conversations'}
+              value={backgroundConcurrency}
+              onChange={(event) => {
+                const value = Number(event.target.value);
+                setBackgroundConcurrency(value);
+                setBackgroundExecutionMaxActiveConversations(value);
+              }}
+              sx={{ maxWidth: 260 }}
+            >
+              {[1, 2, 3].map((value) => <MenuItem key={value} value={value}>{i18n.language.startsWith('zh') ? `${value} 个会话` : `${value} conversation${value === 1 ? '' : 's'}`}</MenuItem>)}
+            </TextField>
+          </Box>
+        </SurfaceCard>
 
         <SurfaceCard id="settings-card-compact-chat" contentSx={buildCardBodySx()}>
           <Box sx={buildSectionBodySx()}>
