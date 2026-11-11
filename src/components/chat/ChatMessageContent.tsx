@@ -479,9 +479,9 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
             {attachment.status === 'failed' ? getAttachmentStatusDetail(attachment) : getAttachmentStatusLabel(attachment)}
           </Typography>
           {attachment.status !== 'failed' ? <LinearProgress sx={{ mt: 0.5 }} /> : null}
-          {attachment.status === 'failed' && onRetryMedia ? (
-            <Button size="small" variant="outlined" color="error" sx={{ mt: 0.6 }} onClick={() => void onRetryMedia?.(message, attachment.id)}>
-              重试
+          {(attachment.status === 'failed' || (attachment.audioPurpose === 'music_generation' && attachment.status === 'generating' && Boolean(attachment.mediaTaskId))) && onRetryMedia ? (
+            <Button size="small" variant="outlined" color={attachment.status === 'failed' ? 'error' : 'primary'} sx={{ mt: 0.6 }} onClick={() => void onRetryMedia?.(message, attachment.id)}>
+              {attachment.status === 'failed' ? '重试' : '检查结果'}
             </Button>
           ) : null}
         </Box>
@@ -501,9 +501,9 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
                 {attachment.status === 'failed' ? getAttachmentStatusDetail(attachment) : getAttachmentStatusLabel(attachment)}
               </Typography>
               {processing ? <LinearProgress /> : null}
-              {attachment.status === 'failed' && onRetryMedia ? (
-                <Button size="small" variant="outlined" color="error" onClick={() => void onRetryMedia?.(message, attachment.id)}>
-                  重试
+              {(attachment.status === 'failed' || (attachment.status === 'generating' && Boolean(attachment.mediaTaskId))) && onRetryMedia ? (
+                <Button size="small" variant="outlined" color={attachment.status === 'failed' ? 'error' : 'primary'} onClick={() => void onRetryMedia?.(message, attachment.id)}>
+                  {attachment.status === 'failed' ? '重试' : '检查结果'}
                 </Button>
               ) : null}
             </Box>
