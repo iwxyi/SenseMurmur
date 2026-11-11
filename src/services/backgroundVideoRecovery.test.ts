@@ -80,6 +80,42 @@ describe('background video recovery', () => {
     expect(findPendingVideoMessages([generating, { ...generating, isDeleted: true }], new Set(['chat']), true)).toEqual([]);
   });
 
+  it('resumes a task from the message window after store rehydration', async () => {
+    vi.mocked(processRichMessageMedia).mockClear();
+    vi.mocked(readAuthSnapshot).mockReturnValue({ mode: 'cloud' } as ReturnType<typeof readAuthSnapshot>);
+    vi.mocked(isCloudSyncEnabled).mockReturnValue(true);
+    vi.spyOn(useChatStore.persist, 'hasHydrated').mockReturnValue(true);
+    vi.spyOn(useSettingsStore.persist, 'hasHydrated').mockReturnValue(true);
+    useChatStore.setState({ chats: [{ id: 'chat', deletedAt: null } as ReturnType<typeof useChatStore.getState>['chats'][number]] });
+    const pending = message('rehydrated', 'generating', 'task-rehydrated');
+    const persisted = __messageRuntimePersistenceForTests.buildPersistedMessageState({
+      messageWindowsByChatId: { chat: { messages: [pending], lastSyncedAt: 1, updatedAt: 1 } },
+      pendingOperations: [],
+    });
+    const originalStorage = useMessageStore.persist.getOptions().storage;
+    useMessageStore.persist.setOptions({ storage: {
+      getItem: async () => ({ state: persisted, version: useMessageStore.persist.getOptions().version }),
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    } as typeof originalStorage });
+    try {
+      useMessageStore.setState({ messages: [], messageWindowsByChatId: {} });
+      await useMessageStore.persist.rehydrate();
+      expect(useMessageStore.getState().messageWindowsByChatId.chat?.messages).toContainEqual(expect.objectContaining({
+        id: pending.id,
+        serverId: pending.serverId,
+        metadata: pending.metadata,
+      }));
+      expect(await recoverBackgroundVideoTasks()).toBe(1);
+      expect(processRichMessageMedia).toHaveBeenCalledWith(expect.objectContaining({
+        message: expect.objectContaining({ id: pending.id, serverId: pending.serverId }),
+        attachmentIds: ['video-rehydrated'],
+      }));
+    } finally {
+      useMessageStore.persist.setOptions({ storage: originalStorage });
+    }
+  });
+
   it('resumes after cloud sync supplies the server message ID and schedules the task once', async () => {
     vi.mocked(processRichMessageMedia).mockClear();
     vi.mocked(readAuthSnapshot).mockReturnValue({ mode: 'cloud' } as ReturnType<typeof readAuthSnapshot>);
