@@ -4,6 +4,7 @@ import { api } from './api';
 import { backendUrl } from './backendUrl';
 import { redactAiDiagnosticText, redactAiDiagnosticValue } from './aiDiagnosticText';
 import { assertWorkspaceActive, getResponseWorkspaceSignal, workspaceFetch as fetch } from './workspaceLifecycle';
+import { assertChatExecutionLease } from './chatExecutionLease';
 
 type ChatRole = 'user' | 'assistant' | 'system';
 export interface ChatMessageImageAttachment {
@@ -166,6 +167,7 @@ export async function submitAiMediaTask(options: {
   aiUsage?: AiUsageMetadata;
   clientRequestKey?: string;
 }) {
+  if (options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId) assertChatExecutionLease(options.aiUsage.resourceId);
   const result = await api.generateAiMedia({
     provider: options.profile.provider,
     model: options.profile.model,
@@ -1439,6 +1441,7 @@ async function generateGeminiImage(config: APIConfig, options: ImageGenerationOp
 }
 
 export async function generateImage(config: APIConfig, options: ImageGenerationOptions): Promise<GeneratedImage[]> {
+  if (options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId) assertChatExecutionLease(options.aiUsage.resourceId);
   if (usesOfficialProxy(config) && (config.provider === 'official-ace-nanobanana' || isNanoBananaImageModel(config.model))) {
     return generateGeminiImage(config, options);
   }
@@ -1635,6 +1638,7 @@ export const generateResponse = async (
   onChunk?: (chunk: string) => void,
   options: GenerateResponseOptions = {},
 ): Promise<string> => {
+  if (options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId) assertChatExecutionLease(options.aiUsage.resourceId);
   const effectiveOptions = { ...options, maxTokens: options.maxTokens === undefined ? normalizeMaxOutputTokens(config.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS) : Math.min(options.maxTokens, normalizeMaxOutputTokens(config.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS)) };
   const effectiveSystemPrompt = effectiveOptions.responseFormat === 'json'
     ? `${systemPrompt}\n\nReturn exactly one valid json object. Do not wrap it in markdown.`
@@ -1657,8 +1661,11 @@ export const generateJsonResponse = async (
   systemPrompt: string,
   messages: ChatMessage[],
   options: GenerateResponseOptions = {},
-): Promise<string> => withTextRequestDeadline(config, options, (timedOptions) =>
-  generateJsonResponseWithinDeadline(config, systemPrompt, messages, timedOptions));
+): Promise<string> => {
+  if (options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId) assertChatExecutionLease(options.aiUsage.resourceId);
+  return withTextRequestDeadline(config, options, (timedOptions) =>
+    generateJsonResponseWithinDeadline(config, systemPrompt, messages, timedOptions));
+};
 
 const generateJsonResponseWithinDeadline = async (
   config: APIConfig,

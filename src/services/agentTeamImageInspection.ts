@@ -36,6 +36,7 @@ async function imageDataUrl(url: string, signal: AbortSignal): Promise<string> {
 
 export async function inspectAgentTeamImages(params: {
   api: APIConfig;
+  chatId?: string;
   goal: string;
   acceptance: string;
   references: Array<{ url: string; mimeType?: string; label?: string }>;
@@ -53,7 +54,7 @@ export async function inspectAgentTeamImages(params: {
     '你是图片检查员。只根据实际收到的图片判断画面内容和问题；不要把生成提示词当作已验证事实。给出可核对的观察、与目标的差距及不确定性。没有看到的细节必须明确说明。',
     [{ role: 'user', content: `检查目标：${params.goal}\n验收要求：${params.acceptance}`, attachments }], undefined,
     { responseFormat: 'text', signal: params.signal, maxTokens: 1200,
-      aiUsage: { type: 'assistant_chat', label: '团队图片检查', scope: 'chat' } });
+      aiUsage: { type: 'assistant_chat', label: '团队图片检查', scope: 'chat', resourceId: params.chatId } });
   if (!result.trim()) throw new WorkflowPreflightError('图片检查没有返回有效结果');
   return result.trim();
 }

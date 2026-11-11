@@ -184,7 +184,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot?.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
-        const plan = await planAgentTeam({ api, goal: task.input, webSearch, ...capabilities, signal });
+        if (!snapshot) throw new WorkflowPreflightError('团队任务记录不存在');
+        const plan = await planAgentTeam({ api, goal: task.input, chatId: snapshot.run.chatId, webSearch, ...capabilities, signal });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         return { output: plan };
       }
@@ -201,7 +202,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
-        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, webSearch, ...capabilities, signal });
+        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities, signal });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         return { output: plan };
       }
@@ -215,7 +216,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const { evidence, omitted } = selectReviewEvidence(snapshot, input.sourceTaskIds);
         const raw = await generateResponse(api, '你是主 Agent 的交付验收员。根据原目标、最终验收标准和真实完成记录判断是否已达到可用交付。只能基于现有工具能力提出最多一步必要补做，不得重复已完成工作。图片和视频生成任务的文字记录只证明附件已保存；只有明确的图片检查任务才提供实际画面观察，不能把未检查的媒体当作已验证。缺失的音乐、剪辑、代码执行等能力不得伪装为已完成。仅输出 JSON：{"complete":true,"reason":"..."} 或 {"complete":false,"reason":"...","nextRequest":"需要补做的具体工作"}。', [{ role: 'user', content: `原目标：${snapshot.run.goal}\n最终验收标准：${finalAcceptance}\n已完成任务摘要（另有 ${omitted} 项已完成记录未列出）：${JSON.stringify(evidence)}` }], undefined, {
           responseFormat: 'json', maxTokens: 600, signal,
-          aiUsage: { type: 'assistant_chat', label: '团队交付验收', scope: 'chat' },
+          aiUsage: { type: 'assistant_chat', label: '团队交付验收', scope: 'chat', resourceId: snapshot.run.chatId },
         });
         let parsed: unknown;
         try { parsed = JSON.parse(raw); } catch (error) { throw new WorkflowPreflightError(`主 Agent 验收返回了无效 JSON：${error instanceof Error ? error.message : '解析失败'}`); }
@@ -263,6 +264,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const output = await inspectAgentTeamImages({
           api: { provider: profile.provider, apiKey: profile.apiKey, baseUrl: profile.baseUrl, model: profile.model, maxOutputTokens: profile.maxOutputTokens },
           goal: [input.task.goal, input.userInstruction].filter(Boolean).join('\n'), acceptance: input.task.acceptance,
+          chatId: snapshot.run.chatId,
           references: references.filter((reference): reference is NonNullable<typeof reference> => Boolean(reference)), signal,
         });
         return { output };
@@ -338,7 +340,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         '只根据提供的目标与上游交付工作；不声称调用了未提供的工具。缺少事实依据时标明不确定性。',
       ].join('\n'), [{ role: 'user', content: `总目标：${input.goal}\n当前任务：${input.task.goal}\n${input.userInstruction ? `用户补充指示：${input.userInstruction}\n` : ''}上游交付：${JSON.stringify(upstream)}` }], undefined, {
         responseFormat: 'text', signal,
-        aiUsage: { type: 'assistant_chat', label: '团队文本任务', scope: 'chat' },
+        aiUsage: { type: 'assistant_chat', label: '团队文本任务', scope: 'chat', resourceId: snapshot.run.chatId },
       });
       if (!output.trim()) throw new WorkflowPreflightError('子 Agent 未提交内容');
       return { output: output.trim() };

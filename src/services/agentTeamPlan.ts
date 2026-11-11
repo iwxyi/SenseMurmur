@@ -112,7 +112,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   };
 }
 
-export async function planAgentTeam(params: { api: APIConfig; goal: string; webSearch?: boolean; imageGeneration?: boolean; audioGeneration?: boolean; imageInspection?: boolean; videoGeneration?: boolean; videoReferenceImages?: boolean; videoRequiresReferenceImage?: boolean; maxVideoReferenceImages?: number; videoUnavailableReason?: string; signal?: AbortSignal }) {
+export async function planAgentTeam(params: { api: APIConfig; goal: string; chatId?: string; webSearch?: boolean; imageGeneration?: boolean; audioGeneration?: boolean; imageInspection?: boolean; videoGeneration?: boolean; videoReferenceImages?: boolean; videoRequiresReferenceImage?: boolean; maxVideoReferenceImages?: number; videoUnavailableReason?: string; signal?: AbortSignal }) {
   const goal = requiredText(params.goal, '用户目标', 12_000);
   const raw = await generateResponse(params.api, [
     '你是通用任务的主 Agent。根据用户目标设计最小可行的团队与无环任务图。简单任务只用一个岗位。',
@@ -121,7 +121,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; webS
     '只输出 JSON：{"summary":"...","roles":[{"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"..."}],"finalAcceptance":"..."}',
   ].join('\n'), [{ role: 'user', content: goal }], undefined, {
     responseFormat: 'json', maxTokens: 2400, signal: params.signal,
-    aiUsage: { type: 'assistant_chat', label: '团队任务规划', scope: 'chat' },
+    aiUsage: { type: 'assistant_chat', label: '团队任务规划', scope: 'chat', resourceId: params.chatId },
   });
   let parsed: unknown;
   try {
