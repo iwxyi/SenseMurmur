@@ -49,6 +49,19 @@ describe('mergeMessages rich media metadata', () => {
     });
   });
 
+  it('does not copy an old file url into a newer retry with no result yet', () => {
+    const local = buildMessage({ metadata: { attachments: [
+      { id: 'video', kind: 'video', status: 'queued', generationJobId: 'new-job', altText: '视频', createdAt: 100, updatedAt: 300 },
+    ] } });
+    const remote = buildMessage({ metadata: { attachments: [
+      { id: 'video', kind: 'video', status: 'ready', generationJobId: 'old-job', url: '/old.mp4', altText: '视频', createdAt: 100, updatedAt: 200 },
+    ] } });
+
+    const attachment = mergeMessages([local], [remote])[0].metadata?.attachments?.[0];
+    expect(attachment).toMatchObject({ status: 'queued', generationJobId: 'new-job' });
+    expect(attachment?.url).toBeUndefined();
+  });
+
   it('accepts a newer explicit retry instead of restoring the previous ready file', () => {
     const local = buildMessage({ metadata: { attachments: [
       { id: 'video', kind: 'video', status: 'ready', generationJobId: 'old-job', url: '/video-old.mp4', altText: '视频', createdAt: 100, updatedAt: 200 },

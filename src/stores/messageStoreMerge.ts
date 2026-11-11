@@ -126,11 +126,7 @@ function mergeAttachmentPair(local: MessageAttachment | undefined, incoming: Mes
       && ((incoming.status === 'queued' || incoming.status === 'generating')
         && (!incoming.generationJobId || incoming.generationJobId === local.generationJobId)
         || (incoming.status === 'ready' && !hasUsableMediaUrl(incoming))))) {
-    return {
-      ...incoming,
-      ...local,
-      updatedAt: Math.max(local.updatedAt || 0, incoming.updatedAt || 0),
-    };
+    return local;
   }
   return incoming;
 }
