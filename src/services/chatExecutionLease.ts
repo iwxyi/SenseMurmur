@@ -40,21 +40,31 @@ export async function runWithChatExecutionLease<T>(chatId: string, work: () => P
   lostLeases.delete(leaseKey(chatId, fence));
   setChatExecutionFence(chatId, fence);
   let leaseError: Error | null = null;
+  let pendingRenewal: Promise<void> | null = null;
   const renewTimer = window.setInterval(() => {
-    void api.renewChatExecutionLease(chatId, fence).catch((error: unknown) => {
+    if (pendingRenewal || leaseError) return;
+    const renewal = api.renewChatExecutionLease(chatId, fence).then(() => undefined).catch((error: unknown) => {
       leaseError = error instanceof Error ? error : new Error('会话运行权已丢失');
       lostLeases.set(leaseKey(chatId, fence), leaseError);
+    });
+    pendingRenewal = renewal;
+    void renewal.finally(() => {
+      if (pendingRenewal === renewal) pendingRenewal = null;
     });
   }, LEASE_RENEW_INTERVAL_MS);
 
   try {
     const result = await work();
+    if (pendingRenewal) await pendingRenewal;
     if (leaseError) throw leaseError;
     return result;
   } finally {
     window.clearInterval(renewTimer);
+    if (pendingRenewal) await pendingRenewal;
     try {
       await api.releaseChatExecutionLease(chatId, fence);
+    } catch {
+      console.warn('[chat-execution-lease:release-failed]');
     } finally {
       clearChatExecutionFence(chatId, fence);
       lostLeases.delete(leaseKey(chatId, fence));
