@@ -27,6 +27,7 @@ import {
   MAX_ACTIVE_MESSAGES_PER_CHAT,
   countUniqueMessages,
   hasCompactedNarrativeWindow,
+  hasRecoverableVideoTask,
   mergeMessages,
   messagesFromWindowChanges,
   normalizeMessage,
@@ -607,21 +608,28 @@ function getPendingChatIds(pendingOperations: PendingMessageOperation[] = []) {
 
 function trimCache(cache: Record<string, CachedMessageWindow>, pendingOperations: PendingMessageOperation[] = []) {
   const pendingChatIds = getPendingChatIds(pendingOperations);
+  const recoverableChatIds = new Set(Object.entries(cache)
+    .filter(([, window]) => window.messages.some(hasRecoverableVideoTask))
+    .map(([chatId]) => chatId));
   const entries = Object.entries(cache).sort((a, b) => {
     const aPending = pendingChatIds.has(a[0]) ? 1 : 0;
     const bPending = pendingChatIds.has(b[0]) ? 1 : 0;
     if (aPending !== bPending) return bPending - aPending;
+    const aRecoverable = recoverableChatIds.has(a[0]) ? 1 : 0;
+    const bRecoverable = recoverableChatIds.has(b[0]) ? 1 : 0;
+    if (aRecoverable !== bRecoverable) return bRecoverable - aRecoverable;
     return b[1].updatedAt - a[1].updatedAt;
   });
+  const kept = entries.filter(([chatId], index) => index < MAX_CACHED_CHATS || recoverableChatIds.has(chatId));
   if (entries.length > MAX_CACHED_CHATS) {
     logMessageWindowDebug('trim-cache-evict', {
       totalWindows: entries.length,
-      keptWindows: entries.slice(0, MAX_CACHED_CHATS).map(([chatId, window]) => ({
+      keptWindows: kept.map(([chatId, window]) => ({
         chatId,
         messages: window.messages?.length || 0,
         updatedAt: window.updatedAt,
       })),
-      evictedWindows: entries.slice(MAX_CACHED_CHATS).map(([chatId, window]) => ({
+      evictedWindows: entries.filter(([chatId]) => !kept.some(([keptId]) => keptId === chatId)).map(([chatId, window]) => ({
         chatId,
         messages: window.messages?.length || 0,
         updatedAt: window.updatedAt,
@@ -629,8 +637,7 @@ function trimCache(cache: Record<string, CachedMessageWindow>, pendingOperations
     });
   }
   return Object.fromEntries(
-    entries
-      .slice(0, MAX_CACHED_CHATS)
+    kept
       .map(([chatId, window]) => [chatId, { ...window, messages: trimMessagesWithBranchContext(window.messages) }])
   );
 }

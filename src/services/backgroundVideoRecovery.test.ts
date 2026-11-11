@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Message } from '../types/message';
 import { findPendingVideoMessages, recoverBackgroundVideoTasks } from './backgroundVideoRecovery';
 import { useChatStore } from '../stores/useChatStore';
-import { useMessageStore } from '../stores/useMessageStore';
+import { __messageRuntimePersistenceForTests, useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { processRichMessageMedia } from './richMessageMedia';
 import { readAuthSnapshot } from './authSnapshot';
@@ -25,6 +25,29 @@ function message(id: string, status: 'generating' | 'queued', taskId?: string): 
 }
 
 describe('background video recovery', () => {
+  it('keeps an older generating video visible after cached chat eviction', () => {
+    const pending = message('old-video', 'generating', 'task-old');
+    const messageWindowsByChatId = Object.fromEntries([
+      ['chat', { messages: [pending], lastSyncedAt: 1, updatedAt: 1 }],
+      ...Array.from({ length: 13 }, (_, index) => [`recent-${index}`, {
+        messages: [], lastSyncedAt: index + 2, updatedAt: index + 2,
+      }] as const),
+    ]);
+    const persisted = __messageRuntimePersistenceForTests.buildPersistedMessageState({ messageWindowsByChatId, pendingOperations: [] });
+    expect(Object.keys(persisted.messageWindowsByChatId)).toHaveLength(12);
+    expect(findPendingVideoMessages(Object.values(persisted.messageWindowsByChatId).flatMap((window) => window.messages), new Set(['chat']), true))
+      .toEqual([expect.objectContaining({ id: pending.id, serverId: pending.serverId })]);
+  });
+  it('retains every recoverable video even when active jobs exceed the chat cache limit', () => {
+    const pending = Array.from({ length: 13 }, (_, index) => ({ ...message(`pending-${index}`, 'generating', `task-${index}`), chatId: `chat-${index}` }));
+    const messageWindowsByChatId = Object.fromEntries(pending.map((item, index) => [item.chatId, {
+      messages: [item], lastSyncedAt: index + 1, updatedAt: index + 1,
+    }]));
+    const persisted = __messageRuntimePersistenceForTests.buildPersistedMessageState({ messageWindowsByChatId, pendingOperations: [] });
+    expect(Object.keys(persisted.messageWindowsByChatId)).toHaveLength(13);
+    expect(findPendingVideoMessages(Object.values(persisted.messageWindowsByChatId).flatMap((window) => window.messages),
+      new Set(pending.map((item) => item.chatId)), true)).toHaveLength(13);
+  });
   it('selects each accepted task once without restarting queued generation', () => {
     const accepted = message('accepted', 'generating', 'task-1');
     const submitting: Message = { ...message('submitting', 'generating'), metadata: { attachments: [{

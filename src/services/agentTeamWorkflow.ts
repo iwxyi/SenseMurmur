@@ -73,7 +73,7 @@ function selectReviewEvidence(snapshot: WorkflowSnapshot, taskIds: string[]) {
   const selected = new Set(media.map((source) => source.id));
   sources.filter((source) => !selected.has(source.id)).slice(-(12 - media.length)).forEach((source) => selected.add(source.id));
   return { omitted: sources.length - selected.size,
-    evidence: sources.filter((source) => selected.has(source.id)).map((source) => ({ task: source.id, output: source.output!.slice(0, 1800) })) };
+    evidence: sources.filter((source) => selected.has(source.id)).map((source) => ({ task: source.id, output: (source.output as string).slice(0, 1800) })) };
 }
 
 function countImageUpstream(task: AgentTeamTask, byId: Map<string, AgentTeamTask>) {

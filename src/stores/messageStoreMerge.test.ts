@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../types/message';
-import { mergeMessages } from './messageStoreMerge';
+import { MAX_CACHED_MESSAGES_PER_CHAT, mergeMessages, trimMessagesWithBranchContext } from './messageStoreMerge';
 
 function buildMessage(patch: Partial<Message> = {}): Message {
   return {
@@ -20,6 +20,11 @@ function buildMessage(patch: Partial<Message> = {}): Message {
 }
 
 describe('mergeMessages rich media metadata', () => {
+  it('retains an older unfinished video task beyond the ordinary message window', () => {
+    const pending = buildMessage({ id: 'pending-video', timestamp: 1, metadata: { attachments: [{ id: 'video', kind: 'video', status: 'generating', mediaTaskId: 'task-1', altText: '视频', createdAt: 1, updatedAt: 1 }] } });
+    const messages = [pending, ...Array.from({ length: MAX_CACHED_MESSAGES_PER_CHAT }, (_, index) => buildMessage({ id: `later-${index}`, timestamp: index + 2 }))];
+    expect(trimMessagesWithBranchContext(messages).some((item) => item.id === pending.id)).toBe(true);
+  });
   it('retains branch edges when cloud metadata only updates media generation', () => {
     const branching = { nodeId: 'node-1', parentNodeId: 'older-parent', rootNodeId: 'root', sequence: 5 };
     const local = buildMessage({ metadata: { branching } });

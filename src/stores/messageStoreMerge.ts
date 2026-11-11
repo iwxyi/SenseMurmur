@@ -248,7 +248,16 @@ export function trimMessages(messages: Message[]) {
 export function trimMessagesWithBranchContext(messages: Message[]) {
   const deduped = dedupeMessages(messages);
   const hasBranchGraph = deduped.some((message) => Boolean(message.metadata?.branching));
-  return deduped.slice(-(hasBranchGraph ? MAX_BRANCH_GRAPH_MESSAGES_PER_CHAT : MAX_CACHED_MESSAGES_PER_CHAT));
+  const limit = hasBranchGraph ? MAX_BRANCH_GRAPH_MESSAGES_PER_CHAT : MAX_CACHED_MESSAGES_PER_CHAT;
+  const tail = deduped.slice(-limit);
+  const retained = deduped.slice(0, -limit).filter(hasRecoverableVideoTask);
+  return retained.length ? [...retained, ...tail] : tail;
+}
+
+export function hasRecoverableVideoTask(message: Message) {
+  return !message.isDeleted && Boolean(message.metadata?.attachments?.some((attachment) =>
+    attachment.kind === 'video' && attachment.status === 'generating'
+    && (attachment.mediaTaskId || attachment.generationJobId)));
 }
 
 export function trimActiveMessages(messages: Message[]) {
