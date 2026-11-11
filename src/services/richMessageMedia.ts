@@ -136,6 +136,14 @@ function toMediaGenerationErrorText(error: unknown, kind: GenerativeAttachmentKi
   return String(error || '图片生成失败');
 }
 
+function shouldKeepSubmittedMediaPending(error: unknown, terminalTaskKnown = false) {
+  if (terminalTaskKnown) return false;
+  if (isAbortError(error)) return true;
+  if (error instanceof ApiError) return ![400, 404, 422].includes(error.status || 0);
+  if (!(error instanceof Error)) return true;
+  return !/(已生成，但文件获取或保存失败|ACE 任务生成失败|视频生成失败，服务端未返回可展示的失败原因|音乐生成失败，服务端未返回可展示的失败原因)/.test(error.message);
+}
+
 const latestRichMediaMessageById = new Map<string, Message>();
 const richMediaMessageUsers = new Map<string, number>();
 const richMediaMetadataWritesByMessageId = new Map<string, Promise<void>>();
@@ -175,6 +183,7 @@ type RichMediaQueueEntry = {
   taskId?: string;
   generationJobId?: string;
   sharesConversationLease?: boolean;
+  terminalTaskKnown?: boolean;
 };
 
 const pendingRichMediaQueue: RichMediaQueueEntry[] = [];
@@ -476,6 +485,7 @@ async function pollVideoTask(params: {
   taskId: string;
 }) {
   const task = await waitForAiMediaTask(params.taskId);
+  params.entry.terminalTaskKnown = task.status === 'succeeded' || task.status === 'failed';
   let latestMessage = getLatestRichMediaMessage(params.entry.messageId, params.message);
   const latestAttachment = latestMessage.metadata?.attachments?.find((item) => item.id === params.attachment.id);
   if (latestAttachment?.generationJobId !== params.generationJobId) return;
@@ -520,6 +530,7 @@ async function pollVideoTask(params: {
 
 async function pollMusicTask(params: { entry: RichMediaQueueEntry; message: Message; attachment: GenerativeAttachment; generationJobId: string; taskId: string }) {
   const task = await waitForAiMediaTask(params.taskId);
+  params.entry.terminalTaskKnown = task.status === 'succeeded' || task.status === 'failed';
   const latestMessage = getLatestRichMediaMessage(params.entry.messageId, params.message);
   const latestAttachment = latestMessage.metadata?.attachments?.find((item) => item.id === params.attachment.id);
   if (latestAttachment?.generationJobId !== params.generationJobId) return;
@@ -689,6 +700,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
         if (latest?.generationJobId !== generationJobId) return;
         const errorText = toMediaGenerationErrorText(error, 'audio');
         richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '聊天音乐生成', message: errorText, createdAt: Date.now() });
+        if (shouldKeepSubmittedMediaPending(error, entry.terminalTaskKnown)) return;
         updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id,
           patch: { status: 'failed', error: errorText, mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
       }).finally(() => {
@@ -755,6 +767,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
           if (latestAttachment?.generationJobId !== generationJobId) return;
           const errorText = toMediaGenerationErrorText(error, 'video');
           richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '聊天视频生成', message: errorText, createdAt: Date.now() });
+          if (shouldKeepSubmittedMediaPending(error, entry.terminalTaskKnown)) return;
           updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id, patch: { status: 'failed', error: errorText, mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
         })
         .finally(() => {

@@ -234,6 +234,21 @@ describe('processRichMessageMedia', () => {
     await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('failed'));
   });
 
+  it('keeps an accepted video pending when polling fails due to a temporary network error', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    vi.mocked(waitForAiMediaTask).mockRejectedValueOnce(new ApiError('网络暂时不可用', { status: 503 }));
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'generating', mediaTaskId: 'accepted-task', generationJobId: 'media-gen-accepted',
+      altText: '短片', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    await processRichMessageMedia({ message, aiProfiles: [], upsertMessage: (next) => upserts.push(next) });
+    await waitForExpectation(() => expect(waitForAiMediaTask).toHaveBeenCalledWith('accepted-task'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'generating', mediaTaskId: 'accepted-task' });
+  });
+
   it('resumes music by saved request key after its model configuration is removed', async () => {
     localStorage.setItem('pneumata-auth-mode', 'cloud');
     localStorage.setItem('pneumata-cloud-sync-enabled', '1');
