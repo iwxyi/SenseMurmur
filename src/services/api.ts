@@ -1327,8 +1327,11 @@ class ApiClient {
     });
   }
 
-  async updateMessageMetadata(id: string, metadata: unknown) {
-    return this.request<Record<string, unknown>>('PATCH', `/messages/${id}/metadata`, { metadata });
+  async updateMessageMetadata(id: string, metadata: unknown, chatId?: string) {
+    return this.request<Record<string, unknown>>('PATCH', `/messages/${id}/metadata`, {
+      metadata,
+      ...(chatId && getChatExecutionFence(chatId) ? { executionFence: getChatExecutionFence(chatId) } : {}),
+    });
   }
 
   async createMediaAsset(data: {

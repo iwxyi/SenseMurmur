@@ -278,7 +278,7 @@ async function persistVideoSubmissionKey(message: Message) {
   if (!message.serverId) throw new Error('云端视频消息尚未同步，不能提交生成任务');
   const serverId = message.serverId;
   const previous = richMediaMetadataWritesByMessageId.get(serverId);
-  const pending = (previous || Promise.resolve()).then(() => api.updateMessageMetadata(serverId, message.metadata).then(() => undefined));
+  const pending = (previous || Promise.resolve()).then(() => api.updateMessageMetadata(serverId, message.metadata, message.chatId).then(() => undefined));
   richMediaMetadataWritesByMessageId.set(serverId, pending);
   try {
     await pending;
@@ -299,7 +299,7 @@ function persistRichMessageMetadata(message: Message, metadata: MessageMetadata,
   }
   const serverId = message.serverId;
   const previous = richMediaMetadataWritesByMessageId.get(serverId);
-  const write = () => api.updateMessageMetadata(serverId, metadata).then(() => undefined).catch((error) => {
+  const write = () => api.updateMessageMetadata(serverId, metadata, message.chatId).then(() => undefined).catch((error) => {
     logRecoverableError({
       location,
       error,
