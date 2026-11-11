@@ -66,9 +66,9 @@ export function shouldCreateSpeakerStreamingPlaceholder(chat?: Pick<GroupChat, '
   return chat?.sessionKind?.scenarioId !== 'story-reader';
 }
 
-export function usesBackgroundGroupConversation(chat: GroupChat) {
-  return chat.type === 'group' && chat.sessionKind?.scenarioId !== 'story-reader'
-    && resolveSessionFamilyKey(chat) === 'conversation';
+export function usesBackgroundGroupExecution(chat: GroupChat) {
+  const family = resolveSessionFamilyKey(chat);
+  return chat.type === 'group' && (family === 'conversation' || family === 'study');
 }
 
 export function resolveConversationLoopStartDelayMs(options: ConversationLoopStartOptions = {}) {
@@ -136,7 +136,7 @@ export function useChatRunLoop(params: {
   paramsRef.current = params;
   useEffect(() => {
     const chat = params.chat;
-    if (!chat || !usesBackgroundGroupConversation(chat)) return undefined;
+    if (!chat || !usesBackgroundGroupExecution(chat)) return undefined;
     let disposed = false;
     let unsubscribe: (() => void) | undefined;
     void import('../services/groupBackgroundConversation').then((service) => {
@@ -499,7 +499,7 @@ export function useChatRunLoop(params: {
     const isStoryChoiceBlocked = storyChoiceGate.waiting;
     const hasActiveLoop = (Boolean(activeRunLoopTokenRef.current)
       && current.loopTokenRef.current === activeRunLoopTokenRef.current)
-      || (usesBackgroundGroupConversation(conversationChat) && isGroupBackgroundActive(conversationChat.id));
+      || (usesBackgroundGroupExecution(conversationChat) && isGroupBackgroundActive(conversationChat.id));
     const blockReason = getConversationLoopStartBlockReason({
       conversationType: conversationChat.type,
       isRunning: current.isRunningRef.current,
@@ -532,7 +532,10 @@ export function useChatRunLoop(params: {
       return null;
     }
     if (blockReason) return blockReason;
-    if (usesBackgroundGroupConversation(conversationChat)) {
+    const isStoryReader = conversationChat.sessionKind?.scenarioId === 'story-reader';
+    const canRunStoryInBackground = !isStoryReader || options.ignoreReaderPositionOnce
+      || Boolean(current.isStoryReaderAtTail?.());
+    if (usesBackgroundGroupExecution(conversationChat) && canRunStoryInBackground) {
       const token = `background-group-${conversationChat.id}`;
       current.loopTokenRef.current = token;
       current.activeChatIdRef.current = conversationChat.id;
@@ -611,7 +614,7 @@ export function useChatRunLoop(params: {
     setIsWaitingForInput(false);
     const current = paramsRef.current;
     const loopToken = current.loopTokenRef.current;
-    if (current.chat && usesBackgroundGroupConversation(current.chat)) {
+    if (current.chat && usesBackgroundGroupExecution(current.chat)) {
       void import('../services/groupBackgroundConversation')
         .then(({ pauseGroupBackgroundConversation }) => pauseGroupBackgroundConversation(current.chat!.id))
         .catch((error: unknown) => current.showErrorToast(error instanceof Error ? error.message : String(error)));

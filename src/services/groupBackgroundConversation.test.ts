@@ -6,7 +6,7 @@ import { useChatStore } from '../stores/useChatStore';
 import { useCharacterStore } from '../stores/useCharacterStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
-import { groupConversationRunId, listGroupBackgroundConversations, pauseGroupBackgroundConversation, recoverGroupBackgroundConversations, resumeGroupBackgroundConversation, startGroupBackgroundConversation } from './groupBackgroundConversation';
+import { groupConversationRunId, isGroupBackgroundTurnBlocked, listGroupBackgroundConversations, pauseGroupBackgroundConversation, recoverGroupBackgroundConversations, resumeGroupBackgroundConversation, startGroupBackgroundConversation } from './groupBackgroundConversation';
 import { currentWorkflowScope, indexedDbWorkflowRepository, workflowRunLockName } from './workflowRunRuntime';
 
 const runLoop = vi.hoisted(() => vi.fn());
@@ -34,6 +34,90 @@ function setup() {
 }
 
 describe('background group conversation', () => {
+  it('stops a story room at visible branch choices until the reader selects one', () => {
+    const chat = normalizeConversation({
+      id: 'story-room', type: 'group', name: '故事房', memberIds: ['a'], createdAt: 1, updatedAt: 1, lastMessageAt: 1,
+      sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'story-reader', surfaceProfile: 'hybrid' },
+      scenarioState: { phase: 'choice', choiceEpoch: 1 },
+    });
+    const choices = [{ label: '打开档案室', prompt: '去档案室' }, { label: '追问医生', prompt: '追问医生' }];
+    const messages = [{ id: 'choice', chatId: chat.id, type: 'ai', senderId: 'narrator', senderName: '旁白', content: '请选择', emotion: 0,
+      timestamp: 1, metadata: { storyChoices: choices } }] as Message[];
+    expect(isGroupBackgroundTurnBlocked(chat, messages)).toBe(true);
+    expect(isGroupBackgroundTurnBlocked({ ...chat, scenarioState: { ...chat.scenarioState, phase: 'branch' } }, messages)).toBe(false);
+  });
+
+  it('persists a stopped story turn without generating past an unselected choice', async () => {
+    const chatId = setup();
+    const current = useChatStore.getState().chats[0];
+    const storyChat = normalizeConversation({
+      ...current,
+      sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'story-reader', surfaceProfile: 'hybrid' },
+      scenarioState: { phase: 'choice', choiceEpoch: 1 },
+    });
+    useChatStore.setState({ chats: [storyChat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [{ id: 'choice', chatId, type: 'ai', senderId: 'narrator', senderName: '旁白', content: '请选择', emotion: 0,
+      timestamp: 1, metadata: { storyChoices: [{ label: '打开档案室' }, { label: '追问医生' }] } } as Message], messageWindowsByChatId: {} });
+
+    await startGroupBackgroundConversation(chatId);
+
+    const snapshot = (await listGroupBackgroundConversations(chatId))[0];
+    expect(snapshot.tasks[0]).toMatchObject({ status: 'completed', output: { outcome: 'stopped', reason: 'waiting_story_choice' } });
+    expect(runLoop).not.toHaveBeenCalled();
+  });
+
+  it('runs one learner-triggered study reply in the background and then waits for new input', async () => {
+    const chatId = setup();
+    const current = useChatStore.getState().chats[0];
+    const studyChat = normalizeConversation({
+      ...current,
+      memberIds: ['user', 'a'],
+      sessionKind: { topology: 'group', family: 'study', scenarioId: 'learning-progress', surfaceProfile: 'hybrid' },
+      scenarioState: { phase: 'learning', learning: { goal: '学习数据库索引', knowledgeItems: [] } },
+    });
+    useChatStore.setState({ chats: [studyChat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [{ id: 'learner-question', chatId, type: 'user', senderId: 'user', senderName: '学习者', content: '什么是覆盖索引？', emotion: 0,
+      timestamp: 1 } as Message], messageWindowsByChatId: {} });
+    runLoop.mockImplementation(async (params: { groupTurnTaskId: string; onCommittedMessage: (message: Message) => void }) => {
+      params.onCommittedMessage({ id: 'teacher-reply', chatId, type: 'ai', senderId: 'a', senderName: 'a', content: '覆盖索引包含查询需要的字段。', emotion: 0,
+        timestamp: Date.now(), metadata: { groupTurnTaskId: params.groupTurnTaskId } });
+    });
+
+    await startGroupBackgroundConversation(chatId);
+
+    const snapshot = (await listGroupBackgroundConversations(chatId))[0];
+    expect(runLoop).toHaveBeenCalledTimes(1);
+    expect(snapshot.tasks.map((task) => task.status)).toEqual(['completed']);
+    expect(snapshot.tasks[0].output).toMatchObject({ outcome: 'committed', messageId: 'teacher-reply' });
+    expect(useChatStore.getState().chats.find((item) => item.id === chatId)?.isActive).toBe(false);
+  });
+
+  it('waits for the reader after one committed story chapter and resumes on explicit start', async () => {
+    const chatId = setup();
+    const current = useChatStore.getState().chats[0];
+    useChatStore.setState({ chats: [normalizeConversation({ ...current,
+      sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'story-reader', surfaceProfile: 'hybrid' },
+      scenarioState: { phase: 'scene', choiceEpoch: 0 },
+    })] });
+    runLoop.mockImplementation(async (params: { groupTurnTaskId: string; onCommittedMessage: (message: Message) => void }) => {
+      params.onCommittedMessage({ id: `chapter-${runLoop.mock.calls.length}`, chatId, type: 'ai', senderId: 'a', senderName: 'a', content: '故事继续。', emotion: 0,
+        timestamp: Date.now(), metadata: { groupTurnTaskId: params.groupTurnTaskId } });
+    });
+
+    await startGroupBackgroundConversation(chatId);
+    const first = (await listGroupBackgroundConversations(chatId))[0];
+    expect(first.tasks).toHaveLength(1);
+    expect(first.tasks[0].output).toMatchObject({ outcome: 'committed', messageId: 'chapter-1' });
+    expect(useChatStore.getState().chats.find((item) => item.id === chatId)?.isActive).toBe(false);
+
+    await startGroupBackgroundConversation(chatId);
+    const second = (await listGroupBackgroundConversations(chatId))[0];
+    expect(second.run.id).toBe(first.run.id);
+    expect(second.tasks).toHaveLength(2);
+    expect(second.tasks[1].output).toMatchObject({ outcome: 'committed', messageId: 'chapter-2' });
+    expect(runLoop).toHaveBeenCalledTimes(2);
+  });
+
   it('runs after the page closes and continues in the same persisted run after new input', async () => {
     const chatId = setup();
     runLoop.mockImplementation(async (params: { groupTurnTaskId: string; onCommittedMessage: (message: Message) => void; onWaitingForInput: () => void }) => {

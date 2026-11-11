@@ -94,6 +94,7 @@ import {
   buildStoryChoicePendingKey,
   buildStoryReaderTextInputCapabilities,
   buildVisibleStoryBranchOptions,
+  canAcknowledgeNewStoryTail,
   findVisibleStoryChoiceSourceMessage,
   getNarrativeRevealIdentityKeys,
   getStoryReaderComposerPlaceholder,
@@ -886,6 +887,8 @@ export default function ChatDetailPage() {
   const [pendingStoryChoiceVisual, setPendingStoryChoiceVisual] = useState<PendingStoryChoiceVisual | null>(null);
   const [isStoryReaderAtTail, setIsStoryReaderAtTail] = useState(true);
   const [hasStoryReaderReachedTailIntent, setHasStoryReaderReachedTailIntent] = useState(false);
+  const [storyReaderAwaitingNewTail, setStoryReaderAwaitingNewTail] = useState(false);
+  const storyReaderGenerationSourceIdRef = useRef<string | null>(null);
   const [hasStoryUserDraft, setHasStoryUserDraft] = useState(false);
   const [isStoryGenerationCancelled, setIsStoryGenerationCancelled] = useState(false);
   const [isExplicitContinuationScrollFollowSuspended, setIsExplicitContinuationScrollFollowSuspended] = useState(false);
@@ -1173,7 +1176,7 @@ export default function ChatDetailPage() {
   const groupBackgroundRevision = useSyncExternalStore(subscribeGroupBackgroundConversations, getGroupBackgroundRevision, getGroupBackgroundRevision);
   const [groupBackgroundError, setGroupBackgroundError] = useState<string | null>(null);
   useEffect(() => {
-    if (!id || chat?.type !== 'group' || resolveSessionFamilyKey(chat) !== 'conversation' || chat.sessionKind?.scenarioId === 'story-reader') {
+    if (!id || chat?.type !== 'group' || !['conversation', 'study'].includes(resolveSessionFamilyKey(chat))) {
       setGroupBackgroundError(null);
       return;
     }
@@ -1689,6 +1692,8 @@ export default function ChatDetailPage() {
     setNarrativeRevealMessageKeys(new Set());
     setPendingStoryChoiceVisual(null);
     setHasStoryReaderReachedTailIntent(false);
+    setStoryReaderAwaitingNewTail(false);
+    storyReaderGenerationSourceIdRef.current = null;
     const nextAtTail = chat?.sessionKind?.scenarioId === 'story-reader' && savedStoryReadingPositionForChat
       ? savedStoryReadingPositionForChat.pinned
       : true;
@@ -4136,8 +4141,16 @@ export default function ChatDetailPage() {
     isStoryReaderAtTailRef.current = true;
     setIsStoryReaderAtTail(true);
     setHasStoryReaderReachedTailIntent(true);
+    if (canAcknowledgeNewStoryTail({
+      awaitingNewTail: storyReaderAwaitingNewTail,
+      isRunning,
+      latestMessageId: currentChatMessages.at(-1)?.id || null,
+      sourceMessageId: storyReaderGenerationSourceIdRef.current,
+    })) {
+      setStoryReaderAwaitingNewTail(false);
+    }
     setIsExplicitContinuationScrollFollowSuspended(false);
-  }, []);
+  }, [currentChatMessages, isRunning, storyReaderAwaitingNewTail]);
 
   const persistStoryReadingPosition = useCallback((chatId: string, position: MessageListScrollPosition, key: string) => {
     const roundedOffsetTop = Math.round(position.offsetTop);
@@ -4235,6 +4248,7 @@ export default function ChatDetailPage() {
       hasUserDraft: hasStoryUserDraft,
       hasRunLoopError: Boolean(chatError || runLoopError),
       canAutoContinueFromTail: sessionScrollCapabilities.autoContinueFromTail,
+      hasAcknowledgedNewTail: !storyReaderAwaitingNewTail,
     })) return;
     if (!chat || !id) return;
     setIsStoryGenerationCancelled(false);
@@ -4251,7 +4265,10 @@ export default function ChatDetailPage() {
       storyChoiceGate,
     }, 'info');
     resume();
+    storyReaderGenerationSourceIdRef.current = currentChatMessages.at(-1)?.id || null;
+    setStoryReaderAwaitingNewTail(true);
     const startBlockReason = startConversationLoopIfNeeded(chat);
+    if (startBlockReason) setStoryReaderAwaitingNewTail(false);
     if (startBlockReason) {
       logDeveloperDiagnostic('story-run:auto-tail-blocked', {
         chatId: id,
@@ -4260,7 +4277,7 @@ export default function ChatDetailPage() {
         storyChoiceGate,
       }, startBlockReason === 'waiting_story_choice' ? 'info' : 'warn');
     }
-  }, [canAutoRunConversation, chat, chatError, hasSavedNonTailStoryReadingPosition, hasStoryReaderReachedTailIntent, hasStoryUserDraft, id, isCurrentStoryChoiceSubmitting, isPaused, isRunning, isStoryReaderAtTail, isStoryRoom, isStoryWaitingForChoice, resume, runLoopError, sessionScrollCapabilities.autoContinueFromTail, sessionScrollCapabilities.autoStickToBottom, startConversationLoopIfNeeded, storyChoiceGate]);
+  }, [canAutoRunConversation, chat, chatError, currentChatMessages, hasSavedNonTailStoryReadingPosition, hasStoryReaderReachedTailIntent, hasStoryUserDraft, id, isCurrentStoryChoiceSubmitting, isPaused, isRunning, isStoryReaderAtTail, isStoryRoom, isStoryWaitingForChoice, resume, runLoopError, sessionScrollCapabilities.autoContinueFromTail, sessionScrollCapabilities.autoStickToBottom, startConversationLoopIfNeeded, storyChoiceGate, storyReaderAwaitingNewTail]);
 
   const handleHeaderPrimaryAction = useCallback(() => {
     if (!chat || !id || !canAutoRunConversation) return;

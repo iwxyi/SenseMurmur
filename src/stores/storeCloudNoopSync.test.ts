@@ -368,6 +368,7 @@ describe('cloud no-op sync', () => {
   });
 
   it('preserves deletion markers in chat member summaries', async () => {
+    await import('./useAuthStore');
     const { useCharacterStore } = await import('./useCharacterStore');
     await useCharacterStore.persist.rehydrate();
     useCharacterStore.setState({ characters: [] });

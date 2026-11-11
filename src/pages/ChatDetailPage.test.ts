@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../types/message';
 import { useMessageStore } from '../stores/useMessageStore';
-import { buildStoryChoicePendingKey, buildStoryReaderTextInputCapabilities, buildVisibleStoryBranchOptions, findVisibleStoryChoiceSourceMessage, getStoryReaderComposerPlaceholder, getStoryTailStatus, isStoryChoicePending, resolveEffectiveStoryReaderAtTail, shouldAutoStartStoryRoom, shouldRegisterLiveNarrativeReveal, shouldRouteTextAsStoryCustomDirection } from './chatDetailStoryHelpers';
+import { buildStoryChoicePendingKey, buildStoryReaderTextInputCapabilities, buildVisibleStoryBranchOptions, canAcknowledgeNewStoryTail, findVisibleStoryChoiceSourceMessage, getStoryReaderComposerPlaceholder, getStoryTailStatus, isStoryChoicePending, resolveEffectiveStoryReaderAtTail, shouldAutoStartStoryRoom, shouldRegisterLiveNarrativeReveal, shouldRouteTextAsStoryCustomDirection } from './chatDetailStoryHelpers';
 
 function buildPauseResumeMessages() {
   return [] as string[];
@@ -200,9 +200,18 @@ describe('ChatDetailPage pause/resume behavior', () => {
     expect(shouldAutoStartStoryRoom({ ...base, isRunning: true })).toBe(false);
     expect(shouldAutoStartStoryRoom({ ...base, hasUserDraft: true })).toBe(false);
     expect(shouldAutoStartStoryRoom({ ...base, hasRunLoopError: true })).toBe(false);
+    expect(shouldAutoStartStoryRoom({ ...base, hasAcknowledgedNewTail: false })).toBe(false);
     expect(shouldAutoStartStoryRoom({ ...base, canAutoContinueFromTail: false })).toBe(false);
     expect(shouldAutoStartStoryRoom({ ...base, isStoryRoom: false })).toBe(false);
     expect(shouldAutoStartStoryRoom({ ...base, canAutoRunConversation: false })).toBe(false);
+  });
+
+  it('acknowledges a new story tail only after the completed chapter and a reader scroll', () => {
+    const base = { awaitingNewTail: true, isRunning: false, latestMessageId: 'chapter-2', sourceMessageId: 'chapter-1' };
+    expect(canAcknowledgeNewStoryTail(base)).toBe(true);
+    expect(canAcknowledgeNewStoryTail({ ...base, isRunning: true })).toBe(false);
+    expect(canAcknowledgeNewStoryTail({ ...base, latestMessageId: 'chapter-1' })).toBe(false);
+    expect(canAcknowledgeNewStoryTail({ ...base, awaitingNewTail: false })).toBe(false);
   });
 
   it('treats restored non-tail story reading positions as not at tail until the reader reaches the tail again', () => {

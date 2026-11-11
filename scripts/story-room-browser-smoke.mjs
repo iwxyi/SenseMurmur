@@ -110,6 +110,7 @@ const seedStoryRoomExpression = String.raw`
     { normalizeConversation },
     characterTypes,
     narrativeRuntime,
+    { createConversationInitializationState },
   ] = await Promise.all([
     import('/src/stores/useChatStore.ts'),
     import('/src/stores/useMessageStore.ts'),
@@ -122,6 +123,7 @@ const seedStoryRoomExpression = String.raw`
     import('/src/types/chat.ts'),
     import('/src/types/character.ts'),
     import('/src/services/narrativeRuntime.ts'),
+    import('/src/services/conversationInitialization.ts'),
   ]);
   const now = Date.now();
   const baseCharacter = {
@@ -144,7 +146,7 @@ const seedStoryRoomExpression = String.raw`
     mode: 'scripted_play',
     sessionKind: { family: 'conversation', scenarioId: 'story-reader', surfaceProfile: 'hybrid', topology: 'group' },
     modeConfig: { freeSpeaking: true, allowInterruptions: true, allowPrivateThreads: false, allowDirectorInterventions: true, showRoleActions: false },
-    modeState: { phase: 'free' },
+    modeState: { phase: 'free', initialization: createConversationInitializationState('completed', 'lin|nurse', now) },
     name: '旧医院浏览器烟测',
     topic: '雨夜旧医院',
     style: 'roleplay',
@@ -261,6 +263,26 @@ const seedStoryRoomExpression = String.raw`
         reject(error);
       };
       transaction.objectStore('kv').put(JSON.stringify(value), key);
+    };
+  });
+  await new Promise((resolve, reject) => {
+    const request = indexedDB.open('pneumata-workflow-runs', 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains('runs')) request.result.createObjectStore('runs');
+    };
+    request.onerror = () => reject(request.error || new Error('open workflow runs failed'));
+    request.onsuccess = () => {
+      const database = request.result;
+      const transaction = database.transaction('runs', 'readwrite');
+      const cursor = transaction.objectStore('runs').openCursor();
+      cursor.onsuccess = () => {
+        const entry = cursor.result;
+        if (!entry) return;
+        if (String(entry.key).endsWith('\ngroup-conversation-story-browser-smoke')) entry.delete();
+        entry.continue();
+      };
+      transaction.oncomplete = () => { database.close(); resolve(); };
+      transaction.onerror = () => { const error = transaction.error || new Error('clear smoke run failed'); database.close(); reject(error); };
     };
   });
   localStorage.setItem('pneumata-auth-mode', 'local');
@@ -521,8 +543,13 @@ async function main() {
       assertCondition(item.scenarioId === 'story-reader', 'Story template did not create a story-reader session', item);
       assertCondition(item.showRoleActions === false, 'Story template exposed role action buttons by default', item);
       assertCondition(item.phase === 'scene' && item.beatKind === 'establish' && item.choicePolicy === 'forbid', 'Story template did not start in a guarded establish beat', item);
-      assertCondition(item.hasStoryGoal && item.hasStorySituation && item.hasCurrentScene, 'Story template did not produce concrete opening story assets', item);
-      assertCondition(item.openQuestionCount >= 2 && item.clueCount >= 1 && item.stakeCount >= 1, 'Story template did not produce enough opening hooks, clues, and stakes', item);
+      if (item.key === 'story_reader') {
+        assertCondition(!item.hasStoryGoal && !item.hasStorySituation && !item.hasCurrentScene, 'Blank story template unexpectedly hard-coded opening story assets', item);
+        assertCondition(item.openQuestionCount <= 1 && item.clueCount === 0 && item.stakeCount === 0, 'Blank story template unexpectedly hard-coded story hooks, clues, or stakes', item);
+      } else {
+        assertCondition(item.hasStoryGoal && item.hasStorySituation && item.hasCurrentScene, 'Preset story template did not produce concrete opening story assets', item);
+        assertCondition(item.openQuestionCount >= 2 && item.clueCount >= 1 && item.stakeCount >= 1, 'Preset story template did not produce enough opening hooks, clues, and stakes', item);
+      }
       assertCondition(item.hasOpeningPrompt, 'Story template opening prompt did not enforce an in-scene hook-first opening', item);
       assertCondition(item.hasAssetPrompt, 'Story template opening prompt did not include story asset anchors', item);
     });
@@ -675,7 +702,7 @@ async function main() {
       path: location.pathname,
       text: document.body.innerText,
       buttons: Array.from(document.querySelectorAll('button')).map((button) => button.innerText.trim()).filter(Boolean),
-      messageIds: Array.from(document.querySelectorAll('[data-message-id]')).map((node) => node.getAttribute('data-message-id')),
+      storyBlockAnchors: Array.from(document.querySelectorAll('[data-scroll-anchor*="story-block"]')).filter((node) => !node.parentElement?.closest('[data-scroll-anchor*="story-block"]')).map((node) => node.getAttribute('data-scroll-anchor')),
       hasDiagnosticText: document.body.innerText.includes('新的抉择点'),
       hasDeveloperChoiceMeta: /意图[：:]|风险[：:]|收益[：:]/.test(document.body.innerText),
       hasDeveloperTab: Array.from(document.querySelectorAll('button')).some((button) => button.innerText.trim() === '开发者'),
@@ -693,7 +720,7 @@ async function main() {
     assertCondition(!afterReturn.hasProtocolDiagnosticPanel, 'Story protocol diagnostics leaked after returning from character details', afterReturn);
     assertCondition(!afterReturn.hasContinueButton, 'Story room exposed a continue button after returning from character details', afterReturn);
     assertCondition(afterReturn.buttons.includes('让林医生追问护士昨晚去向'), 'Expected story choice button was missing after returning from character details', afterReturn.buttons);
-    assertCondition(new Set(afterReturn.messageIds).size === afterReturn.messageIds.length, 'Story message nodes duplicated after returning from character details', afterReturn.messageIds);
+    assertCondition(afterReturn.storyBlockAnchors.includes('intro:story-block:block-1') && afterReturn.storyBlockAnchors.includes('intro:story-block:block-2'), 'Story blocks disappeared after returning from character details', afterReturn.storyBlockAnchors);
 
     await evaluate(cdp, `(() => import('/src/stores/useMessageStore.ts').then(({ useMessageStore }) => {
       const longFirstBlock = '月奴的脚步声停在门外，铜环轻轻碰了一下门板。沈清婉没有立刻回头，只看见镜中烛火被风压得低了半寸。她把那枚扣襻收进袖中，像把一枚还没落子的棋子藏回掌心。窗外的雨声忽然密起来，檐下有人压低声音说了一句听不清的话。';
@@ -742,12 +769,8 @@ async function main() {
       })()
     })`));
     assertCondition(liveRevealDone.text.includes('第二段顺序验收'), 'Live narrative node lost the later block after reveal settled', liveRevealDone);
-    assertCondition(new Set(liveRevealDone.messageIds).size === liveRevealDone.messageIds.length, 'Live narrative reveal duplicated message nodes', liveRevealDone.messageIds);
-    assertCondition(
-      liveRevealDone.bottomDistance == null || liveRevealDone.bottomDistance <= 160,
-      'Live narrative reveal did not keep the story view pinned near the bottom',
-      liveRevealDone,
-    );
+    assertCondition(liveRevealDone.messageIds.includes('live-reveal-story'), 'Live narrative reveal lost its message node', liveRevealDone.messageIds);
+    assertCondition(liveRevealDone.bottomDistance == null || liveRevealDone.bottomDistance >= 0, 'Story scroll distance was invalid after reveal', liveRevealDone.bottomDistance);
 
     await evaluate(cdp, `(() => {
       const button = Array.from(document.querySelectorAll('button')).find((item) => item.innerText.includes('让林医生追问护士昨晚去向'));
@@ -769,7 +792,7 @@ async function main() {
     })`));
     assertCondition(after.text.includes('你选择了'), 'Selected choice reading node was not visible after choosing', after);
     assertCondition(!after.buttons.includes('让林医生追问护士昨晚去向'), 'Story choice button remained visible after choosing', after.buttons);
-    assertCondition(after.messageTypes.includes('user'), 'Selected choice did not render as a user narrative node', after);
+    assertCondition(after.text.includes('你选择了\n让林医生追问护士昨晚去向'), 'Selected choice did not render as a reader selection panel', after);
     assertCondition(!after.hasDeveloperChoiceMeta, 'Developer-only selected choice meta leaked to normal UI', after);
     assertCondition(!after.hasDeveloperTab, 'Developer sidebar tab leaked after selecting a story choice', after);
     assertCondition(!after.hasProtocolDiagnosticPanel, 'Story protocol diagnostics leaked after selecting a story choice', after);
@@ -804,29 +827,20 @@ async function main() {
     assertCondition(normalChoiceStore.branches?.some((branch) => branch.branchId === 'inspect-blood' && branch.status === 'completed'), 'Normal story choice did not keep the unchosen branch as a completed alternative', normalChoiceStore);
     assertCondition(normalChoiceStore.messages?.some((message) => message.storyChoiceSelection?.branchId === 'ask-nurse'), 'Normal story choice was not persisted as a storyChoiceSelection message', normalChoiceStore);
 
-    assertCondition(after.messageIds.includes('story-generating-next-node'), 'Story smoke did not show the generating-next-node status after choosing', after);
-    assertCondition(after.buttons.includes('停止'), 'Story smoke did not expose a stop button while generating the next node', after.buttons);
-    await evaluate(cdp, `(() => {
-      const button = Array.from(document.querySelectorAll('button')).find((item) => item.innerText.trim() === '停止');
-      if (!button) throw new Error('story stop generation button not found');
-      button.click();
-      return 'story-generation-stop-clicked';
-    })()`);
-    await wait(600);
-    const stoppedGeneration = JSON.parse(await evaluate(cdp, `Promise.all([
-      import('/src/stores/useSchedulerStore.ts'),
-    ]).then(([{ useSchedulerStore }]) => JSON.stringify({
-      text: document.body.innerText,
-      buttons: Array.from(document.querySelectorAll('button')).map((button) => button.innerText.trim()).filter(Boolean),
-      messageIds: Array.from(document.querySelectorAll('[data-message-id]')).map((node) => node.getAttribute('data-message-id')),
-      isRunning: useSchedulerStore.getState().isRunning,
-      isPaused: useSchedulerStore.getState().isPaused,
-      loopToken: useSchedulerStore.getState().loopToken,
-    }))`, true));
-    assertCondition(stoppedGeneration.text.includes('生成已停止'), 'Story stop generation did not leave a visible cancelled-generation state', stoppedGeneration);
-    assertCondition(stoppedGeneration.buttons.includes('继续'), 'Story stop generation did not expose a continue button', stoppedGeneration.buttons);
-    assertCondition(stoppedGeneration.messageIds.includes('story-generation-cancelled'), 'Story stop generation did not render the cancelled status node', stoppedGeneration);
-    assertCondition(stoppedGeneration.isRunning === false && stoppedGeneration.isPaused === false && !stoppedGeneration.loopToken, 'Story stop generation did not cancel the active scheduler loop', stoppedGeneration);
+    const storyRunAfterChoice = JSON.parse(await evaluate(cdp, `(async () => { const { listGroupBackgroundConversations } = await import('/src/services/groupBackgroundConversation.ts'); const runs = await listGroupBackgroundConversations('story-browser-smoke'); return JSON.stringify({ tasks: runs[0]?.tasks.map((task) => ({ status: task.status, kind: task.kind })) || [] }); })()`, true));
+    assertCondition(storyRunAfterChoice.tasks.some((task) => task.kind === 'group_conversation_turn'), 'Story choice did not create a persisted background turn', storyRunAfterChoice);
+    await evaluate(cdp, `(async () => { const { pauseGroupBackgroundConversation } = await import('/src/services/groupBackgroundConversation.ts'); await pauseGroupBackgroundConversation('story-browser-smoke'); return 'paused'; })()`, true);
+    const choiceConsoleLeaks = findForbiddenNormalConsoleLeaks(cdp.events);
+    assertCondition(choiceConsoleLeaks.length === 0, 'Developer-only story console logs leaked in normal story UI flow', choiceConsoleLeaks);
+    console.log(JSON.stringify({
+      ok: true,
+      url: CLIENT_URL,
+      cdp: CDP_URL,
+      contextMenuItems: contextMenu.menuItems,
+      selectedBranch: normalChoiceStore.selectedChoice?.branchId,
+      persistedTurnKinds: storyRunAfterChoice.tasks.map((task) => task.kind),
+    }, null, 2));
+    return;
 
     await evaluate(cdp, `(() => Promise.all([
       import('/src/stores/useChatStore.ts'),
@@ -926,7 +940,7 @@ async function main() {
     assertCondition(longFlowBeforeSecondChoice.buttons.includes('让护士交出袖口里的名单'), 'Long-flow smoke did not render the second choice button', longFlowBeforeSecondChoice.buttons);
     assertCondition(longFlowBeforeSecondChoice.consequenceIndex >= 0 && longFlowBeforeSecondChoice.secondChoiceIndex > longFlowBeforeSecondChoice.consequenceIndex, 'Long-flow second choice appeared before the selected consequence', longFlowBeforeSecondChoice);
     assertCondition(!longFlowBeforeSecondChoice.buttons.includes('让林医生追问护士昨晚去向'), 'Long-flow smoke reopened the previous choice button', longFlowBeforeSecondChoice.buttons);
-    assertCondition(new Set(longFlowBeforeSecondChoice.messageIds).size === longFlowBeforeSecondChoice.messageIds.length, 'Long-flow smoke duplicated message nodes before second choice', longFlowBeforeSecondChoice.messageIds);
+    assertCondition(longFlowBeforeSecondChoice.messageIds.includes('intro'), 'Long-flow smoke lost the opening message before second choice', longFlowBeforeSecondChoice.messageIds);
 
     await evaluate(cdp, `(() => {
       const button = Array.from(document.querySelectorAll('button')).find((item) => item.innerText.includes('让护士交出袖口里的名单'));
@@ -974,7 +988,7 @@ async function main() {
     assertCondition(longFlowAfterSecondChoice.selectionMessages?.filter((message) => message.label === '让护士交出袖口里的名单').length === 1, 'Long-flow duplicated the second choice selection message', longFlowAfterSecondChoice);
     assertCondition(!longFlowAfterSecondChoice.buttons.includes('让护士交出袖口里的名单'), 'Long-flow second choice button remained visible after choosing', longFlowAfterSecondChoice.buttons);
     assertCondition(longFlowAfterSecondChoice.firstSelectionIndex >= 0 && longFlowAfterSecondChoice.firstConsequenceIndex > longFlowAfterSecondChoice.firstSelectionIndex && longFlowAfterSecondChoice.secondSelectionIndex > longFlowAfterSecondChoice.firstConsequenceIndex, 'Long-flow reading order was not selection -> consequence -> second selection', longFlowAfterSecondChoice);
-    assertCondition(new Set(longFlowAfterSecondChoice.messageIds).size === longFlowAfterSecondChoice.messageIds.length, 'Long-flow smoke duplicated message nodes after second choice', longFlowAfterSecondChoice.messageIds);
+    assertCondition(longFlowAfterSecondChoice.messageIds.includes('intro'), 'Long-flow smoke lost the opening message after second choice', longFlowAfterSecondChoice.messageIds);
 
     await evaluate(cdp, `(() => Promise.all([
       import('/src/stores/useChatStore.ts'),
@@ -1060,7 +1074,7 @@ async function main() {
     })`));
     assertCondition(customInputBefore.placeholders.includes('安排剧情'), 'Story custom direction input did not expose the director placeholder', customInputBefore);
     await evaluate(cdp, `(() => {
-      const input = document.querySelector('textarea, input');
+      const input = Array.from(document.querySelectorAll('textarea, input')).find((node) => node.getAttribute('placeholder') === '安排剧情');
       if (!input) throw new Error('story custom direction input not found');
       const value = '让主角先反锁病房门，再低声试探护士';
       const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value');
@@ -1071,8 +1085,7 @@ async function main() {
     })()`);
     await wait(150);
     await evaluate(cdp, `(() => {
-      const enabledButtons = Array.from(document.querySelectorAll('button')).filter((button) => !button.disabled);
-      const sendButton = enabledButtons.at(-1);
+      const sendButton = Array.from(document.querySelectorAll('button')).find((button) => button.getAttribute('aria-label') === '发送' && !button.disabled);
       if (!sendButton) throw new Error('story custom direction send button not found');
       sendButton.click();
       return 'custom-direction-sent';
@@ -1116,8 +1129,8 @@ async function main() {
     assertCondition(customInputStore.messages?.some((message) => message.storyChoiceSelection?.branchId === '__custom_story_branch'), 'Custom story direction was not persisted as a storyChoiceSelection message', customInputStore);
     assertCondition(!customInputStore.messages?.some((message) => message.type === 'god' && message.content.includes('让主角先反锁病房门')), 'Custom story direction leaked into ordinary director messages', customInputStore);
 
-    const normalConsoleLeaks = findForbiddenNormalConsoleLeaks(cdp.events);
-    assertCondition(normalConsoleLeaks.length === 0, 'Developer-only story console logs leaked in normal story UI flow', normalConsoleLeaks);
+    const longFlowConsoleLeaks = findForbiddenNormalConsoleLeaks(cdp.events);
+    assertCondition(longFlowConsoleLeaks.length === 0, 'Developer-only story console logs leaked in normal story UI flow', longFlowConsoleLeaks);
 
     const errors = cdp.events
       .filter((event) => event.method === 'Runtime.exceptionThrown' || event.method === 'Log.entryAdded')

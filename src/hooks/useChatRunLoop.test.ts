@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getConversationLoopStartBlockReason, resolveConversationLoopStartDelayMs, shouldCreateSpeakerStreamingPlaceholder, shouldSkipConversationLoopStart, shouldStartConversationLoop, shouldTreatActiveLoopAsSuccessfulStart } from './useChatRunLoop';
+import { getConversationLoopStartBlockReason, resolveConversationLoopStartDelayMs, shouldCreateSpeakerStreamingPlaceholder, shouldSkipConversationLoopStart, shouldStartConversationLoop, shouldTreatActiveLoopAsSuccessfulStart, usesBackgroundGroupExecution } from './useChatRunLoop';
 
 describe('useChatRunLoop start guard', () => {
   it('reports the root reason that blocks loop start', () => {
@@ -102,6 +102,12 @@ describe('useChatRunLoop start guard', () => {
     })).toBe(true);
 
     expect(shouldCreateSpeakerStreamingPlaceholder(null)).toBe(true);
+  });
+
+  it('routes conversation story rooms through the persistent group runner', () => {
+    expect(usesBackgroundGroupExecution({ type: 'group', sessionKind: { topology: 'group', family: 'conversation', scenarioId: 'story-reader', surfaceProfile: 'hybrid' } } as never)).toBe(true);
+    expect(usesBackgroundGroupExecution({ type: 'group', sessionKind: { topology: 'group', family: 'study', scenarioId: 'learning-progress', surfaceProfile: 'hybrid' } } as never)).toBe(true);
+    expect(usesBackgroundGroupExecution({ type: 'group', sessionKind: { topology: 'group', family: 'analysis', scenarioId: 'opinion-review', surfaceProfile: 'text' } } as never)).toBe(false);
   });
 
   it('can bypass the loop start timer for explicit user-triggered generation', () => {

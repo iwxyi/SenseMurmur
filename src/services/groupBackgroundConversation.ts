@@ -16,6 +16,8 @@ import { runWithConversationExecutionLock } from './conversationExecutionLock';
 import { getWorkspaceSignal } from './workspaceLifecycle';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { createWorkflowRunRuntime, currentWorkflowScope, indexedDbWorkflowRepository, workflowRunLockName, WorkflowPreflightError, type WorkflowSnapshot, type WorkflowTask } from './workflowRunRuntime';
+import { getStoryChoiceGateState } from './storyChoices';
+import { resolveSessionFamilyKey } from './sessionEngineKeys';
 
 const active = new Map<string, Promise<void>>();
 const starting = new Map<string, Promise<void>>();
@@ -46,6 +48,11 @@ function committedTurn(chatId: string, taskId: string) {
     && (!item.metadata?.turnSegment || item.metadata.turnSegment.index === item.metadata.turnSegment.count - 1));
 }
 
+export function isGroupBackgroundTurnBlocked(chat: GroupChat, messages: Message[]) {
+  return chat.sessionKind?.scenarioId === 'story-reader'
+    && getStoryChoiceGateState(chat, messages).waiting;
+}
+
 async function appendEvents(chatId: string, payloads: Parameters<Parameters<typeof runSessionLoop>[0]['appendEventMessage']>[1][], sourceMessageId?: string) {
   const messages = payloads.map((payload) => {
     const event = normalizeRuntimeEvent(payload);
@@ -71,11 +78,14 @@ async function executeTurn(task: WorkflowTask, signal: AbortSignal) {
   ]);
   const chat = useChatStore.getState().chats.find((item) => item.id === chatId);
   if (!chat || chat.type !== 'group' || chat.deletedAt != null || !chat.isActive) throw new WorkflowPreflightError('群聊已停止或不可用');
-  const members = await Promise.all(chat.memberIds.map(async (id) => useCharacterStore.getState().characters.find((item) => item.id === id)
+  const members = await Promise.all(chat.memberIds.filter((id) => id !== 'user').map(async (id) => useCharacterStore.getState().characters.find((item) => item.id === id)
     || useCharacterStore.getState().loadCharacter(id)));
   if (members.some((item) => !item)) throw new WorkflowPreflightError('群聊角色已不存在');
   const previous = committedTurn(chatId, task.id);
   if (previous) return { output: { outcome: 'committed', messageId: previous.id } };
+  if (isGroupBackgroundTurnBlocked(chat, chatMessages(chatId, chat))) {
+    return { output: { outcome: 'stopped', reason: 'waiting_story_choice' } };
+  }
   const scope = currentWorkflowScope();
   const engine = await loadSessionEngine(chat);
   let running = true;
@@ -143,6 +153,10 @@ function nextTask(snapshot: WorkflowSnapshot): WorkflowTask {
     dependsOn: snapshot.tasks.length ? [snapshot.tasks.at(-1)!.id] : [], status: 'queued', attempt: 0, updatedAt: Date.now() };
 }
 
+function waitsForReaderOrLearner(chat: GroupChat) {
+  return chat.sessionKind?.scenarioId === 'story-reader' || resolveSessionFamilyKey(chat) === 'study';
+}
+
 async function startGroupBackgroundConversationOnce(chatId: string) {
   if (!navigator.locks?.request) throw new Error('此设备不支持安全的群聊后台运行');
   const running = active.get(groupConversationRunId(chatId));
@@ -164,7 +178,8 @@ async function startGroupBackgroundConversationOnce(chatId: string) {
     if (!snapshot) throw new Error('群聊后台任务不存在');
     if (snapshot.tasks.some((task) => task.status === 'result_unknown' || task.status === 'failed')) throw new Error('群聊上次请求结果需要核对');
     if (snapshot.tasks.length && snapshot.tasks.every((task) => task.status === 'completed')
-      && (snapshot.tasks.at(-1)?.output as { outcome?: string } | undefined)?.outcome === 'stopped') {
+      && ((snapshot.tasks.at(-1)?.output as { outcome?: string } | undefined)?.outcome === 'stopped'
+        || waitsForReaderOrLearner(chat))) {
       await runtime.addTasksOnce(runId, snapshot.run.planVersion, [nextTask(snapshot)]);
     }
   }
@@ -221,7 +236,8 @@ export async function resumeGroupBackgroundConversation(chatId: string) {
         await useChatStore.getState().updateChat(chatId, { isActive: false });
         break;
       }
-      if ((latest.tasks.at(-1)?.output as { outcome?: string } | undefined)?.outcome === 'stopped') {
+      if ((latest.tasks.at(-1)?.output as { outcome?: string } | undefined)?.outcome === 'stopped'
+        || waitsForReaderOrLearner(chat)) {
         await useChatStore.getState().updateChat(chatId, { isActive: false });
         break;
       }

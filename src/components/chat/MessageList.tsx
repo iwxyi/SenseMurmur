@@ -626,7 +626,6 @@ export default function MessageList({
   const bottomLoadTriggeredRef = useRef(false);
   const shouldStickToBottomRef = useRef(true);
   const lastReportedBottomPinnedRef = useRef<boolean | null>(null);
-  const lastReportedNearBottomRef = useRef<boolean | null>(null);
   const hasJumpedToBottomRef = useRef(false);
   const initialScrollPositionRef = useRef(initialScrollPosition);
   const pendingInitialRestoreRef = useRef<MessageListScrollPosition | null>(initialScrollPosition?.pinned ? null : initialScrollPosition);
@@ -825,7 +824,7 @@ export default function MessageList({
       const recentNarrative = !item.pending && isNarrativeRevealAllowed({ item: item.sourceItem, revealMessageKeys: narrativeRevealMessageKeys });
       const shouldFadeNode = recentNarrative && storyRevealMode === 'fade' && !prefersReducedMotion();
       const character = block.displayMode === 'bubble' ? resolveNarrativeBlockCharacter(block, characters) : undefined;
-      if (!item.pending) {
+      if (!item.pending && block.displayMode !== 'bubble') {
         return (
           <div
             key={item.key}
@@ -903,10 +902,9 @@ export default function MessageList({
 
   const reportNearBottomState = useCallback((element: HTMLDivElement) => {
     const nearBottom = getDistanceFromBottom(element) <= getAdaptiveBottomThreshold(element) && !hasMoreNewer;
-    if (lastReportedNearBottomRef.current !== nearBottom) {
-      lastReportedNearBottomRef.current = nearBottom;
-      onNearBottomChange?.(nearBottom);
-    }
+    // This callback runs for an actual reader scroll. Reaching the tail again
+    // must be observable even when a short new chapter never left the viewport.
+    onNearBottomChange?.(nearBottom);
     return nearBottom;
   }, [getAdaptiveBottomThreshold, getDistanceFromBottom, hasMoreNewer, onNearBottomChange]);
 

@@ -55,6 +55,7 @@ export function shouldAutoStartStoryRoom(params: {
   hasUserDraft?: boolean;
   hasRunLoopError: boolean;
   canAutoContinueFromTail?: boolean;
+  hasAcknowledgedNewTail?: boolean;
 }) {
   return params.hasChat
     && params.hasChatId
@@ -67,6 +68,7 @@ export function shouldAutoStartStoryRoom(params: {
     && !params.isStoryChoiceSubmitting
     && !params.hasUserDraft
     && !params.hasRunLoopError
+    && params.hasAcknowledgedNewTail !== false
     && params.canAutoContinueFromTail !== false;
 }
 
@@ -77,6 +79,16 @@ export function resolveEffectiveStoryReaderAtTail(params: {
 }) {
   if (params.hasSavedNonTailStoryReadingPosition && !params.hasStoryReaderReachedTailIntent) return false;
   return params.isStoryReaderAtTail;
+}
+
+export function canAcknowledgeNewStoryTail(params: {
+  awaitingNewTail: boolean;
+  isRunning: boolean;
+  latestMessageId: string | null;
+  sourceMessageId: string | null;
+}) {
+  return params.awaitingNewTail && !params.isRunning
+    && Boolean(params.latestMessageId && params.latestMessageId !== params.sourceMessageId);
 }
 
 export function getNarrativeRevealIdentityKeys(message: Message) {
