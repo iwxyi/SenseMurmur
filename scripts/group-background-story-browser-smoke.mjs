@@ -86,7 +86,7 @@ async function main() {
       useChatStore.setState((state) => ({ ...state, chats: state.chats.filter((item) => item.id !== chatId) }));
       useMessageStore.setState((state) => ({ ...state, messages: state.messages.filter((item) => item.chatId !== chatId) }));
       const db = await new Promise((resolve, reject) => {
-        const request = indexedDB.open('pneumata-workflow-runs', 1);
+        const request = indexedDB.open('pneumata-workflow-runs', 3);
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
       });

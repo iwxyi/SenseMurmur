@@ -3,6 +3,7 @@ import { generateResponse } from './aiClient';
 import { WorkflowPreflightError } from './workflowRunRuntime';
 
 export interface AgentTeamRole {
+  schemaVersion?: 1;
   id: string;
   name: string;
   responsibility: string;
@@ -18,9 +19,15 @@ export interface AgentTeamTask {
   dependsOn: string[];
   acceptance: string;
   tool?: AgentTeamRole['allowedTools'][number];
+  deliverable?: {
+    kind: 'document' | 'code' | 'diagram' | 'html' | 'table' | 'json' | 'text';
+    title: string;
+    language?: string;
+  };
 }
 
 export interface AgentTeamPlan {
+  schemaVersion?: 1;
   summary: string;
   roles: AgentTeamRole[];
   tasks: AgentTeamTask[];
@@ -47,12 +54,15 @@ function identifier(value: unknown, label: string) {
 
 export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   const source = record(raw);
+  if (source.schemaVersion !== undefined && source.schemaVersion !== 1) throw new Error('团队计划版本不受支持');
   if (!Array.isArray(source.roles) || !Array.isArray(source.tasks)) throw new Error('团队计划缺少岗位或任务');
   if (source.roles.length < 1 || source.roles.length > 6 || source.tasks.length < 1 || source.tasks.length > 16) throw new Error('团队计划规模超出限制');
   const roles = source.roles.map((item): AgentTeamRole => {
     const value = record(item);
+    if (value.schemaVersion !== undefined && value.schemaVersion !== 1) throw new Error('岗位契约版本不受支持');
     if (!Array.isArray(value.allowedTools) || value.allowedTools.some((tool) => tool !== 'text_generation' && tool !== 'web_search' && tool !== 'image_generation' && tool !== 'audio_generation' && tool !== 'video_generation' && tool !== 'image_inspection')) throw new Error('岗位申请了不可用工具');
     return {
+      schemaVersion: 1,
       id: identifier(value.id, '岗位 ID'),
       name: requiredText(value.name, '岗位名称', 60),
       responsibility: requiredText(value.responsibility, '岗位职责', 500),
@@ -72,6 +82,17 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     if (tool !== 'text_generation' && tool !== 'web_search' && tool !== 'image_generation' && tool !== 'audio_generation' && tool !== 'video_generation' && tool !== 'image_inspection') throw new Error('任务申请了不可用工具');
     if (!rolesById.get(roleId)?.allowedTools.includes(tool)) throw new Error('任务使用了岗位未获授权的工具');
     if (!Array.isArray(value.dependsOn) || value.dependsOn.length > 8) throw new Error('任务依赖无效');
+    let deliverable: AgentTeamTask['deliverable'];
+    if (value.deliverable !== undefined) {
+      const rawDeliverable = record(value.deliverable);
+      const kind = rawDeliverable.kind;
+      if (!['document', 'code', 'diagram', 'html', 'table', 'json', 'text'].includes(String(kind))) throw new Error('任务交付类型无效');
+      deliverable = {
+        kind: kind as NonNullable<AgentTeamTask['deliverable']>['kind'],
+        title: requiredText(rawDeliverable.title, '任务交付标题', 120),
+        ...(rawDeliverable.language === undefined ? {} : { language: requiredText(rawDeliverable.language, '交付语言', 40) }),
+      };
+    }
     return {
       id: identifier(value.id, '任务 ID'),
       roleId,
@@ -79,6 +100,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
       dependsOn: value.dependsOn.map((dependency) => identifier(dependency, '依赖任务 ID')),
       acceptance: requiredText(value.acceptance, '任务验收', 800),
       ...(value.tool === undefined ? {} : { tool }),
+      ...(deliverable ? { deliverable } : {}),
     };
   });
   const tasksById = new Map(tasks.map((task) => [task.id, task]));
@@ -123,6 +145,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     throw new Error('视频任务目前不能接收已生成的音乐或视频片段；需要配乐或拼接时须使用音视频合成工具');
   }
   return {
+    schemaVersion: 1,
     summary: requiredText(source.summary, '计划摘要', 800),
     roles,
     tasks,
@@ -136,7 +159,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; chat
     '你是通用任务的主 Agent。根据用户目标设计最小可行的团队与无环任务图。简单任务只用一个岗位。',
     `当前开放工具：text_generation${params.webSearch ? '、web_search' : ''}${params.imageGeneration ? '、image_generation' : ''}${params.audioGeneration ? '、audio_generation' : ''}${params.imageInspection ? '、image_inspection' : ''}${params.videoGeneration ? '、video_generation' : ''}。${params.videoUnavailableReason ? `视频生成当前不可用：${params.videoUnavailableReason}。` : ''}网页搜索任务的 goal 是搜索词；图片任务的 goal 是可生成的画面提示词，可依赖文字脚本、搜索摘要或图片检查文字${params.imageReferenceImages ? `，也可直接依赖已生成图片并作为参考图${params.maxImageReferenceImages ? `（最多 ${params.maxImageReferenceImages} 张）` : ''}` : '；当前图片模型不支持参考图，不要让图片任务直接依赖图片任务'}；音乐任务的 goal 是包含风格、情绪、乐器与可选歌词要求的音乐提示词，系统异步生成完整音频。用户要求明确歌词时，先用 text_generation 写歌词，再让 audio_generation 依赖歌词任务；系统会把歌词交付作为音乐提示词的一部分。图片检查必须直接依赖已生成图片，模型会收到真实画面；视频任务的 goal 是精炼成片提示词，可以依赖脚本${params.videoReferenceImages ? '和图片' : ''}任务。视频任务不能依赖音乐或其他视频片段，目前没有音轨合成和视频拼接工具。${params.videoRequiresReferenceImage ? '当前视频模型必须先有参考图片。' : ''}${params.videoReferenceImages ? `依赖图片时系统把图片作为参考素材${params.maxVideoReferenceImages ? `，当前模型最多 ${params.maxVideoReferenceImages} 张` : ''}。` : '当前视频模型不能接收参考图片，不要规划图片到视频的依赖。'}视频由系统异步生成，不能声称立即成片。只安排确实必要的图像、音乐与视频生成，避免为验证或补充说明而反复生成同一媒体。不得承诺音视频剪辑合成、文件写入或代码执行；能力不足时在摘要说明。`,
     '岗位必须有具体职责、方法和可检查的验收标准；任务必须有唯一 ID、岗位归属、明确目标和依赖。不要用岗位名称冒充专业能力。',
-    '只输出 JSON：{"summary":"...","roles":[{"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"..."}],"finalAcceptance":"..."}',
+    '只为需要用户单独打开、复用或编辑的任务声明 deliverable；可选类型 document、table、code、diagram、html、json、text。格式为 {"kind":"table","title":"市场比较表","language":"csv"}。未声明时仍会纳入团队总结，不要给搜索、图片/音频/视频生成等每个步骤机械创建文字产物。只输出 JSON：{"schemaVersion":1,"summary":"...","roles":[{"schemaVersion":1,"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"...","deliverable":{"kind":"table","title":"比较表","language":"csv"}}],"finalAcceptance":"..."}',
   ].join('\n'), [{ role: 'user', content: goal }], undefined, {
     responseFormat: 'json', maxTokens: 2400, signal: params.signal,
     aiUsage: { type: 'assistant_chat', label: '团队任务规划', scope: 'chat', resourceId: params.chatId },

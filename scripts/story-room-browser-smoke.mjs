@@ -266,9 +266,13 @@ const seedStoryRoomExpression = String.raw`
     };
   });
   await new Promise((resolve, reject) => {
-    const request = indexedDB.open('pneumata-workflow-runs', 1);
+    const request = indexedDB.open('pneumata-workflow-runs', 3);
     request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains('runs')) request.result.createObjectStore('runs');
+      const database = request.result;
+      if (!database.objectStoreNames.contains('runs')) database.createObjectStore('runs');
+      if (!database.objectStoreNames.contains('events')) database.createObjectStore('events', { keyPath: 'key' });
+      if (!database.objectStoreNames.contains('outbox')) database.createObjectStore('outbox', { keyPath: 'key' });
+      if (!database.objectStoreNames.contains('outbox_consumers')) database.createObjectStore('outbox_consumers', { keyPath: 'key' });
     };
     request.onerror = () => reject(request.error || new Error('open workflow runs failed'));
     request.onsuccess = () => {

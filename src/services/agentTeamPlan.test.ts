@@ -16,7 +16,29 @@ const valid = () => ({
 
 describe('agent team plan', () => {
   it('accepts a bounded task graph with explicit role contracts', () => {
-    expect(validateAgentTeamPlan(valid()).tasks[1].dependsOn).toEqual(['research']);
+    const plan = validateAgentTeamPlan(valid());
+    expect(plan.tasks[1].dependsOn).toEqual(['research']);
+    expect(plan.schemaVersion).toBe(1);
+    expect(plan.roles[0].schemaVersion).toBe(1);
+  });
+
+  it('migrates legacy plans and roles in memory while rejecting unknown contract versions', () => {
+    const legacy = validateAgentTeamPlan(valid());
+    expect(legacy).toMatchObject({ schemaVersion: 1, roles: [{ schemaVersion: 1 }] });
+    expect(() => validateAgentTeamPlan({ ...valid(), schemaVersion: 2 })).toThrow('团队计划版本不受支持');
+    const unsupportedRole = valid();
+    unsupportedRole.roles[0] = { ...unsupportedRole.roles[0], schemaVersion: 2 } as typeof unsupportedRole.roles[number];
+    expect(() => validateAgentTeamPlan(unsupportedRole)).toThrow('岗位契约版本不受支持');
+  });
+
+  it('validates optional typed deliverables and preserves legacy tasks without one', () => {
+    const plan = valid();
+    plan.tasks[0] = { ...plan.tasks[0], deliverable: { kind: 'table', title: '竞品对照表', language: 'markdown' } };
+    const parsed = validateAgentTeamPlan(plan);
+    expect(parsed.tasks[0].deliverable).toEqual({ kind: 'table', title: '竞品对照表', language: 'markdown' });
+    expect(parsed.tasks[1].deliverable).toBeUndefined();
+    expect(() => validateAgentTeamPlan({ ...plan, tasks: [{ ...plan.tasks[0], deliverable: { kind: 'audio', title: '无效类型' } }, plan.tasks[1]] })).toThrow('交付类型无效');
+    expect(() => validateAgentTeamPlan({ ...plan, tasks: [{ ...plan.tasks[0], deliverable: { kind: 'table', title: '' } }, plan.tasks[1]] })).toThrow('交付标题无效');
   });
 
   it('rejects unknown tools and missing role references', () => {

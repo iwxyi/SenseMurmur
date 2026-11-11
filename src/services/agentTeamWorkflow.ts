@@ -9,12 +9,14 @@ import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope'
 import { currentWorkflowScope, workflowRunLockName } from './workflowRunRuntime';
 import { attachMessageToActiveBranch } from './messageBranching';
 import type { Message } from '../types/message';
+import type { AssistantArtifactItem } from '../types/assistantArtifact';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { readAuthSnapshot } from './authSnapshot';
 import { getWorkspaceSignal } from './workspaceLifecycle';
 import { scheduleBackgroundExecution } from './backgroundExecutionScheduler';
 import { runWithConversationExecutionLock } from './conversationExecutionLock';
 import { assertChatExecutionLease } from './chatExecutionLease';
+import { getChatExecutionFence } from './chatExecutionFence';
 import { api as appApi } from './api';
 import { resolveChatAgentCapabilities } from './chatAgentCapabilities';
 import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTeamVideoTask';
@@ -150,6 +152,33 @@ function isTeamTaskInput(value: unknown): value is TeamTaskInput {
   return Boolean(candidate.task && candidate.role && typeof candidate.goal === 'string');
 }
 
+function sameAgentTeamRole(left: AgentTeamPlan['roles'][number], right: AgentTeamPlan['roles'][number]) {
+  const leftTools = new Set(left.allowedTools);
+  const rightTools = new Set(right.allowedTools);
+  return left.id === right.id
+    && left.name === right.name
+    && left.responsibility === right.responsibility
+    && left.method === right.method
+    && left.acceptance === right.acceptance
+    && leftTools.size === rightTools.size
+    && [...leftTools].every((tool) => rightTools.has(tool));
+}
+
+function sameAgentTeamTask(left: AgentTeamPlan['tasks'][number], right: AgentTeamPlan['tasks'][number]) {
+  const leftDependencies = new Set(left.dependsOn);
+  const rightDependencies = new Set(right.dependsOn);
+  return left.id === right.id
+    && left.roleId === right.roleId
+    && left.goal === right.goal
+    && left.acceptance === right.acceptance
+    && (left.tool || 'text_generation') === (right.tool || 'text_generation')
+    && left.deliverable?.kind === right.deliverable?.kind
+    && left.deliverable?.title === right.deliverable?.title
+    && left.deliverable?.language === right.deliverable?.language
+    && leftDependencies.size === rightDependencies.size
+    && [...leftDependencies].every((id) => rightDependencies.has(id));
+}
+
 export function buildAgentTeamTaskRevisionRequest(task: WorkflowTask, instruction: string) {
   const trimmed = instruction.trim();
   if (!trimmed || trimmed.length > 4000) throw new WorkflowPreflightError('补充指示应为 1 到 4000 个字符');
@@ -258,7 +287,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       }
       const plannedTask = plan.tasks.find((item) => item.id === (input.sourcePlanTaskId ? originalPlanTaskId(input.sourcePlanTaskId, task.id) : task.id));
       const plannedRole = plan.roles.find((item) => item.id === plannedTask?.roleId);
-      if (!plannedTask || !plannedRole || JSON.stringify(input.task) !== JSON.stringify(plannedTask) || JSON.stringify(role) !== JSON.stringify(plannedRole) || input.goal !== snapshot.run.goal
+      if (!plannedTask || !plannedRole || !sameAgentTeamTask(input.task, plannedTask) || !sameAgentTeamRole(role, plannedRole) || input.goal !== snapshot.run.goal
         || (input.userInstruction !== undefined && (typeof input.userInstruction !== 'string' || !input.userInstruction.trim() || input.userInstruction.length > 4000))) {
         throw new WorkflowPreflightError('团队任务与已保存计划不一致');
       }
@@ -633,63 +662,101 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
     async publish(runId: string) {
       if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队交付');
       const deliveryScope = scope();
-      return navigator.locks.request(workflowRunLockName(deliveryScope, runId), async () => {
-      if (scope() !== deliveryScope) throw new Error('账号已切换，团队交付已暂停');
+      const initial = await runtime.read(runId);
+      if (!initial || initial.run.status !== 'completed') throw new Error('团队任务尚未完成');
+      const chatId = initial.run.chatId;
+      const assertDeliveryOwnership = () => {
+        if (scope() !== deliveryScope) throw new Error('账号已切换，团队交付已暂停');
+        assertChatExecutionLease(chatId);
+      };
+      const publishWithinRunLock = (signal?: AbortSignal) => navigator.locks.request(workflowRunLockName(deliveryScope, runId), async () => {
+      if (signal?.aborted) throw signal.reason || new Error('团队交付已暂停');
+      assertDeliveryOwnership();
       const snapshot = await runtime.read(runId);
       if (!snapshot || snapshot.run.status !== 'completed') throw new Error('团队任务尚未完成');
+      if (snapshot.run.chatId !== chatId) throw new Error('团队交付会话已变化');
       await Promise.all([
         ensureAssistantArtifactStoreHydrated(),
         useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
         useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
       ]);
+      if (signal?.aborted) throw signal.reason || new Error('团队交付已暂停');
+      assertDeliveryOwnership();
       const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId && item.deletedAt == null);
       if (!chat || chat.type !== 'assistant') throw new Error('交付会话不可用');
       const sourceId = `team-delivery-${runId}`;
-      const existing = useAssistantArtifactStore.getState().getArtifactsForChat(chat.id).find((item) => item.sourceMessageId === sourceId);
-      const existingVersion = existing?.versions.find((item) => item.id === existing.currentVersionId);
+      const chatArtifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chat.id);
       const plan = validateAgentTeamPlan(snapshot.tasks.find((task) => task.id === 'plan')?.output);
       const delegatedPlans = snapshot.tasks.filter((task) => task.kind === 'team_plan_revision' && task.status === 'completed'
         && snapshot.tasks.some((item) => item.id.startsWith(delegatedTaskId(task.id, '')))).map((task) => ({
         sourceId: task.id, plan: validateAgentTeamPlan(task.output),
       }));
-      const content = [
-        `# ${plan.summary}`,
-        ...plan.tasks.map((task) => {
-          const output = snapshot.tasks.find((item) => item.id === task.id)?.output;
-          if (typeof output !== 'string') throw new Error('团队交付缺少任务结果');
-          return `## ${task.goal}\n\n${output}`;
-        }),
-        ...delegatedPlans.flatMap(({ sourceId, plan: delegated }) => delegated.tasks.map((task) => {
-          const output = snapshot.tasks.find((item) => item.id === delegatedTaskId(sourceId, task.id))?.output;
-          if (typeof output !== 'string') throw new Error('追加委派交付缺少任务结果');
-          return `## ${task.goal}\n\n${output}`;
-        })),
-      ].join('\n\n');
-      if (scope() !== deliveryScope) throw new Error('账号已切换，团队交付已暂停');
-      const artifact = existingVersion?.content === content ? existing : useAssistantArtifactStore.getState().upsertArtifactsFromMessage({
-        chatId: chat.id,
-        messageId: sourceId,
-        drafts: [{ kind: 'document', title: plan.summary.slice(0, 60), content, summary: delegatedPlans.at(-1)?.plan.finalAcceptance || plan.finalAcceptance,
-          ...(existing ? { action: 'update' as const, targetArtifactId: existing.id, baseVersionId: existing.currentVersionId } : {}) }],
-      })[0];
-      if (!artifact) throw new Error('团队交付产物保存失败');
-      if (scope() !== deliveryScope) throw new Error('账号已切换，团队交付已暂停');
+      const completed = [
+        ...plan.tasks.map((task) => ({ task, id: task.id })),
+        ...delegatedPlans.flatMap(({ sourceId: revisionId, plan: delegated }) => delegated.tasks.map((task) => ({ task, id: delegatedTaskId(revisionId, task.id) }))),
+      ].map(({ task, id }) => {
+        const output = snapshot.tasks.find((item) => item.id === id)?.output;
+        if (typeof output !== 'string') throw new Error('团队交付缺少任务结果');
+        return { task, id, output };
+      });
+      const declared = completed.filter((item) => item.task.deliverable);
+      const untyped = completed.filter((item) => !item.task.deliverable);
+      const artifacts: Array<AssistantArtifactItem | null> = [];
+      const store = useAssistantArtifactStore.getState();
+      const upsert = (artifactSourceId: string, kind: 'document' | 'code' | 'diagram' | 'html' | 'table' | 'json' | 'text', title: string, content: string, summary: string, language?: string) => {
+        const existing = chatArtifacts.find((item) => item.sourceMessageId === artifactSourceId);
+        const current = existing?.versions.find((item) => item.id === existing.currentVersionId);
+        if (current?.content.trim() === content.trim()) return existing!;
+        return store.upsertArtifactsFromMessage({ chatId: chat.id, messageId: artifactSourceId, drafts: [{
+          kind, title, content, summary, language,
+          ...(existing ? { action: 'update' as const, targetArtifactId: existing.id, baseVersionId: existing.currentVersionId } : {}),
+        }] })[0] || null;
+      };
+      assertDeliveryOwnership();
+      for (const { task, id, output } of declared) {
+        const spec = task.deliverable!;
+        artifacts.push(upsert(`${sourceId}:${id}`, spec.kind, spec.title, output, task.acceptance, spec.language));
+      }
+      const summaryContent = declared.length
+        ? [`# ${plan.summary}`, ...untyped.map(({ task, output }) => `## ${task.goal}\n\n${output}`)].join('\n\n')
+        : [`# ${plan.summary}`, ...completed.map(({ task, output }) => `## ${task.goal}\n\n${output}`)].join('\n\n');
+      if (!declared.length || untyped.length) {
+        artifacts.push(upsert(sourceId, 'document', plan.summary.slice(0, 60), summaryContent,
+          delegatedPlans.at(-1)?.plan.finalAcceptance || plan.finalAcceptance));
+      }
+      const savedArtifacts = artifacts.filter((item): item is AssistantArtifactItem => Boolean(item));
+      if (!savedArtifacts.length || savedArtifacts.length !== artifacts.length) throw new Error('团队交付产物保存失败');
+      if (signal?.aborted) throw signal.reason || new Error('团队交付已暂停');
+      assertDeliveryOwnership();
       const messageStore = useMessageStore.getState();
       const known = [...messageStore.messages, ...(messageStore.messageWindowsByChatId[chat.id]?.messages || [])];
       const previousDelivery = known.find((item) => item.id === sourceId || item.clientKey === sourceId);
-      if (!previousDelivery || previousDelivery.metadata?.assistant?.artifacts?.[0]?.versionId !== artifact.currentVersionId) {
+      const artifactRefs = savedArtifacts.map((item) => ({ id: item.id, kind: item.kind, title: item.title, versionId: item.currentVersionId }));
+      const refsChanged = JSON.stringify(previousDelivery?.metadata?.assistant?.artifacts || []) !== JSON.stringify(artifactRefs);
+      if (!previousDelivery || refsChanged) {
         const draft = attachMessageToActiveBranch(chat, known, {
           id: sourceId, clientKey: sourceId, chatId: chat.id, type: 'ai' as const,
-          senderId: 'assistant', senderName: '助手', content: `${existing ? '团队任务已更新' : '团队任务已完成'}：${plan.summary}`,
+          senderId: 'assistant', senderName: '助手', content: `${previousDelivery ? '团队任务已更新' : '团队任务已完成'}：${plan.summary}`,
           emotion: 0, timestamp: previousDelivery?.timestamp || Date.now(), isDeleted: false,
-          metadata: { format: 'markdown' as const, assistant: { mode: 'general' as const, artifacts: [{ id: artifact.id, kind: artifact.kind, title: artifact.title, versionId: artifact.currentVersionId }] } },
+          metadata: { format: 'markdown' as const, assistant: { mode: 'general' as const, artifacts: artifactRefs } },
         }) as Message;
         useMessageStore.getState().upsertMessage(draft);
         useMessageStore.getState().queueMessageSync(draft);
         void useChatStore.getState().updateChat(chat.id, { lastMessageAt: draft.timestamp, latestMessage: draft });
       }
       flushBufferedPersistenceWrites();
-      return artifact;
+      if (signal?.aborted) throw signal.reason || new Error('团队交付已暂停');
+      assertDeliveryOwnership();
+      await runtime.markDeliveryPublished(runId, snapshot.run.planVersion);
+      return savedArtifacts[0];
+      });
+      if (getChatExecutionFence(chatId)) {
+        assertDeliveryOwnership();
+        return publishWithinRunLock();
+      }
+      return runWithConversationExecutionLock(deliveryScope, chatId, async (signal) => {
+        assertDeliveryOwnership();
+        return publishWithinRunLock(signal);
       });
     },
   };
@@ -907,6 +974,15 @@ export async function recoverAgentTeamRuns() {
       });
     });
     changed ||= recovered;
+  }
+  for (const run of runs) {
+    if (run.run.status !== 'completed' || run.run.deliveryStatus === 'published' || currentWorkflowScope() !== storageScope) continue;
+    try {
+      await currentTeamWorkflow().publish(run.run.id);
+      changed = true;
+    } catch (error) {
+      console.error('[agent-team:delivery-recovery-failed]', { runId: run.run.id, error });
+    }
   }
   if (changed) notifyTeam();
   return changed;

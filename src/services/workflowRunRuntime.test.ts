@@ -1,8 +1,28 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowSnapshot } from './workflowRunRuntime';
 
 let testIndexedDb: IDBFactory | undefined;
+
+beforeAll(async () => {
+  testIndexedDb = new IDBFactory();
+  vi.stubGlobal('indexedDB', testIndexedDb);
+  vi.stubGlobal('IDBKeyRange', IDBKeyRange);
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = testIndexedDb!.open('pneumata-workflow-runs', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('runs');
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  const tx = db.transaction('runs', 'readwrite');
+  tx.objectStore('runs').put(snapshot('legacy-v1'), 'legacy-scope\nlegacy-v1');
+  await new Promise<void>((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+  db.close();
+});
 
 function snapshot(id: string): WorkflowSnapshot {
   return {
@@ -15,14 +35,28 @@ function snapshot(id: string): WorkflowSnapshot {
 }
 
 beforeEach(() => {
-  const currentIndexedDb = new IDBFactory();
-  testIndexedDb ??= currentIndexedDb;
-  vi.stubGlobal('indexedDB', currentIndexedDb);
+  vi.stubGlobal('indexedDB', testIndexedDb!);
   vi.stubGlobal('IDBKeyRange', IDBKeyRange);
   vi.stubGlobal('navigator', { locks: { request: async (_name: string, _options: unknown, callback: (lock: object) => Promise<WorkflowSnapshot>) => callback({}) } });
 });
 
 describe('workflow run runtime', () => {
+  it('upgrades a version 1 database and preserves its legacy run snapshot', async () => {
+    const upgraded = await indexedDbWorkflowRepository.read('legacy-scope', 'legacy-v1');
+    expect(upgraded?.schemaVersion).toBe(1);
+    expect(upgraded?.run.goal).toBe('制作短片');
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = testIndexedDb!.open('pneumata-workflow-runs', 3);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    expect(db.objectStoreNames.contains('runs')).toBe(true);
+    expect(db.objectStoreNames.contains('events')).toBe(true);
+    expect(db.objectStoreNames.contains('outbox')).toBe(true);
+    expect(db.objectStoreNames.contains('outbox_consumers')).toBe(true);
+    db.close();
+  });
+
   it('persists dependency progress and resumes the external task without generating it again', async () => {
     const id = crypto.randomUUID();
     const execute = vi.fn(async (task: { id: string }) => task.id === 'script' ? { output: '脚本完成' } : { externalTaskId: 'upstream-1' });
@@ -102,12 +136,86 @@ describe('workflow run runtime', () => {
     expect((await runtime.read(id))?.schemaVersion).toBe(1);
   });
 
+  it('persists ordered events atomically and paginates after a sequence', async () => {
+    const id = crypto.randomUUID();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'event-test');
+    await runtime.create(snapshot(id));
+    await indexedDbWorkflowRepository.transact('event-test', id, (current) => {
+      if (!current) throw new Error('missing');
+      return { snapshot: { ...current, run: { ...current.run, status: 'paused', updatedAt: 2 } }, value: undefined };
+    });
+    const events = await indexedDbWorkflowRepository.listEvents('event-test', id);
+    expect(events.map((event) => event.sequence)).toEqual([1, 2]);
+    expect(events[0].changedTasks).toHaveLength(2);
+    expect(events[0].eventId).toBe(`${id}:1`);
+    expect(events[0].aggregateVersion).toBe(1);
+    expect(events[1].runStatus).toBe('paused');
+    expect(await indexedDbWorkflowRepository.listEvents('event-test', id, 1)).toEqual([events[1]]);
+  });
+
+  it('replays durable outbox records until a consumer acknowledges them', async () => {
+    const id = crypto.randomUUID();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'outbox-test');
+    await runtime.create(snapshot(id));
+    await indexedDbWorkflowRepository.registerOutboxConsumer('outbox-test', id, 'delivery');
+    const firstRead = await indexedDbWorkflowRepository.listOutboxEvents('outbox-test', id, 'delivery');
+    expect(firstRead).toHaveLength(1);
+    expect(firstRead[0].eventId).toBe(`${id}:1`);
+    expect(await indexedDbWorkflowRepository.listOutboxEvents('outbox-test', id, 'delivery')).toEqual(firstRead);
+
+    await indexedDbWorkflowRepository.transact('outbox-test', id, (current) => {
+      if (!current) throw new Error('missing');
+      return { snapshot: { ...current, run: { ...current.run, status: 'paused', updatedAt: 2 } }, value: undefined };
+    });
+    const events = await indexedDbWorkflowRepository.listOutboxEvents('outbox-test', id, 'delivery');
+    expect(events.map((event) => event.sequence)).toEqual([1, 2]);
+    await indexedDbWorkflowRepository.acknowledgeOutboxEvents('outbox-test', id, 'delivery', 2);
+    await indexedDbWorkflowRepository.acknowledgeOutboxEvents('outbox-test', id, 'delivery', 1);
+    expect(await indexedDbWorkflowRepository.listOutboxEvents('outbox-test', id, 'delivery')).toEqual([]);
+    await expect(indexedDbWorkflowRepository.acknowledgeOutboxEvents('outbox-test', id, 'delivery', 3)).rejects.toThrow('尚未写入');
+  });
+
+  it('retains the latest 256 events without deleting the boundary event', async () => {
+    const id = crypto.randomUUID();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'event-retention-test');
+    await runtime.create(snapshot(id));
+    await indexedDbWorkflowRepository.registerOutboxConsumer('event-retention-test', id, 'retention-check');
+    for (let version = 2; version <= 260; version += 1) {
+      await indexedDbWorkflowRepository.transact('event-retention-test', id, (current) => {
+        if (!current) throw new Error('missing');
+        return { snapshot: { ...current, run: { ...current.run, planVersion: version, updatedAt: version } }, value: undefined };
+      });
+    }
+    const events = await indexedDbWorkflowRepository.listEvents('event-retention-test', id);
+    expect(events).toHaveLength(256);
+    expect(events[0].sequence).toBe(5);
+    expect(events.at(-1)?.sequence).toBe(260);
+    const outbox = await indexedDbWorkflowRepository.listOutboxEvents('event-retention-test', id, 'retention-check', 1000);
+    expect(outbox).toHaveLength(260);
+    expect(outbox[0].sequence).toBe(1);
+    expect(outbox.at(-1)?.sequence).toBe(260);
+  });
+
+  it('does not commit an event when snapshot validation aborts the transaction', async () => {
+    const id = crypto.randomUUID();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'event-atomicity-test');
+    await runtime.create(snapshot(id));
+    await indexedDbWorkflowRepository.registerOutboxConsumer('event-atomicity-test', id, 'atomicity-check');
+    await expect(indexedDbWorkflowRepository.transact('event-atomicity-test', id, (current) => {
+      if (!current) throw new Error('missing');
+      return { snapshot: { ...current, run: { ...current.run, planVersion: 2 }, tasks: [{ ...current.tasks[0], attempt: -1 }, current.tasks[1]] }, value: undefined };
+    })).rejects.toThrow('尝试次数无效');
+    expect(await indexedDbWorkflowRepository.listEvents('event-atomicity-test', id)).toHaveLength(1);
+    expect((await indexedDbWorkflowRepository.listOutboxEvents('event-atomicity-test', id, 'atomicity-check')).map((event) => event.sequence)).toEqual([1]);
+    expect((await runtime.read(id))?.run.planVersion).toBe(1);
+  });
+
   it('migrates legacy snapshots without rewriting their task history', async () => {
     const id = crypto.randomUUID();
     const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'test');
     await runtime.create(snapshot(id));
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = testIndexedDb!.open('pneumata-workflow-runs', 1);
+      const request = testIndexedDb!.open('pneumata-workflow-runs', 3);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });

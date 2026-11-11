@@ -13,7 +13,7 @@ import { synthesizeSpeech, usesManagedSpeechProfile } from './speech';
 import { useAuthStore } from '../stores/useAuthStore';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { conversationExecutionLockName } from './conversationExecutionLock';
-import { runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
+import { assertChatExecutionLease, runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
 import { getChatExecutionFence } from './chatExecutionFence';
 import { currentWorkflowScope } from './workflowRunRuntime';
 import { getWorkspaceSignal } from './workspaceLifecycle';
@@ -187,6 +187,7 @@ type RichMediaQueueEntry = {
   taskId?: string;
   generationJobId?: string;
   sharesConversationLease?: boolean;
+  executionSignal?: AbortSignal;
   terminalTaskKnown?: boolean;
 };
 
@@ -604,6 +605,8 @@ async function runWithMediaResultLease<T>(chatId: string, serverMessageId: strin
 }
 
 async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: AbortSignal) {
+  if (signal?.aborted) throw signal.reason || new DOMException('团队运行已中断', 'AbortError');
+  if (entry.sharesConversationLease && !isLocalOnlyMediaMode()) assertChatExecutionLease(entry.message.chatId);
   const messageId = entry.messageId;
   const currentMessage = getLatestRichMediaMessage(messageId, entry.message);
   if (!isLocalOnlyMediaMode() && !currentMessage.serverId) {
@@ -904,6 +907,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
     });
     rememberRichMediaMessage(workingMessage);
   } catch (error) {
+    if (entry.executionSignal?.aborted) return;
     const latestAttachment = getLatestRichMediaMessage(messageId, workingMessage).metadata?.attachments?.find((item) => item.id === attachment.id);
     if (latestAttachment?.generationJobId !== generationJobId) return;
     const uncertainSubmission = isAbortError(error) && !entry.taskId
@@ -977,9 +981,20 @@ function pumpRichMediaQueue() {
 }
 
 async function runRichMediaQueueEntryWithLease(entry: RichMediaQueueEntry) {
-  if (isLocalOnlyMediaMode()) return runRichMediaQueueEntry(entry);
+  if (isLocalOnlyMediaMode()) return runRichMediaQueueEntry(entry, entry.executionSignal);
   const chatId = entry.message.chatId;
-  if (entry.sharesConversationLease && getChatExecutionFence(chatId)) return runRichMediaQueueEntry(entry);
+  if (entry.sharesConversationLease) {
+    if (!getChatExecutionFence(chatId)) throw new Error('团队媒体任务没有有效的会话运行权，已暂停提交');
+    const signal = entry.executionSignal;
+    if (!signal || signal.aborted) throw signal?.reason || new DOMException('团队运行已中断', 'AbortError');
+    assertChatExecutionLease(chatId);
+    await runRichMediaQueueEntry(entry, signal);
+    const serverId = entry.message.serverId;
+    if (serverId) await richMediaMetadataWritesByMessageId.get(serverId);
+    assertChatExecutionLease(chatId);
+    if (signal.aborted) throw signal.reason || new DOMException('团队运行已中断', 'AbortError');
+    return;
+  }
   const scope = currentWorkflowScope();
   const signal = getWorkspaceSignal();
   const run = () => runWithChatExecutionLeaseWhenAvailable(chatId, async (leaseSignal) => {
@@ -1006,6 +1021,7 @@ function enqueueRichMediaAttachment(params: {
   upsertMessage: (message: Message) => void;
   priority?: 'normal' | 'next';
   sharesConversationLease?: boolean;
+  executionSignal?: AbortSignal;
 }) {
   const id = richMediaQueueEntryId(params.message.id, params.attachment.id);
   const existing = activeRichMediaQueueEntriesById.get(id);
@@ -1036,6 +1052,7 @@ function enqueueRichMediaAttachment(params: {
     aiProfiles: params.aiProfiles,
     upsertMessage: params.upsertMessage,
     sharesConversationLease: params.sharesConversationLease,
+    executionSignal: params.executionSignal,
     promise,
     resolve,
     reject,
@@ -1061,6 +1078,7 @@ export async function processRichMessageMedia(params: {
   attachmentIds?: string[];
   priority?: 'normal' | 'next';
   sharesConversationLease?: boolean;
+  executionSignal?: AbortSignal;
 }) {
   if (!isLocalOnlyMediaMode() && !params.message.serverId) return;
   const attachmentFilter = params.attachmentIds?.length ? new Set(params.attachmentIds) : null;
@@ -1105,6 +1123,7 @@ export async function processRichMessageMedia(params: {
       upsertMessage: params.upsertMessage,
       priority: params.priority,
       sharesConversationLease: params.sharesConversationLease,
+      executionSignal: params.executionSignal,
     })));
   } finally {
     // Polling may continue after submission returns. Retain the merged message

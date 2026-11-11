@@ -14,6 +14,7 @@ interface QueuedWork<T> {
 const queue: QueuedWork<unknown>[] = [];
 const activeChats = new Set<string>();
 const activeWorkIds = new Set<string>();
+const scheduledWorkById = new Map<string, Promise<unknown>>();
 const listeners = new Set<() => void>();
 let activeCount = 0;
 let dispatchSequence = 0;
@@ -80,19 +81,32 @@ function pump() {
 export function scheduleBackgroundExecution<T>(chatId: string, run: () => Promise<T>, signal?: AbortSignal, workId?: string): Promise<T> {
   if (!chatId) return Promise.reject(new Error('后台任务缺少会话'));
   if (signal?.aborted) return Promise.reject(signal.reason || new Error('任务已取消'));
-  return new Promise<T>((resolve, reject) => {
-    const item: QueuedWork<T> = { chatId, workId, run, resolve, reject, signal };
+  if (workId) {
+    const scheduled = scheduledWorkById.get(workId);
+    if (scheduled) return scheduled as Promise<T>;
+  }
+  const promise = new Promise<T>((resolve, reject) => {
+    const cleanupWorkId = () => {
+      if (workId && scheduledWorkById.get(workId) === promise) scheduledWorkById.delete(workId);
+    };
+    const item: QueuedWork<T> = {
+      chatId, workId, run, signal,
+      resolve: (value) => { cleanupWorkId(); resolve(value); },
+      reject: (reason) => { cleanupWorkId(); reject(reason); },
+    };
     item.onAbort = () => {
       const index = queue.indexOf(item as QueuedWork<unknown>);
       if (index < 0) return;
       queue.splice(index, 1);
-      reject(signal?.reason || new Error('任务已取消'));
+      item.reject(signal?.reason || new Error('任务已取消'));
       publish();
     };
     signal?.addEventListener('abort', item.onAbort, { once: true });
     queue.push(item as QueuedWork<unknown>);
-    pump();
   });
+  if (workId) scheduledWorkById.set(workId, promise);
+  pump();
+  return promise;
 }
 
 onWorkspaceShutdown(() => {

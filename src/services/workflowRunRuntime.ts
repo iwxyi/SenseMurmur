@@ -30,6 +30,7 @@ export interface WorkflowRun {
   planOpen?: boolean;
   autoReview?: boolean;
   pauseRequested?: boolean;
+  deliveryStatus?: 'pending' | 'published';
   updatedAt: number;
 }
 
@@ -37,6 +38,18 @@ export interface WorkflowSnapshot {
   schemaVersion?: 1;
   run: WorkflowRun;
   tasks: WorkflowTask[];
+}
+
+export interface WorkflowEvent {
+  eventId: string;
+  aggregateVersion: number;
+  sequence: number;
+  runId: string;
+  occurredAt: number;
+  runStatus: WorkflowRun['status'];
+  generation: number;
+  planVersion: number;
+  changedTasks: Array<{ id: string; status: WorkflowTaskStatus | 'removed'; attempt: number }>;
 }
 
 const RUN_STATUSES = new Set<WorkflowRun['status']>(['active', 'paused', 'completed', 'failed', 'cancelled']);
@@ -67,6 +80,7 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
   if (run.resumeCommandIds !== undefined && (!Array.isArray(run.resumeCommandIds) || run.resumeCommandIds.some((id) => typeof id !== 'string' || !id))) {
     throw new Error('工作流恢复命令记录无效');
   }
+  if (run.deliveryStatus !== undefined && run.deliveryStatus !== 'pending' && run.deliveryStatus !== 'published') throw new Error('工作流交付状态无效');
 
   const taskIds = new Set<string>();
   for (const candidate of value.tasks) {
@@ -151,20 +165,32 @@ export class WorkflowPreflightError extends Error {
 export interface WorkflowRepository {
   read(scope: string, runId: string): Promise<WorkflowSnapshot | null>;
   list(scope: string): Promise<WorkflowSnapshot[]>;
+  listEvents(scope: string, runId: string, afterSequence?: number): Promise<WorkflowEvent[]>;
+  registerOutboxConsumer(scope: string, runId: string, consumerId: string): Promise<void>;
+  listOutboxEvents(scope: string, runId: string, consumerId: string, limit?: number): Promise<WorkflowEvent[]>;
+  acknowledgeOutboxEvents(scope: string, runId: string, consumerId: string, throughSequence: number): Promise<void>;
   transact<T>(scope: string, runId: string, update: (current: WorkflowSnapshot | null) => { snapshot: WorkflowSnapshot; value: T }): Promise<T>;
 }
 
 const DB_NAME = 'pneumata-workflow-runs';
 const STORE = 'runs';
+const EVENT_STORE = 'events';
+const OUTBOX_STORE = 'outbox';
+const CONSUMER_STORE = 'outbox_consumers';
+const EVENT_RETENTION_PER_RUN = 256;
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function openDb(): Promise<IDBDatabase> {
   if (typeof indexedDB === 'undefined') return Promise.reject(new Error('此设备不支持工作流持久化'));
   if (dbPromise) return dbPromise;
   const pending: Promise<IDBDatabase> = new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 1);
+    const request = indexedDB.open(DB_NAME, 3);
     request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(STORE)) request.result.createObjectStore(STORE);
+      const database = request.result;
+      if (!database.objectStoreNames.contains(STORE)) database.createObjectStore(STORE);
+      if (!database.objectStoreNames.contains(EVENT_STORE)) database.createObjectStore(EVENT_STORE, { keyPath: 'key' });
+      if (!database.objectStoreNames.contains(OUTBOX_STORE)) database.createObjectStore(OUTBOX_STORE, { keyPath: 'key' });
+      if (!database.objectStoreNames.contains(CONSUMER_STORE)) database.createObjectStore(CONSUMER_STORE, { keyPath: 'key' });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error('打开工作流存储失败'));
@@ -179,6 +205,41 @@ function openDb(): Promise<IDBDatabase> {
 
 function rowKey(scope: string, runId: string) {
   return `${scope}\n${runId}`;
+}
+
+function eventPrefix(scope: string, runId: string) {
+  return rowKey(scope, runId) + String.fromCharCode(10);
+}
+
+function eventKey(scope: string, runId: string, sequence: number) {
+  return eventPrefix(scope, runId) + String(sequence).padStart(16, '0');
+}
+
+function consumerKey(scope: string, runId: string, consumerId: string) {
+  return `${rowKey(scope, runId)}\n${consumerId}`;
+}
+
+function changedTaskStates(current: WorkflowSnapshot | null, next: WorkflowSnapshot) {
+  const before = new Map((current?.tasks || []).map((task) => [task.id, task]));
+  const after = new Map(next.tasks.map((task) => [task.id, task]));
+  const changed: WorkflowEvent['changedTasks'] = [];
+  for (const id of new Set([...before.keys(), ...after.keys()])) {
+    const previous = before.get(id);
+    const task = after.get(id);
+    if (previous?.status === task?.status && previous?.attempt === task?.attempt) continue;
+    changed.push({ id, status: task?.status || 'removed', attempt: task?.attempt || previous?.attempt || 0 });
+  }
+  return changed.sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function hasWorkflowStateChange(current: WorkflowSnapshot | null, next: WorkflowSnapshot, changedTasks: WorkflowEvent['changedTasks']) {
+  if (!current || changedTasks.length > 0) return true;
+  return current.run.status !== next.run.status
+    || current.run.generation !== next.run.generation
+    || current.run.planVersion !== next.run.planVersion
+    || current.run.deliveryStatus !== next.run.deliveryStatus
+    || current.run.pauseRequested !== next.run.pauseRequested
+    || current.run.planOpen !== next.run.planOpen;
 }
 
 export function workflowRunLockName(scope: string, runId: string) {
@@ -235,10 +296,126 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
       request.onerror = () => reject(request.error || new Error('列出工作流失败'));
     });
   },
+  async listEvents(scope, runId, afterSequence = 0) {
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new Error('工作流事件游标无效');
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(EVENT_STORE, 'readonly');
+      const prefix = eventPrefix(scope, runId);
+      const lowerBound = eventKey(scope, runId, afterSequence + 1);
+      const request = tx.objectStore(EVENT_STORE).openCursor(IDBKeyRange.bound(lowerBound, prefix + String.fromCharCode(65535)));
+      const events: WorkflowEvent[] = [];
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          resolve(events);
+          return;
+        }
+        const value: unknown = cursor.value;
+        if (isRecord(value) && value.runId === runId && Number.isSafeInteger(value.sequence)
+          && typeof value.occurredAt === 'number' && RUN_STATUSES.has(value.runStatus as WorkflowRun['status'])
+          && Array.isArray(value.changedTasks)) {
+          const changedTasks = value.changedTasks.flatMap((candidate): WorkflowEvent['changedTasks'] => {
+            if (!isRecord(candidate) || typeof candidate.id !== 'string' || !Number.isSafeInteger(candidate.attempt)) return [];
+            if (candidate.status !== 'removed' && !TASK_STATUSES.has(candidate.status as WorkflowTaskStatus)) return [];
+            return [{ id: candidate.id, status: candidate.status as WorkflowTaskStatus | 'removed', attempt: candidate.attempt as number }];
+          });
+          events.push({
+            eventId: typeof value.eventId === 'string' ? value.eventId : `${runId}:${String(value.sequence)}`,
+            aggregateVersion: Number.isSafeInteger(value.aggregateVersion) ? value.aggregateVersion as number : value.sequence as number,
+            sequence: value.sequence as number,
+            runId,
+            occurredAt: value.occurredAt,
+            runStatus: value.runStatus as WorkflowRun['status'],
+            generation: Number(value.generation),
+            planVersion: Number(value.planVersion),
+            changedTasks,
+          });
+        }
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error || new Error('读取工作流事件失败'));
+    });
+  },
+  async registerOutboxConsumer(scope, runId, consumerId) {
+    assertNonEmptyString(consumerId, 'outbox 消费者 ID');
+    const db = await openDb();
+    return new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([STORE, CONSUMER_STORE], 'readwrite');
+      const runRequest = tx.objectStore(STORE).get(rowKey(scope, runId));
+      runRequest.onsuccess = () => {
+        if (runRequest.result === undefined) { tx.abort(); reject(new Error('工作流不存在')); return; }
+        const key = consumerKey(scope, runId, consumerId);
+        const consumerStore = tx.objectStore(CONSUMER_STORE);
+        const currentRequest = consumerStore.get(key);
+        currentRequest.onsuccess = () => {
+          if (currentRequest.result === undefined) consumerStore.put({ key, scope, runId, consumerId, acknowledgedThrough: 0 });
+        };
+        currentRequest.onerror = () => { tx.abort(); reject(currentRequest.error || new Error('读取 outbox 消费回执失败')); };
+      };
+      runRequest.onerror = () => { tx.abort(); reject(runRequest.error || new Error('读取工作流失败')); };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('注册 outbox 消费者失败'));
+      tx.onabort = () => reject(tx.error || new Error('注册 outbox 消费者事务中止'));
+    });
+  },
+  async listOutboxEvents(scope, runId, consumerId, limit = 100) {
+    assertNonEmptyString(consumerId, 'outbox 消费者 ID');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error('outbox 批量大小无效');
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction([OUTBOX_STORE, CONSUMER_STORE], 'readonly');
+      const consumerRequest = tx.objectStore(CONSUMER_STORE).get(consumerKey(scope, runId, consumerId));
+      consumerRequest.onsuccess = () => {
+        const consumer = consumerRequest.result;
+        if (!consumer) { reject(new Error('outbox 消费者尚未注册')); return; }
+        const prefix = eventPrefix(scope, runId);
+        const lowerBound = eventKey(scope, runId, consumer.acknowledgedThrough + 1);
+        const request = tx.objectStore(OUTBOX_STORE).openCursor(IDBKeyRange.bound(lowerBound, prefix + String.fromCharCode(65535)));
+        const events: WorkflowEvent[] = [];
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor || events.length >= limit) { resolve(events); return; }
+          const { key, ...event } = cursor.value;
+          void key;
+          events.push(event as WorkflowEvent);
+          cursor.continue();
+        };
+        request.onerror = () => reject(request.error || new Error('读取工作流 outbox 失败'));
+      };
+      consumerRequest.onerror = () => reject(consumerRequest.error || new Error('读取 outbox 消费回执失败'));
+    });
+  },
+  async acknowledgeOutboxEvents(scope, runId, consumerId, throughSequence) {
+    assertNonEmptyString(consumerId, 'outbox 消费者 ID');
+    if (!Number.isSafeInteger(throughSequence) || throughSequence < 0) throw new Error('outbox 回执序号无效');
+    const db = await openDb();
+    return new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([OUTBOX_STORE, CONSUMER_STORE], 'readwrite');
+      const consumerStore = tx.objectStore(CONSUMER_STORE);
+      const key = consumerKey(scope, runId, consumerId);
+      const request = consumerStore.get(key);
+      request.onsuccess = () => {
+        const consumer = request.result;
+        if (!consumer) { tx.abort(); reject(new Error('outbox 消费者尚未注册')); return; }
+        if (throughSequence <= consumer.acknowledgedThrough) return;
+        const eventRequest = tx.objectStore(OUTBOX_STORE).get(eventKey(scope, runId, throughSequence));
+        eventRequest.onsuccess = () => {
+          if (!eventRequest.result) { tx.abort(); reject(new Error('不能确认尚未写入的 outbox 事件')); return; }
+          consumerStore.put({ ...consumer, acknowledgedThrough: throughSequence, updatedAt: Date.now() });
+        };
+        eventRequest.onerror = () => { tx.abort(); reject(eventRequest.error || new Error('核对 outbox 事件失败')); };
+      };
+      request.onerror = () => { tx.abort(); reject(request.error || new Error('读取 outbox 消费回执失败')); };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('保存 outbox 回执失败'));
+      tx.onabort = () => reject(tx.error || new Error('保存 outbox 回执事务中止'));
+    });
+  },
   async transact(scope, runId, update) {
     const db = await openDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE, 'readwrite');
+      const tx = db.transaction([STORE, EVENT_STORE, OUTBOX_STORE], 'readwrite');
       const store = tx.objectStore(STORE);
       const request = store.get(rowKey(scope, runId));
       let value: unknown;
@@ -250,6 +427,50 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
           const migratedNext = migrateWorkflowSnapshot(next.snapshot);
           value = next.value;
           store.put(migratedNext, rowKey(scope, runId));
+          const changedTasks = changedTaskStates(migratedCurrent, migratedNext);
+          if (!hasWorkflowStateChange(migratedCurrent, migratedNext, changedTasks)) return;
+          const prefix = eventPrefix(scope, runId);
+          const eventStore = tx.objectStore(EVENT_STORE);
+          const range = IDBKeyRange.bound(prefix, prefix + String.fromCharCode(65535));
+          const lastEventRequest = eventStore.openCursor(range, 'prev');
+          lastEventRequest.onsuccess = () => {
+            try {
+              const key = lastEventRequest.result?.key;
+              const previousSequence = typeof key === 'string' ? Number(key.slice(prefix.length)) || 0 : 0;
+              const sequence = previousSequence + 1;
+              const event: WorkflowEvent & { key: string } = {
+                key: eventKey(scope, runId, sequence),
+                eventId: `${runId}:${sequence}`,
+                aggregateVersion: sequence,
+                sequence,
+                runId,
+                occurredAt: migratedNext.run.updatedAt,
+                runStatus: migratedNext.run.status,
+                generation: migratedNext.run.generation,
+                planVersion: migratedNext.run.planVersion,
+                changedTasks,
+              };
+              eventStore.put(event);
+              tx.objectStore(OUTBOX_STORE).put(event);
+              const oldestRetainedSequence = sequence - EVENT_RETENTION_PER_RUN;
+              if (oldestRetainedSequence > 0) {
+                const pruneRange = IDBKeyRange.bound(prefix, eventKey(scope, runId, oldestRetainedSequence));
+                const pruneRequest = eventStore.openCursor(pruneRange);
+                pruneRequest.onsuccess = () => pruneRequest.result?.delete();
+                pruneRequest.onerror = () => {
+                  tx.abort();
+                  reject(pruneRequest.error || new Error('清理工作流事件失败'));
+                };
+              }
+            } catch (error) {
+              tx.abort();
+              reject(error);
+            }
+          };
+          lastEventRequest.onerror = () => {
+            tx.abort();
+            reject(lastEventRequest.error || new Error('写入工作流事件失败'));
+          };
         } catch (error) {
           tx.abort();
           reject(error);
@@ -447,6 +668,16 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
+  async function markDeliveryPublished(runId: string, expectedPlanVersion: number) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.status !== 'completed') throw new Error('只能确认已完成的工作流交付');
+      if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流交付版本冲突');
+      if (current.run.deliveryStatus === 'published') return { snapshot: current, value: current };
+      const snapshot = { ...current, run: { ...current.run, deliveryStatus: 'published' as const, updatedAt: Date.now() } };
+      return { snapshot, value: snapshot };
+    });
+  }
+
   async function runWithLock(runId: string, storageScope: string, work: () => Promise<WorkflowSnapshot>) {
     if (typeof navigator === 'undefined') return work();
     if (!navigator.locks?.request) throw new Error('此浏览器不支持安全的多标签页工作流执行');
@@ -569,5 +800,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamPlan, addTasksOnce, expandPlanOnce, closePlan, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamPlan, addTasksOnce, expandPlanOnce, closePlan, markDeliveryPublished, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }

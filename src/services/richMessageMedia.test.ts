@@ -8,7 +8,11 @@ import { waitForAiMediaTask } from './aiClient';
 import { api, ApiError } from './api';
 import { runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
 
-vi.mock('./chatExecutionLease', () => ({ runWithChatExecutionLeaseWhenAvailable: vi.fn(async (_chatId: string, work: (signal: AbortSignal) => Promise<void>) => work(new AbortController().signal)) }));
+vi.mock('./chatExecutionLease', () => ({
+  assertChatExecutionLease: vi.fn(),
+  runWithChatExecutionLeaseWhenAvailable: vi.fn(async (_chatId: string, work: (signal: AbortSignal) => Promise<void>) => work(new AbortController().signal)),
+}));
+vi.mock('./chatExecutionFence', () => ({ getChatExecutionFence: vi.fn(() => ({ ownerId: 'test-owner', generation: 1 })) }));
 
 vi.mock('./api', () => ({
   ApiError: class ApiError extends Error { status: number; constructor(message: string, options: { status: number }) { super(message); this.status = options.status; } },
@@ -130,6 +134,57 @@ async function waitForExpectation(assertion: () => void) {
 }
 
 describe('processRichMessageMedia', () => {
+  it('does not submit shared team media after the workflow lease signal is aborted', async () => {
+    const controller = new AbortController();
+    controller.abort(new DOMException('lease lost', 'AbortError'));
+    const message = buildQueuedImageMessage({
+      id: 'aborted-team-video', serverId: 'server-video',
+      metadata: { attachments: [{ id: 'video-1', kind: 'video', status: 'queued', promptText: '森林追逐', altText: '视频', createdAt: 1, updatedAt: 1 }] },
+    });
+    await expect(processRichMessageMedia({
+      message, aiProfiles: [{ ...imageProfile, type: 'video', model: 'video-model' }],
+      sharesConversationLease: true, executionSignal: controller.signal, upsertMessage: vi.fn(),
+    })).rejects.toThrow('lease lost');
+    expect(generateVideoWithAdapter).not.toHaveBeenCalled();
+  });
+
+  it('keeps the shared workflow lease until the accepted video task ID is persisted', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const taskIdWrite = deferred<Record<string, unknown>>();
+    vi.mocked(api.updateMessageMetadata)
+      .mockResolvedValueOnce({})
+      .mockReturnValueOnce(taskIdWrite.promise);
+    vi.mocked(generateVideoWithAdapter).mockResolvedValue({ task_id: 'accepted-under-lease' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>);
+    const message = buildQueuedImageMessage({
+      id: 'shared-video-run', serverId: 'server-shared-video',
+      metadata: { attachments: [{ id: 'video-1', kind: 'video', status: 'queued', promptText: '森林追逐', altText: '视频', createdAt: 1, updatedAt: 1 }] },
+    });
+    const processing = processRichMessageMedia({
+      message,
+      aiProfiles: [{ ...imageProfile, type: 'video', model: 'video-model' }],
+      sharesConversationLease: true,
+      executionSignal: new AbortController().signal,
+      upsertMessage: vi.fn(),
+    });
+    let settled = false;
+    void processing.finally(() => { settled = true; });
+
+    await waitForExpectation(() => {
+      expect(api.updateMessageMetadata).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(api.updateMessageMetadata).mock.calls[1]?.[1]).toMatchObject({
+        attachments: [expect.objectContaining({ status: 'generating', mediaTaskId: 'accepted-under-lease' })],
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    taskIdWrite.resolve({});
+    await processing;
+    expect(settled).toBe(true);
+    expect(runWithChatExecutionLeaseWhenAvailable).not.toHaveBeenCalled();
+  });
+
   const localStorageMock = (() => {
     const values = new Map<string, string>();
     return {

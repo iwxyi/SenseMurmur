@@ -12,6 +12,7 @@ import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTea
 import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReference } from './agentTeamImageTask';
 import { inspectAgentTeamImages } from './agentTeamImageInspection';
 import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
+import { conversationExecutionLockName } from './conversationExecutionLock';
 
 vi.mock('./agentTeamImageInspection', () => ({ inspectAgentTeamImages: vi.fn() }));
 vi.mock('./agentTeamAudioTask', () => ({ inspectAgentTeamAudioAttachment: vi.fn(), queueAgentTeamAudio: vi.fn() }));
@@ -731,6 +732,79 @@ describe('agent team workflow', () => {
     expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.filter((item) => item.id === `team-delivery-${runId}`)).toHaveLength(1);
   });
 
+  it('does not publish recovered delivery when the conversation execution lock is unavailable', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `locked-delivery-${runId}`;
+    const scope = `locked-delivery-scope-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    generate.mockResolvedValueOnce(JSON.stringify({
+      summary: '锁定交付', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理材料', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '成稿' }], finalAcceptance: '报告可读',
+    })).mockResolvedValueOnce('报告正文');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    await workflow.start(runId, chatId, '写报告');
+    const request = vi.fn(async (name: string, _options: unknown, callback: (lock: object | null) => Promise<unknown>) =>
+      callback(name === conversationExecutionLockName(scope, chatId) ? null : {}));
+    vi.stubGlobal('navigator', { locks: { request } });
+
+    await expect(workflow.publish(runId)).rejects.toThrow('另一个标签页');
+    expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)).toHaveLength(0);
+    expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.some((item) => item.id === `team-delivery-${runId}`)).not.toBe(true);
+    expect((await indexedDbWorkflowRepository.read(scope, runId))?.run.deliveryStatus).toBeUndefined();
+    expect(request.mock.calls.map(([name]) => name)).toEqual([conversationExecutionLockName(scope, chatId)]);
+  });
+
+  it('publishes typed task deliverables as separate artifacts attached to one idempotent message', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `typed-delivery-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '多产物交付', memberIds: [], deletedAt: null } as (typeof state.chats)[number]] }));
+    generate.mockResolvedValueOnce(JSON.stringify({
+      summary: '调研与数据交付',
+      roles: [{ id: 'analyst', name: '分析师', responsibility: '调研并整理数据', method: '提取结论和数据', acceptance: '交付可复用', allowedTools: ['text_generation'] }],
+      tasks: [
+        { id: 'findings', roleId: 'analyst', goal: '撰写调研结论', dependsOn: [], acceptance: '报告完整', deliverable: { kind: 'document', title: '调研报告' } },
+        { id: 'comparison', roleId: 'analyst', goal: '整理比较表', dependsOn: ['findings'], acceptance: '表格完整', deliverable: { kind: 'table', title: '比較表', language: 'markdown' } },
+      ], finalAcceptance: '报告和表格均可复用',
+    })).mockResolvedValueOnce('调研结论文本').mockResolvedValueOnce(' | 项目 | 值 |\n | --- | --- |\n | A | 1 |');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'typed-delivery-test');
+    await workflow.start(runId, chatId, '完成调研并交付报告和表格');
+    const first = await workflow.publish(runId);
+    const second = await workflow.publish(runId);
+    const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId).filter((item) => item.sourceMessageId.startsWith(`team-delivery-${runId}:`));
+    expect(artifacts.map((item) => [item.kind, item.title])).toEqual([['table', '比較表'], ['document', '调研报告']]);
+    expect(artifacts).toHaveLength(2);
+    expect(first.id).toBe(second.id);
+    const delivered = useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.find((message) => message.id === `team-delivery-${runId}`);
+    expect(delivered?.metadata?.assistant?.artifacts).toHaveLength(2);
+    expect(delivered?.metadata?.assistant?.artifacts?.map((item) => item.id).sort()).toEqual(artifacts.map((item) => item.id).sort());
+  });
+
+  it('runs independent report and table tasks concurrently and publishes both artifacts', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `parallel-delivery-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    generate.mockResolvedValueOnce(JSON.stringify({
+      summary: '市场研究交付',
+      roles: [{ id: 'analyst', name: '研究员', responsibility: '研究并整理', method: '并行完成报告和数据表', acceptance: '两份交付均完整', allowedTools: ['text_generation'] }],
+      tasks: [
+        { id: 'report', roleId: 'analyst', goal: '撰写市场研究报告', dependsOn: [], acceptance: '报告完整', deliverable: { kind: 'document', title: '市场报告' } },
+        { id: 'table', roleId: 'analyst', goal: '整理市场数据表', dependsOn: [], acceptance: '表格完整', deliverable: { kind: 'table', title: '市场数据' } },
+      ],
+      finalAcceptance: '报告与数据表均可复用',
+    })).mockResolvedValueOnce('报告正文').mockResolvedValueOnce('| 类别 | 数量 |\n| --- | --- |\n| A | 3 |');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `parallel-delivery-scope-${runId}`);
+    const finished = await workflow.start(runId, chatId, '完成市场研究报告与数据表');
+    expect(finished.snapshot.run.status).toBe('completed');
+    expect(generate).toHaveBeenCalledTimes(3);
+    expect(finished.snapshot.tasks.filter((task) => task.id === 'report' || task.id === 'table').map((task) => task.status)).toEqual(['completed', 'completed']);
+
+    await workflow.publish(runId);
+    const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId);
+    expect(artifacts.map((item) => [item.kind, item.title]).sort()).toEqual([['document', '市场报告'], ['table', '市场数据']]);
+    const delivery = useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.find((message) => message.id === `team-delivery-${runId}`);
+    expect(delivery?.metadata?.assistant?.artifacts).toHaveLength(2);
+  });
+
   it('does not publish a completed run after the workspace changes during store hydration', async () => {
     const runId = crypto.randomUUID();
     const chatId = `team-chat-${runId}`;
@@ -775,6 +849,59 @@ describe('agent team workflow', () => {
     expect(saved?.run.status).toBe('paused');
     expect(saved?.tasks.map((task) => task.status)).toEqual(['result_unknown', 'waiting_dependency']);
     expect(generate).not.toHaveBeenCalled();
+  });
+
+  it('publishes a completed run after restart when the client stopped before delivery', async () => {
+    const runId = `team-${crypto.randomUUID()}`;
+    const chatId = `recovered-delivery-${runId}`;
+    const scope = currentWorkflowScope();
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    generate.mockResolvedValueOnce(JSON.stringify({
+      summary: '恢复交付报告',
+      roles: [{ id: 'writer', name: '写作者', responsibility: '撰写报告', method: '整理资料', acceptance: '报告可读', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '报告可读', deliverable: { kind: 'document', title: '恢复报告' } }],
+      finalAcceptance: '报告已完成',
+    })).mockResolvedValueOnce('恢复后的报告内容');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const finished = await workflow.start(runId, chatId, '写报告');
+    expect(finished.snapshot.run.status).toBe('completed');
+    expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)).toHaveLength(0);
+
+    expect(await recoverAgentTeamRuns()).toBe(true);
+    expect(await recoverAgentTeamRuns()).toBe(false);
+    const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId);
+    expect(artifacts).toHaveLength(1);
+    expect(artifacts[0].versions.find((version) => version.id === artifacts[0].currentVersionId)?.content).toBe('恢复后的报告内容');
+    expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.filter((message) => message.id === `team-delivery-${runId}`)).toHaveLength(1);
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect((await indexedDbWorkflowRepository.read(scope, runId))?.run.deliveryStatus).toBe('published');
+  });
+
+  it('retries delivery after artifacts are saved but the final message write fails', async () => {
+    const runId = `team-${crypto.randomUUID()}`;
+    const chatId = `partial-delivery-${runId}`;
+    const scope = currentWorkflowScope();
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    generate.mockResolvedValueOnce(JSON.stringify({
+      summary: '中断恢复报告',
+      roles: [{ id: 'writer', name: '写作者', responsibility: '撰写报告', method: '整理资料', acceptance: '报告可读', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '报告可读', deliverable: { kind: 'document', title: '中断恢复报告' } }],
+      finalAcceptance: '报告已完成',
+    })).mockResolvedValueOnce('已保存的报告内容');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    await workflow.start(runId, chatId, '写报告');
+    const messageStore = useMessageStore.getState();
+    const upsert = vi.spyOn(messageStore, 'upsertMessage').mockImplementationOnce(() => { throw new Error('模拟最终消息写入失败'); });
+    await expect(workflow.publish(runId)).rejects.toThrow('模拟最终消息写入失败');
+    upsert.mockRestore();
+    expect((await indexedDbWorkflowRepository.read(scope, runId))?.run.deliveryStatus).toBeUndefined();
+    expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)).toHaveLength(1);
+
+    expect(await recoverAgentTeamRuns()).toBe(true);
+    expect((await indexedDbWorkflowRepository.read(scope, runId))?.run.deliveryStatus).toBe('published');
+    expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)).toHaveLength(1);
+    expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.filter((message) => message.id === `team-delivery-${runId}`)).toHaveLength(1);
+    expect(generate).toHaveBeenCalledTimes(2);
   });
 
   it('preserves an interrupted review as unknown instead of evaluating or publishing it again', async () => {
@@ -851,6 +978,36 @@ describe('agent team workflow', () => {
     expect(result.snapshot.run.status).toBe('completed');
     expect(generate.mock.calls[0][2][0].content).toContain('用户补充指示：用简体中文');
     await expect(scoped.instructQueuedTask(runId, 'write', 3, '再次修改')).rejects.toThrow('请先暂停整个团队任务');
+  });
+
+  it('resumes legacy task inputs after role schema migration without treating normalization as tampering', async () => {
+    const runId = `team-${crypto.randomUUID()}`;
+    const scope = 'team-legacy-role-version-test';
+    const plan = {
+      summary: '写报告',
+      roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理材料', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '成稿' }],
+      finalAcceptance: '可阅读',
+    };
+    const now = Date.now();
+    const scoped = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
+      run: { id: runId, chatId: 'chat', goal: '写报告', status: 'paused', generation: 1, planVersion: 2, planOpen: true, updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '写报告', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        { id: 'write', runId, kind: 'agent_text', input: {
+          task: { acceptance: '成稿', dependsOn: [], goal: '写报告', roleId: 'writer', id: 'write' },
+          role: plan.roles[0], goal: '写报告',
+        }, dependsOn: ['plan'], status: 'queued', attempt: 0, updatedAt: now },
+      ],
+    }, value: undefined }));
+
+    generate.mockResolvedValueOnce('已完成的报告');
+    const resumed = await scoped.resume(runId);
+
+    expect(resumed.snapshot.run.status).toBe('completed');
+    expect(resumed.snapshot.tasks.find((task) => task.id === 'write')?.output).toBe('已完成的报告');
+    expect(generate).toHaveBeenCalledOnce();
   });
 
   it('persists a delegated plan, resumes its child task, and includes its result in delivery', async () => {

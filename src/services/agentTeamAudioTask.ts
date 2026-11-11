@@ -85,6 +85,7 @@ export async function queueAgentTeamAudio(params: { runId: string; taskId: strin
   if (params.signal.aborted) throw new Error('音乐任务已中断，提交结果需要核对');
   await processRichMessageMedia({ message: synced, aiProfiles: useSettingsStore.getState().aiProfiles,
     sharesConversationLease: true,
+    executionSignal: params.signal,
     upsertMessage: (next) => useMessageStore.getState().upsertMessage(next) });
   const result = inspectAgentTeamAudioAttachment(params.runId, params.taskId);
   if (result?.status === 'waiting_external') return { externalTaskId: result.externalTaskId };

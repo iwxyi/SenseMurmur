@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getBackgroundExecutionSummary, scheduleBackgroundExecution } from './backgroundExecutionScheduler';
+import { getBackgroundExecutionSummary, scheduleBackgroundExecution, subscribeBackgroundExecution } from './backgroundExecutionScheduler';
 import { setBackgroundExecutionMaxActiveConversations } from './backgroundExecutionPreferences';
 
 function deferred() {
@@ -91,5 +91,59 @@ describe('background execution scheduler', () => {
     await expect(pending).rejects.toThrow('账号已切换');
     expect(execute).not.toHaveBeenCalled();
     expect(getBackgroundExecutionSummary()).toMatchObject({ active: 0, queued: 0, activeWorkIds: [] });
+  });
+
+  it('coalesces duplicate recovery requests by work ID until the original work settles', async () => {
+    const gate = deferred();
+    const firstRun = vi.fn(async () => { await gate.wait; return 'recovered'; });
+    const duplicateRun = vi.fn(async () => 'duplicate');
+    const first = scheduleBackgroundExecution('recovery-chat', firstRun, undefined, 'recovery-run');
+    const duplicate = scheduleBackgroundExecution('other-chat', duplicateRun, undefined, 'recovery-run');
+
+    expect(duplicate).toBe(first);
+    await vi.waitFor(() => expect(firstRun).toHaveBeenCalledTimes(1));
+    expect(duplicateRun).not.toHaveBeenCalled();
+    gate.release();
+    await expect(Promise.all([first, duplicate])).resolves.toEqual(['recovered', 'recovered']);
+
+    const afterSettlement = vi.fn(async () => 'new-attempt');
+    await expect(scheduleBackgroundExecution('recovery-chat', afterSettlement, undefined, 'recovery-run'))
+      .resolves.toBe('new-attempt');
+    expect(afterSettlement).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the work ID when queued work is cancelled so it can be scheduled again', async () => {
+    setBackgroundExecutionMaxActiveConversations(1);
+    const gate = deferred();
+    const blocker = scheduleBackgroundExecution('cancel-blocker', async () => { await gate.wait; });
+    const controller = new AbortController();
+    const cancelledRun = vi.fn(async () => 'unexpected');
+    const cancelled = scheduleBackgroundExecution('cancel-queued', cancelledRun, controller.signal, 'cancelled-run');
+    controller.abort(new Error('cancelled'));
+    await expect(cancelled).rejects.toThrow('cancelled');
+
+    const retryRun = vi.fn(async () => 'retry');
+    const retry = scheduleBackgroundExecution('cancel-queued', retryRun, undefined, 'cancelled-run');
+    gate.release();
+    await expect(Promise.all([blocker, retry])).resolves.toEqual([undefined, 'retry']);
+    expect(cancelledRun).not.toHaveBeenCalled();
+    expect(retryRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('registers the work ID before notifying listeners that can re-enter the scheduler', async () => {
+    const run = vi.fn(async () => 'single-run');
+    let nested: Promise<string> | undefined;
+    let removeListener = () => undefined;
+    removeListener = subscribeBackgroundExecution(() => {
+      if (nested) return;
+      nested = scheduleBackgroundExecution('reentrant-chat', vi.fn(async () => 'duplicate'), undefined, 'reentrant-run');
+      removeListener();
+    });
+    const original = scheduleBackgroundExecution('reentrant-chat', run, undefined, 'reentrant-run');
+
+    expect(nested).toBe(original);
+    await expect(original).resolves.toBe('single-run');
+    expect(run).toHaveBeenCalledTimes(1);
+    removeListener();
   });
 });
