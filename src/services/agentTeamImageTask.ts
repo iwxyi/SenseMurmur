@@ -62,7 +62,8 @@ function waitForServerId(runId: string, taskId: string, signal: AbortSignal) {
   });
 }
 
-export async function queueAgentTeamImage(params: { runId: string; taskId: string; chatId: string; prompt: string; signal: AbortSignal }): Promise<WorkflowTaskResult> {
+export async function queueAgentTeamImage(params: { runId: string; taskId: string; chatId: string; prompt: string;
+  referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -85,7 +86,7 @@ export async function queueAgentTeamImage(params: { runId: string; taskId: strin
     senderId: 'assistant', senderName: '助手', content: '图片', emotion: 0, timestamp: now, isDeleted: false,
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, attachments: [{
       id: `team-image-${params.taskId}`, kind: 'image' as const, status: 'queued' as const,
-      altText: '团队生成图片', promptText: params.prompt, createdAt: now, updatedAt: now,
+      altText: '团队生成图片', promptText: params.prompt, referenceImages: params.referenceImages, createdAt: now, updatedAt: now,
     }] },
   }) as Message;
   if (!existing) {

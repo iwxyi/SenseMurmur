@@ -63,12 +63,12 @@ describe('agent team plan', () => {
     expect(() => validateAgentTeamPlan(plan)).toThrow('只能依赖文字歌词或说明');
   });
 
-  it('rejects image generation depending on another image without an image reference adapter', () => {
+  it('allows image generation to depend on another generated image', () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['image_generation'];
     plan.tasks[0] = { ...plan.tasks[0], tool: 'image_generation' } as typeof plan.tasks[0];
     plan.tasks[1] = { ...plan.tasks[1], tool: 'image_generation' } as typeof plan.tasks[1];
-    expect(() => validateAgentTeamPlan(plan)).toThrow('不能把已生成媒体当作参考素材');
+    expect(validateAgentTeamPlan(plan).tasks[1].dependsOn).toEqual(['research']);
   });
 
   it('allows image generation to use the written result of an image inspection', () => {

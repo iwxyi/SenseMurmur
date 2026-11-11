@@ -40,6 +40,21 @@ describe('agent team image task', () => {
     expect(processRichMessageMedia).toHaveBeenCalledTimes(1);
   });
 
+  it('persists upstream reference images in the queued attachment', async () => {
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
+      expect(message.metadata?.attachments?.[0]?.referenceImages).toEqual([
+        { url: '/uploads/media/user/chat/scene.png', mimeType: 'image/png', label: '场景图' },
+      ]);
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'ready', url: '/uploads/media/user/chat/character.png', updatedAt: Date.now() + 1,
+      })) } });
+    });
+    await queueAgentTeamImage({ runId: 'run', taskId: 'character', chatId: 'team-image-chat', prompt: '在森林中画角色',
+      referenceImages: [{ url: '/uploads/media/user/chat/scene.png', mimeType: 'image/png', label: '场景图' }], signal: new AbortController().signal });
+    expect(useMessageStore.getState().messages[0].metadata?.attachments?.[0]?.referenceImages?.[0]?.url)
+      .toBe('/uploads/media/user/chat/scene.png');
+  });
+
   it('does not resubmit an image whose upstream request started before interruption', async () => {
     useMessageStore.setState({ messages: [imageMessage('generating')] });
     useSettingsStore.setState({ aiProfiles: [] });

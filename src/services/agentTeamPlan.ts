@@ -109,8 +109,8 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     throw new Error('音乐任务目前只能依赖文字歌词或说明');
   }
   if (tasks.some((task) => task.tool === 'image_generation'
-    && task.dependsOn.some((id) => !['text_generation', 'web_search', 'image_inspection'].includes(tasksById.get(id)?.tool || 'text_generation')))) {
-    throw new Error('图片任务目前只能依赖文字脚本、搜索摘要或图片检查文字，不能把已生成媒体当作参考素材');
+    && task.dependsOn.some((id) => !['text_generation', 'web_search', 'image_inspection', 'image_generation'].includes(tasksById.get(id)?.tool || 'text_generation')))) {
+    throw new Error('图片任务只能依赖文字或已生成图片，不能读取音频与视频附件');
   }
   const hasUnsupportedVideoAncestor = (task: AgentTeamTask, visited = new Set<string>()): boolean => task.dependsOn.some((id) => {
     if (visited.has(id)) return false;
@@ -130,11 +130,11 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   };
 }
 
-export async function planAgentTeam(params: { api: APIConfig; goal: string; chatId?: string; webSearch?: boolean; imageGeneration?: boolean; audioGeneration?: boolean; imageInspection?: boolean; videoGeneration?: boolean; videoReferenceImages?: boolean; videoRequiresReferenceImage?: boolean; maxVideoReferenceImages?: number; videoUnavailableReason?: string; signal?: AbortSignal }) {
+export async function planAgentTeam(params: { api: APIConfig; goal: string; chatId?: string; webSearch?: boolean; imageGeneration?: boolean; imageReferenceImages?: boolean; maxImageReferenceImages?: number; audioGeneration?: boolean; imageInspection?: boolean; videoGeneration?: boolean; videoReferenceImages?: boolean; videoRequiresReferenceImage?: boolean; maxVideoReferenceImages?: number; videoUnavailableReason?: string; signal?: AbortSignal }) {
   const goal = requiredText(params.goal, '用户目标', 12_000);
   const raw = await generateResponse(params.api, [
     '你是通用任务的主 Agent。根据用户目标设计最小可行的团队与无环任务图。简单任务只用一个岗位。',
-    `当前开放工具：text_generation${params.webSearch ? '、web_search' : ''}${params.imageGeneration ? '、image_generation' : ''}${params.audioGeneration ? '、audio_generation' : ''}${params.imageInspection ? '、image_inspection' : ''}${params.videoGeneration ? '、video_generation' : ''}。${params.videoUnavailableReason ? `视频生成当前不可用：${params.videoUnavailableReason}。` : ''}网页搜索任务的 goal 是搜索词；图片任务的 goal 是可生成的画面提示词，只能依赖文字脚本、搜索摘要或图片检查产生的文字，不能读取上游媒体附件作为参考图；音乐任务的 goal 是包含风格、情绪、乐器与可选歌词要求的音乐提示词，系统异步生成完整音频。用户要求明确歌词时，先用 text_generation 写歌词，再让 audio_generation 依赖歌词任务；系统会把歌词交付作为音乐提示词的一部分。图片检查必须直接依赖已生成图片，模型会收到真实画面；视频任务的 goal 是精炼成片提示词，可以依赖脚本${params.videoReferenceImages ? '和图片' : ''}任务。视频任务不能依赖音乐或其他视频片段，目前没有音轨合成和视频拼接工具。${params.videoRequiresReferenceImage ? '当前视频模型必须先有参考图片。' : ''}${params.videoReferenceImages ? `依赖图片时系统把图片作为参考素材${params.maxVideoReferenceImages ? `，当前模型最多 ${params.maxVideoReferenceImages} 张` : ''}。` : '当前视频模型不能接收参考图片，不要规划图片到视频的依赖。'}视频由系统异步生成，不能声称立即成片。只安排确实必要的图像、音乐与视频生成，避免为验证或补充说明而反复生成同一媒体。不得承诺音视频剪辑合成、文件写入或代码执行；能力不足时在摘要说明。`,
+    `当前开放工具：text_generation${params.webSearch ? '、web_search' : ''}${params.imageGeneration ? '、image_generation' : ''}${params.audioGeneration ? '、audio_generation' : ''}${params.imageInspection ? '、image_inspection' : ''}${params.videoGeneration ? '、video_generation' : ''}。${params.videoUnavailableReason ? `视频生成当前不可用：${params.videoUnavailableReason}。` : ''}网页搜索任务的 goal 是搜索词；图片任务的 goal 是可生成的画面提示词，可依赖文字脚本、搜索摘要或图片检查文字${params.imageReferenceImages ? `，也可直接依赖已生成图片并作为参考图${params.maxImageReferenceImages ? `（最多 ${params.maxImageReferenceImages} 张）` : ''}` : '；当前图片模型不支持参考图，不要让图片任务直接依赖图片任务'}；音乐任务的 goal 是包含风格、情绪、乐器与可选歌词要求的音乐提示词，系统异步生成完整音频。用户要求明确歌词时，先用 text_generation 写歌词，再让 audio_generation 依赖歌词任务；系统会把歌词交付作为音乐提示词的一部分。图片检查必须直接依赖已生成图片，模型会收到真实画面；视频任务的 goal 是精炼成片提示词，可以依赖脚本${params.videoReferenceImages ? '和图片' : ''}任务。视频任务不能依赖音乐或其他视频片段，目前没有音轨合成和视频拼接工具。${params.videoRequiresReferenceImage ? '当前视频模型必须先有参考图片。' : ''}${params.videoReferenceImages ? `依赖图片时系统把图片作为参考素材${params.maxVideoReferenceImages ? `，当前模型最多 ${params.maxVideoReferenceImages} 张` : ''}。` : '当前视频模型不能接收参考图片，不要规划图片到视频的依赖。'}视频由系统异步生成，不能声称立即成片。只安排确实必要的图像、音乐与视频生成，避免为验证或补充说明而反复生成同一媒体。不得承诺音视频剪辑合成、文件写入或代码执行；能力不足时在摘要说明。`,
     '岗位必须有具体职责、方法和可检查的验收标准；任务必须有唯一 ID、岗位归属、明确目标和依赖。不要用岗位名称冒充专业能力。',
     '只输出 JSON：{"summary":"...","roles":[{"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"..."}],"finalAcceptance":"..."}',
   ].join('\n'), [{ role: 'user', content: goal }], undefined, {
@@ -152,6 +152,14 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; chat
   catch (error) { throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队计划无效'); }
   if (!params.webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索');
   if (!params.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');
+  if (!params.imageReferenceImages && plan.tasks.some((task) => task.tool === 'image_generation'
+    && task.dependsOn.some((id) => plan.tasks.find((source) => source.id === id)?.tool === 'image_generation'))) {
+    throw new WorkflowPreflightError('当前图片模型不支持参考图片');
+  }
+  if (params.maxImageReferenceImages && plan.tasks.some((task) => task.tool === 'image_generation'
+    && task.dependsOn.filter((id) => plan.tasks.find((source) => source.id === id)?.tool === 'image_generation').length > params.maxImageReferenceImages!)) {
+    throw new WorkflowPreflightError(`当前图片模型最多支持 ${params.maxImageReferenceImages} 张参考图片`);
+  }
   if (!params.audioGeneration && plan.tasks.some((task) => task.tool === 'audio_generation')) throw new WorkflowPreflightError('当前未配置音乐生成模型');
   if (!params.imageInspection && plan.tasks.some((task) => task.tool === 'image_inspection')) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
   if (!params.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(params.videoUnavailableReason || '当前未配置视频模型');

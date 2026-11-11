@@ -1,4 +1,4 @@
-import { getUsablePreferredAIProfile, resolveAIModelInputCapabilities, type APIConfig } from '../types/settings';
+import { getUsablePreferredAIProfile, normalizeImageCapabilities, resolveAIModelInputCapabilities, type APIConfig } from '../types/settings';
 import { generateResponse } from './aiClient';
 import { planAgentTeam, validateAgentTeamPlan, type AgentTeamPlan, type AgentTeamTask } from './agentTeamPlan';
 import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
@@ -42,7 +42,10 @@ async function teamMediaCapabilities() {
   const imageProfile = getUsablePreferredAIProfile(profiles, 'image');
   const audioProfile = getUsablePreferredAIProfile(profiles, 'audio');
   const textProfile = getUsablePreferredAIProfile(profiles, 'text');
-  const media = { imageGeneration: Boolean(imageProfile), audioGeneration: Boolean(audioProfile), imageInspection: Boolean(imageProfile && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput) };
+  const imageCapabilities = normalizeImageCapabilities(imageProfile?.imageCapabilities);
+  const media = { imageGeneration: Boolean(imageProfile), imageReferenceImages: Boolean(imageProfile && imageCapabilities.referenceImage),
+    maxImageReferenceImages: imageProfile && imageCapabilities.referenceImage ? imageCapabilities.multiReferenceImage ? undefined : 1 : 0,
+    audioGeneration: Boolean(audioProfile), imageInspection: Boolean(imageProfile && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput) };
   const videoProfile = getUsablePreferredAIProfile(profiles, 'video');
   if (!videoProfile) return { ...media, videoGeneration: false, videoReferenceImages: false, videoRequiresReferenceImage: false, maxVideoReferenceImages: 0, videoUnavailableReason: '当前未配置视频模型' };
   let videoReferenceImages = false;
@@ -108,6 +111,10 @@ function countImageUpstream(task: AgentTeamTask, byId: Map<string, AgentTeamTask
   return [...visited].filter((id) => byId.get(id)?.tool === 'image_generation').length;
 }
 
+function directImageDependencies(task: AgentTeamTask, byId: Map<string, AgentTeamTask>) {
+  return task.dependsOn.filter((id) => byId.get(id)?.tool === 'image_generation');
+}
+
 function parseTeamReview(value: unknown): { complete: boolean; reason: string; nextRequest?: string } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new WorkflowPreflightError('主 Agent 验收结果无效');
   const result = value as Record<string, unknown>;
@@ -169,6 +176,13 @@ function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<R
   if (!capabilities.imageInspection && plan.tasks.some((task) => task.tool === 'image_inspection')) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
   if (!capabilities.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
   const byId = new Map(plan.tasks.map((task) => [task.id, task]));
+  if (!capabilities.imageReferenceImages && plan.tasks.some((task) => task.tool === 'image_generation' && directImageDependencies(task, byId).length > 0)) {
+    throw new WorkflowPreflightError('当前图片模型不支持参考图片，请切换模型或改用图片检查文字迭代');
+  }
+  if (capabilities.maxImageReferenceImages !== undefined && plan.tasks.some((task) => task.tool === 'image_generation'
+    && directImageDependencies(task, byId).length > capabilities.maxImageReferenceImages!)) {
+    throw new WorkflowPreflightError(`当前图片模型最多支持 ${capabilities.maxImageReferenceImages} 张参考图片，请减少素材或更换模型`);
+  }
   if (!capabilities.videoReferenceImages && plan.tasks.some((task) => task.tool === 'video_generation' && countImageUpstream(task, byId) > 0)) {
     throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换视频模型或调整追加要求');
   }
@@ -252,13 +266,24 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (task.kind !== teamTaskKind(input.task)) throw new WorkflowPreflightError('团队任务工具与计划不一致');
       if (signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
       if (selectedTool === 'image_generation') {
-        const upstream = input.task.dependsOn.map((id) => {
+        const imageTaskIds = input.task.dependsOn.filter((id) => plan.tasks.find((item) => item.id === id)?.tool === 'image_generation');
+        const imageProfile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image');
+        const imageCapabilities = normalizeImageCapabilities(imageProfile?.imageCapabilities);
+        if (imageTaskIds.length && (!imageProfile || !imageCapabilities.referenceImage)) throw new WorkflowPreflightError('当前图片模型不支持参考图片');
+        if (imageTaskIds.length > 1 && !imageCapabilities.multiReferenceImage) throw new WorkflowPreflightError('当前图片模型只支持一张参考图片');
+        const referenceImages = imageTaskIds.map((id) => {
+          const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
+          const reference = teamImageReference(task.runId, dependencyId);
+          if (!reference) throw new WorkflowPreflightError('图片任务的参考图片文件尚未就绪');
+          return reference;
+        });
+        const upstream = input.task.dependsOn.filter((id) => !imageTaskIds.includes(id)).map((id) => {
           const dependency = snapshot.tasks.find((item) => item.id === (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id));
           if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('图片的上游脚本尚未就绪');
           return dependency.output.slice(0, 12_000);
         });
         return queueAgentTeamImage({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
-          prompt: [input.task.goal, ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), signal });
+          prompt: [input.task.goal, ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), referenceImages, signal });
       }
       if (selectedTool === 'image_inspection') {
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'text');

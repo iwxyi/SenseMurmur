@@ -89,6 +89,29 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('passes the completed image attachment to a dependent image task', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `image-chain-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true,
+        imageCapabilities: { textToImage: true, referenceImage: true, multiReferenceImage: false, seed: false, negativePrompt: false } },
+    ] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '连续画面', roles: [
+      { id: 'artist', name: '画师', responsibility: '绘制场景', method: '先画场景再画角色', acceptance: '两张图', allowedTools: ['image_generation'] },
+    ], tasks: [
+      { id: 'scene', roleId: 'artist', goal: '画森林', dependsOn: [], tool: 'image_generation', acceptance: '森林图' },
+      { id: 'character', roleId: 'artist', goal: '在森林中画角色', dependsOn: ['scene'], tool: 'image_generation', acceptance: '角色图' },
+    ], finalAcceptance: '两张图已保存' }));
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已保存' });
+    vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/user/chat/scene.png', mimeType: 'image/png', label: '场景图' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'text-model' }, () => `image-chain-scope-${runId}`);
+    const result = await workflow.start(runId, chatId, '画森林，然后在同一场景画角色');
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(queueAgentTeamImage).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'character',
+      referenceImages: [{ url: '/uploads/media/user/chat/scene.png', mimeType: 'image/png', label: '场景图' }] }));
+  });
+
   it('rejects planning for a deleted assistant chat before calling the model', async () => {
     const runId = crypto.randomUUID();
     useChatStore.setState((state) => ({ chats: state.chats.map((chat) => chat.id === 'chat' ? { ...chat, deletedAt: Date.now() } : chat) }));
