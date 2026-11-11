@@ -167,16 +167,27 @@ async function reconcileCommittedAiDirectReply(runId: string) {
   if (reconciled) publish();
   return reconciled;
 }
-export async function startAiDirectBackgroundReply(chatId: string, userMessageId: string) {
+const starting = new Map<string, ReturnType<typeof resumeAiDirectBackgroundReply>>();
+
+export function startAiDirectBackgroundReply(chatId: string, userMessageId: string) {
   const runId = aiDirectReplyRunId(chatId, userMessageId);
-  if (!await runtime.read(runId)) {
+  const pending = starting.get(runId);
+  if (pending) return pending;
+  const operation = (async () => {
     const now = Date.now();
     const snapshot: WorkflowSnapshot = { run: { id: runId, chatId, goal: 'AI 私聊回复', status: 'active', generation: 0, planVersion: 1, updatedAt: now },
       tasks: [{ id: userMessageId, runId, kind: 'ai_direct_reply', input: { chatId, userMessageId }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }] };
-    await runtime.create(snapshot);
-    publish();
-  }
-  return resumeAiDirectBackgroundReply(runId);
+    const created = await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, (existing) => ({
+      snapshot: existing || snapshot, value: !existing,
+    }));
+    if (created) publish();
+    return resumeAiDirectBackgroundReply(runId);
+  })();
+  starting.set(runId, operation);
+  void operation.finally(() => {
+    if (starting.get(runId) === operation) starting.delete(runId);
+  }).catch(() => undefined);
+  return operation;
 }
 export async function resumeAiDirectBackgroundReply(runId: string) {
   if (!navigator.locks?.request) throw new Error('此设备不支持安全的 AI 私聊任务恢复');

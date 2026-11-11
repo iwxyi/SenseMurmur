@@ -34,6 +34,23 @@ function setup() {
 }
 
 describe('direct background reply', () => {
+  it('coalesces simultaneous starts for one user message', async () => {
+    const { chatId, userMessage } = setup();
+    flow.mockImplementation(async (params: { upsertMessage: (message: Message) => void }) => {
+      params.upsertMessage({ id: crypto.randomUUID(), chatId, type: 'ai', senderId: 'character', senderName: '角色',
+        content: '已回复', emotion: 0, timestamp: userMessage.timestamp + 1, isDeleted: false,
+        metadata: { directReplyToUserMessageId: userMessage.id } });
+    });
+    const [first, second] = await Promise.all([
+      startDirectBackgroundReply(chatId, userMessage.id),
+      startDirectBackgroundReply(chatId, userMessage.id),
+    ]);
+    expect(first.snapshot.run.status).toBe('completed');
+    expect(second.snapshot.run.status).toBe('completed');
+    expect(flow).toHaveBeenCalledTimes(1);
+    expect(await listDirectBackgroundReplies(chatId)).toHaveLength(1);
+  });
+
   it('uses the committed user message, then avoids duplicate generation on resume', async () => {
     const { chatId, userMessage } = setup();
     flow.mockImplementation(async (params: { upsertMessage: (message: Message) => void }) => {
@@ -80,6 +97,28 @@ describe('direct background reply', () => {
     const restored = (await listDirectBackgroundReplies(chatId))[0];
     expect(restored.run.status).toBe('completed');
     expect(restored.tasks[0].status).toBe('completed');
+    expect(flow).not.toHaveBeenCalled();
+  });
+
+  it('does not complete an interrupted segmented reply from its first bubble', async () => {
+    const { chatId, userMessage } = setup();
+    const runId = directReplyRunId(chatId, userMessage.id);
+    useMessageStore.getState().upsertMessage({
+      id: crypto.randomUUID(), chatId, type: 'ai', senderId: 'character', senderName: '角色',
+      content: '第一段', emotion: 0, timestamp: userMessage.timestamp + 1, isDeleted: false,
+      metadata: { directReplyToUserMessageId: userMessage.id, turnSegment: { index: 0, count: 2 } },
+    });
+    await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, () => ({
+      snapshot: {
+        run: { id: runId, chatId, goal: '回复用户消息', status: 'active', generation: 1, planVersion: 1, updatedAt: Date.now() },
+        tasks: [{ id: userMessage.id, runId, kind: 'direct_reply', input: { chatId, userMessageId: userMessage.id },
+          dependsOn: [], status: 'running', attempt: 1, updatedAt: Date.now() }],
+      }, value: undefined,
+    }));
+    await recoverDirectBackgroundReplies();
+    const recovered = (await listDirectBackgroundReplies(chatId))[0];
+    expect(recovered.run.status).toBe('paused');
+    expect(recovered.tasks[0].status).toBe('result_unknown');
     expect(flow).not.toHaveBeenCalled();
   });
 

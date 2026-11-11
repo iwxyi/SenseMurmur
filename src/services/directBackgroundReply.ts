@@ -41,7 +41,8 @@ function committedReply(chatId: string, userMessageId: string) {
       ? { ...state.messageWindowsByChatId[chatId], preserveBranchContext: true }
       : undefined,
   }).find((item) => item.type === 'ai' && !item.isDeleted && !item.isStreaming
-    && item.metadata?.directReplyToUserMessageId === userMessageId);
+    && item.metadata?.directReplyToUserMessageId === userMessageId
+    && (!item.metadata?.turnSegment || item.metadata.turnSegment.index === item.metadata.turnSegment.count - 1));
 }
 
 async function executeDirectReply(task: WorkflowTask, signal: AbortSignal) {
@@ -108,6 +109,7 @@ async function executeDirectReply(task: WorkflowTask, signal: AbortSignal) {
 const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: executeDirectReply });
 const listeners = new Set<() => void>();
 const active = new Set<string>();
+const starting = new Map<string, ReturnType<typeof resumeDirectBackgroundReply>>();
 let revision = 0;
 function publish() { revision += 1; listeners.forEach((listener) => listener()); }
 
@@ -150,18 +152,27 @@ async function reconcileCommittedDirectReply(runId: string) {
   return reconciled;
 }
 
-export async function startDirectBackgroundReply(chatId: string, userMessageId: string) {
+export function startDirectBackgroundReply(chatId: string, userMessageId: string) {
   const runId = directReplyRunId(chatId, userMessageId);
-  const now = Date.now();
-  if (!await runtime.read(runId)) {
+  const pending = starting.get(runId);
+  if (pending) return pending;
+  const operation = (async () => {
+    const now = Date.now();
     const snapshot: WorkflowSnapshot = {
       run: { id: runId, chatId, goal: '回复用户消息', status: 'active', generation: 0, planVersion: 1, updatedAt: now },
       tasks: [{ id: userMessageId, runId, kind: 'direct_reply', input: { chatId, userMessageId }, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
     };
-    await runtime.create(snapshot);
-    publish();
-  }
-  return resumeDirectBackgroundReply(runId);
+    const created = await indexedDbWorkflowRepository.transact(currentWorkflowScope(), runId, (existing) => ({
+      snapshot: existing || snapshot, value: !existing,
+    }));
+    if (created) publish();
+    return resumeDirectBackgroundReply(runId);
+  })();
+  starting.set(runId, operation);
+  void operation.finally(() => {
+    if (starting.get(runId) === operation) starting.delete(runId);
+  }).catch(() => undefined);
+  return operation;
 }
 
 export async function resumeDirectBackgroundReply(runId: string) {

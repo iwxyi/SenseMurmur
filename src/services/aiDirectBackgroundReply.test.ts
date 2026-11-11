@@ -35,6 +35,19 @@ function setup() {
 }
 
 describe('AI direct background reply', () => {
+  it('coalesces simultaneous starts for one user message', async () => {
+    const { chatId, source } = setup();
+    runLoop.mockImplementation(async (params: { onQuiet: () => void }) => { params.onQuiet(); });
+    const [first, second] = await Promise.all([
+      startAiDirectBackgroundReply(chatId, source.id),
+      startAiDirectBackgroundReply(chatId, source.id),
+    ]);
+    expect(first.run.status).toBe('completed');
+    expect(second.run.status).toBe('completed');
+    expect(runLoop).toHaveBeenCalledTimes(1);
+    expect(await listAiDirectBackgroundReplies(chatId)).toHaveLength(1);
+  });
+
   it('continues after the chat page is gone and does not repeat a committed reply', async () => {
     const { chatId, source } = setup();
     runLoop.mockImplementation(async (params: { onCommittedMessage: (message: Message) => void; upsertMessage: (message: Message) => void }) => {
