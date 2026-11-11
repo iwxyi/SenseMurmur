@@ -15,6 +15,22 @@ describe('aiClient multimodal requests', () => {
     expect(JSON.parse(String(calls[0].init?.body))).toMatchObject({ provider: 'official-ace-nanobanana', contents: [{ parts: [{ text: 'a tea cup' }] }] });
     expect(images).toHaveLength(1);
   });
+  it('sends a saved image reference as inline data to the official Nano Banana edit path', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      if (String(input).startsWith('/uploads/media/')) return new Response(new Uint8Array([1, 2, 3]), { headers: { 'Content-Type': 'image/png' } });
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: 'AQID' } }] } }] }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    await generateImage({ provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2' }, {
+      prompt: '保留森林背景，加入角色', referenceImages: [{ url: '/uploads/media/user/chat/scene.png', mimeType: 'image/png' }],
+    });
+    expect(calls.map((call) => call.url)).toEqual(['/uploads/media/user/chat/scene.png', '/api/ai/gemini/models/nano-banana-2/generateContent']);
+    expect(JSON.parse(String(calls[1].init?.body)).contents[0].parts).toEqual([
+      { text: '保留森林背景，加入角色' }, { inlineData: { mimeType: 'image/png', data: 'AQID' } },
+    ]);
+  });
   afterEach(() => {
     globalThis.fetch = fetchMock;
   });
