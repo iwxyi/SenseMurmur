@@ -1080,6 +1080,8 @@ export async function retryRichMessageMedia(params: {
   const attachments = params.message.metadata?.attachments || [];
   const target = attachments.find((attachment) => attachment.id === params.attachmentId);
   if (!target || (target.status !== 'failed' && target.status !== 'queued' && target.status !== 'generating' && !(target.status === 'ready' && (!target.url || target.kind === 'sticker')))) return;
+  const activePoll = longRunningRichMediaEntriesById.get(richMediaQueueEntryId(params.message.id, params.attachmentId));
+  if (activePoll && target.mediaTaskId && activePoll.taskId === target.mediaTaskId) return;
   const isAsyncTask = target.kind === 'video' || (target.kind === 'audio' && target.audioPurpose === 'music_generation');
   let reuseMediaTask = false;
   if (isAsyncTask && target.mediaTaskId) {
