@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { projectBackgroundExecutionOverview } from './backgroundExecutionOverview';
+import { isSafelyResumableWorkflow, projectBackgroundExecutionOverview } from './backgroundExecutionOverview';
 import type { WorkflowSnapshot, WorkflowTaskStatus } from './workflowRunRuntime';
 
 function sample(id: string, status: WorkflowSnapshot['run']['status'], taskStatus: WorkflowTaskStatus): WorkflowSnapshot {
@@ -20,6 +20,16 @@ describe('background execution overview', () => {
       sample('awaiting-close', 'active', 'completed'),
       sample('abandoned-review', 'paused', 'abandoned'),
     ], ['active']);
-    expect(overview).toEqual({ running: 1, queued: 1, interrupted: 1, blocked: 1, chatId: 'active' });
+    expect(overview).toEqual({ running: 1, queued: 1, interrupted: 1, blocked: 1, resumable: 0, chatId: 'active' });
+  });
+
+  it('only resumes interrupted work that is safe to continue automatically', () => {
+    expect(isSafelyResumableWorkflow(sample('queued-after-interrupt', 'paused', 'queued'))).toBe(true);
+    expect(isSafelyResumableWorkflow(sample('waiting-external', 'paused', 'waiting_external'))).toBe(true);
+    expect(isSafelyResumableWorkflow(sample('unknown-result', 'paused', 'result_unknown'))).toBe(false);
+    expect(isSafelyResumableWorkflow(sample('needs-user', 'paused', 'waiting_user'))).toBe(false);
+    expect(isSafelyResumableWorkflow(sample('failed', 'paused', 'failed'))).toBe(false);
+    expect(isSafelyResumableWorkflow(sample('cancelled', 'paused', 'cancelled'))).toBe(false);
+    expect(isSafelyResumableWorkflow(sample('active', 'active', 'queued'))).toBe(false);
   });
 });

@@ -15,6 +15,7 @@ import SettingsSuggestIcon from '@mui/icons-material/SettingsSuggest';
 import SyncProblemIcon from '@mui/icons-material/SyncProblem';
 import CloseIcon from '@mui/icons-material/Close';
 import DeleteSweepIcon from '@mui/icons-material/DeleteSweep';
+import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
@@ -54,7 +55,7 @@ import { dismissAllRichMediaGenerationErrors, dismissRichMediaGenerationError, g
 import { dismissAllChatCompletionErrors, dismissChatCompletionError, getChatCompletionSummary, subscribeChatCompletionQueue, type ChatCompletionSummary } from '../services/chatCompletionQueue';
 import { isImageAvatar } from '../utils/avatar';
 import { buildCardAvatarHoverMotionSx } from '../styles/avatarHoverMotion';
-import { loadBackgroundExecutionOverview, type BackgroundExecutionOverview } from '../services/backgroundExecutionOverview';
+import { loadBackgroundExecutionOverview, resumeAllSafelyRecoverableBackgroundRuns, type BackgroundExecutionOverview } from '../services/backgroundExecutionOverview';
 import { subscribeBackgroundExecution } from '../services/backgroundExecutionScheduler';
 import { subscribeAssistantBackgroundRunChanges } from '../services/assistantBackgroundReply';
 import { subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
@@ -497,6 +498,8 @@ export default function HomePage() {
   const [characterCompletionSummary, setCharacterCompletionSummary] = useState<CharacterCompletionSummary>(() => getCharacterCompletionSummary());
   const [chatCompletionSummary, setChatCompletionSummary] = useState<ChatCompletionSummary>(() => getChatCompletionSummary());
   const [backgroundOverview, setBackgroundOverview] = useState<BackgroundExecutionOverview | null>(null);
+  const [resumingBackgroundRuns, setResumingBackgroundRuns] = useState(false);
+  const [backgroundResumeNotice, setBackgroundResumeNotice] = useState<string | null>(null);
   const [generationErrorsDialogOpen, setGenerationErrorsDialogOpen] = useState(false);
   const [selectedGenerationError, setSelectedGenerationError] = useState<GenerationOverviewError | null>(null);
   const previousLoginIdentityRef = useRef<string | null | undefined>(undefined);
@@ -560,6 +563,22 @@ export default function HomePage() {
     ...getRecentRichMediaGenerationErrors().map((error) => ({ ...error, source: 'rich-media' as const })),
   ].sort((a, b) => b.createdAt - a.createdAt), [avatarQueueSummary.recentErrors, characterCompletionSummary.recentErrors, chatCompletionSummary.recentErrors, richMediaQueue]);
   const recentGenerationErrors = generationErrors.slice(0, 3);
+  const resumeBackgroundRuns = async () => {
+    if (resumingBackgroundRuns) return;
+    setResumingBackgroundRuns(true);
+    setBackgroundResumeNotice(null);
+    try {
+      const result = await resumeAllSafelyRecoverableBackgroundRuns();
+      setBackgroundResumeNotice(result.submitted > 0
+        ? `已恢复 ${result.submitted} 个后台任务`
+        : '没有可安全恢复的后台任务');
+    } catch (error) {
+      setBackgroundResumeNotice(error instanceof Error ? `恢复失败：${error.message}` : '恢复后台任务失败');
+    } finally {
+      setResumingBackgroundRuns(false);
+      void loadBackgroundExecutionOverview().then(setBackgroundOverview);
+    }
+  };
   const dismissGenerationError = (error: GenerationOverviewError) => {
     if (error.source === 'avatar') avatarGenerationQueue.dismissError(error.id);
     else if (error.source === 'completion') dismissCharacterCompletionError(error.id);
@@ -1140,7 +1159,20 @@ export default function HomePage() {
         ) : null}
 
         <SurfaceCard>
-          <SectionHeader title="工作台概览" />
+          <SectionHeader title="工作台概览" action={backgroundOverview?.resumable ? (
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<RestartAltIcon />}
+              onClick={() => void resumeBackgroundRuns()}
+              disabled={resumingBackgroundRuns}
+              aria-label={`恢复全部可继续任务，共 ${backgroundOverview.resumable} 个`}
+              sx={{ flexShrink: 0 }}
+            >
+              {resumingBackgroundRuns ? '恢复中…' : `恢复任务 (${backgroundOverview.resumable})`}
+            </Button>
+          ) : undefined} />
+          {backgroundResumeNotice ? <Alert severity="info" sx={{ mb: 1.5 }} onClose={() => setBackgroundResumeNotice(null)}>{backgroundResumeNotice}</Alert> : null}
           <Box sx={buildStatGridSx()}>
             {stats.map((stat) => (
               <Box key={stat.label} sx={buildStatCellSx()}>
