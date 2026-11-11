@@ -478,6 +478,9 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
           <Typography variant="caption" color={attachment.status === 'failed' ? 'error.main' : 'text.secondary'} sx={{ overflowWrap: 'anywhere' }}>
             {attachment.status === 'failed' || attachment.audioPurpose === 'music_generation' ? getAttachmentStatusDetail(attachment) : getAttachmentStatusLabel(attachment)}
           </Typography>
+          {attachment.status === 'generating' && attachment.audioPurpose === 'music_generation' && attachment.error ? (
+            <Typography variant="caption" color="warning.main" sx={{ overflowWrap: 'anywhere' }}>{attachment.error}。可检查原任务结果。</Typography>
+          ) : null}
           {attachment.status !== 'failed' ? <LinearProgress sx={{ mt: 0.5 }} /> : null}
           {(attachment.status === 'failed' || (attachment.audioPurpose === 'music_generation' && attachment.status === 'generating' && Boolean(attachment.mediaTaskId))) && onRetryMedia ? (
             <Button size="small" variant="outlined" color={attachment.status === 'failed' ? 'error' : 'primary'} sx={{ mt: 0.6 }} onClick={() => void onRetryMedia?.(message, attachment.id)}>
@@ -500,6 +503,9 @@ export function MessageContent({ message, onRetryMedia, onOpenImage, onOpenPromp
               <Typography variant="caption" color={attachment.status === 'failed' ? 'error' : 'text.secondary'}>
                 {getAttachmentStatusDetail(attachment)}
               </Typography>
+              {attachment.status === 'generating' && attachment.error ? (
+                <Typography variant="caption" color="warning.main" sx={{ overflowWrap: 'anywhere' }}>{attachment.error}。可检查原任务结果。</Typography>
+              ) : null}
               {processing ? <LinearProgress /> : null}
               {(attachment.status === 'failed' || (attachment.status === 'generating' && Boolean(attachment.mediaTaskId))) && onRetryMedia ? (
                 <Button size="small" variant="outlined" color={attachment.status === 'failed' ? 'error' : 'primary'} onClick={() => void onRetryMedia?.(message, attachment.id)}>

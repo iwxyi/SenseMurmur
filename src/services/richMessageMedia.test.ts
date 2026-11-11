@@ -249,6 +249,7 @@ describe('processRichMessageMedia', () => {
     await waitForExpectation(() => expect(waitForAiMediaTask).toHaveBeenCalledWith('accepted-task'));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'generating', mediaTaskId: 'accepted-task' });
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]?.error).toBe('网络暂时不可用');
     expect(getRecentRichMediaGenerationErrors()).toEqual(expect.arrayContaining([expect.objectContaining({ message: '网络暂时不可用' })]));
     expect(notify).toHaveBeenCalled();
     unsubscribe();

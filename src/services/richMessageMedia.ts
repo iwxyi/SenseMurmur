@@ -521,7 +521,7 @@ async function pollVideoTask(params: {
       updateRichMediaMessage({
         message: latestMessage,
         attachmentId: params.attachment.id,
-        patch: { status: 'ready', mediaTaskId: undefined, assetId: asset.id, url: asset.url, mimeType: asset.mimeType, sizeBytes: asset.sizeBytes, checksum: asset.checksum, generationJobId: params.generationJobId },
+        patch: { status: 'ready', error: undefined, mediaTaskId: undefined, assetId: asset.id, url: asset.url, mimeType: asset.mimeType, sizeBytes: asset.sizeBytes, checksum: asset.checksum, generationJobId: params.generationJobId },
         upsertMessage: params.entry.upsertMessage,
       });
     return;
@@ -555,7 +555,7 @@ async function pollMusicTask(params: { entry: RichMediaQueueEntry; message: Mess
   }
   const durationMs = isLocalOnlyMediaMode() && asset.url.startsWith('data:') ? await getAudioDurationMs(asset.url) : undefined;
   updateRichMediaMessage({ message: latestMessage, attachmentId: params.attachment.id,
-    patch: { status: 'ready', mediaTaskId: undefined, assetId: asset.id, url: asset.url, mimeType: asset.mimeType,
+    patch: { status: 'ready', error: undefined, mediaTaskId: undefined, assetId: asset.id, url: asset.url, mimeType: asset.mimeType,
       sizeBytes: asset.sizeBytes, checksum: asset.checksum, durationMs, generationJobId: params.generationJobId }, upsertMessage: params.entry.upsertMessage });
   });
 }
@@ -723,7 +723,12 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
         const errorText = toMediaGenerationErrorText(error, 'audio');
         richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '聊天音乐生成', message: errorText, createdAt: Date.now() });
         publishRichMediaQueueSnapshot();
-        if (shouldKeepSubmittedMediaPending(error, entry.terminalTaskKnown)) return;
+        if (shouldKeepSubmittedMediaPending(error, entry.terminalTaskKnown)) {
+          updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id,
+            patch: { status: 'generating', error: errorText, mediaTaskId: taskId, generationJobId },
+            upsertMessage: entry.upsertMessage, persistMetadata: false });
+          return;
+        }
         void runWithMediaResultLease(latestMessage.chatId, latestMessage.serverId, async () => {
           updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id,
             patch: { status: 'failed', error: errorText, mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
@@ -793,7 +798,12 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
           const errorText = toMediaGenerationErrorText(error, 'video');
           richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '聊天视频生成', message: errorText, createdAt: Date.now() });
           publishRichMediaQueueSnapshot();
-          if (shouldKeepSubmittedMediaPending(error, entry.terminalTaskKnown)) return;
+          if (shouldKeepSubmittedMediaPending(error, entry.terminalTaskKnown)) {
+            updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id,
+              patch: { status: 'generating', error: errorText, mediaTaskId: taskId, generationJobId },
+              upsertMessage: entry.upsertMessage, persistMetadata: false });
+            return;
+          }
           void runWithMediaResultLease(latestMessage.chatId, latestMessage.serverId, async () => {
             updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id, patch: { status: 'failed', error: errorText, mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
           }).catch((commitError) => console.error('[rich-message-media:video-failure-commit]', commitError));
