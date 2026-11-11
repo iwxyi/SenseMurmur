@@ -117,18 +117,18 @@ function hasUsableMediaUrl(attachment: MessageAttachment | undefined) {
   return Boolean(attachment?.url && typeof attachment.url === 'string');
 }
 
-function shouldPreserveLocalReadyAttachment(local: MessageAttachment | undefined, incoming: MessageAttachment) {
-  if (!local || local.status !== 'ready' || !hasUsableMediaUrl(local)) return false;
-  if (incoming.status === 'queued' || incoming.status === 'generating') return true;
-  return incoming.status === 'ready' && !hasUsableMediaUrl(incoming);
-}
-
 function mergeAttachmentPair(local: MessageAttachment | undefined, incoming: MessageAttachment) {
-  if (shouldPreserveLocalReadyAttachment(local, incoming)) {
+  if (!local) return incoming;
+  // A cloud response can arrive after a local poll or retry has already
+  // advanced the task. Keep the newer attachment, including its task ID.
+  if (local.updatedAt > incoming.updatedAt
+    || (local.status === 'ready' && hasUsableMediaUrl(local)
+      && (incoming.status === 'queued' || incoming.status === 'generating'
+        || (incoming.status === 'ready' && !hasUsableMediaUrl(incoming))))) {
     return {
       ...incoming,
       ...local,
-      updatedAt: Math.max(local?.updatedAt || 0, incoming.updatedAt || 0),
+      updatedAt: Math.max(local.updatedAt || 0, incoming.updatedAt || 0),
     };
   }
   return incoming;
@@ -161,6 +161,7 @@ function mergeMetadataPair(existing: MessageMetadata | undefined, incoming: Mess
           ...(existing.generation || {}),
           ...(incoming.generation || {}),
           status: generationStatus,
+          updatedAt: Math.max(existing.generation?.updatedAt || 0, incoming.generation?.updatedAt || 0),
         }
       : undefined,
   };

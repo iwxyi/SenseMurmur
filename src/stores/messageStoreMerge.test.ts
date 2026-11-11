@@ -20,6 +20,35 @@ function buildMessage(patch: Partial<Message> = {}): Message {
 }
 
 describe('mergeMessages rich media metadata', () => {
+  it('keeps a newer local video poll result over an older cloud placeholder', () => {
+    const local = buildMessage({ metadata: {
+      generation: { status: 'failed', updatedAt: 300 },
+      attachments: [{ id: 'video', kind: 'video', status: 'failed', mediaTaskId: 'task-1', error: '上游生成失败', altText: '视频', createdAt: 100, updatedAt: 300 }],
+    } });
+    const remote = buildMessage({ metadata: {
+      generation: { status: 'generating', updatedAt: 200 },
+      attachments: [{ id: 'video', kind: 'video', status: 'generating', mediaTaskId: 'task-1', altText: '视频', createdAt: 100, updatedAt: 200 }],
+    } });
+
+    expect(mergeMessages([local], [remote])[0].metadata).toMatchObject({
+      generation: { status: 'failed', updatedAt: 300 },
+      attachments: [{ status: 'failed', mediaTaskId: 'task-1', error: '上游生成失败' }],
+    });
+  });
+
+  it('keeps the latest accepted task when a stale cloud copy arrives after retry', () => {
+    const local = buildMessage({ metadata: { attachments: [
+      { id: 'video', kind: 'video', status: 'generating', mediaTaskId: 'new-task', altText: '视频', createdAt: 100, updatedAt: 300 },
+    ] } });
+    const remote = buildMessage({ metadata: { attachments: [
+      { id: 'video', kind: 'video', status: 'failed', mediaTaskId: 'old-task', error: '旧任务失败', altText: '视频', createdAt: 100, updatedAt: 200 },
+    ] } });
+
+    expect(mergeMessages([local], [remote])[0].metadata?.attachments?.[0]).toMatchObject({
+      status: 'generating', mediaTaskId: 'new-task', updatedAt: 300,
+    });
+  });
+
   it('retains an older unfinished video task beyond the ordinary message window', () => {
     const pending = buildMessage({ id: 'pending-video', timestamp: 1, metadata: { attachments: [{ id: 'video', kind: 'video', status: 'generating', mediaTaskId: 'task-1', altText: '视频', createdAt: 1, updatedAt: 1 }] } });
     const messages = [pending, ...Array.from({ length: MAX_CACHED_MESSAGES_PER_CHAT }, (_, index) => buildMessage({ id: `later-${index}`, timestamp: index + 2 }))];
