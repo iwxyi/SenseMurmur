@@ -1209,6 +1209,71 @@ describe('processRichMessageMedia', () => {
     });
   });
 
+  it('starts video submission while an image is still generating', async () => {
+    const imageGate = deferred<Array<{ dataUrl: string; mimeType: string }>>();
+    const videoGate = deferred<Awaited<ReturnType<typeof generateVideoWithAdapter>>>();
+    const pollGate = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(generateImageWithAdapter).mockReturnValue(imageGate.promise);
+    vi.mocked(generateVideoWithAdapter).mockReturnValue(videoGate.promise);
+    vi.mocked(waitForAiMediaTask).mockReturnValue(pollGate.promise);
+    const imageUpserts: Message[] = [];
+    const videoUpserts: Message[] = [];
+    const imageRun = processRichMessageMedia({ message: buildQueuedImageMessage({ id: 'parallel-image' }),
+      character, aiProfiles: [imageProfile], upsertMessage: (next) => imageUpserts.push(next) });
+    const videoRun = processRichMessageMedia({ message: buildQueuedImageMessage({ id: 'parallel-video', metadata: { attachments: [{
+      id: 'video-1', kind: 'video', status: 'queued', promptText: '森林追逐', altText: '视频', createdAt: 123, updatedAt: 123,
+    }] } }), aiProfiles: [{ ...imageProfile, type: 'video', model: 'video-model' }],
+    upsertMessage: (next) => videoUpserts.push(next) });
+
+    await waitForExpectation(() => {
+      expect(generateImageWithAdapter).toHaveBeenCalledTimes(1);
+      expect(generateVideoWithAdapter).toHaveBeenCalledTimes(1);
+      expect(imageUpserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('generating');
+      expect(videoUpserts.at(-1)?.metadata?.attachments?.[0]?.status).toBe('generating');
+      expect(getRichMediaQueueSnapshot()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ lane: 'image', position: 1, total: 1 }),
+        expect.objectContaining({ lane: 'video', position: 1, total: 1 }),
+      ]));
+    });
+    videoGate.resolve({ task_id: 'parallel-task' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>);
+    await videoRun;
+    imageGate.resolve([{ dataUrl: 'data:image/png;base64,parallel', mimeType: 'image/png' }]);
+    await imageRun;
+    pollGate.resolve({ task_id: 'parallel-task', model: 'video-model', status: 'failed', result: { error: '测试结束' },
+      chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(getRichMediaQueueSnapshot()).toEqual([]));
+  });
+
+  it('keeps both results when image and video on one message finish in different lanes', async () => {
+    const imageGate = deferred<Array<{ dataUrl: string; mimeType: string }>>();
+    const videoGate = deferred<Awaited<ReturnType<typeof generateVideoWithAdapter>>>();
+    const pollGate = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(generateImageWithAdapter).mockReturnValue(imageGate.promise);
+    vi.mocked(generateVideoWithAdapter).mockReturnValue(videoGate.promise);
+    vi.mocked(waitForAiMediaTask).mockReturnValue(pollGate.promise);
+    const message = buildQueuedImageMessage({ id: 'mixed-message', metadata: { attachments: [
+      { id: 'image-1', kind: 'image', status: 'queued', promptText: '场景图', altText: '图片', createdAt: 123, updatedAt: 123 },
+      { id: 'video-1', kind: 'video', status: 'queued', promptText: '森林追逐', altText: '视频', createdAt: 123, updatedAt: 123 },
+    ] } });
+    const upserts: Message[] = [];
+    const run = processRichMessageMedia({ message, aiProfiles: [imageProfile, { ...imageProfile, type: 'video', model: 'video-model' }],
+      upsertMessage: (next) => upserts.push(next) });
+    await waitForExpectation(() => {
+      expect(generateImageWithAdapter).toHaveBeenCalledTimes(1);
+      expect(generateVideoWithAdapter).toHaveBeenCalledTimes(1);
+    });
+    videoGate.resolve({ task_id: 'mixed-video-task' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>);
+    imageGate.resolve([{ dataUrl: 'data:image/png;base64,mixed', mimeType: 'image/png' }]);
+    await run;
+    expect(upserts.at(-1)?.metadata?.attachments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'image-1', status: 'ready' }),
+      expect.objectContaining({ id: 'video-1', status: 'generating', mediaTaskId: 'mixed-video-task' }),
+    ]));
+    pollGate.resolve({ task_id: 'mixed-video-task', model: 'video-model', status: 'failed', result: { error: '测试结束' },
+      chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(getRichMediaQueueSnapshot()).toEqual([]));
+  });
+
   it('recovers a stale generating attachment into the global queue', async () => {
     vi.mocked(generateImageWithAdapter).mockResolvedValue([{
       dataUrl: 'data:image/png;base64,recovered',

@@ -17,6 +17,7 @@ import { runWithChatExecutionLease } from './chatExecutionLease';
 import { getChatExecutionFence } from './chatExecutionFence';
 import { currentWorkflowScope } from './workflowRunRuntime';
 import { getWorkspaceSignal } from './workspaceLifecycle';
+import { mergeMessages } from '../stores/messageStoreMerge';
 
 function findProfile(profiles: AIModelProfile[], id?: string | null) {
   const profile = id ? profiles.find((item) => item.id === id) : null;
@@ -116,6 +117,7 @@ function isAbortError(error: unknown) {
 }
 
 type GenerativeAttachmentKind = Extract<MessageAttachmentKind, 'image' | 'audio' | 'video' | 'sticker'>;
+type RichMediaQueueLane = 'image' | 'audio' | 'video' | 'sticker';
 type GenerativeAttachment = MessageAttachment & { kind: GenerativeAttachmentKind };
 
 function isGenerativeAttachment(attachment: MessageAttachment): attachment is GenerativeAttachment {
@@ -152,6 +154,7 @@ export type RichMediaQueueSnapshotEntry = {
   messageId: string;
   attachmentId: string;
   kind: GenerativeAttachmentKind;
+  lane: RichMediaQueueLane;
   audioPurpose?: MessageAttachment['audioPurpose'];
   status: RichMediaQueueEntryStatus;
   position: number;
@@ -170,6 +173,7 @@ type RichMediaQueueEntry = {
   messageId: string;
   attachmentId: string;
   kind: GenerativeAttachmentKind;
+  lane: RichMediaQueueLane;
   status: RichMediaQueueEntryStatus;
   message: Message;
   character?: AICharacter | null;
@@ -190,13 +194,16 @@ const pendingRichMediaQueue: RichMediaQueueEntry[] = [];
 const activeRichMediaQueueEntriesById = new Map<string, RichMediaQueueEntry>();
 const longRunningRichMediaEntriesById = new Map<string, RichMediaQueueEntry>();
 const richMediaQueueListeners = new Set<() => void>();
-let runningRichMediaQueueEntry: RichMediaQueueEntry | null = null;
+const runningRichMediaQueueEntries = new Map<RichMediaQueueLane, RichMediaQueueEntry>();
 let richMediaQueueSnapshotCache: RichMediaQueueSnapshotEntry[] = [];
 const richMediaGenerationErrors = new Map<string, RichMediaGenerationError>();
 const dismissedRichMediaGenerationErrorIds = new Set<string>();
 
 function rememberRichMediaMessage(message: Message) {
-  latestRichMediaMessageById.set(message.id, message);
+  const previous = latestRichMediaMessageById.get(message.id);
+  const merged = previous ? mergeMessages([previous], [message])[0] : message;
+  latestRichMediaMessageById.set(message.id, merged);
+  return merged;
 }
 
 function getLatestRichMediaMessage(messageId: string, fallback: Message) {
@@ -207,13 +214,17 @@ function richMediaQueueEntryId(messageId: string, attachmentId: string) {
   return `${messageId}:${attachmentId}`;
 }
 
+function richMediaQueueLane(attachment: GenerativeAttachment): RichMediaQueueLane {
+  return attachment.kind;
+}
+
 function isRecoverableGenerativeAttachment(item: MessageAttachment): item is GenerativeAttachment {
   return isGenerativeAttachment(item) && (item.status === 'queued' || item.status === 'generating');
 }
 
 function buildRichMediaQueueSnapshot(): RichMediaQueueSnapshotEntry[] {
   const entries = [
-    ...(runningRichMediaQueueEntry ? [runningRichMediaQueueEntry] : []),
+    ...runningRichMediaQueueEntries.values(),
     ...longRunningRichMediaEntriesById.values(),
     ...pendingRichMediaQueue,
   ].filter((entry, index, all) => all.findIndex((candidate) => candidate.id === entry.id) === index);
@@ -221,10 +232,11 @@ function buildRichMediaQueueSnapshot(): RichMediaQueueSnapshotEntry[] {
     messageId: entry.messageId,
     attachmentId: entry.attachmentId,
     kind: entry.kind,
+    lane: entry.lane,
     audioPurpose: entry.message.metadata?.attachments?.find((attachment) => attachment.id === entry.attachmentId)?.audioPurpose,
     status: entry.status,
-    position: index + 1,
-    total: entries.length,
+    position: entries.slice(0, index + 1).filter((candidate) => candidate.lane === entry.lane).length,
+    total: entries.filter((candidate) => candidate.lane === entry.lane).length,
   }));
 }
 
@@ -263,7 +275,7 @@ export function resetRichMediaQueueForTests() {
   pendingRichMediaQueue.splice(0, pendingRichMediaQueue.length);
   activeRichMediaQueueEntriesById.clear();
   longRunningRichMediaEntriesById.clear();
-  runningRichMediaQueueEntry = null;
+  runningRichMediaQueueEntries.clear();
   richMediaQueueSnapshotCache = [];
   latestRichMediaMessageById.clear();
   richMediaMessageUsers.clear();
@@ -280,12 +292,13 @@ function updateRichMediaMessage(params: {
   upsertMessage: (message: Message) => void;
   persistMetadata?: boolean;
 }) {
-  const nextMetadata = updateAttachment(params.message.metadata, params.attachmentId, params.patch);
-  const nextMessage = { ...params.message, metadata: nextMetadata };
-  rememberRichMediaMessage(nextMessage);
-  params.upsertMessage(nextMessage);
-  if (params.persistMetadata !== false) persistRichMessageMetadata(nextMessage, nextMetadata, 'rich-message-media.persist-metadata', params.attachmentId);
-  return nextMessage;
+  const latest = getLatestRichMediaMessage(params.message.id, params.message);
+  const nextMetadata = updateAttachment(latest.metadata, params.attachmentId, params.patch);
+  const nextMessage = { ...latest, metadata: nextMetadata };
+  const mergedMessage = rememberRichMediaMessage(nextMessage);
+  params.upsertMessage(mergedMessage);
+  if (params.persistMetadata !== false) persistRichMessageMetadata(mergedMessage, mergedMessage.metadata || nextMetadata, 'rich-message-media.persist-metadata', params.attachmentId);
+  return mergedMessage;
 }
 
 async function persistVideoSubmissionKey(message: Message) {
@@ -909,13 +922,10 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry) {
 }
 
 function pumpRichMediaQueue() {
-  if (runningRichMediaQueueEntry) return;
-  const entry = pendingRichMediaQueue.shift();
-  if (!entry) {
-    publishRichMediaQueueSnapshot();
-    return;
-  }
-  runningRichMediaQueueEntry = entry;
+  const index = pendingRichMediaQueue.findIndex((item) => !runningRichMediaQueueEntries.has(item.lane));
+  if (index < 0) { publishRichMediaQueueSnapshot(); return; }
+  const entry = pendingRichMediaQueue.splice(index, 1)[0];
+  runningRichMediaQueueEntries.set(entry.lane, entry);
   entry.status = 'generating';
   publishRichMediaQueueSnapshot();
   void runRichMediaQueueEntryWithLease(entry)
@@ -934,10 +944,11 @@ function pumpRichMediaQueue() {
     })
     .finally(() => {
       activeRichMediaQueueEntriesById.delete(entry.id);
-      runningRichMediaQueueEntry = null;
+      if (runningRichMediaQueueEntries.get(entry.lane) === entry) runningRichMediaQueueEntries.delete(entry.lane);
       publishRichMediaQueueSnapshot();
       pumpRichMediaQueue();
     });
+  pumpRichMediaQueue();
 }
 
 async function runRichMediaQueueEntryWithLease(entry: RichMediaQueueEntry) {
@@ -992,6 +1003,7 @@ function enqueueRichMediaAttachment(params: {
     messageId: params.message.id,
     attachmentId: params.attachment.id,
     kind: params.attachment.kind,
+    lane: richMediaQueueLane(params.attachment),
     status: 'queued',
     message: params.message,
     character: params.character,

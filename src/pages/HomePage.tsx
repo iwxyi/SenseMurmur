@@ -511,7 +511,8 @@ export default function HomePage() {
   const [calendarNow, setCalendarNow] = useState(() => Date.now());
   const richMediaQueue = useSyncExternalStore(subscribeRichMediaQueue, getRichMediaQueueSnapshot, getRichMediaQueueSnapshot);
   const richMediaVideoQueue = useMemo(() => richMediaQueue.filter((entry) => entry.kind === 'video'), [richMediaQueue]);
-  const richMediaNonVideoQueue = useMemo(() => richMediaQueue.filter((entry) => entry.kind !== 'video'), [richMediaQueue]);
+  const richMediaImageQueue = useMemo(() => richMediaQueue.filter((entry) => entry.kind === 'image' || entry.kind === 'sticker'), [richMediaQueue]);
+  const richMediaAudioQueue = useMemo(() => richMediaQueue.filter((entry) => entry.kind === 'audio'), [richMediaQueue]);
   const inAppNotifications = useInAppNotificationStore((state) => state.items);
   // Persisted local chat summaries render immediately; cloud prefetch below
   // only merges fresher data and may update this ordering afterwards.
@@ -556,12 +557,13 @@ export default function HomePage() {
     previousLoginIdentityRef.current = currentLoginIdentity;
   }, [isLoggedIn, user?.email, user?.id]);
 
-  const generationErrors = useMemo<GenerationOverviewError[]>(() => [
+  const richMediaGenerationErrors = getRecentRichMediaGenerationErrors();
+  const generationErrors: GenerationOverviewError[] = [
     ...avatarQueueSummary.recentErrors.map((error) => ({ ...error, source: 'avatar' as const })),
     ...characterCompletionSummary.recentErrors.map((error) => ({ ...error, source: 'completion' as const })),
     ...chatCompletionSummary.recentErrors.map((error) => ({ ...error, source: 'chat-completion' as const })),
-    ...getRecentRichMediaGenerationErrors().map((error) => ({ ...error, source: 'rich-media' as const })),
-  ].sort((a, b) => b.createdAt - a.createdAt), [avatarQueueSummary.recentErrors, characterCompletionSummary.recentErrors, chatCompletionSummary.recentErrors, richMediaQueue]);
+    ...richMediaGenerationErrors.map((error) => ({ ...error, source: 'rich-media' as const })),
+  ].sort((a, b) => b.createdAt - a.createdAt);
   const recentGenerationErrors = generationErrors.slice(0, 3);
   const resumeBackgroundRuns = async () => {
     if (resumingBackgroundRuns) return;
@@ -1057,13 +1059,19 @@ export default function HomePage() {
       onOpen: () => navigate('/chats'),
       attention: true,
     }] : []),
-    ...(richMediaNonVideoQueue.length ? [{
-      label: richMediaNonVideoQueue[0]?.kind === 'audio'
-        ? richMediaNonVideoQueue[0]?.audioPurpose === 'music_generation' ? '正在生成音乐' : '正在生成语音'
-        : '正在生成图片',
-      value: richMediaNonVideoQueue.length > 1 ? `${richMediaNonVideoQueue[0]?.position || 1}/${richMediaNonVideoQueue[0]?.total || richMediaNonVideoQueue.length}` : 1,
+    ...(richMediaImageQueue.length ? [{
+      label: '正在生成图片',
+      value: richMediaImageQueue.length > 1 ? `${richMediaImageQueue.length} 个任务` : 1,
       icon: <AutoAwesomeIcon />,
-      color: richMediaNonVideoQueue[0]?.kind === 'audio' ? 'primary.main' : 'secondary.main',
+      color: 'secondary.main',
+      onOpen: () => navigate('/chats'),
+      attention: true,
+    }] : []),
+    ...(richMediaAudioQueue.length ? [{
+      label: richMediaAudioQueue.some((entry) => entry.audioPurpose === 'music_generation') ? '正在生成音乐' : '正在生成语音',
+      value: richMediaAudioQueue.length > 1 ? `${richMediaAudioQueue.length} 个任务` : 1,
+      icon: <AutoAwesomeIcon />,
+      color: 'primary.main',
       onOpen: () => navigate('/chats'),
       attention: true,
     }] : []),
