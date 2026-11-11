@@ -53,6 +53,16 @@ describe('background video recovery', () => {
     expect(findPendingVideoMessages(Object.values(persisted.messageWindowsByChatId).flatMap((window) => window.messages),
       new Set(pending.map((item) => item.chatId)), true)).toHaveLength(13);
   });
+  it('retains accepted music even when its chat cache exceeds the window limit', () => {
+    const music = musicMessage('old-music', 'music-task');
+    const messageWindowsByChatId = Object.fromEntries([
+      ['chat', { messages: [music], lastSyncedAt: 1, updatedAt: 1 }],
+      ...Array.from({ length: 13 }, (_, index) => [`recent-${index}`, { messages: [], lastSyncedAt: index + 2, updatedAt: index + 2 }] as const),
+    ]);
+    const persisted = __messageRuntimePersistenceForTests.buildPersistedMessageState({ messageWindowsByChatId, pendingOperations: [] });
+    expect(findPendingVideoMessages(Object.values(persisted.messageWindowsByChatId).flatMap((window) => window.messages), new Set(['chat']), true))
+      .toEqual([expect.objectContaining({ id: music.id })]);
+  });
   it('selects each accepted task once without restarting queued generation', () => {
     const accepted = message('accepted', 'generating', 'task-1');
     const submitting: Message = { ...message('submitting', 'generating'), metadata: { attachments: [{

@@ -28,7 +28,7 @@ import {
   MAX_ACTIVE_MESSAGES_PER_CHAT,
   countUniqueMessages,
   hasCompactedNarrativeWindow,
-  hasRecoverableVideoTask,
+  hasRecoverableMediaTask,
   mergeMessages,
   messagesFromWindowChanges,
   normalizeMessage,
@@ -611,7 +611,7 @@ function getPendingChatIds(pendingOperations: PendingMessageOperation[] = []) {
 function trimCache(cache: Record<string, CachedMessageWindow>, pendingOperations: PendingMessageOperation[] = []) {
   const pendingChatIds = getPendingChatIds(pendingOperations);
   const recoverableChatIds = new Set(Object.entries(cache)
-    .filter(([, window]) => window.messages.some(hasRecoverableVideoTask))
+    .filter(([, window]) => window.messages.some(hasRecoverableMediaTask))
     .map(([chatId]) => chatId));
   const entries = Object.entries(cache).sort((a, b) => {
     const aPending = pendingChatIds.has(a[0]) ? 1 : 0;

@@ -250,13 +250,13 @@ export function trimMessagesWithBranchContext(messages: Message[]) {
   const hasBranchGraph = deduped.some((message) => Boolean(message.metadata?.branching));
   const limit = hasBranchGraph ? MAX_BRANCH_GRAPH_MESSAGES_PER_CHAT : MAX_CACHED_MESSAGES_PER_CHAT;
   const tail = deduped.slice(-limit);
-  const retained = deduped.slice(0, -limit).filter(hasRecoverableVideoTask);
+  const retained = deduped.slice(0, -limit).filter(hasRecoverableMediaTask);
   return retained.length ? [...retained, ...tail] : tail;
 }
 
-export function hasRecoverableVideoTask(message: Message) {
+export function hasRecoverableMediaTask(message: Message) {
   return !message.isDeleted && Boolean(message.metadata?.attachments?.some((attachment) =>
-    attachment.kind === 'video' && attachment.status === 'generating'
+    (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation')) && attachment.status === 'generating'
     && (attachment.mediaTaskId || attachment.generationJobId)));
 }
 

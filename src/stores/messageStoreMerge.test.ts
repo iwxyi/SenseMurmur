@@ -25,6 +25,11 @@ describe('mergeMessages rich media metadata', () => {
     const messages = [pending, ...Array.from({ length: MAX_CACHED_MESSAGES_PER_CHAT }, (_, index) => buildMessage({ id: `later-${index}`, timestamp: index + 2 }))];
     expect(trimMessagesWithBranchContext(messages).some((item) => item.id === pending.id)).toBe(true);
   });
+  it('retains an older accepted music task beyond the ordinary message window', () => {
+    const pending = buildMessage({ id: 'pending-music', timestamp: 1, metadata: { attachments: [{ id: 'music', kind: 'audio', audioPurpose: 'music_generation', status: 'generating', mediaTaskId: 'task-1', altText: '音乐', createdAt: 1, updatedAt: 1 }] } });
+    const messages = [pending, ...Array.from({ length: MAX_CACHED_MESSAGES_PER_CHAT }, (_, index) => buildMessage({ id: `later-${index}`, timestamp: index + 2 }))];
+    expect(trimMessagesWithBranchContext(messages).some((item) => item.id === pending.id)).toBe(true);
+  });
   it('retains branch edges when cloud metadata only updates media generation', () => {
     const branching = { nodeId: 'node-1', parentNodeId: 'older-parent', rootNodeId: 'root', sequence: 5 };
     const local = buildMessage({ metadata: { branching } });
