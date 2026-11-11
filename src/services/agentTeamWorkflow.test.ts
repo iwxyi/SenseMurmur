@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { generateResponse, listAvailableModels } from './aiClient';
-import { createAgentTeamWorkflow, recoverAgentTeamRuns } from './agentTeamWorkflow';
+import { buildAgentTeamTaskRevisionRequest, createAgentTeamWorkflow, recoverAgentTeamRuns } from './agentTeamWorkflow';
 import { currentWorkflowScope, indexedDbWorkflowRepository, type WorkflowSnapshot } from './workflowRunRuntime';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
@@ -15,6 +15,31 @@ import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTea
 
 vi.mock('./agentTeamImageInspection', () => ({ inspectAgentTeamImages: vi.fn() }));
 vi.mock('./agentTeamAudioTask', () => ({ inspectAgentTeamAudioAttachment: vi.fn(), queueAgentTeamAudio: vi.fn() }));
+
+describe('agent team child collaboration', () => {
+  it('turns a completed child instruction into a role-scoped main-agent revision request', () => {
+    const request = buildAgentTeamTaskRevisionRequest({
+      id: 'research', runId: 'run', kind: 'agent_text',
+      input: {
+        task: { id: 'research', roleId: 'analyst', goal: '研究竞品', dependsOn: [], acceptance: '给出来源和结论' },
+        role: { id: 'analyst', name: '市场分析师', responsibility: '分析市场', method: '比较公开资料', acceptance: '有证据' },
+        goal: '研究产品机会',
+      },
+      output: '竞品多使用订阅制', dependsOn: [], status: 'completed', attempt: 1, updatedAt: 1,
+    }, '补充日本市场，并给出数据年份');
+    expect(request).toContain('市场分析师');
+    expect(request).toContain('原任务：研究竞品');
+    expect(request).toContain('原验收：给出来源和结论');
+    expect(request).toContain('用户给该子 Agent 的新指示：补充日本市场，并给出数据年份');
+  });
+
+  it('rejects instructions for tasks without a confirmed completed delivery', () => {
+    expect(() => buildAgentTeamTaskRevisionRequest({
+      id: 'research', runId: 'run', kind: 'agent_text', input: {},
+      dependsOn: [], status: 'result_unknown', attempt: 1, updatedAt: 1,
+    }, '继续')).toThrow('只有已完成的子 Agent 任务');
+  });
+});
 
 vi.mock('./agentTeamVideoTask', () => ({
   inspectAgentTeamVideoAttachment: vi.fn(),

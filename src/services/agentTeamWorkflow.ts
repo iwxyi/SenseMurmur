@@ -136,6 +136,25 @@ function isTeamTaskInput(value: unknown): value is TeamTaskInput {
   return Boolean(candidate.task && candidate.role && typeof candidate.goal === 'string');
 }
 
+export function buildAgentTeamTaskRevisionRequest(task: WorkflowTask, instruction: string) {
+  const trimmed = instruction.trim();
+  if (!trimmed || trimmed.length > 4000) throw new WorkflowPreflightError('补充指示应为 1 到 4000 个字符');
+  if (task.status !== 'completed' || task.attempt < 1 || !isTeamTaskInput(task.input)) {
+    throw new WorkflowPreflightError('只有已完成的子 Agent 任务可以发起定向追加委派');
+  }
+  const role = task.input.role;
+  const originalTask = task.input.task;
+  return [
+    `请围绕已完成的子 Agent 任务“${role.name}”进行定向追加协作。`,
+    `原职责：${role.responsibility}`,
+    `原方法：${role.method}`,
+    `原任务：${originalTask.goal}`,
+    `原验收：${originalTask.acceptance}`,
+    `用户给该子 Agent 的新指示：${trimmed}`,
+    '只规划这条指示所需的补充或修订工作；复用 Run 中已有交付作为证据，不重复已完成的生成任务。',
+  ].join('\n');
+}
+
 function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<ReturnType<typeof teamMediaCapabilities>>, webSearch: boolean) {
   if (!webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索');
   if (!capabilities.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');

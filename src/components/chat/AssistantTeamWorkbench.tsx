@@ -3,6 +3,7 @@ import { Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, D
 import type { WorkflowSnapshot, WorkflowTask } from '../../services/workflowRunRuntime';
 import { summarizeWorkflowRun } from '../../services/workflowRunRuntime';
 import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
+import { buildAgentTeamTaskRevisionRequest } from '../../services/agentTeamWorkflow';
 
 interface Props {
   runs: WorkflowSnapshot[];
@@ -78,6 +79,9 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
     && run.tasks.length < 24
     && !run.tasks.some((item) => item.status === 'running' || item.status === 'result_unknown' || item.status === 'failed'
       || (item.kind === 'team_plan_revision' && item.status !== 'completed'));
+  const canReviseSelectedTask = Boolean(canAddRevision && task && details && childTasks.includes(task)
+    && task.status === 'completed' && task.attempt > 0);
+  const canInstructSelectedTask = editable || canReviseSelectedTask;
 
   return <>
     <Box role="status" sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, left: 12, right: 12, zIndex: 5, display: 'flex', alignItems: 'center', gap: 1, px: 1.25, py: 0.5, borderRadius: 1.5, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider', boxShadow: 1, minWidth: 0 }}>
@@ -108,15 +112,19 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           {details.acceptance && <Typography variant="body2"><strong>验收</strong> {details.acceptance}</Typography>}
           {task.error && <Typography variant="body2" color="error.main"><strong>问题</strong> {task.error}</Typography>}
           {typeof (task.input as { userInstruction?: unknown })?.userInstruction === 'string' && <Typography variant="body2"><strong>用户指示</strong> {String((task.input as { userInstruction: string }).userInstruction)}</Typography>}
-          {editable && <Box sx={{ display: 'grid', gap: 1 }}>
-            <TextField multiline minRows={2} fullWidth size="small" label="补充该子任务的指示" value={instruction} onChange={(event) => { setInstruction(event.target.value); setInstructionError(null); }} slotProps={{ htmlInput: { maxLength: 4000 } }} disabled={savingInstruction} />
+          {canInstructSelectedTask && <Box sx={{ display: 'grid', gap: 1 }}>
+            <TextField multiline minRows={2} fullWidth size="small" label={editable ? '补充该子任务的指示' : '与该子 Agent 继续协作'} value={instruction} onChange={(event) => { setInstruction(event.target.value); setInstructionError(null); }} slotProps={{ htmlInput: { maxLength: 4000 } }} disabled={savingInstruction} />
+            {canReviseSelectedTask && <Typography variant="caption" color="text.secondary">主 Agent 会根据已有交付为该角色规划后续工作。</Typography>}
             {instructionError && <Typography variant="caption" color="error.main">{instructionError}</Typography>}
             <Button size="small" variant="outlined" disabled={!instruction.trim() || savingInstruction} onClick={() => {
               setSavingInstruction(true);
-              void onInstruct(run, task, instruction).then(() => { setInstruction(''); setInstructionError(null); }).catch((error: unknown) => {
+              const operation = editable
+                ? onInstruct(run, task, instruction)
+                : onDelegate(run, buildAgentTeamTaskRevisionRequest(task, instruction));
+              void operation.then(() => { setInstruction(''); setInstructionError(null); }).catch((error: unknown) => {
                 setInstructionError(error instanceof Error ? error.message : '保存指示失败');
               }).finally(() => setSavingInstruction(false));
-            }}>保存指示</Button>
+            }}>{editable ? '保存指示' : '发送给主 Agent'}</Button>
           </Box>}
           {typeof task.output === 'string' && <Box sx={{ p: 1.5, borderRadius: 1, bgcolor: 'action.hover', maxHeight: 300, overflowY: 'auto' }}><Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.output}</Typography></Box>}
         </Box> : <Box sx={{ display: 'grid', gap: 1.25, overflowWrap: 'anywhere' }}>

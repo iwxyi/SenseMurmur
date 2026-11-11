@@ -38,6 +38,7 @@
     "test:message-branching-browser-smoke": "node scripts/message-branching-browser-smoke.mjs",
     "test:story-browser-smoke": "node scripts/story-room-browser-smoke.mjs",
     "test:assistant-html-browser-smoke": "node scripts/assistant-html-browser-smoke.mjs",
+    "test:assistant-team-collaboration-browser-smoke": "node scripts/assistant-team-collaboration-browser-smoke.mjs",
     "test:assistant-run-recovery-browser-smoke": "node scripts/assistant-run-recovery-browser-smoke.mjs",
     "test:ai-llm-acceptance": "node scripts/ai-llm-acceptance.mjs",
     "test:ai-chatflow-acceptance": "node scripts/ai-llm-acceptance.mjs --cases=chatflow",
