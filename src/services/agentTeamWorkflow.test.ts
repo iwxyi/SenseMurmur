@@ -731,6 +731,32 @@ describe('agent team workflow', () => {
     expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.filter((item) => item.id === `team-delivery-${runId}`)).toHaveLength(1);
   });
 
+  it('does not publish a completed run after the workspace changes during store hydration', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `team-chat-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '团队交付', memberIds: [], deletedAt: null } as (typeof state.chats)[number]] }));
+    generate.mockResolvedValueOnce(JSON.stringify({
+      summary: '交付报告', roles: [{ id: 'writer', name: '写作者', responsibility: '写报告', method: '整理材料', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '成稿' }], finalAcceptance: '报告可读',
+    })).mockResolvedValueOnce('完成的报告');
+    let activeScope = 'team-publish-scope-a';
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => activeScope);
+    await workflow.start(runId, chatId, '交付报告');
+    const hydrated = vi.spyOn(useChatStore.persist, 'hasHydrated').mockReturnValue(false);
+    const rehydrate = vi.spyOn(useChatStore.persist, 'rehydrate').mockImplementation(async () => {
+      activeScope = 'team-publish-scope-b';
+      return undefined;
+    });
+    try {
+      await expect(workflow.publish(runId)).rejects.toThrow('账号已切换');
+      expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)).toHaveLength(0);
+      expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.some((item) => item.id === `team-delivery-${runId}`)).not.toBe(true);
+    } finally {
+      hydrated.mockRestore();
+      rehydrate.mockRestore();
+    }
+  });
+
   it('recovers a stopped run without resending an in-flight model request', async () => {
     const runId = `team-${crypto.randomUUID()}`;
     const scope = currentWorkflowScope();

@@ -665,6 +665,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return `## ${task.goal}\n\n${output}`;
         })),
       ].join('\n\n');
+      if (scope() !== deliveryScope) throw new Error('账号已切换，团队交付已暂停');
       const artifact = existingVersion?.content === content ? existing : useAssistantArtifactStore.getState().upsertArtifactsFromMessage({
         chatId: chat.id,
         messageId: sourceId,
