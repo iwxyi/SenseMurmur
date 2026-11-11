@@ -31,7 +31,7 @@ beforeEach(() => {
 describe('agent team image task', () => {
   it('uses one attachment and exposes the ready image as a video reference', async () => {
     vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
-      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({ ...item, status: 'ready', url: 'https://example.test/scene.png', updatedAt: 3 })) } });
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({ ...item, status: 'ready', url: 'https://example.test/scene.png', updatedAt: Date.now() + 1 })) } });
     });
     const params = { runId: 'run', taskId: 'shot', chatId: 'team-image-chat', prompt: '森林场景图', signal: new AbortController().signal };
     expect(await queueAgentTeamImage(params)).toEqual({ output: expect.stringContaining('森林场景图') });
