@@ -3,8 +3,6 @@ import { readAuthSnapshot } from './authSnapshot';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
 import { api } from './api';
 import { clearChatExecutionFence, getChatExecutionFence, setChatExecutionFence, type ChatExecutionFence } from './chatExecutionFence';
-import { useMessageStore } from '../stores/useMessageStore';
-import { useChatStore } from '../stores/useChatStore';
 
 const LEASE_RENEW_INTERVAL_MS = 15_000;
 const lostLeases = new Map<string, Error>();
@@ -13,23 +11,32 @@ function leaseKey(chatId: string, fence: ChatExecutionFence) {
   return `${chatId}:${fence.ownerId}:${fence.generation}`;
 }
 
-function pendingFencedWrites(chatId: string, fence: ChatExecutionFence) {
+function pendingFencedWrites(
+  chatId: string,
+  fence: ChatExecutionFence,
+  messageOperations: Array<{ executionFence?: ChatExecutionFence; chatId?: string }>,
+  chatOperations: Array<{ executionFence?: ChatExecutionFence; entityId?: string }>,
+) {
   const matches = (operation: { executionFence?: ChatExecutionFence; chatId?: string; entityId?: string }) => {
     const operationFence = operation.executionFence;
     return (operation.chatId === chatId || operation.entityId === chatId)
       && operationFence?.ownerId === fence.ownerId && operationFence.generation === fence.generation;
   };
-  return useMessageStore.getState().pendingOperations.filter(matches).length
-    + useChatStore.getState().pendingOperations.filter(matches).length;
+  return messageOperations.filter(matches).length + chatOperations.filter(matches).length;
 }
 
 async function confirmFencedWrites(chatId: string, fence: ChatExecutionFence) {
-  if (!pendingFencedWrites(chatId, fence)) return;
+  const [{ useMessageStore }, { useChatStore }] = await Promise.all([
+    import('../stores/useMessageStore'), import('../stores/useChatStore'),
+  ]);
+  const pendingCount = () => pendingFencedWrites(chatId, fence,
+    useMessageStore.getState().pendingOperations, useChatStore.getState().pendingOperations);
+  if (!pendingCount()) return;
   if (typeof navigator !== 'undefined' && !navigator.onLine) throw new Error('本次会话仍有待同步结果；联网后请核对同步状态');
   await useChatStore.getState().flushPendingOperations();
   await useMessageStore.getState().flushPendingOperations();
   await useChatStore.getState().flushPendingOperations();
-  if (pendingFencedWrites(chatId, fence)) throw new Error('本次会话仍有待同步结果，请在同步状态中检查后继续');
+  if (pendingCount()) throw new Error('本次会话仍有待同步结果，请在同步状态中检查后继续');
 }
 
 export function assertChatExecutionLease(chatId: string) {
