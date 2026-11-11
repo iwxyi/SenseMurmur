@@ -81,15 +81,25 @@ export async function runWithChatExecutionLease<T>(chatId: string, work: () => P
     });
   }, LEASE_RENEW_INTERVAL_MS);
 
+  let writesConfirmed = false;
   try {
     const result = await work();
     await confirmFencedWrites(chatId, fence);
+    writesConfirmed = true;
     if (pendingRenewal) await pendingRenewal;
     if (leaseError) throw leaseError;
     return result;
   } finally {
     window.clearInterval(renewTimer);
     if (pendingRenewal) await pendingRenewal;
+    if (!writesConfirmed && !leaseError) {
+      try {
+        await confirmFencedWrites(chatId, fence);
+      } catch {
+        // The original task error remains authoritative; the outbox retains
+        // its own visible sync failure for the user to inspect.
+      }
+    }
     try {
       await api.releaseChatExecutionLease(chatId, fence);
     } catch {

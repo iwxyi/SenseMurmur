@@ -94,4 +94,23 @@ describe('chat execution lease', () => {
     expect(api.releaseChatExecutionLease).toHaveBeenCalledOnce();
     flush.mockRestore();
   });
+
+  it('confirms local writes before release even when the task itself fails', async () => {
+    const sequence: string[] = [];
+    const flush = vi.spyOn(useMessageStore.getState(), 'flushPendingOperations').mockImplementation(async () => {
+      sequence.push('flush');
+      useMessageStore.setState({ pendingOperations: [] });
+    });
+    vi.mocked(api.releaseChatExecutionLease).mockImplementation(async () => {
+      sequence.push('release');
+      return { released: true };
+    });
+    await expect(runWithChatExecutionLease('chat-five', async () => {
+      const fence = getChatExecutionFence('chat-five')!;
+      useMessageStore.setState({ pendingOperations: [{ id: 'message-test', chatId: 'chat-five', executionFence: fence, status: 'pending', attemptCount: 0, createdAt: Date.now(), kind: 'create' }] });
+      throw new Error('task failed');
+    })).rejects.toThrow('task failed');
+    expect(sequence).toEqual(['flush', 'release']);
+    flush.mockRestore();
+  });
 });
