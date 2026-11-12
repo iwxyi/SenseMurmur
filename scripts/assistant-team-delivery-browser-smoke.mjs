@@ -85,12 +85,13 @@ try {
       finalAcceptance: '报告与数据表均完整',
     };
     const requests = [];
+    let responseSequence = null;
     const originalFetch = window.fetch;
     window.fetch = async (input, init) => {
       if (!String(input).includes('mock-llm.invalid')) return originalFetch(input, init);
       const request = JSON.parse(init.body);
       requests.push(request);
-      const content = requests.length === 1 ? JSON.stringify(plan)
+      const content = responseSequence ? responseSequence.shift() : requests.length === 1 ? JSON.stringify(plan)
         : JSON.stringify(request.messages).includes('整理市场数据表')
           ? '| 类别 | 数量 |\\n| --- | ---: |\\n| A | 3 |'
           : '市场研究报告：需求稳定，主要机会集中在订阅服务。';
@@ -121,6 +122,19 @@ try {
       const messagesAfterRepeat = [...useMessageStore.getState().messages, ...(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages || [])]
         .filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index)
         .filter((item) => item.id === 'team-delivery-' + runId);
+      const deliveryModelCalls = requests.length;
+      const stalledPlan = { ...plan, tasks: [plan.tasks[0]] };
+      const verdict = JSON.stringify({ complete: false, reason: '缺少公开来源', nextRequest: '补充公开来源' });
+      responseSequence = [JSON.stringify(stalledPlan), '目前没有来源', verdict, JSON.stringify(stalledPlan), '目前没有来源', verdict];
+      const stalledRunId = 'stalled-' + crypto.randomUUID();
+      const stalled = await workflow.start(stalledRunId, chatId, '研究市场且结论必须有来源', true);
+      if (stalled.snapshot.run.status !== 'paused') throw new Error('重复返工未暂停');
+      const block = stalled.snapshot.tasks.find((task) => task.id === 'review_needs_user');
+      if (!block?.error?.includes('没有产生新的文本交付')) throw new Error('未说明无进展原因');
+      if (requests.length !== deliveryModelCalls + 6) throw new Error('无进展后仍有额外模型调用');
+      const restarted = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'browser-smoke', baseUrl: 'https://mock-llm.invalid/v1', model: 'smoke-model' }, currentWorkflowScope);
+      await restarted.resume(stalledRunId);
+      if (requests.length !== deliveryModelCalls + 6) throw new Error('重新打开后重复了无进展请求');
       window.fetch = originalFetch;
       return {
         status: afterFirstDelivery?.run.status,
@@ -130,8 +144,10 @@ try {
         artifactsAfterRepeat: artifactsAfterRepeat.length,
         messages: messages.length,
         messagesAfterRepeat: messagesAfterRepeat.length,
-        modelCalls: requests.length,
+        modelCalls: deliveryModelCalls,
         budgetRecovery: paused.snapshot.run.status === 'paused' && completed.snapshot.run.maxModelCalls === 3,
+        stalledStatus: stalled.snapshot.run.status,
+        stalledModelCalls: requests.length - deliveryModelCalls,
       };
     } finally { window.fetch = originalFetch; }
   })()`);
@@ -144,6 +160,8 @@ try {
   assert.equal(result.messagesAfterRepeat, 1);
   assert.equal(result.modelCalls, 3);
   assert.equal(result.budgetRecovery, true);
+  assert.equal(result.stalledStatus, 'paused');
+  assert.equal(result.stalledModelCalls, 6);
   console.log(JSON.stringify({ ok: true, ...result }));
 } finally {
   cdp.close();

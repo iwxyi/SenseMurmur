@@ -25,6 +25,7 @@ import { inspectAgentTeamImages } from './agentTeamImageInspection';
 import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
 import { listAvailableModels } from './aiClient';
 import { canComposeTeamMedia, composeAgentTeamMedia, inspectAgentTeamComposition } from './agentTeamMediaComposition';
+import { hasRepeatedTeamReviewWithoutProgress } from './agentTeamProgress';
 
 const TOOL_TASK_KINDS = {
   text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio',
@@ -647,6 +648,10 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           if (completedReview?.status !== 'completed') break;
           const verdict = parseTeamReview(completedReview.output);
           if (verdict.complete) break;
+          if (hasRepeatedTeamReviewWithoutProgress(snapshot, reviewId)) {
+            snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '自动返工没有产生新的文本交付，验收再次提出相同要求。已暂停以避免重复执行，请补充约束、调整模型或指定下一步。'));
+            break;
+          }
           if (round === 3) {
             snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, `自动验收仍未通过：${verdict.reason}。请检查目标或追加指示。`));
             break;

@@ -297,6 +297,26 @@ describe('agent team workflow', () => {
     await workflow.resume(runId);
     expect(generate).toHaveBeenCalledTimes(6);
   });
+  it('pauses repeated automatic revisions with unchanged evidence and remains blocked after restart', async () => {
+    const runId = crypto.randomUUID();
+    const plan = { summary: '研究', roles: [{ id: 'writer', name: '研究员', responsibility: '研究', method: '核对来源', acceptance: '有来源', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'research', roleId: 'writer', goal: '研究问题', dependsOn: [], acceptance: '有来源' }], finalAcceptance: '结论有来源' };
+    const verdict = JSON.stringify({ complete: false, reason: '缺少来源', nextRequest: '补充来源' });
+    generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('目前缺少来源')
+      .mockResolvedValueOnce(verdict).mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('目前缺少来源').mockResolvedValueOnce(verdict);
+    const scope = `team-stalled-${runId}`;
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const workflow = createAgentTeamWorkflow(config, () => scope);
+    const result = await workflow.start(runId, 'chat', '研究问题', true);
+    expect(result.snapshot.run.status).toBe('paused');
+    expect(result.snapshot.tasks.find((task) => task.id === 'review_needs_user')?.error).toContain('没有产生新的文本交付');
+    expect(result.snapshot.tasks.some((task) => task.id === 'auto_delegate_2')).toBe(false);
+    const restarted = createAgentTeamWorkflow(config, () => scope);
+    await restarted.resume(runId);
+    expect(generate).toHaveBeenCalledTimes(6);
+    const updated = await restarted.addRevisionRequest(runId, result.snapshot.run.planVersion, '明确只使用已提供资料');
+    expect(updated.tasks.some((task) => task.id === 'review_needs_user')).toBe(false);
+  });
   it('retains early media evidence when a long run has later text results', async () => {
     const runId = crypto.randomUUID();
     const now = Date.now();
