@@ -17,6 +17,7 @@ import { composeAgentTeamMedia, inspectAgentTeamComposition, teamMediaAttachment
 import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
 import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
 import { countWorkflowModelCalls } from './workflowRunRuntime';
+import * as persistence from '../stores/storePersistenceScope';
 
 vi.mock('./agentTeamMediaComposition', () => ({ canComposeTeamMedia: () => true, composeAgentTeamMedia: vi.fn(), inspectAgentTeamComposition: vi.fn(), teamMediaAttachment: vi.fn() }));
 vi.mock('./agentTeamVideoInspection', () => ({ inspectAgentTeamVideo: vi.fn() }));
@@ -1191,7 +1192,7 @@ describe('agent team workflow', () => {
   it('runs independent report and table tasks concurrently and publishes both artifacts', async () => {
     const runId = crypto.randomUUID();
     const chatId = `parallel-delivery-${runId}`;
-    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null, messageBranchState: { enabled: false } } as (typeof state.chats)[number]] }));
     generate.mockResolvedValueOnce(JSON.stringify({
       summary: '市场研究交付',
       roles: [{ id: 'analyst', name: '研究员', responsibility: '研究并整理', method: '并行完成报告和数据表', acceptance: '两份交付均完整', allowedTools: ['text_generation'] }],
@@ -1264,7 +1265,7 @@ describe('agent team workflow', () => {
     const runId = `team-${crypto.randomUUID()}`;
     const chatId = `recovered-delivery-${runId}`;
     const scope = currentWorkflowScope();
-    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null, messageBranchState: { enabled: false } } as (typeof state.chats)[number]] }));
     generate.mockResolvedValueOnce(JSON.stringify({
       summary: '恢复交付报告',
       roles: [{ id: 'writer', name: '写作者', responsibility: '撰写报告', method: '整理资料', acceptance: '报告可读', allowedTools: ['text_generation'] }],
@@ -1288,11 +1289,11 @@ describe('agent team workflow', () => {
     expect(await indexedDbWorkflowRepository.listOutboxEvents(scope, runId, 'team-delivery')).toHaveLength(0);
   });
 
-  it('retries delivery after artifacts are saved but the final message write fails', async () => {
+  it.each(['message', 'transaction'])('retries delivery without duplicate versions after a %s failure', async (failure) => {
     const runId = `team-${crypto.randomUUID()}`;
     const chatId = `partial-delivery-${runId}`;
     const scope = currentWorkflowScope();
-    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null, messageBranchState: { enabled: false } } as (typeof state.chats)[number]] }));
     generate.mockResolvedValueOnce(JSON.stringify({
       summary: '中断恢复报告',
       roles: [{ id: 'writer', name: '写作者', responsibility: '撰写报告', method: '整理资料', acceptance: '报告可读', allowedTools: ['text_generation'] }],
@@ -1302,15 +1303,20 @@ describe('agent team workflow', () => {
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
     await workflow.start(runId, chatId, '写报告');
     const messageStore = useMessageStore.getState();
-    const upsert = vi.spyOn(messageStore, 'upsertMessage').mockImplementationOnce(() => { throw new Error('模拟最终消息写入失败'); });
-    await expect(workflow.publish(runId)).rejects.toThrow('模拟最终消息写入失败');
-    upsert.mockRestore();
+    const interrupted = failure === 'message'
+      ? vi.spyOn(messageStore, 'upsertMessage').mockImplementationOnce(() => { throw new Error('模拟交付写入失败'); })
+      : vi.spyOn(persistence, 'commitBufferedPersistenceWrites').mockRejectedValueOnce(new Error('模拟交付写入失败'));
+    await expect(workflow.publish(runId)).rejects.toThrow('模拟交付写入失败');
+    interrupted.mockRestore();
     expect((await indexedDbWorkflowRepository.read(scope, runId))?.run.deliveryStatus).toBeUndefined();
     expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)).toHaveLength(1);
+    const versionId = useAssistantArtifactStore.getState().getArtifactsForChat(chatId)[0].currentVersionId;
 
     expect(await recoverAgentTeamRuns()).toBe(true);
     expect((await indexedDbWorkflowRepository.read(scope, runId))?.run.deliveryStatus).toBe('published');
     expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)).toHaveLength(1);
+    expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)[0].currentVersionId).toBe(versionId);
+    expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)[0].versions).toHaveLength(1);
     expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.filter((message) => message.id === `team-delivery-${runId}`)).toHaveLength(1);
     expect(generate).toHaveBeenCalledTimes(2);
   });
@@ -1424,7 +1430,7 @@ describe('agent team workflow', () => {
   it('persists a delegated plan, resumes its child task, and includes its result in delivery', async () => {
     const runId = crypto.randomUUID();
     const chatId = `delegate-chat-${runId}`;
-    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '交付', memberIds: [], deletedAt: null } as (typeof state.chats)[number]] }));
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '交付', memberIds: [], deletedAt: null, messageBranchState: { enabled: false } } as (typeof state.chats)[number]] }));
     const basePlan = {
       summary: '先调研', roles: [{ id: 'researcher', name: '研究员', responsibility: '调研', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
       tasks: [{ id: 'research', roleId: 'researcher', goal: '调研问题', dependsOn: [], acceptance: '有结论' }], finalAcceptance: '完成研究',
@@ -1495,7 +1501,7 @@ describe('agent team workflow', () => {
   it('accepts a second revision and publishes all rounds in one artifact', async () => {
     const runId = crypto.randomUUID();
     const chatId = `multiple-revisions-${runId}`;
-    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '交付', memberIds: [], deletedAt: null } as (typeof state.chats)[number]] }));
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '交付', memberIds: [], deletedAt: null, messageBranchState: { enabled: false } } as (typeof state.chats)[number]] }));
     const plan = (id: string, goal: string) => ({ summary: goal,
       roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '有交付', allowedTools: ['text_generation'] }],
       tasks: [{ id, roleId: 'writer', goal, dependsOn: [], acceptance: '有内容' }], finalAcceptance: '内容完整' });

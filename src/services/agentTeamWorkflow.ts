@@ -6,7 +6,9 @@ import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRep
 import { ensureAssistantArtifactStoreHydrated, useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
-import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
+import { commitBufferedPersistenceWrites } from '../stores/storePersistenceScope';
+import { scopedStorageKey } from '../constants/brand';
+import { getLocalDataUserId } from './authStorageScope';
 import { currentWorkflowScope, workflowRunLockName } from './workflowRunRuntime';
 import { attachMessageToActiveBranch } from './messageBranching';
 import { advanceTeamConversation, captureTeamSourceBranch, teamConversationBlockReason, teamConversationContext } from './agentTeamConversation';
@@ -842,6 +844,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
     async publish(runId: string) {
       if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队交付');
       const deliveryScope = scope();
+      const deliveryStorageKeys = ['assistant-artifacts', 'messages', 'chats'].map((name) => scopedStorageKey(`${name}-${getLocalDataUserId()}`));
       const initial = await runtime.read(runId);
       if (!initial || initial.run.status !== 'completed') throw new Error('团队任务尚未完成');
       const chatId = initial.run.chatId;
@@ -925,9 +928,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         useMessageStore.getState().upsertMessage(draft);
         useMessageStore.getState().queueMessageSync(draft);
         await advanceTeamConversation(draft, snapshot.run.goalSpec?.sourceBranch);
-        void useChatStore.getState().updateChat(chat.id, { lastMessageAt: draft.timestamp, latestMessage: draft });
+        await useChatStore.getState().updateChat(chat.id, { lastMessageAt: draft.timestamp, latestMessage: draft });
       }
-      flushBufferedPersistenceWrites();
+      await commitBufferedPersistenceWrites(deliveryStorageKeys);
       if (signal?.aborted) throw signal.reason || new Error('团队交付已暂停');
       assertDeliveryOwnership();
       await runtime.markDeliveryPublished(runId, snapshot.run.planVersion);

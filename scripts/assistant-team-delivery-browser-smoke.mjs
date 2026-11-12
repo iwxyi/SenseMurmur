@@ -42,6 +42,7 @@ const page = pages.find((item) => item.type === 'page' && item.url.startsWith(or
 if (!page) throw new Error(`Open MirageTea in Chrome first: ${clientUrl}`);
 const cdp = new Cdp(page.webSocketDebuggerUrl);
 await cdp.open();
+let cleanupSource;
 
 try {
   await cdp.send('Page.enable');
@@ -169,6 +170,7 @@ try {
       if (requests.length !== deliveryModelCalls + 6) throw new Error('重新打开后重复了无进展请求');
       window.fetch = originalFetch;
       return {
+        runId, chatId,
         status: afterFirstDelivery?.run.status,
         deliveryStatus: afterFirstDelivery?.run.deliveryStatus,
         taskStatuses: afterFirstDelivery?.tasks.map((task) => task.status),
@@ -197,6 +199,34 @@ try {
   assert.equal(result.branchRecovery, true);
   assert.equal(result.stalledStatus, 'paused');
   assert.equal(result.stalledModelCalls, 6);
+  cleanupSource = await cdp.evaluate('window.__cleanupDeliveryFixture.toString()');
+  await cdp.send('Page.reload');
+  let reloaded = false;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    reloaded = await cdp.evaluate(`Boolean(document.querySelector('#root')?.childElementCount) && !window.__cleanupDeliveryFixture`);
+    if (reloaded) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(reloaded, true, 'Browser did not reload');
+  const restored = await cdp.evaluate(`(async () => {
+    const [{ useMessageStore }, { useAssistantArtifactStore }, { currentWorkflowScope, indexedDbWorkflowRepository }] = await Promise.all([
+      import('/src/stores/useMessageStore.ts'), import('/src/stores/useAssistantArtifactStore.ts'), import('/src/services/workflowRunRuntime.ts'),
+    ]);
+    window.__cleanupDeliveryFixture = (${cleanupSource});
+    await Promise.all([useMessageStore.persist.rehydrate(), useAssistantArtifactStore.persist.rehydrate()]);
+    const chatId = ${JSON.stringify(result.chatId)};
+    const runId = ${JSON.stringify(result.runId)};
+    const snapshot = await indexedDbWorkflowRepository.read(currentWorkflowScope(), runId);
+    const messages = [...useMessageStore.getState().messages, ...(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages || [])];
+    const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId);
+    return { published: snapshot?.run.deliveryStatus === 'published',
+      message: messages.some((item) => item.id === 'team-delivery-' + runId),
+      artifacts: artifacts.length, versions: artifacts.map((item) => item.versions.length) };
+  })()`);
+  assert.deepEqual(restored, { published: true, message: true, artifacts: 2, versions: [1, 1] });
+  delete result.runId;
+  delete result.chatId;
+  result.reloadRecovery = true;
   console.log(JSON.stringify({ ok: true, ...result }));
 } finally {
   await cdp.evaluate('window.__cleanupDeliveryFixture?.()').catch((error) => console.error('Fixture cleanup failed:', error));

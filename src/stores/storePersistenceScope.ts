@@ -59,6 +59,7 @@ export interface LocalStorageFallbackMigrationResult {
 }
 
 const bufferedFlushers = new Set<() => void>();
+const durableBufferedFlushers = new Set<(keys: ReadonlySet<string>) => Promise<void>>();
 let bufferedLifecycleRegistered = false;
 const INDEXED_DB_NAME = 'pneumata-local-store';
 const INDEXED_DB_VERSION = 1;
@@ -138,6 +139,12 @@ function ensureBufferedStorageLifecycle() {
 
 export function flushBufferedPersistenceWrites() {
   for (const flush of bufferedFlushers) flush();
+}
+
+// Delivery acknowledgements must wait for transaction completion, not dispatch.
+export async function commitBufferedPersistenceWrites(keys: readonly string[]) {
+  const selected = new Set(keys);
+  await Promise.all([...durableBufferedFlushers].map((flush) => flush(selected)));
 }
 
 function parsePersistedValue<T>(raw: string | null, reviver?: BufferedJsonStorageOptions['reviver']) {
@@ -478,6 +485,9 @@ export function createBufferedJsonStorage<T>(
 ): PersistStorage<T, void> {
   const pendingWrites = new Map<string, PendingBufferedWrite<T>>();
   const inFlightWrites = new Map<string, PendingBufferedWrite<T>>();
+  const completions = new Map<string, Promise<void>>();
+  const failedWrites = new Map<string, PendingBufferedWrite<T>>();
+  const failures = new Map<string, unknown>();
   const flushDelayMs = options.flushDelayMs ?? 96;
 
   const resolveStorageTarget = (name: string): BufferedStorageTarget => {
@@ -496,6 +506,7 @@ export function createBufferedJsonStorage<T>(
     const pending = pendingWrites.get(key);
     if (!pending) return;
     pendingWrites.delete(key);
+    failedWrites.delete(key);
     cancelBufferedFlush(pending.handle);
     let serializedValue = '';
     try {
@@ -505,11 +516,16 @@ export function createBufferedJsonStorage<T>(
         : pending.target.setItem(serializedValue);
       if (setResult instanceof Promise) {
         inFlightWrites.set(key, pending);
-        setResult.catch((error) => {
+        const completion = setResult.then(() => {
+          failures.delete(key);
+        }).catch((error: unknown) => {
+          failures.set(key, error);
+          failedWrites.set(key, pending);
           recordPersistenceFailure({ name: pending.name, reason: 'write_failed', error, serializedValue });
           console.warn('[storage] persistence async write failed', { name: pending.name, error });
         }).finally(() => {
           inFlightWrites.delete(key);
+          completions.delete(key);
           try {
             flushKey(key);
           } catch (error) {
@@ -518,8 +534,13 @@ export function createBufferedJsonStorage<T>(
             console.warn('[storage] persistence pending flush failed', { name: pending.name, error });
           }
         });
+        completions.set(key, completion);
+      } else {
+        failures.delete(key);
       }
     } catch (error) {
+      failures.set(key, error);
+      failedWrites.set(key, pending);
       const errorName = error instanceof DOMException ? error.name : '';
       if (errorName === 'QuotaExceededError' || errorName === 'NS_ERROR_DOM_QUOTA_REACHED') {
         recordPersistenceFailure({ name: pending.name, reason: 'quota_exceeded', error, serializedValue });
@@ -539,6 +560,26 @@ export function createBufferedJsonStorage<T>(
 
   ensureBufferedStorageLifecycle();
   bufferedFlushers.add(flushAll);
+  durableBufferedFlushers.add(async (keys) => {
+    for (const key of keys) {
+      const failed = failedWrites.get(key);
+      if (failed && !pendingWrites.has(key) && !inFlightWrites.has(key)) pendingWrites.set(key, failed);
+    }
+    // Writes scheduled while a transaction is busy may replace its snapshot.
+    // Wait for those too before acknowledging delivery.
+    while (true) {
+      for (const key of keys) flushKey(key);
+      const active = [...keys].flatMap((key) => completions.get(key) ? [completions.get(key)!] : []);
+      if (active.length) {
+        await Promise.all(active);
+        continue;
+      }
+      for (const key of keys) {
+        if (failures.has(key)) throw failures.get(key);
+      }
+      return;
+    }
+  });
 
   function prepareValue(target: BufferedStorageTarget, value: StorageValue<T> | null) {
     return value && target.transformState
@@ -550,7 +591,7 @@ export function createBufferedJsonStorage<T>(
     getItem: (name: string) => {
       const target = resolveStorageTarget(name);
       // A dispatched write remains the latest snapshot until its transaction commits.
-      const pending = pendingWrites.get(target.key) ?? inFlightWrites.get(target.key);
+      const pending = pendingWrites.get(target.key) ?? inFlightWrites.get(target.key) ?? failedWrites.get(target.key);
       if (pending && (target.canReadPending?.() ?? true)) return prepareValue(target, pending.value);
       const raw = target.getItem();
       if (raw instanceof Promise) {

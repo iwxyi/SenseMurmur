@@ -7,6 +7,7 @@ import {
   createScopedIndexedDbBufferedJsonStorage,
   createScopedIndexedDbStorage,
   flushBufferedPersistenceWrites,
+  commitBufferedPersistenceWrites,
   migrateLocalStorageFallbacksToIndexedDb,
   readIndexedDbStorageDiagnostics,
 } from './storePersistenceScope';
@@ -126,6 +127,56 @@ describe('storePersistenceScope', () => {
     expect(readPersistenceHealth().latestFailure).toMatchObject({ name: 'failed-write', reason: 'write_failed' });
     expect(raw.setItem).toHaveBeenLastCalledWith('failed-write', JSON.stringify({ state: { value: 2 } }));
     warnSpy.mockRestore();
+  });
+
+  it('acknowledges only after both the in-flight and newest coalesced snapshots commit', async () => {
+    const commits: Array<() => void> = [];
+    const raw = createStorageMock();
+    const storage = createBufferedJsonStorage<{ value: number }>({ ...raw,
+      setItem: (name, value) => new Promise<void>((resolve) => {
+        commits.push(() => { raw.setItem(name, value); resolve(); });
+      }),
+    });
+    const key = 'durable-barrier';
+    storage.setItem(key, { state: { value: 1 } });
+    let acknowledged = false;
+    const barrier = commitBufferedPersistenceWrites([key]).then(() => { acknowledged = true; });
+    storage.setItem(key, { state: { value: 2 } });
+    expect(acknowledged).toBe(false);
+    commits.shift()!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(acknowledged).toBe(false);
+    commits.shift()!();
+    await barrier;
+    expect(JSON.parse(raw.getItem(key)!).state.value).toBe(2);
+  });
+
+  it('rejects a failed commit, retains the snapshot, and allows an explicit durable retry', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const raw = createStorageMock();
+    const setItem = vi.fn().mockRejectedValueOnce(new Error('disk unavailable'))
+      .mockImplementation((name: string, value: string) => { raw.setItem(name, value); });
+    const storage = createBufferedJsonStorage<{ value: number }>({ ...raw, setItem });
+    const key = 'durable-retry';
+    storage.setItem(key, { state: { value: 7 } });
+    await expect(commitBufferedPersistenceWrites([key])).rejects.toThrow('disk unavailable');
+    expect(raw.getItem(key)).toBeNull();
+    expect(storage.getItem(key)).toEqual({ state: { value: 7 } });
+    await commitBufferedPersistenceWrites([key]);
+    expect(JSON.parse(raw.getItem(key)!).state.value).toBe(7);
+    expect(setItem).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
+  });
+
+  it('keeps another account failure outside the selected delivery barrier', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const storage = createBufferedJsonStorage<{ value: number }>({
+      getItem: () => null, removeItem: vi.fn(), setItem: () => Promise.reject(new Error('other account failure')),
+    });
+    storage.setItem('other-account', { state: { value: 1 } });
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(commitBufferedPersistenceWrites(['current-account'])).resolves.toBeUndefined();
+    warn.mockRestore();
   });
 
   it('waits for transaction commit and rejects a write aborted after request success', async () => {
