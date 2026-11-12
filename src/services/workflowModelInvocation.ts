@@ -1,4 +1,4 @@
-export const WORKFLOW_MODEL_TASK_KINDS = ['team_plan', 'team_plan_revision', 'team_review', 'agent_text', 'agent_image_inspection', 'agent_video_inspection'] as const;
+export const WORKFLOW_MODEL_TASK_KINDS = ['team_plan', 'team_plan_revision', 'team_review', 'agent_text', 'agent_delegation', 'agent_image_inspection', 'agent_video_inspection'] as const;
 
 export interface WorkflowModelInvocation {
   schemaVersion: 1;

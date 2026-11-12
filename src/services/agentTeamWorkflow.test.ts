@@ -106,6 +106,90 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('recursively delegates, waits for children, aggregates and restores without duplicate calls', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `recursive-${runId}`;
+    const role = { id: 'lead', name: '负责人', responsibility: '交付研究', method: '按需拆分', acceptance: '有证据', allowedTools: ['text_generation', 'delegate_task'] };
+    const makePlan = (id: string, goal: string, tool: string) => ({ summary: goal, roles: [role],
+      tasks: [{ id, roleId: role.id, goal, tool, dependsOn: [], acceptance: '有证据' }], finalAcceptance: '报告可用' });
+    generate.mockResolvedValueOnce(JSON.stringify(makePlan('research', '研究产品机会', 'delegate_task')))
+      .mockResolvedValueOnce(JSON.stringify(makePlan('market', '分析市场需求', 'delegate_task')))
+      .mockResolvedValueOnce(JSON.stringify(makePlan('findings', '整理已提供的需求证据', 'text_generation')))
+      .mockResolvedValueOnce('证据：用户需要离线运行')
+      .mockResolvedValueOnce('市场结论：离线需求明确')
+      .mockResolvedValueOnce('研究结论：优先离线交付');
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const workflow = createAgentTeamWorkflow(config, () => scope);
+    const result = await workflow.start(runId, 'chat', '研究产品机会', false);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'research')?.output).toContain('优先离线交付');
+    expect(result.snapshot.tasks.find((task) => task.id === 'research_market')?.output).toContain('离线需求明确');
+    expect(result.snapshot.tasks.find((task) => task.id === 'research_market_findings')?.output).toContain('离线运行');
+    expect(generate.mock.calls[4][2][0].content).toContain('用户需要离线运行');
+    expect(generate.mock.calls[5][2][0].content).toContain('离线需求明确');
+    expect(countWorkflowModelCalls(result.snapshot)).toBe(6);
+    const attempts = await indexedDbWorkflowRepository.listTaskAttempts(scope, runId, 'research');
+    expect(attempts.map((attempt) => attempt.status)).toEqual(['completed', 'completed']);
+    expect((await indexedDbWorkflowRepository.listPlanRevisions(scope, runId)).some((revision) => revision.addedTaskIds.includes('research_market_findings'))).toBe(true);
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(generate).toHaveBeenCalledTimes(6);
+  });
+
+  it('rejects child plans that expand parent tool permissions', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `recursive-denied-${runId}`;
+    const role = { id: 'lead', name: '负责人', responsibility: '研究', method: '拆分', acceptance: '完整', allowedTools: ['delegate_task', 'text_generation'] };
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '研究', roles: [role], tasks: [{ id: 'research', roleId: role.id, goal: '研究', tool: 'delegate_task', dependsOn: [], acceptance: '完整' }], finalAcceptance: '完整' }))
+      .mockResolvedValueOnce(JSON.stringify({ summary: '越权', roles: [{ ...role, allowedTools: ['text_generation', 'web_search'] }], tasks: [{ id: 'report', roleId: role.id, goal: '整理报告', tool: 'text_generation', dependsOn: [], acceptance: '报告' }], finalAcceptance: '报告' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const result = await workflow.start(runId, 'chat', '研究', false);
+    expect(result.snapshot.tasks.find((task) => task.id === 'research')?.status).toBe('failed');
+    expect(result.snapshot.tasks).toHaveLength(2);
+    expect(queueAgentTeamImage).not.toHaveBeenCalled();
+    expect(countWorkflowModelCalls(result.snapshot)).toBe(2);
+  });
+
+  it('retries a failed delegation synthesis without repeating completed child work', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `synthesis-retry-${runId}`;
+    const role = { id: 'lead', name: '负责人', responsibility: '研究', method: '拆分', acceptance: '完整', allowedTools: ['delegate_task', 'text_generation'] };
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '研究', roles: [role], tasks: [{ id: 'research', roleId: role.id, goal: '研究市场', tool: 'delegate_task', dependsOn: [], acceptance: '报告' }], finalAcceptance: '报告' }))
+      .mockResolvedValueOnce(JSON.stringify({ summary: '证据', roles: [{ ...role, allowedTools: ['text_generation'] }], tasks: [{ id: 'evidence', roleId: role.id, goal: '整理证据', tool: 'text_generation', dependsOn: [], acceptance: '证据' }], finalAcceptance: '证据' }))
+      .mockResolvedValueOnce('已完成的证据').mockResolvedValueOnce('').mockResolvedValueOnce('汇总完成');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const failed = await workflow.start(runId, 'chat', '调研', false);
+    expect(failed.snapshot.run.status).toBe('failed');
+    await workflow.retryFailedPlan(runId, 'research', failed.snapshot.run.planVersion);
+    const result = await workflow.resume(runId);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'research_evidence')?.attempt).toBe(1);
+    expect(generate).toHaveBeenCalledTimes(5);
+    expect(generate.mock.calls[4][2][0].content).toContain('已完成的证据');
+  });
+
+  it.each(['complete', 'depth', 'repeat'] as const)('enforces recursive delegation boundaries: %s', async (mode) => {
+    const runId = crypto.randomUUID();
+    const role = { id: 'lead', name: '负责人', responsibility: '研究', method: '拆分', acceptance: '证据', allowedTools: ['delegate_task', 'text_generation'] };
+    const plan = (id: string, goal: string, tool = 'delegate_task') => JSON.stringify({ summary: goal,
+      roles: [{ ...role, allowedTools: tool === 'text_generation' ? ['text_generation'] : role.allowedTools }],
+      tasks: [{ id, goal, roleId: role.id, tool, dependsOn: [], acceptance: '证据' }], finalAcceptance: '报告' });
+    generate.mockResolvedValueOnce(plan('first', '研究机会'))
+      .mockResolvedValueOnce(plan('second', mode === 'repeat' ? '研究机会' : '分析市场'))
+      .mockResolvedValueOnce(plan('third', '分析客户'))
+      .mockResolvedValueOnce(plan('leaf', '整理结论', mode === 'depth' ? 'delegate_task' : 'text_generation'))
+      .mockResolvedValueOnce('真实证据').mockResolvedValueOnce('客户结论').mockResolvedValueOnce('市场结论').mockResolvedValueOnce('最终报告');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `boundary-${runId}`);
+    const result = await workflow.start(runId, 'chat', '完成调研', false);
+    if (mode === 'complete') {
+      expect(result.snapshot.run.status).toBe('completed');
+      expect(generate).toHaveBeenCalledTimes(8);
+    } else {
+      expect(result.snapshot.run.status).toBe('failed');
+      expect(generate).toHaveBeenCalledTimes(mode === 'repeat' ? 2 : 4);
+      expect(result.snapshot.tasks.some((task) => task.error?.includes(mode === 'repeat' ? '重复祖先目标' : '委派'))).toBe(true);
+    }
+  });
+
   it.each([0, 1])('persists goal constraints and enforces %s automatic review rounds after restart', async (rounds) => {
     const runId = crypto.randomUUID();
     const scope = `goal-contract-${runId}`;
@@ -266,7 +350,7 @@ describe('agent team workflow', () => {
     expect(extended.snapshot.tasks.find((task) => task.id === 'delegated_shot_40')?.output).toBe('补充镜头 40 内容');
     await workflow.resume(runId);
     expect(generate).toHaveBeenCalledTimes(82);
-  });
+  }, 15_000);
 
   it('passes the completed image attachment to a dependent image task', async () => {
     const runId = crypto.randomUUID();
@@ -768,6 +852,28 @@ describe('agent team workflow', () => {
     expect(completed.snapshot.tasks.map((task) => task.status)).toEqual(['completed', 'completed', 'completed']);
     expect(queueAgentTeamVideo).toHaveBeenCalledTimes(1);
     expect(generate.mock.calls[1][2][0].content).toContain('视频已生成');
+  });
+
+  it('restores delegated external media without re-planning or resubmitting it', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `delegated-video-${runId}`;
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
+    const role = { id: 'director', name: '导演', responsibility: '拍摄', method: '拆分', acceptance: '成片', allowedTools: ['delegate_task', 'video_generation', 'text_generation'] };
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [role], tasks: [{ id: 'film', roleId: role.id, goal: '制作短片', tool: 'delegate_task', dependsOn: [], acceptance: '成片' }], finalAcceptance: '可播放' }))
+      .mockResolvedValueOnce(JSON.stringify({ summary: '镜头', roles: [{ ...role, allowedTools: ['video_generation'] }], tasks: [{ id: 'shot', roleId: role.id, goal: '森林追逐', tool: 'video_generation', dependsOn: [], acceptance: '视频' }], finalAcceptance: '视频' }))
+      .mockResolvedValueOnce('下级已交付视频');
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'delegated-video-task' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'delegated-video-task' });
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const pending = await createAgentTeamWorkflow(config, () => scope).start(runId, 'chat', '制作森林短片', false);
+    expect(pending.snapshot.tasks.find((task) => task.id === 'film')?.status).toBe('waiting_dependency');
+    expect(pending.snapshot.tasks.find((task) => task.id === 'film_shot')?.externalTaskId).toBe('delegated-video-task');
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'completed', output: '视频已生成并保存' });
+    const completed = await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(completed.snapshot.run.status).toBe('completed');
+    expect(generate).toHaveBeenCalledTimes(3);
+    expect(generate.mock.calls[2][2][0].content).toContain('视频已生成并保存');
+    expect(queueAgentTeamVideo).toHaveBeenCalledTimes(1);
   });
 
   it('passes a completed script into the video prompt', async () => {

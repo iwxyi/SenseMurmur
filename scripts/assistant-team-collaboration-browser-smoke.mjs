@@ -98,6 +98,49 @@ try {
     }, currentWorkflowScope);
     await runtime.create({ ...run, run: { ...run.run, status: 'active' }, tasks: run.tasks.map((task) => task.id === 'research' ? { ...task, status: 'queued', attempt: 0, output: undefined } : task) });
     const persistedRun = await runtime.resume(runId);
+    const [{ createAgentTeamWorkflow }, { useChatStore }] = await Promise.all([
+      import('/src/services/agentTeamWorkflow.ts'), import('/src/stores/useChatStore.ts'),
+    ]);
+    if (!useChatStore.persist.hasHydrated()) await useChatStore.persist.rehydrate();
+    const recursiveId = 'browser-collab-recursive-' + crypto.randomUUID();
+    const recursiveChatId = recursiveId + '-chat';
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: recursiveChatId, type: 'assistant', name: '递归委派验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));
+    const originalFetch = window.fetch;
+    let recursiveRequests = 0;
+    const recursivePlan = (id, goal, tool) => JSON.stringify({ summary: goal,
+      roles: [{ id: 'lead', name: '研究负责人', responsibility: '调研', method: '分解验证', acceptance: '有依据', allowedTools: tool === 'delegate_task' ? ['delegate_task', 'text_generation'] : ['text_generation'] }],
+      tasks: [{ id, roleId: 'lead', goal, tool, dependsOn: [], acceptance: '有依据' }], finalAcceptance: '可用报告' });
+    const replies = [recursivePlan('research', '研究机会', 'delegate_task'), recursivePlan('market', '分析市场', 'delegate_task'),
+      recursivePlan('evidence', '整理资料', 'text_generation'), '证据：离线使用需求', '市场交付：优先离线', '研究交付：离线方案'];
+    const config = { provider: 'openai', baseUrl: 'https://delegation-smoke.invalid/v1', apiKey: 'test-fixture', model: 'fixture' };
+    let recursiveRun;
+    window.fetch = async (input, init) => {
+      if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
+      const request = JSON.parse(init.body);
+      if (recursiveRequests === 4 && !JSON.stringify(request.messages).includes('离线使用需求')) throw new Error('Missing child evidence');
+      const content = replies[recursiveRequests++];
+      if (!content) throw new Error('Unexpected duplicate model request');
+      return Response.json({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
+    };
+    try {
+      const workflow = createAgentTeamWorkflow(config, currentWorkflowScope);
+      const paused = await workflow.start(recursiveId, recursiveChatId, '调研产品', false, new AbortController().signal, 3);
+      if (paused.snapshot.run.status !== 'paused' || recursiveRequests !== 3
+        || paused.snapshot.tasks.filter((task) => task.expansion).length !== 2) throw new Error('Delegation budget did not pause expanded children');
+      const restored = createAgentTeamWorkflow(config, currentWorkflowScope);
+      const saved = await restored.read(recursiveId);
+      await restored.setModelCallLimit(recursiveId, saved.run.planVersion, 6);
+      recursiveRun = (await restored.resume(recursiveId)).snapshot;
+      if (recursiveRun.run.status !== 'completed' || recursiveRequests !== 6
+        || recursiveRun.tasks.find((task) => task.id === 'research').output !== '研究交付：离线方案') throw new Error('Nested recovery or parent synthesis failed');
+      await createAgentTeamWorkflow(config, currentWorkflowScope).resume(recursiveId);
+      if (recursiveRequests !== 6) throw new Error('Recovery duplicated model requests');
+      const attempts = await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), recursiveId, 'research');
+      if (attempts.length !== 2 || attempts.some((attempt) => attempt.status !== 'completed')) throw new Error('Delegation attempt journal incomplete');
+    } finally {
+      window.fetch = originalFetch;
+      useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== recursiveChatId) }));
+    }
     const journalRunId = 'browser-collab-journal-' + crypto.randomUUID();
     await runtime.create({ ...run, run: { ...run.run, id: journalRunId, status: 'paused' },
       tasks: run.tasks.map((task) => ({ ...task, runId: journalRunId })) });
@@ -136,7 +179,7 @@ try {
     const root = createRoot(container);
     window.__assistantTeamSmoke.root = root;
     root.render(React.createElement(Workbench, {
-      runs: [persistedRun, resumableRun, secondResumableRun, uncertainRun], canRun: true, isRunActive: () => false, onResume: () => {},
+      runs: [persistedRun, resumableRun, secondResumableRun, uncertainRun, recursiveRun], canRun: true, isRunActive: () => false, onResume: () => {},
       onResumeAll: async (items) => { window.__assistantTeamSmoke.resumed = items.map((item) => item.run.id); }, onCreate: () => {},
       onInstruct: async () => {}, onPause: async () => {},
       onUpdateModelCallLimit: async (item, limit) => { window.__assistantTeamSmoke.limits.push({ runId: item.run.id, limit }); },
@@ -180,7 +223,11 @@ try {
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '保存调用上限').click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.limits.length === 1`), 'model call limit saved');
   assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.limits[0]`), { runId: 'browser-resume-run', limit: 12 });
-  console.log(JSON.stringify({ ok: true, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent === '研究机会').click()`);
+  await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).filter((button) => button.textContent.includes('研究负责人')).length === 3`), 'recursive child tasks visible');
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).filter((button) => button.textContent.includes('研究负责人')).at(-1).click()`);
+  await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('整理资料') && document.querySelector('[role="dialog"]').textContent.includes('证据：离线使用需求')`), 'nested child delivery visible');
+  console.log(JSON.stringify({ ok: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } catch (error) {
   console.error(JSON.stringify({ browserErrors: cdp.errors }));
   throw error;

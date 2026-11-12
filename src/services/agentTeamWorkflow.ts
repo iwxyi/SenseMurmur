@@ -32,6 +32,7 @@ import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoa
 const TOOL_TASK_KINDS = {
   text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio', speech_generation: 'agent_audio',
   image_inspection: 'agent_image_inspection', video_inspection: 'agent_video_inspection', video_generation: 'agent_video', media_composition: 'agent_media_composition',
+  delegate_task: 'agent_delegation',
 } as const;
 
 function teamTaskKind(task: AgentTeamTask) { return TOOL_TASK_KINDS[task.tool || 'text_generation']; }
@@ -164,6 +165,29 @@ function isTeamTaskInput(value: unknown): value is TeamTaskInput {
   return Boolean(candidate.task && candidate.role && typeof candidate.goal === 'string');
 }
 
+function delegationAncestors(snapshot: WorkflowSnapshot, task: WorkflowTask): WorkflowTask[] {
+  const ancestors: WorkflowTask[] = [];
+  const visited = new Set([task.id]);
+  let sourceId = isTeamTaskInput(task.input) ? task.input.sourcePlanTaskId : undefined;
+  while (sourceId) {
+    if (visited.has(sourceId)) throw new WorkflowPreflightError('委派关系形成循环');
+    visited.add(sourceId);
+    const source = snapshot.tasks.find((item) => item.id === sourceId);
+    if (!source) throw new WorkflowPreflightError('委派来源不存在');
+    if (source.kind !== 'agent_delegation') break;
+    ancestors.push(source);
+    sourceId = isTeamTaskInput(source.input) ? source.input.sourcePlanTaskId : undefined;
+  }
+  return ancestors;
+}
+
+function assertInheritedPlanAuthorized(snapshot: WorkflowSnapshot, parent: WorkflowTask, plan: AgentTeamPlan) {
+  assertGoalPlanAuthorized(snapshot, plan);
+  if (!isTeamTaskInput(parent.input)) throw new WorkflowPreflightError('父任务授权记录无效');
+  const tools = parent.input.role.allowedTools;
+  if (plan.roles.some((role) => role.allowedTools.some((tool) => !tools.includes(tool)))) throw new WorkflowPreflightError('下级岗位申请了父任务未获准的工具');
+}
+
 function sameAgentTeamRole(left: AgentTeamPlan['roles'][number], right: AgentTeamPlan['roles'][number]) {
   const leftTools = new Set(left.allowedTools);
   const rightTools = new Set(right.allowedTools);
@@ -252,7 +276,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
-        const plan = await planAgentTeam({ api, goal: task.input + workflowGoalContext(snapshot.run.goalSpec), chatId: snapshot.run.chatId, webSearch, ...capabilities, signal, beforeModelRequest: context.beginModelInvocation });
+        const plan = await planAgentTeam({ api, goal: task.input + workflowGoalContext(snapshot.run.goalSpec), chatId: snapshot.run.chatId, webSearch, ...capabilities, delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         assertGoalPlanAuthorized(snapshot, plan);
         return { output: plan };
@@ -270,7 +294,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
-        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities, signal, beforeModelRequest: context.beginModelInvocation });
+        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities, delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         assertGoalPlanAuthorized(snapshot, plan);
         return { output: plan };
@@ -303,7 +327,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       assertChatExecutionLease(snapshot.run.chatId);
       let plan: AgentTeamPlan;
       try {
-        plan = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === (input.sourcePlanTaskId || 'plan'))?.output);
+        const source = snapshot.tasks.find((item) => item.id === (input.sourcePlanTaskId || 'plan'));
+        plan = validateAgentTeamPlan(source?.expansion?.context ?? source?.output);
+        if (source?.kind === 'agent_delegation') assertInheritedPlanAuthorized(snapshot, source, plan);
       } catch (error) {
         throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队计划无效');
       }
@@ -317,6 +343,50 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       assertGoalPlanAuthorized(snapshot, plan);
       if (task.kind !== teamTaskKind(input.task)) throw new WorkflowPreflightError('团队任务工具与计划不一致');
       if (signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
+      if (selectedTool === 'delegate_task') {
+        const ancestors = delegationAncestors(snapshot, task);
+        if (ancestors.length >= 3) throw new WorkflowPreflightError('已达到最多3层委派，请直接执行具体工作');
+        if (ancestors.some((ancestor) => isTeamTaskInput(ancestor.input)
+          && ancestor.input.task.goal.normalize('NFKC').replace(/\s+/g, ' ').trim() === input.task.goal.normalize('NFKC').replace(/\s+/g, ' ').trim())) throw new WorkflowPreflightError('下级委派重复祖先目标，已阻止循环拆分');
+        if (task.expansion) {
+          const evidence = selectReviewEvidence(snapshot, task.expansion.taskIds).evidence;
+          await context.beginModelInvocation();
+          const output = await generateResponse(api, `你负责汇总下级 Agent 的真实交付。按父任务验收给出可用结果；不得声称未执行的工作已完成，明确列出缺口。${workflowGoalContext(snapshot.run.goalSpec)}`,
+            [{ role: 'user', content: `总目标：${snapshot.run.goal}\n父任务：${input.task.goal}\n用户补充指示：${input.userInstruction || '无'}\n验收：${input.task.acceptance}\n下级交付：${JSON.stringify(evidence)}` }], undefined,
+            { responseFormat: 'text', signal, aiUsage: { type: 'assistant_chat', label: '下级任务汇总', scope: 'chat', resourceId: snapshot.run.chatId } });
+          if (!output.trim()) throw new WorkflowPreflightError('下级任务汇总返回空内容');
+          return { output };
+        }
+        const chat = requireActiveAssistantChat(snapshot.run.chatId);
+        const capabilities = await teamMediaCapabilities();
+        const can = (tool: AgentTeamPlan['roles'][number]['allowedTools'][number]) => role.allowedTools.includes(tool);
+        const contextTaskIds = task.dependsOn.filter((id) => {
+          const source = snapshot.tasks.find((item) => item.id === id);
+          return source?.status === 'completed' && typeof source.output === 'string';
+        });
+        const prior = selectReviewEvidence(snapshot, contextTaskIds).evidence.slice(-8)
+          .map((entry) => ({ ...entry, output: entry.output.slice(0, 600) }));
+        const delegated = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n只拆分当前子目标：${input.task.goal}\n用户补充指示：${input.userInstruction || '无'}\n验收：${input.task.acceptance}\n本岗位可用工具：${role.allowedTools.join('、')}\n已有交付：${JSON.stringify(prior)}`,
+          chatId: snapshot.run.chatId, ...capabilities,
+          webSearch: can('web_search') && Boolean(chat.modeState && resolveChatAgentCapabilities(chat).webSearch),
+          imageGeneration: can('image_generation') && capabilities.imageGeneration,
+          audioGeneration: can('audio_generation') && capabilities.audioGeneration,
+          speechGeneration: can('speech_generation') && capabilities.speechGeneration,
+          videoGeneration: can('video_generation') && capabilities.videoGeneration,
+          imageInspection: can('image_inspection') && capabilities.imageInspection,
+          videoInspection: can('video_inspection') && capabilities.videoInspection,
+          mediaComposition: can('media_composition') && capabilities.mediaComposition,
+          delegation: ancestors.length < 2, signal, beforeModelRequest: context.beginModelInvocation });
+        assertInheritedPlanAuthorized(snapshot, task, delegated);
+        validateAvailableTeamTools(delegated, capabilities, Boolean(chat.modeState && resolveChatAgentCapabilities(chat).webSearch));
+        const delegatedRoles = new Map(delegated.roles.map((item) => [item.id, item]));
+        return { spawn: { context: delegated, tasks: delegated.tasks.map((child): WorkflowTask => ({
+          id: delegatedTaskId(task.id, child.id), runId: task.runId, kind: teamTaskKind(child),
+          input: { task: child, goal: snapshot.run.goal, role: delegatedRoles.get(child.roleId)!, sourcePlanTaskId: task.id, contextTaskIds } satisfies TeamTaskInput,
+          dependsOn: [...new Set([...contextTaskIds, ...child.dependsOn.map((id) => delegatedTaskId(task.id, id))])],
+          status: 'waiting_dependency', attempt: 0, updatedAt: Date.now(),
+        })) } };
+      }
       if (selectedTool === 'media_composition') {
         if (!input.task.composition) throw new WorkflowPreflightError('缺少音视频合成配置');
         return composeAgentTeamMedia({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
@@ -770,9 +840,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const sourceId = `team-delivery-${runId}`;
       const chatArtifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chat.id);
       const plan = validateAgentTeamPlan(snapshot.tasks.find((task) => task.id === 'plan')?.output);
-      const delegatedPlans = snapshot.tasks.filter((task) => task.kind === 'team_plan_revision' && task.status === 'completed'
+      const delegatedPlans = snapshot.tasks.filter((task) => (task.kind === 'team_plan_revision' || task.kind === 'agent_delegation') && task.status === 'completed'
         && snapshot.tasks.some((item) => item.id.startsWith(delegatedTaskId(task.id, '')))).map((task) => ({
-        sourceId: task.id, plan: validateAgentTeamPlan(task.output),
+        sourceId: task.id, plan: validateAgentTeamPlan(task.expansion?.context ?? task.output),
       }));
       const completed = [
         ...plan.tasks.map((task) => ({ task, id: task.id })),

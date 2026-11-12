@@ -76,7 +76,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const latestReview = run.tasks.filter((item) => item.kind === 'team_review' && item.status === 'completed').at(-1);
   const reviewResult = latestReview?.output && typeof latestReview.output === 'object' && !Array.isArray(latestReview.output)
     ? latestReview.output as { complete?: unknown; reason?: unknown } : null;
-  const childTasks = run.tasks.filter((item) => item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_image_inspection' || item.kind === 'agent_video_inspection' || item.kind === 'agent_audio' || item.kind === 'agent_video' || item.kind === 'agent_media_composition');
+  const childTasks = run.tasks.filter((item) => item.kind === 'agent_delegation' || item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_image_inspection' || item.kind === 'agent_video_inspection' || item.kind === 'agent_audio' || item.kind === 'agent_video' || item.kind === 'agent_media_composition');
   const blocked = summary.blocked.length > 0;
   const running = isRunActive(run.run.id);
   const modelCallLimitReached = run.run.maxModelCalls !== undefined && countWorkflowModelCalls(run) >= run.run.maxModelCalls;
@@ -84,7 +84,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
     && (task.status === 'queued' || task.status === 'waiting_dependency'));
   const unknownReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'result_unknown');
   const failedReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'failed');
-  const failedPlan = run.tasks.find((item) => (item.kind === 'team_plan' || item.kind === 'team_plan_revision') && item.status === 'failed');
+  const failedPlan = run.tasks.find((item) => (item.kind === 'team_plan' || item.kind === 'team_plan_revision' || item.kind === 'agent_delegation') && item.status === 'failed');
   const canAddRevision = canRun && (run.run.status === 'paused' || run.run.status === 'completed')
     && !run.tasks.some((item) => item.status === 'running' || item.status === 'result_unknown' || item.status === 'failed'
       || (item.kind === 'team_plan_revision' && item.status !== 'completed'));
@@ -180,7 +180,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
             }}>重试主 Agent 验收</Button>
           </Box>}
           {failedPlan && canRun && run.run.status === 'failed' && <Box sx={{ display: 'grid', gap: 0.75 }}>
-            <Typography variant="body2" color="text.secondary">规划结果已明确失败。修正模型或目标后，可以只重试这轮规划；之前完成的步骤会保留。</Typography>
+            <Typography variant="body2" color="text.secondary">{failedPlan.kind === 'agent_delegation' ? '委派步骤已明确失败。可以重试当前规划或汇总，已完成的下级交付会保留。' : '规划结果已明确失败。修正模型或目标后，可以只重试这轮规划；之前完成的步骤会保留。'}</Typography>
             {reviewActionError && reviewActionRunId === run.run.id && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
             <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
               setSavingReviewAction(true);
@@ -189,7 +189,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
                 setReviewActionRunId(run.run.id);
                 setReviewActionError(error instanceof Error ? error.message : '重试规划失败');
               }).finally(() => setSavingReviewAction(false));
-            }}>重试主 Agent 规划</Button>
+            }}>{failedPlan.kind === 'agent_delegation' ? failedPlan.expansion ? '重试委派汇总' : '重试下级规划' : '重试主 Agent 规划'}</Button>
           </Box>}
           {pauseError && <Typography variant="body2" color="error.main">{pauseError}</Typography>}
           {canAddRevision && <Box sx={{ display: 'grid', gap: 1 }}>

@@ -43,6 +43,76 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it.each(['valid', 'duplicate', 'cycle', 'missing'] as const)('atomically expands child tasks: %s', async (mode) => {
+    const id = crypto.randomUUID();
+    const scope = `expand-${id}`;
+    const initial = snapshot(id);
+    initial.tasks[0].kind = 'agent_delegation';
+    const calls: string[] = [];
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+      tracksModelInvocations: true,
+      async execute(task, _signal, context) {
+        calls.push(task.id);
+        if (task.kind === 'agent_delegation') {
+          await context.beginModelInvocation();
+          const saved = await indexedDbWorkflowRepository.read(scope, id);
+          if (saved?.tasks.find((item) => item.id === task.id)?.expansion) {
+            expect(saved.tasks.find((item) => item.id === 'child')?.status).toBe('completed');
+            return { output: '子任务汇总' };
+          }
+          const child: WorkflowTask = { id: 'child', runId: id, kind: 'local', input: '执行',
+            dependsOn: mode === 'cycle' ? ['script'] : mode === 'missing' ? ['missing'] : [], status: 'queued', attempt: 0, updatedAt: 1 };
+          return { spawn: { tasks: mode === 'duplicate' ? [child, child] : [child], context: { summary: '已保存的子计划' } } };
+        }
+        if (task.id === 'video') {
+          const saved = await indexedDbWorkflowRepository.read(scope, id);
+          expect(saved?.tasks[0].output).toBe('子任务汇总');
+        }
+        return { output: '完成' };
+      },
+    }, () => scope);
+    await runtime.create(initial);
+    const result = await runtime.resume(id);
+    if (mode === 'valid') {
+      expect(calls).toEqual(['script', 'child', 'script', 'video']);
+      expect(result.run.status).toBe('completed');
+      expect(result.run.planVersion).toBe(2);
+      expect((await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script')).map((attempt) => attempt.status)).toEqual(['completed', 'completed']);
+    } else {
+      expect(result.tasks).toHaveLength(2);
+      expect(result.tasks[0].status).toBe('failed');
+      expect(result.run.planVersion).toBe(1);
+      expect(calls).toEqual(['script']);
+    }
+  });
+
+  it('resumes persisted children and parent synthesis after reaching a shared model budget', async () => {
+    const id = crypto.randomUUID();
+    const scope = `expand-budget-${id}`;
+    const initial = snapshot(id);
+    initial.run.maxModelCalls = 1;
+    initial.tasks = [{ ...initial.tasks[0], kind: 'agent_delegation' }];
+    const execute = vi.fn(async (task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => {
+      await context.beginModelInvocation();
+      const saved = await indexedDbWorkflowRepository.read(scope, id);
+      if (task.id === 'script' && !saved?.tasks[0].expansion) return { spawn: { context: '子计划', tasks: [
+        { id: 'child', runId: id, kind: 'agent_text', input: '执行', dependsOn: [], status: 'queued' as const, attempt: 0, updatedAt: 1 },
+      ] } };
+      return { output: task.id === 'child' ? '子交付' : '汇总' };
+    });
+    const create = () => createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksModelInvocations: true, execute }, () => scope);
+    await create().create(initial);
+    const paused = await create().resume(id);
+    expect(paused.run.status).toBe('paused');
+    expect(paused.tasks[0].expansion?.context).toBe('子计划');
+    expect(execute).toHaveBeenCalledTimes(1);
+    await indexedDbWorkflowRepository.transact(scope, id, (current) => ({ snapshot: { ...current!, run: { ...current!.run, maxModelCalls: 3 } }, value: undefined }));
+    const completed = await create().resume(id);
+    expect(completed.run.status).toBe('completed');
+    expect(execute.mock.calls.map(([task]) => task.id)).toEqual(['script', 'child', 'script']);
+    expect(countWorkflowModelCalls(completed)).toBe(3);
+  });
+
   it.each(['success', 'preflight', 'unknown', 'invalid-response', 'duplicate'] as const)('journals model request boundaries: %s', async (outcome) => {
     const id = crypto.randomUUID();
     const scope = `invocation-${id}`;

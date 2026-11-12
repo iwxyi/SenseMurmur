@@ -20,6 +20,7 @@ export interface WorkflowTask {
   attempt: number;
   unstartedModelAttempts?: number;
   modelInvocation?: WorkflowModelInvocation;
+  expansion?: { taskIds: string[]; context: unknown };
   updatedAt: number;
 }
 
@@ -113,6 +114,12 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
       if (!isWorkflowModelTask(candidate.kind) || invocation.runId !== candidate.runId || invocation.taskId !== candidate.id
         || invocation.attempt !== candidate.attempt) throw new Error('工作流调用关联无效');
     }
+    const dependencies = candidate.dependsOn;
+    if (candidate.expansion !== undefined && (!isRecord(candidate.expansion)
+      || !Array.isArray(candidate.expansion.taskIds) || !candidate.expansion.taskIds.length
+      || candidate.expansion.taskIds.length > 48 || candidate.expansion.taskIds.some((id) => typeof id !== 'string' || !id || id === candidate.id)
+      || new Set(candidate.expansion.taskIds).size !== candidate.expansion.taskIds.length
+      || candidate.expansion.taskIds.some((id) => !dependencies.includes(id)))) throw new Error('工作流子任务展开记录无效');
     if (!Number.isFinite(candidate.updatedAt)) throw new Error('工作流任务更新时间无效');
     for (const field of ['externalTaskId', 'error'] as const) {
       if (candidate[field] !== undefined && typeof candidate[field] !== 'string') throw new Error(`工作流任务${field}无效`);
@@ -180,6 +187,7 @@ function finishModelInvocation(task: WorkflowTask, state: 'succeeded' | 'failed'
 export interface WorkflowTaskResult {
   output?: unknown;
   externalTaskId?: string;
+  spawn?: { tasks: WorkflowTask[]; context: unknown };
 }
 
 export interface WorkflowExecutor {
@@ -720,7 +728,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
   async function retryFailedTeamPlan(runId: string, expectedPlanVersion: number, taskId: string) {
     return mutate(scope(), runId, (current) => {
       if (current.run.planVersion !== expectedPlanVersion || current.run.status !== 'failed') throw new Error('团队计划已更新，请刷新后重试');
-      const target = current.tasks.find((task) => task.id === taskId && (task.kind === 'team_plan' || task.kind === 'team_plan_revision') && task.status === 'failed');
+      const target = current.tasks.find((task) => task.id === taskId && (task.kind === 'team_plan' || task.kind === 'team_plan_revision' || task.kind === 'agent_delegation') && task.status === 'failed');
       if (!target || current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown')) throw new Error('当前规划任务不能重试');
       const now = Date.now();
       const snapshot: WorkflowSnapshot = { ...current,
@@ -889,20 +897,38 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
           };
           try {
             const result = isReady ? await executor.execute(task, signal, context) : await executor.inspectExternal!(task, signal);
-            await mutate(storageScope, runId, (current) => ({ snapshot: scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' ? current : {
-              ...current,
-              tasks: current.tasks.map((item) => {
+            await mutate(storageScope, runId, (current) => {
+              if (scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active') return { snapshot: current, value: undefined };
+              const spawn = 'spawn' in result ? result.spawn : undefined;
+              const parent = current.tasks.find((item) => item.id === task.id);
+              if (spawn && (!isReady || !parent || parent.expansion || ('externalTaskId' in result && result.externalTaskId) || !spawn.tasks.length || spawn.tasks.length > 48
+                || spawn.tasks.some((child) => child.runId !== runId || child.attempt !== 0 || child.expansion
+                  || !['queued', 'waiting_dependency'].includes(child.status) || current.tasks.some((existing) => existing.id === child.id)))) {
+                throw new WorkflowPreflightError('子任务展开状态无效');
+              }
+              const next: WorkflowSnapshot = {
+              ...current, run: { ...current.run, planVersion: current.run.planVersion + (spawn ? 1 : 0), updatedAt: Date.now() },
+              tasks: [...current.tasks.map((item): WorkflowTask => {
                 if (item.id !== task.id) return item;
                 if (isReady && item.modelInvocation?.state === 'reserved') throw new WorkflowPreflightError('执行器未记录模型调用开始，结果不能提交');
                 return {
                 ...finishModelInvocation(item, 'status' in result && result.status === 'failed' ? 'failed' : 'succeeded', Date.now()),
-                status: 'status' in result ? result.status === 'pending' ? 'waiting_external' : result.status === 'failed' ? 'failed' : 'completed' : result.externalTaskId ? 'waiting_external' : 'completed',
+                status: spawn ? 'waiting_dependency' : 'status' in result ? result.status === 'pending' ? 'waiting_external' : result.status === 'failed' ? 'failed' : 'completed' : result.externalTaskId ? 'waiting_external' : 'completed',
+                ...(spawn ? { expansion: { taskIds: spawn.tasks.map((child) => child.id), context: spawn.context }, dependsOn: [...new Set([...item.dependsOn, ...spawn.tasks.map((child) => child.id)])] } : {}),
                 output: result.output ?? item.output,
                 externalTaskId: 'externalTaskId' in result ? result.externalTaskId : item.externalTaskId,
                 error: 'error' in result ? result.error : undefined,
                 updatedAt: Date.now(),
-              }; }),
-            }, value: undefined }));
+              }; }), ...(spawn?.tasks || [])],
+            };
+              if (spawn) {
+                try {
+                  assertWorkflowSnapshot(next);
+                } catch (error) {
+                  throw new WorkflowPreflightError(error instanceof Error ? error.message : '子任务展开计划无效');
+                }
+              }
+              return { snapshot: next, value: undefined }; });
             if ('status' in result && result.status === 'pending') inspectedExternalIds.add(task.id);
           } catch (error) {
             await mutate(storageScope, runId, (current) => ({ snapshot: scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' ? current : { ...current, tasks: current.tasks.map((item) => {
