@@ -13,9 +13,11 @@ import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReferenc
 import { inspectAgentTeamImages } from './agentTeamImageInspection';
 import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
 import { conversationExecutionLockName } from './conversationExecutionLock';
-import { composeAgentTeamMedia, inspectAgentTeamComposition } from './agentTeamMediaComposition';
+import { composeAgentTeamMedia, inspectAgentTeamComposition, teamMediaAttachment } from './agentTeamMediaComposition';
+import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
 
-vi.mock('./agentTeamMediaComposition', () => ({ canComposeTeamMedia: () => true, composeAgentTeamMedia: vi.fn(), inspectAgentTeamComposition: vi.fn() }));
+vi.mock('./agentTeamMediaComposition', () => ({ canComposeTeamMedia: () => true, composeAgentTeamMedia: vi.fn(), inspectAgentTeamComposition: vi.fn(), teamMediaAttachment: vi.fn() }));
+vi.mock('./agentTeamVideoInspection', () => ({ inspectAgentTeamVideo: vi.fn() }));
 
 vi.mock('./agentTeamImageInspection', () => ({ inspectAgentTeamImages: vi.fn() }));
 vi.mock('./agentTeamAudioTask', () => ({ inspectAgentTeamAudioAttachment: vi.fn(), queueAgentTeamAudio: vi.fn() }));
@@ -97,9 +99,45 @@ beforeEach(() => {
   vi.mocked(queueAgentTeamAudio).mockReset();
   vi.mocked(composeAgentTeamMedia).mockReset();
   vi.mocked(inspectAgentTeamComposition).mockReset();
+  vi.mocked(teamMediaAttachment).mockReset();
+  vi.mocked(inspectAgentTeamVideo).mockReset();
 });
 
 describe('agent team workflow', () => {
+  it.each([true, false])('inspects only saved video files (file available: %s) and never regenerates them', async (available) => {
+    const runId = crypto.randomUUID();
+    const scope = `video-inspection-${runId}`;
+    const now = Date.now();
+    useSettingsStore.setState({ aiProfiles: [{ id: 'vision', name: '视觉', type: 'text', provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o', isDefault: true }] });
+    const role = { id: 'reviewer', name: '检查员', responsibility: '检查视频', method: '抽帧', acceptance: '实际画面', allowedTools: ['video_generation', 'video_inspection'] };
+    const tasks = [
+      { id: 'shot', roleId: role.id, goal: '生成', acceptance: '视频可播放', dependsOn: [], tool: 'video_generation' },
+      { id: 'inspect', roleId: role.id, goal: '检查', acceptance: '有角色', dependsOn: ['shot'], tool: 'video_inspection' },
+    ];
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
+      run: { id: runId, chatId: 'chat', goal: '检查短片', status: 'paused', generation: 1, planVersion: 1, planOpen: false, updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '检查短片', output: { roles: [role], tasks, summary: '检查', finalAcceptance: '实际画面' }, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        ...tasks.map((task) => ({ id: task.id, runId, kind: task.id === 'shot' ? 'agent_video' : 'agent_video_inspection',
+          input: { task, role, goal: '检查短片' }, output: task.id === 'shot' ? '视频已保存' : undefined,
+          dependsOn: ['plan', ...task.dependsOn], status: task.id === 'shot' ? 'completed' as const : 'queued' as const, attempt: task.id === 'shot' ? 1 : 0, updatedAt: now })),
+      ],
+    }, value: undefined }));
+    vi.mocked(teamMediaAttachment).mockReturnValue(available ? { id: 'video', kind: 'video', status: 'ready', url: 'data:video/mp4;base64,saved', altText: '成片', createdAt: now, updatedAt: now } : undefined);
+    vi.mocked(inspectAgentTeamVideo).mockResolvedValue('抽帧可见角色，未检查音轨');
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o' }, () => scope);
+    const result = await workflow.resume(runId);
+    if (available) {
+      expect(result.snapshot.run.status).toBe('completed');
+      expect(inspectAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ url: 'data:video/mp4;base64,saved', maxFrames: 6 }));
+      await workflow.resume(runId);
+      expect(inspectAgentTeamVideo).toHaveBeenCalledTimes(1);
+    } else {
+      expect(result.snapshot.tasks.find((task) => task.id === 'inspect')).toMatchObject({ status: 'failed', error: expect.stringContaining('尚未保存') });
+      expect(inspectAgentTeamVideo).not.toHaveBeenCalled();
+    }
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+  });
   it.each(['running', 'failed', 'result_unknown'] as const)('resumes %s local composition without resubmitting completed media', async (status) => {
     const runId = crypto.randomUUID();
     const scope = `composition-${runId}`;

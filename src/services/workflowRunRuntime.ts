@@ -150,7 +150,7 @@ export function summarizeWorkflowRun(snapshot: WorkflowSnapshot): WorkflowResume
 
 export function countWorkflowModelCalls(snapshot: WorkflowSnapshot): number {
   return snapshot.tasks.filter((task) => task.kind === 'team_plan' || task.kind === 'team_plan_revision'
-    || task.kind === 'team_review' || task.kind === 'agent_text' || task.kind === 'agent_image_inspection')
+    || task.kind === 'team_review' || task.kind === 'agent_text' || task.kind === 'agent_image_inspection' || task.kind === 'agent_video_inspection')
     .reduce((total, task) => total + task.attempt, 0);
 }
 
@@ -812,7 +812,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         const batch = [...ready, ...external].filter((task) => {
           if (task.status === 'waiting_external') return true;
           if (task.kind !== 'team_plan' && task.kind !== 'team_plan_revision' && task.kind !== 'team_review'
-            && task.kind !== 'agent_text' && task.kind !== 'agent_image_inspection') return true;
+            && task.kind !== 'agent_text' && task.kind !== 'agent_image_inspection' && task.kind !== 'agent_video_inspection') return true;
           if (selectedModelCalls >= remainingModelCalls) return false;
           selectedModelCalls += 1;
           return true;

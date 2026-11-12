@@ -29,7 +29,14 @@ try {
   const pending = new Map();
   socket.addEventListener('message', ({ data }) => {
     const response = JSON.parse(data.toString());
-    if (response.method === 'Runtime.consoleAPICalled' && response.params.type === 'error') console.error('Browser:', response.params.args.map((arg) => arg.value ?? arg.description));
+    if (response.method === 'Runtime.consoleAPICalled' && response.params.type === 'error') {
+      for (const arg of response.params.args) {
+        if (!arg.objectId) { console.error('Browser:', arg.value ?? arg.description); continue; }
+        void send('Runtime.callFunctionOn', { objectId: arg.objectId, functionDeclaration: 'function() { return JSON.stringify(this, (_key, value) => value instanceof Error ? { name: value.name, message: value.message, stack: value.stack } : value); }', returnByValue: true })
+          .then((result) => console.error('Browser:', result.result?.value))
+          .catch((error) => console.error('Cannot inspect browser error:', error.message));
+      }
+    }
     const entry = pending.get(response.id);
     if (!entry) return;
     pending.delete(response.id);
@@ -47,8 +54,29 @@ try {
     if (result.exceptionDetails) throw new Error(result.result?.description || result.exceptionDetails.text);
     return result.result?.value;
   };
+  const cleanup = `async () => {
+    const database = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('pneumata-workflow-runs', 5);
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    try {
+      const tx = database.transaction(['runs', 'events', 'outbox', 'outbox_consumers', 'task_attempts', 'plan_revisions'], 'readwrite');
+      for (const name of tx.objectStoreNames) {
+        const request = tx.objectStore(name).openCursor();
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) return;
+          if (String(cursor.key).includes(String.fromCharCode(10) + 'composition-smoke-')) cursor.delete();
+          cursor.continue();
+        };
+      }
+      await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error); });
+    } finally { database.close(); }
+  }`;
   await send('Page.enable');
+  await send('Runtime.discardConsoleEntries');
   await send('Runtime.enable');
+  await evaluate(`(${cleanup})()`);
   await send('Page.navigate', { url: `${clientUrl}/chats` });
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (await evaluate(`Boolean(document.querySelector('#root')?.childElementCount)`)) break;
@@ -77,25 +105,46 @@ try {
         id: 'fixture-' + taskId, kind: taskId === 'music' ? 'audio' : 'video', status: 'ready', altText: '测试素材', url, createdAt: now, updatedAt: now,
       }] },
     });
-    const role = { id: 'director', name: '导演', responsibility: '制作短片', method: '拼接配乐', acceptance: '成片可用', allowedTools: ['text_generation', 'speech_generation', 'video_generation', 'audio_generation', 'media_composition'] };
+    const role = { id: 'director', name: '导演', responsibility: '制作短片', method: '拼接配乐', acceptance: '成片可用', allowedTools: ['text_generation', 'speech_generation', 'video_generation', 'audio_generation', 'media_composition', 'video_inspection'] };
     const tasks = ['shot_a', 'shot_b', 'music'].map((id) => ({ id, roleId: role.id, goal: id, dependsOn: [], acceptance: '素材已保存', tool: id === 'music' ? 'audio_generation' : 'video_generation' }));
     tasks.push({ id: 'script', roleId: role.id, goal: '只写旁白正文', dependsOn: [], acceptance: '有正文', tool: 'text_generation' });
     tasks.push({ id: 'narration', roleId: role.id, goal: '制作旁白，不朗读这条指令', dependsOn: ['script'], acceptance: '旁白可播放', tool: 'speech_generation', speech: { textTaskId: 'script' } });
     tasks.push({ id: 'film', roleId: role.id, goal: '合并两镜头并循环配乐，叠加旁白，关闭原声', dependsOn: ['shot_a', 'shot_b', 'music', 'narration'], tool: 'media_composition', acceptance: '视频带音乐与旁白',
       composition: { clips: [{ taskId: 'shot_a', startSeconds: 0.1, durationSeconds: 0.4 }, { taskId: 'shot_b', durationSeconds: 0.4 }], audioTracks: [{ taskId: 'music', loop: true }, { taskId: 'narration', volume: 0.5, offsetSeconds: 0.4 }], aspectRatio: '16:9', originalAudioVolume: 0 } });
+    tasks.push({ id: 'inspect', roleId: role.id, goal: '检查成片颜色顺序', dependsOn: ['film'], tool: 'video_inspection', acceptance: '红色在前蓝色在后' });
     const plan = validateAgentTeamPlan({ summary: '合成验证', roles: [role], tasks, finalAcceptance: '视频带配乐' });
     const snapshot = { run: { id: runId, chatId, goal: '合成验证', status: 'paused', generation: 0, planVersion: 1, updatedAt: now, planOpen: true }, tasks: [
       { id: 'plan', runId, kind: 'team_plan', input: '合成验证', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
-      ...plan.tasks.map((task) => ({ id: task.id, runId, kind: task.id === 'music' || task.id === 'narration' ? 'agent_audio' : task.id === 'script' ? 'agent_text' : task.id === 'film' ? 'agent_media_composition' : 'agent_video',
-        input: { task, role: plan.roles[0], goal: '合成验证' }, output: ['film', 'narration'].includes(task.id) ? undefined : task.id === 'script' ? '森林深处，一场追逐开始了。' : '素材已保存', dependsOn: ['plan', ...task.dependsOn], status: task.id === 'film' ? 'running' : task.id === 'narration' ? 'waiting_dependency' : 'completed', attempt: task.id === 'narration' ? 0 : 1, updatedAt: now })),
+      ...plan.tasks.map((task) => ({ id: task.id, runId, kind: task.id === 'music' || task.id === 'narration' ? 'agent_audio' : task.id === 'script' ? 'agent_text' : task.id === 'film' ? 'agent_media_composition' : task.id === 'inspect' ? 'agent_video_inspection' : 'agent_video',
+        input: { task, role: plan.roles[0], goal: '合成验证' }, output: ['film', 'narration', 'inspect'].includes(task.id) ? undefined : task.id === 'script' ? '森林深处，一场追逐开始了。' : '素材已保存', dependsOn: ['plan', ...task.dependsOn], status: task.id === 'film' ? 'running' : ['narration', 'inspect'].includes(task.id) ? 'waiting_dependency' : 'completed', attempt: ['narration', 'inspect'].includes(task.id) ? 0 : 1, updatedAt: now })),
     ] };
     await runtime.indexedDbWorkflowRepository.transact(runtime.currentWorkflowScope(), runId, () => ({ snapshot, value: undefined }));
     const workflow = createAgentTeamWorkflow({ provider: 'openai', baseUrl: '', apiKey: '', model: 'not-called' }, runtime.currentWorkflowScope);
     const originalFetch = window.fetch;
     const originalProfiles = useSettingsStore.getState().aiProfiles;
     let speechRequests = 0;
-    useSettingsStore.setState({ aiProfiles: [{ id: 'speech-smoke', name: '测试旁白', type: 'tts', provider: 'openai', baseUrl: 'https://speech-smoke.invalid/v1', apiKey: 'test-fixture', model: 'tts-1', isDefault: true }] });
+    let visionRequests = 0;
+    let inspectionPixels;
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'speech-smoke', name: '测试旁白', type: 'tts', provider: 'openai', baseUrl: 'https://speech-smoke.invalid/v1', apiKey: 'test-fixture', model: 'tts-1', isDefault: true },
+      { id: 'vision-smoke', name: '测试视觉', type: 'text', provider: 'openai', baseUrl: 'https://vision-smoke.invalid/v1', apiKey: 'test-fixture', model: 'gpt-4o', isDefault: true },
+    ] });
     window.fetch = async (input, init) => {
+      if (String(input).startsWith('https://vision-smoke.invalid/')) {
+        const body = JSON.parse(init.body);
+        const content = body.messages.at(-1).content;
+        const images = content.filter((item) => item.type === 'image_url');
+        if (images.length !== 6 || !content.some((item) => item.type === 'text' && item.text.includes('未检查音轨'))) throw new Error('Missing video frames or inspection scope');
+        inspectionPixels = await Promise.all([images[0], images.at(-1)].map(async (item) => {
+          if (!item.image_url.url.startsWith('data:image/jpeg;base64,')) throw new Error('Inspection did not receive real JPEG frames');
+          const image = new Image(); image.src = item.image_url.url; await image.decode();
+          const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+          const context = canvas.getContext('2d'); context.drawImage(image, image.width / 2, image.height / 2, 1, 1, 0, 0, 1, 1);
+          return Array.from(context.getImageData(0, 0, 1, 1).data).slice(0, 3);
+        }));
+        visionRequests++;
+        return Response.json({ choices: [{ message: { role: 'assistant', content: '抽样画面先红后蓝；未检查音轨与逐帧连续性。' }, finish_reason: 'stop' }] });
+      }
       if (!String(input).startsWith('https://speech-smoke.invalid/')) return originalFetch(input, init);
       const body = JSON.parse(init.body);
       if (body.input !== '森林深处，一场追逐开始了。' || body.voice !== 'alloy' || body.model !== 'tts-1') throw new Error('Incorrect speech request: ' + JSON.stringify(body));
@@ -133,7 +182,9 @@ try {
     const matches = new Set([...state.messages, ...Object.values(state.messageWindowsByChatId).flatMap((window) => window.messages)].filter((message) => message.id === 'team-composition-' + runId + '-film').map((message) => message.id));
     const narration = composition.teamMediaAttachment(runId, 'narration');
     if (!narration?.url?.startsWith('data:audio/') || narration.audioPurpose !== 'chat_voice') throw new Error('Narration not saved locally');
-    window.__compositionSmoke = { done: true, result: { status: after.run.status, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
+    const inspection = after.tasks.find((task) => task.id === 'inspect');
+    if (inspection.status !== 'completed' || !inspection.output.includes('未检查音轨或逐帧连续性')) throw new Error('Missing persisted inspection scope');
+    window.__compositionSmoke = { done: true, result: { status: after.run.status, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, visionRequests, inspectionPixels, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
     } finally { window.fetch = originalFetch; useSettingsStore.setState({ aiProfiles: originalProfiles }); }
   })().catch((error) => { window.__compositionSmoke = { done: true, error: String(error?.stack || error) }; });`);
   let result;
@@ -151,10 +202,14 @@ try {
   assert.ok(result.musicEnergy > 10 && result.musicEnergy > result.originalEnergy * 20, 'Music must loop into the second clip and original audio must be muted');
   assert.ok(result.narrationEnergy > 10 && result.narrationEnergy > result.originalEnergy * 10, 'Narration must be mixed into the second clip');
   assert.equal(result.speechRequests, 1, 'Recreating the workflow must not synthesize narration twice');
+  assert.equal(result.visionRequests, 1, 'Recovery must not inspect a completed video twice');
+  assert.ok(result.inspectionPixels[0][0] > 180 && result.inspectionPixels[0][2] < 40, 'Inspection must receive the actual red opening frame');
+  assert.ok(result.inspectionPixels[1][2] > 180 && result.inspectionPixels[1][0] < 40, 'Inspection must receive the actual blue ending frame');
   assert.equal(result.messageCount, 1); assert.equal(result.attempt, 2);
   const outputUrl = await evaluate('window.__compositionSmoke.result.localUrl');
   const outputPath = process.env.PNEUMATA_COMPOSITION_OUTPUT;
   if (outputPath) await writeFile(outputPath, Buffer.from(outputUrl.split(',')[1], 'base64'));
+  await evaluate(`(${cleanup})()`);
   console.log(JSON.stringify({ ok: true, ...result, ...(outputPath ? { outputPath } : {}) }));
 } finally {
   socket?.close();

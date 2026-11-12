@@ -24,12 +24,13 @@ import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReferenc
 import { inspectAgentTeamImages } from './agentTeamImageInspection';
 import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
 import { listAvailableModels } from './aiClient';
-import { canComposeTeamMedia, composeAgentTeamMedia, inspectAgentTeamComposition } from './agentTeamMediaComposition';
+import { canComposeTeamMedia, composeAgentTeamMedia, inspectAgentTeamComposition, teamMediaAttachment } from './agentTeamMediaComposition';
 import { hasRepeatedTeamReviewWithoutProgress } from './agentTeamProgress';
+import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
 
 const TOOL_TASK_KINDS = {
   text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio', speech_generation: 'agent_audio',
-  image_inspection: 'agent_image_inspection', video_generation: 'agent_video', media_composition: 'agent_media_composition',
+  image_inspection: 'agent_image_inspection', video_inspection: 'agent_video_inspection', video_generation: 'agent_video', media_composition: 'agent_media_composition',
 } as const;
 
 function teamTaskKind(task: AgentTeamTask) { return TOOL_TASK_KINDS[task.tool || 'text_generation']; }
@@ -51,6 +52,7 @@ async function teamMediaCapabilities() {
     maxImageReferenceImages: imageProfile && imageCapabilities.referenceImage ? imageCapabilities.multiReferenceImage ? undefined : 1 : 0,
     audioGeneration: Boolean(audioProfile), speechGeneration: Boolean(getUsablePreferredAIProfile(profiles, 'tts')),
     imageInspection: Boolean(imageProfile && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput),
+    videoInspection: Boolean(typeof document !== 'undefined' && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput),
     mediaComposition: canComposeTeamMedia() };
   const videoProfile = getUsablePreferredAIProfile(profiles, 'video');
   if (!videoProfile) return { ...media, videoGeneration: false, videoReferenceImages: false, videoRequiresReferenceImage: false, maxVideoReferenceImages: 0, videoUnavailableReason: '当前未配置视频模型' };
@@ -209,6 +211,7 @@ function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<R
   if (!capabilities.speechGeneration && plan.tasks.some((task) => task.tool === 'speech_generation')) throw new WorkflowPreflightError('当前未配置 TTS 配音模型');
   if (!capabilities.mediaComposition && plan.tasks.some((task) => task.tool === 'media_composition')) throw new WorkflowPreflightError('此设备不支持本地音视频合成');
   if (!capabilities.imageInspection && plan.tasks.some((task) => task.tool === 'image_inspection')) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
+  if (!capabilities.videoInspection && plan.tasks.some((task) => task.tool === 'video_inspection')) throw new WorkflowPreflightError('当前设备或文字模型不支持视频抽帧检查');
   if (!capabilities.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
   const byId = new Map(plan.tasks.map((task) => [task.id, task]));
   if (!capabilities.imageReferenceImages && plan.tasks.some((task) => task.tool === 'image_generation' && directImageDependencies(task, byId).length > 0)) {
@@ -270,7 +273,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         try { finalAcceptance = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === 'plan')?.output).finalAcceptance; }
         catch (error) { throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队验收标准无效'); }
         const { evidence, omitted } = selectReviewEvidence(snapshot, input.sourceTaskIds);
-        const raw = await generateResponse(api, '你是主 Agent 的交付验收员。根据原目标、最终验收标准和真实完成记录判断是否已达到可用交付。只能基于现有工具能力提出最多一步必要补做，不得重复已完成工作。图片、音乐和视频生成任务的文字记录只证明附件已保存；只有明确的图片检查任务才提供实际画面观察，不能把未检查的媒体当作已验证。缺失的剪辑、混音、代码执行等能力不得伪装为已完成。仅输出 JSON：{"complete":true,"reason":"..."} 或 {"complete":false,"reason":"...","nextRequest":"需要补做的具体工作"}。', [{ role: 'user', content: `原目标：${snapshot.run.goal}\n最终验收标准：${finalAcceptance}\n已完成任务摘要（另有 ${omitted} 项已完成记录未列出）：${JSON.stringify(evidence)}` }], undefined, {
+        const raw = await generateResponse(api, '你是主 Agent 的交付验收员。根据原目标、最终验收标准和真实完成记录判断是否已达到可用交付。只能基于现有工具能力提出最多一步必要补做，不得重复已完成工作。图片、音乐和视频生成任务的文字记录只证明附件已保存；只有明确的图片检查或视频抽帧检查任务才提供实际画面观察，抽帧检查仅覆盖报告列出的采样时刻，不证明音轨、逐帧连续性或全部镜头合格。不能把未检查的媒体当作已验证。缺失的剪辑、混音、代码执行等能力不得伪装为已完成。仅输出 JSON：{"complete":true,"reason":"..."} 或 {"complete":false,"reason":"...","nextRequest":"需要补做的具体工作"}。', [{ role: 'user', content: `原目标：${snapshot.run.goal}\n最终验收标准：${finalAcceptance}\n已完成任务摘要（另有 ${omitted} 项已完成记录未列出）：${JSON.stringify(evidence)}` }], undefined, {
           responseFormat: 'json', maxTokens: 600, signal,
           aiUsage: { type: 'assistant_chat', label: '团队交付验收', scope: 'chat', resourceId: snapshot.run.chatId },
         });
@@ -341,6 +344,21 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           references: references.filter((reference): reference is NonNullable<typeof reference> => Boolean(reference)), signal,
         });
         return { output };
+      }
+      if (selectedTool === 'video_inspection') {
+        const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'text');
+        const capabilities = resolveAIModelInputCapabilities(profile);
+        if (!profile || !capabilities.imageInput || capabilities.maxAttachments < 1) throw new WorkflowPreflightError('当前文字模型不支持视频抽帧检查');
+        const videoTaskIds = input.task.dependsOn.map((id) => input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id)
+          .filter((id) => ['agent_video', 'agent_media_composition'].includes(snapshot.tasks.find((item) => item.id === id)?.kind || ''));
+        if (videoTaskIds.length !== 1) throw new WorkflowPreflightError('视频检查需要唯一的成片文件');
+        const attachment = teamMediaAttachment(task.runId, videoTaskIds[0]);
+        if (!attachment?.url || attachment.kind !== 'video') throw new WorkflowPreflightError('待检查视频尚未保存在当前聊天，请先恢复视频文件');
+        return { output: await inspectAgentTeamVideo({
+          api: { provider: profile.provider, apiKey: profile.apiKey, baseUrl: profile.baseUrl, model: profile.model, maxOutputTokens: profile.maxOutputTokens },
+          chatId: snapshot.run.chatId, goal: [input.task.goal, input.userInstruction].filter(Boolean).join('\n'), acceptance: input.task.acceptance,
+          url: attachment.url, maxFrames: Math.min(6, capabilities.maxAttachments), signal,
+        }) };
       }
       if (selectedTool === 'speech_generation') {
         const speech = input.task.speech;

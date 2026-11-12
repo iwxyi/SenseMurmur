@@ -15,6 +15,19 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('requires video inspection to read one direct saved video source', async () => {
+    const plan = valid();
+    plan.roles[0].allowedTools = ['video_generation', 'video_inspection'];
+    const shot = { ...plan.tasks[0], tool: 'video_generation' };
+    const inspect = { ...plan.tasks[1], tool: 'video_inspection' };
+    const candidate = { ...plan, tasks: [shot, inspect] };
+    expect(validateAgentTeamPlan(candidate).tasks[1].tool).toBe('video_inspection');
+    expect(() => validateAgentTeamPlan({ ...candidate, tasks: [shot, { ...inspect, dependsOn: [] }] })).toThrow('唯一');
+    expect(() => validateAgentTeamPlan({ ...candidate, tasks: [shot, { ...shot, id: 'second' }, { ...inspect, dependsOn: ['research', 'second'] }] })).toThrow('唯一');
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+    await expect(planAgentTeam({ api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o' }, goal: '检查视频', videoGeneration: true }))
+      .rejects.toThrow('不支持视频抽帧检查');
+  });
   it('accepts explicit narration text and a dedicated script dependency', () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['text_generation', 'speech_generation'];
