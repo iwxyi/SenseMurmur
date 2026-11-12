@@ -323,17 +323,24 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         await ensureAssistantArtifactStoreHydrated();
         const savedMedia = listTeamSavedMedia(snapshot, task.input.sourceTaskIds);
         const savedText = listTeamSavedText(snapshot, task.input.sourceTaskIds, useAssistantArtifactStore.getState().items);
-        const rootPlan = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === 'plan')?.output);
-        const canPatchRoot = impact && rootPlan.tasks.some((item) => item.id === impact.targetTaskId)
-          && !rootPlan.tasks.some((item) => item.tool === 'delegate_task')
-          && !snapshot.tasks.some((item) => item.kind === 'team_plan_revision' && item.id !== task.id)
-          && rootPlan.tasks.every((item) => {
-            const source = snapshot.tasks.find((candidate) => candidate.id === item.id);
-            return source?.status === 'completed' && isTeamTaskInput(source.input) && !source.input.sourcePlanTaskId
-              && !source.input.userInstruction && sameAgentTeamTask(source.input.task, item);
+        const target = impact ? snapshot.tasks.find((item) => item.id === impact.targetTaskId) : undefined;
+        const ownerId = target && isTeamTaskInput(target.input) ? target.input.sourcePlanTaskId ?? 'plan' : undefined;
+        const latestPlan = snapshot.tasks.filter((item) => item.kind === 'team_plan_revision' && item.id !== task.id).at(-1)
+          ?? snapshot.tasks.find((item) => item.id === 'plan');
+        const sourcePlan = ownerId && latestPlan?.id === ownerId ? validateAgentTeamPlan(latestPlan.output) : undefined;
+        const taskSources = sourcePlan ? Object.fromEntries(sourcePlan.tasks.map((item) => [item.id,
+          ownerId === 'plan' ? item.id : delegatedTaskId(ownerId!, item.id)])) : undefined;
+        const canPatch = sourcePlan && target && taskSources
+          && !sourcePlan.tasks.some((item) => item.tool === 'delegate_task')
+          && sourcePlan.tasks.every((item) => {
+            const source = snapshot.tasks.find((candidate) => candidate.id === taskSources[item.id]);
+            return source?.status === 'completed' && isTeamTaskInput(source.input)
+              && (source.input.sourcePlanTaskId ?? 'plan') === ownerId
+              && !source.input.userInstruction && sameAgentTeamTask(source.input.task, item)
+              && sameAgentTeamRole(source.input.role, sourcePlan.roles.find((role) => role.id === item.roleId)!);
           });
         const plan = await planAgentTeam({ api, goal: task.input.request, context: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}${revisionContext}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities,
-          savedMedia, savedText, ...(canPatchRoot ? { revisionBase: { plan: rootPlan, targetTaskId: impact.targetTaskId, savedMedia, savedText } } : {}),
+          savedMedia, savedText, ...(canPatch ? { revisionBase: { plan: sourcePlan, targetTaskId: ownerId === 'plan' ? target.id : originalPlanTaskId(ownerId!, target.id), taskSources, savedMedia, savedText } } : {}),
           delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         assertGoalPlanAuthorized(snapshot, plan);

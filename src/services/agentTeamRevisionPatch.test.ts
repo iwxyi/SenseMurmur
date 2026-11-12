@@ -53,6 +53,22 @@ describe('deterministic team revision compilation', () => {
     expect(result.revisionCompilation?.reusedTaskIds).toEqual(['music']);
   });
 
+  it('pins actual runtime sources while preserving local composition aliases in later revisions', () => {
+    const original = fixture();
+    const taskSources = Object.fromEntries(original.plan.tasks.map((task) => [task.id, `delegated_${task.id}`]));
+    const base = { ...original, targetTaskId: 'final', taskSources,
+      savedMedia: original.savedMedia.map((entry) => ({ ...entry, taskId: taskSources[entry.taskId] })) };
+    const result = validateAgentTeamPlan(compileTeamRevisionPatch(patchFor(base), base));
+    expect(result.tasks.map((task) => task.id)).toEqual(['final']);
+    expect(result.tasks[0].savedMedia?.map((entry) => [entry.alias, entry.taskId])).toEqual([
+      ['video_a', 'delegated_video_a'], ['video_b', 'delegated_video_b'], ['music', 'delegated_music'],
+    ]);
+    expect(result.tasks[0].composition).toEqual(original.plan.tasks[5].composition);
+    for (const mapping of [{}, { ...taskSources, final: taskSources.music }, { ...taskSources, wrong: 'wrong' }]) {
+      expect(() => compileTeamRevisionPatch(patchFor(base), { ...base, taskSources: mapping })).toThrow('对应关系无效');
+    }
+  });
+
   it('pins an unchanged script body for narration and preserves the speech binding', () => {
     const plan = validateAgentTeamPlan({ summary: '配音', finalAcceptance: '清晰',
       roles: [{ id: 'maker', name: '制作', responsibility: '旁白', method: '朗读', acceptance: '可听', allowedTools: ['text_generation', 'speech_generation'] }],

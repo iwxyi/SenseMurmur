@@ -7,6 +7,7 @@ type SavedMedia = NonNullable<AgentTeamTask['savedMedia']>[number];
 export interface TeamRevisionBase {
   plan: AgentTeamPlan;
   targetTaskId: string;
+  taskSources?: Record<string, string>;
   savedText: Omit<AgentTeamSavedText, 'alias'>[];
   savedMedia: Omit<SavedMedia, 'alias'>[];
 }
@@ -42,6 +43,10 @@ export function compileTeamRevisionPatch(raw: unknown, base: TeamRevisionBase): 
   const byId = new Map(base.plan.tasks.map((task) => [task.id, task]));
   if (byId.size !== base.plan.tasks.length || !byId.has(base.targetTaskId)
     || base.plan.tasks.some((task) => task.tool === 'delegate_task')) throw new Error('当前计划不支持局部修订，请完整重规划');
+  if (base.taskSources && (Object.keys(base.taskSources).length !== byId.size
+    || Object.keys(base.taskSources).some((id) => !byId.has(id))
+    || Object.values(base.taskSources).some((id) => typeof id !== 'string' || !id.trim())
+    || new Set(Object.values(base.taskSources)).size !== byId.size)) throw new Error('局部修订的运行任务对应关系无效');
   const updates = new Map<string, { goal: string; acceptance: string }>();
   for (const rawUpdate of patch.updates) {
     if (!rawUpdate || typeof rawUpdate !== 'object' || Array.isArray(rawUpdate)) throw new Error('局部修订条目无效');
@@ -69,10 +74,11 @@ export function compileTeamRevisionPatch(raw: unknown, base: TeamRevisionBase): 
     const savedText = [...(task.savedText ?? [])];
     const savedMedia = [...(task.savedMedia ?? [])];
     for (const id of task.dependsOn.filter((id) => !affected.has(id))) {
-      const media = base.savedMedia.find((entry) => entry.taskId === id);
+      const sourceId = base.taskSources?.[id] ?? id;
+      const media = base.savedMedia.find((entry) => entry.taskId === sourceId);
       if (media) savedMedia.push({ ...media, alias: id });
       else {
-        const text = base.savedText.find((entry) => entry.taskId === id && !entry.artifact);
+        const text = base.savedText.find((entry) => entry.taskId === sourceId && !entry.artifact);
         if (!text) throw new Error('局部修订缺少可固定版本的上游交付，请完整重规划');
         savedText.push({ ...text, alias: id });
       }

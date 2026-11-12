@@ -2236,6 +2236,32 @@ describe('agent team workflow', () => {
     expect(generate.mock.calls[7][2][0].content).toContain('原始交付正文');
     await createAgentTeamWorkflow(config, () => scope).resume(runId);
     expect(generate).toHaveBeenCalledTimes(8);
+    const next = createAgentTeamWorkflow(config, () => scope);
+    const beforeSecond = (await next.read(runId))!;
+    const previousPlan = beforeSecond.tasks.find((task) => task.id === 'delegate')!.output;
+    const secondRequest = await next.addRevisionRequest(runId, beforeSecond.run.planVersion, '只修改最新汇总的语气', 'delegated_final');
+    await next.setModelCallLimit(runId, secondRequest.run.planVersion, 10);
+    generate.mockResolvedValueOnce(JSON.stringify({ revisionPatch: { schemaVersion: 1, basePlanSha256: workflowJsonDigest(previousPlan),
+      updates: [{ taskId: 'final', goal: '用简洁语气汇总', acceptance: '简洁完整' }] } })).mockResolvedValueOnce('第二轮汇总');
+    const second = await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(second.snapshot.run.status).toBe('completed');
+    expect(second.snapshot.tasks.find((task) => task.id === 'delegate_2')?.output).toMatchObject({
+      revisionCompilation: { changedTaskIds: ['final'], rerunTaskIds: ['final'], reusedTaskIds: ['draft'] },
+      tasks: [{ savedText: [expect.objectContaining({ alias: 'other', taskId: 'other' }), expect.objectContaining({ alias: 'draft', taskId: 'delegated_draft' })] }],
+    });
+    expect(generate.mock.calls[9][2][0].content).toContain('修改后的草稿');
+    for (const original of completed.snapshot.tasks) expect(second.snapshot.tasks.find((task) => task.id === original.id)).toEqual(original);
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(generate).toHaveBeenCalledTimes(10);
+    const latest = (await next.read(runId))!;
+    const oldRequest = await next.addRevisionRequest(runId, latest.run.planVersion, '改动旧资料', 'source');
+    await next.setModelCallLimit(runId, oldRequest.run.planVersion, 11);
+    generate.mockResolvedValueOnce(JSON.stringify({ revisionPatch: { schemaVersion: 1, basePlanSha256: workflowJsonDigest(rootPlan),
+      updates: [{ taskId: 'source', goal: '改动旧资料', acceptance: '更新资料' }] } }));
+    const stale = await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(stale.snapshot.run.status).toBe('failed');
+    expect(stale.snapshot.tasks.find((task) => task.id === 'delegate_3')?.error).toContain('不允许局部修订');
+    expect(generate).toHaveBeenCalledTimes(11);
   });
 
   it('reopens a completed run for delegation and updates its existing delivery version', async () => {

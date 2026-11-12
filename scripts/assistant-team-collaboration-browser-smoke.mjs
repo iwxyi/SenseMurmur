@@ -184,14 +184,17 @@ try {
     ] };
     let patchRequests = 0;
     let patchResponse;
+    let secondPatchResponse;
     window.fetch = async (input, init) => {
       if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
       const request = JSON.parse(init.body);
       const index = patchRequests++;
       if (index === 5 && !request.messages.some((message) => String(message.content).includes('revisionPatch'))) throw new Error('Missing revision patch protocol');
       if (index === 7 && (!JSON.stringify(request.messages).includes('修改后的草稿') || !JSON.stringify(request.messages).includes('原始交付正文'))) throw new Error('Revision lost pinned or new evidence');
-      if (index > 7) throw new Error('Revision repeated completed work');
-      const content = index === 0 ? JSON.stringify(patchPlan) : index === 5 ? patchResponse : index === 6 ? '修改后的草稿' : index === 7 ? '修改后的汇总' : '原始交付正文';
+      if (index === 9 && !JSON.stringify(request.messages).includes('修改后的草稿')) throw new Error('Second revision lost actual previous draft');
+      if (index > 9) throw new Error('Revision repeated completed work');
+      const content = index === 0 ? JSON.stringify(patchPlan) : index === 5 ? patchResponse : index === 6 ? '修改后的草稿' : index === 7 ? '修改后的汇总'
+        : index === 8 ? secondPatchResponse : index === 9 ? '第二轮汇总' : '原始交付正文';
       return Response.json({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
     };
     try {
@@ -214,6 +217,21 @@ try {
       if ((await restored.resume(patchId)).snapshot.run.status !== 'completed' || patchRequests !== 8) throw new Error('Partial revision recovery failed');
       await createAgentTeamWorkflow(config, currentWorkflowScope).resume(patchId);
       if (patchRequests !== 8) throw new Error('Repeated revision recovery duplicated requests');
+      const firstRevision = await restored.read(patchId);
+      secondPatchResponse = JSON.stringify({ revisionPatch: { schemaVersion: 1,
+        basePlanSha256: workflowJsonDigest(firstRevision.tasks.find((task) => task.id === 'delegate').output),
+        updates: [{ taskId: 'final', goal: '用简洁语气汇总', acceptance: '简洁完整' }] } });
+      const secondRequest = await restored.addRevisionRequest(patchId, firstRevision.run.planVersion, '只修改最新汇总的语气', 'delegated_final');
+      await restored.setModelCallLimit(patchId, secondRequest.run.planVersion, 9);
+      const secondPause = (await restored.resume(patchId)).snapshot;
+      const compiled = secondPause.tasks.find((task) => task.id === 'delegate_2').output;
+      if (secondPause.run.status !== 'paused' || patchRequests !== 9 || compiled.tasks.length !== 1
+        || !compiled.tasks[0].savedText.some((entry) => entry.alias === 'draft' && entry.taskId === 'delegated_draft')) throw new Error('Second revision did not pin actual task source');
+      const secondRestored = createAgentTeamWorkflow(config, currentWorkflowScope);
+      await secondRestored.setModelCallLimit(patchId, secondPause.run.planVersion, 10);
+      if ((await secondRestored.resume(patchId)).snapshot.run.status !== 'completed' || patchRequests !== 10) throw new Error('Second revision recovery failed');
+      await createAgentTeamWorkflow(config, currentWorkflowScope).resume(patchId);
+      if (patchRequests !== 10) throw new Error('Repeated second revision duplicated work');
     } finally {
       window.fetch = originalFetch;
       useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== patchChatId) }));
