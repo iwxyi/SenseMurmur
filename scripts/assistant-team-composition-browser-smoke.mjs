@@ -203,6 +203,9 @@ try {
     if (!narration?.url?.startsWith('data:audio/') || narration.audioPurpose !== 'chat_voice') throw new Error('Narration not saved locally');
     const inspection = after.tasks.find((task) => task.id === 'inspect');
     if (inspection.status !== 'completed' || !inspection.output.includes('未检查音轨或逐帧连续性')) throw new Error('Missing persisted inspection scope');
+    const inspectionAttempts = await runtime.indexedDbWorkflowRepository.listTaskAttempts(runtime.currentWorkflowScope(), runId, 'inspect');
+    if (inspection.modelInvocation?.state !== 'succeeded' || inspectionAttempts.length !== 1
+      || JSON.stringify(inspectionAttempts[0].modelInvocation) !== JSON.stringify(inspection.modelInvocation)) throw new Error('Missing atomic model invocation journal');
     window.__compositionSmoke = { done: true, result: { status: after.run.status, rejectedGoalReplacement, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, visionRequests, inspectionPixels, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
     } finally { window.fetch = originalFetch; useSettingsStore.setState({ aiProfiles: originalProfiles }); }
   })().catch((error) => { window.__compositionSmoke = { done: true, error: String(error?.stack || error) }; });`);

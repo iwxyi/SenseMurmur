@@ -243,7 +243,8 @@ function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<R
 
 export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
   const runtime: ReturnType<typeof createWorkflowRunRuntime> = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
-    async execute(task: WorkflowTask, signal) {
+    tracksModelInvocations: true,
+    async execute(task: WorkflowTask, signal, context) {
       if (task.kind === 'team_plan') {
         if (typeof task.input !== 'string') throw new WorkflowPreflightError('团队目标无效');
         const snapshot = await runtime.read(task.runId);
@@ -251,7 +252,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
-        const plan = await planAgentTeam({ api, goal: task.input + workflowGoalContext(snapshot.run.goalSpec), chatId: snapshot.run.chatId, webSearch, ...capabilities, signal });
+        const plan = await planAgentTeam({ api, goal: task.input + workflowGoalContext(snapshot.run.goalSpec), chatId: snapshot.run.chatId, webSearch, ...capabilities, signal, beforeModelRequest: context.beginModelInvocation });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         assertGoalPlanAuthorized(snapshot, plan);
         return { output: plan };
@@ -269,7 +270,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
-        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities, signal });
+        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities, signal, beforeModelRequest: context.beginModelInvocation });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         assertGoalPlanAuthorized(snapshot, plan);
         return { output: plan };
@@ -284,6 +285,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         catch (error) { throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队验收标准无效'); }
         const { evidence, omitted } = selectReviewEvidence(snapshot, input.sourceTaskIds);
         finalAcceptance += workflowGoalContext(snapshot.run.goalSpec);
+        await context.beginModelInvocation();
         const raw = await generateResponse(api, '你是主 Agent 的交付验收员。根据原目标、最终验收标准和真实完成记录判断是否已达到可用交付。只能基于现有工具能力提出最多一步必要补做，不得重复已完成工作。图片、音乐和视频生成任务的文字记录只证明附件已保存；只有明确的图片检查或视频抽帧检查任务才提供实际画面观察，抽帧检查仅覆盖报告列出的采样时刻，不证明音轨、逐帧连续性或全部镜头合格。不能把未检查的媒体当作已验证。缺失的剪辑、混音、代码执行等能力不得伪装为已完成。仅输出 JSON：{"complete":true,"reason":"..."} 或 {"complete":false,"reason":"...","nextRequest":"需要补做的具体工作"}。', [{ role: 'user', content: `原目标：${snapshot.run.goal}\n最终验收标准：${finalAcceptance}\n已完成任务摘要（另有 ${omitted} 项已完成记录未列出）：${JSON.stringify(evidence)}` }], undefined, {
           responseFormat: 'json', maxTokens: 600, signal,
           aiUsage: { type: 'assistant_chat', label: '团队交付验收', scope: 'chat', resourceId: snapshot.run.chatId },
@@ -354,6 +356,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           goal: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), input.userInstruction].filter(Boolean).join('\n'), acceptance: input.task.acceptance,
           chatId: snapshot.run.chatId,
           references: references.filter((reference): reference is NonNullable<typeof reference> => Boolean(reference)), signal,
+          beforeModelRequest: context.beginModelInvocation,
         });
         return { output };
       }
@@ -370,6 +373,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           api: { provider: profile.provider, apiKey: profile.apiKey, baseUrl: profile.baseUrl, model: profile.model, maxOutputTokens: profile.maxOutputTokens },
           chatId: snapshot.run.chatId, goal: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), input.userInstruction].filter(Boolean).join('\n'), acceptance: input.task.acceptance,
           url: attachment.url, maxFrames: Math.min(6, capabilities.maxAttachments), signal,
+          beforeModelRequest: context.beginModelInvocation,
         }) };
       }
       if (selectedTool === 'speech_generation') {
@@ -456,6 +460,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('上游交付尚未就绪');
         return { taskId: id, content: dependency.output.slice(0, directIds.includes(id) ? 12_000 : 1_500) };
       });
+      await context.beginModelInvocation();
       const output = await generateResponse(api, [
         `岗位：${role.name}`,
         `职责：${role.responsibility}`,

@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowSnapshot } from './workflowRunRuntime';
+import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowExecutionContext, type WorkflowSnapshot, type WorkflowTask } from './workflowRunRuntime';
+import { workflowModelInvocationId } from './workflowModelInvocation';
 import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
 
 let testIndexedDb: IDBFactory | undefined;
@@ -42,6 +43,98 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it.each(['success', 'preflight', 'unknown', 'invalid-response', 'duplicate'] as const)('journals model request boundaries: %s', async (outcome) => {
+    const id = crypto.randomUUID();
+    const scope = `invocation-${id}`;
+    const plan = snapshot(id);
+    plan.run.maxModelCalls = 1;
+    plan.tasks = [{ ...plan.tasks[0], kind: 'agent_text' }];
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+      tracksModelInvocations: true,
+      async execute(task, _signal, context) {
+        const reserved = await indexedDbWorkflowRepository.read(scope, id);
+        expect(reserved?.tasks[0].modelInvocation?.state).toBe('reserved');
+        if (outcome === 'preflight') throw new WorkflowPreflightError('权限不足');
+        await context.beginModelInvocation();
+        const attempts = await indexedDbWorkflowRepository.listTaskAttempts(scope, id, task.id);
+        expect(attempts[0].modelInvocation?.state).toBe('started');
+        if (outcome === 'duplicate') await expect(context.beginModelInvocation()).rejects.toThrow('已失效或已开始');
+        if (outcome === 'unknown') throw new Error('连接中断');
+        if (outcome === 'invalid-response') throw new WorkflowPreflightError('响应格式错误');
+        return { output: '结果' };
+      },
+    }, () => scope);
+    await runtime.create(plan);
+    const result = await runtime.resume(id);
+    const expected = outcome === 'preflight' ? 'not_started' : outcome === 'unknown' ? 'result_unknown' : outcome === 'invalid-response' ? 'failed' : 'succeeded';
+    expect(result.tasks[0].modelInvocation?.state).toBe(expected);
+    expect(countWorkflowModelCalls(result)).toBe(outcome === 'preflight' ? 0 : 1);
+    expect((await indexedDbWorkflowRepository.listTaskAttempts(scope, id, plan.tasks[0].id))[0].modelInvocation).toEqual(result.tasks[0].modelInvocation);
+  });
+
+  it.each(['reserved', 'started'] as const)('recovers %s model requests without duplicate paid calls', async (state) => {
+    const id = crypto.randomUUID();
+    const scope = `recover-invocation-${id}`;
+    const plan = snapshot(id);
+    plan.run.status = 'paused';
+    plan.run.maxModelCalls = 1;
+    plan.tasks = [{ ...plan.tasks[0], kind: 'agent_text', status: 'running', attempt: 1,
+      modelInvocation: { schemaVersion: 1, id: workflowModelInvocationId(id, 'script', 1), runId: id, taskId: 'script', attempt: 1, state, reservedAt: 1,
+        ...(state === 'started' ? { startedAt: 1 } : {}) } }];
+    const execute = vi.fn(async (_task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => { await context.beginModelInvocation(); return { output: '完成' }; });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksModelInvocations: true, execute }, () => scope);
+    await runtime.create(plan);
+    const result = await runtime.resume(id);
+    expect(execute).toHaveBeenCalledTimes(state === 'reserved' ? 1 : 0);
+    expect(result.tasks[0].status).toBe(state === 'reserved' ? 'completed' : 'result_unknown');
+    expect(result.tasks[0].attempt).toBe(state === 'reserved' ? 2 : 1);
+    expect(countWorkflowModelCalls(result)).toBe(1);
+    await runtime.resume(id);
+    expect(execute).toHaveBeenCalledTimes(state === 'reserved' ? 1 : 0);
+  });
+
+  it.each(['abort', 'pause', 'account'] as const)('rejects request start after losing execution authority: %s', async (reason) => {
+    const id = crypto.randomUUID();
+    const storageScope = `authority-${id}`;
+    let currentScope = storageScope;
+    const plan = snapshot(id);
+    plan.tasks = [{ ...plan.tasks[0], kind: 'agent_text' }];
+    const controller = new AbortController();
+    const request = vi.fn();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const execute = vi.fn(async (_task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => {
+      await gate;
+      await context.beginModelInvocation();
+      request();
+      return { output: '不能发出请求' };
+    });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksModelInvocations: true, execute }, () => currentScope);
+    await runtime.create(plan);
+    const pending = runtime.resume(id, controller.signal);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    if (reason === 'abort') controller.abort();
+    if (reason === 'pause') await runtime.pause(id);
+    if (reason === 'account') currentScope = 'different-account';
+    release();
+    await pending;
+    expect(request).not.toHaveBeenCalled();
+    currentScope = storageScope;
+    const saved = await runtime.read(id);
+    expect(saved?.tasks[0].modelInvocation?.startedAt).toBeUndefined();
+  });
+
+  it('rejects a tracked executor result without a persisted request boundary', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.tasks = [{ ...plan.tasks[0], kind: 'agent_text' }];
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksModelInvocations: true, execute: async () => ({ output: '无调用记录' }) }, () => `missing-boundary-${id}`);
+    await runtime.create(plan);
+    const result = await runtime.resume(id);
+    expect(result.tasks[0]).toMatchObject({ status: 'failed', modelInvocation: { state: 'not_started' } });
+    expect(countWorkflowModelCalls(result)).toBe(0);
+  });
+
   it('persists immutable goal authorization and rejects mismatched or unsupported contracts', async () => {
     const id = crypto.randomUUID();
     const scope = `goal-${id}`;

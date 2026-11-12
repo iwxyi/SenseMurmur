@@ -2,6 +2,12 @@ import { useEffect, useState } from 'react';
 import { Box, Button, CircularProgress, Typography } from '@mui/material';
 import { currentWorkflowScope, indexedDbWorkflowRepository, type WorkflowTaskStatus } from '../../services/workflowRunRuntime';
 import type { WorkflowTaskAttempt } from '../../services/workflowTaskAttempt';
+import type { WorkflowModelInvocation } from '../../services/workflowModelInvocation';
+
+const invocationLabels: Record<WorkflowModelInvocation['state'], string> = {
+  reserved: '等待调用模型', started: '模型请求已开始', succeeded: '模型请求已完成',
+  failed: '模型调用后处理失败', result_unknown: '模型结果待核对', not_started: '未调用模型',
+};
 
 interface Props { runId: string; taskId: string; updatedAt: number; statusLabels: Record<WorkflowTaskStatus, string> }
 
@@ -31,6 +37,7 @@ export default function TeamTaskExecutionHistory({ runId, taskId, updatedAt, sta
       {!loading && !error && !attempts.length && <Typography variant="caption" color="text.secondary">暂无执行记录</Typography>}
       {attempts.map((attempt) => <Box key={attempt.attempt}>
         <Typography variant="body2">第 {attempt.attempt} 次执行 · {statusLabels[attempt.status]} · 计划 {attempt.planVersion}</Typography>
+        {attempt.modelInvocation && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{invocationLabels[attempt.modelInvocation.state]}</Typography>}
         <Typography variant="caption" color="text.secondary">{new Date(attempt.startedAt).toLocaleString()}{attempt.finishedAt ? ` 至 ${new Date(attempt.finishedAt).toLocaleString()}` : ''}</Typography>
       </Box>)}
     </Box>}

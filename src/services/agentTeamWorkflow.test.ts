@@ -167,8 +167,7 @@ describe('agent team workflow', () => {
     }, value: undefined }));
     const result = await createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope).resume(runId);
     expect(result.snapshot.tasks.find((item) => item.id === task.id)?.error).toContain('未获得本次任务的目标授权');
-    // The current budget conservatively reserves every dispatch attempt, including preflight failures.
-    expect(countWorkflowModelCalls(result.snapshot)).toBe(2);
+    expect(countWorkflowModelCalls(result.snapshot)).toBe(1);
     expect(generate).not.toHaveBeenCalled();
   });
 
@@ -192,7 +191,7 @@ describe('agent team workflow', () => {
       ],
     }, value: undefined }));
     vi.mocked(teamMediaAttachment).mockReturnValue(available ? { id: 'video', kind: 'video', status: 'ready', url: 'data:video/mp4;base64,saved', altText: '成片', createdAt: now, updatedAt: now } : undefined);
-    vi.mocked(inspectAgentTeamVideo).mockResolvedValue('抽帧可见角色，未检查音轨');
+    vi.mocked(inspectAgentTeamVideo).mockImplementation(async (params) => { await params.beforeModelRequest?.(); return '抽帧可见角色，未检查音轨'; });
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o' }, () => scope);
     const result = await workflow.resume(runId);
     if (available) {
@@ -369,7 +368,7 @@ describe('agent team workflow', () => {
     ], finalAcceptance: '报告说明实际画面' })).mockResolvedValueOnce('根据检查观察撰写的报告');
     vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片附件已保存' });
     vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/forest.png', mimeType: 'image/png' });
-    vi.mocked(inspectAgentTeamImages).mockResolvedValue('实际画面有森林，无角色');
+    vi.mocked(inspectAgentTeamImages).mockImplementation(async (params) => { await params.beforeModelRequest?.(); return '实际画面有森林，无角色'; });
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o' }, () => `inspection-scope-${runId}`);
     const result = await workflow.start(runId, chatId, '画森林并检查');
     expect(result.snapshot.run.status).toBe('completed');
@@ -393,7 +392,7 @@ describe('agent team workflow', () => {
       ], finalAcceptance: '短片可播放' }));
     vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已保存' });
     vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/forest.png', mimeType: 'image/png' });
-    vi.mocked(inspectAgentTeamImages).mockResolvedValue('实际画面是森林，但光线偏暗');
+    vi.mocked(inspectAgentTeamImages).mockImplementation(async (params) => { await params.beforeModelRequest?.(); return '实际画面是森林，但光线偏暗'; });
     vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'video-task' });
     vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'video-task' });
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o' }, () => `inspection-video-scope-${runId}`);
