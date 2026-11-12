@@ -56,7 +56,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   const source = record(raw);
   if (source.schemaVersion !== undefined && source.schemaVersion !== 1) throw new Error('团队计划版本不受支持');
   if (!Array.isArray(source.roles) || !Array.isArray(source.tasks)) throw new Error('团队计划缺少岗位或任务');
-  if (source.roles.length < 1 || source.roles.length > 6 || source.tasks.length < 1 || source.tasks.length > 16) throw new Error('团队计划规模超出限制');
+  if (source.roles.length < 1 || source.roles.length > 8 || source.tasks.length < 1 || source.tasks.length > 48) throw new Error('团队计划规模超出限制');
   const roles = source.roles.map((item): AgentTeamRole => {
     const value = record(item);
     if (value.schemaVersion !== undefined && value.schemaVersion !== 1) throw new Error('岗位契约版本不受支持');
@@ -161,7 +161,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; chat
     '岗位必须有具体职责、方法和可检查的验收标准；任务必须有唯一 ID、岗位归属、明确目标和依赖。不要用岗位名称冒充专业能力。',
     '只为需要用户单独打开、复用或编辑的任务声明 deliverable；可选类型 document、table、code、diagram、html、json、text。格式为 {"kind":"table","title":"市场比较表","language":"csv"}。未声明时仍会纳入团队总结，不要给搜索、图片/音频/视频生成等每个步骤机械创建文字产物。只输出 JSON：{"schemaVersion":1,"summary":"...","roles":[{"schemaVersion":1,"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"...","deliverable":{"kind":"table","title":"比较表","language":"csv"}}],"finalAcceptance":"..."}',
   ].join('\n'), [{ role: 'user', content: goal }], undefined, {
-    responseFormat: 'json', maxTokens: 2400, signal: params.signal,
+    responseFormat: 'json', maxTokens: 10_000, signal: params.signal,
     aiUsage: { type: 'assistant_chat', label: '团队任务规划', scope: 'chat', resourceId: params.chatId },
   });
   let parsed: unknown;

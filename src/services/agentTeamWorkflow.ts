@@ -29,6 +29,7 @@ const TOOL_TASK_KINDS = {
   text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio',
   image_inspection: 'agent_image_inspection', video_generation: 'agent_video',
 } as const;
+const MAX_TEAM_RUN_TASKS = 64;
 
 function teamTaskKind(task: AgentTeamTask) { return TOOL_TASK_KINDS[task.tool || 'text_generation']; }
 function isAgentTaskKind(kind: string) { return Object.values(TOOL_TASK_KINDS).some((value) => value === kind); }
@@ -94,11 +95,9 @@ function selectReviewEvidence(snapshot: WorkflowSnapshot, taskIds: string[]) {
     if (!source || source.status !== 'completed' || typeof source.output !== 'string') throw new WorkflowPreflightError('验收证据尚未就绪');
     return source;
   });
-  const media = sources.filter((source) => source.kind === 'agent_image' || source.kind === 'agent_audio' || source.kind === 'agent_video').slice(-6);
-  const selected = new Set(media.map((source) => source.id));
-  sources.filter((source) => !selected.has(source.id)).slice(-(12 - media.length)).forEach((source) => selected.add(source.id));
-  return { omitted: sources.length - selected.size,
-    evidence: sources.filter((source) => selected.has(source.id)).map((source) => ({ task: source.id, output: (source.output as string).slice(0, 1800) })) };
+  const maxPerTask = sources.length <= 12 ? 1800 : Math.max(240, Math.floor(24_000 / sources.length));
+  return { omitted: 0,
+    evidence: sources.map((source) => ({ task: source.id, output: (source.output as string).slice(0, maxPerTask) })) };
 }
 
 function countImageUpstream(task: AgentTeamTask, byId: Map<string, AgentTeamTask>) {
@@ -456,7 +455,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (current.run.status !== 'paused' && current.run.status !== 'completed') throw new Error('请先暂停整个团队任务');
         if (current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
         const hasReviewBlock = current.tasks.some((task) => task.id === 'review_needs_user' && task.status === 'waiting_user');
-        if (current.tasks.length - (hasReviewBlock ? 1 : 0) >= 24) throw new Error('团队任务规模超出限制');
+        if (current.tasks.length - (hasReviewBlock ? 1 : 0) >= MAX_TEAM_RUN_TASKS) throw new Error('团队任务规模超出限制');
         if (current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown' || task.status === 'failed')) throw new Error('请先处理未完成或待核对的步骤');
         if (current.tasks.some((task) => task.kind === 'team_plan_revision' && task.status !== 'completed')) throw new Error('请先完成已追加的团队任务');
         const sourceTaskIds = current.tasks.filter((task) => isAgentTaskKind(task.kind)).map((task) => task.id);
@@ -581,7 +580,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (revisionTask.id.startsWith('auto_delegate_') && snapshot.run.autoReview === false) continue;
         const delegated = validateAgentTeamPlan(revisionTask.output);
         const alreadyExpanded = snapshot.tasks.some((task) => task.id === delegatedTaskId(revisionTask.id, delegated.tasks[0]?.id || ''));
-        if (!alreadyExpanded && snapshot.tasks.length + delegated.tasks.length > 24) {
+        if (!alreadyExpanded && snapshot.tasks.length + delegated.tasks.length > MAX_TEAM_RUN_TASKS) {
           if (revisionTask.id.startsWith('auto_delegate_')) {
             const reviewId = `review_${revisionTask.id.slice('auto_delegate_'.length)}`;
             snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '新增任务超过团队规模上限，请缩小目标后追加指示。'));
@@ -625,7 +624,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const revisionId = `auto_delegate_${round}`;
           if (!snapshot.tasks.some((task) => task.id === revisionId)) {
             const sourceTaskIds = snapshot.tasks.filter((task) => isAgentTaskKind(task.kind)).map((task) => task.id);
-            if (snapshot.tasks.length >= 23) {
+            if (snapshot.tasks.length >= MAX_TEAM_RUN_TASKS) {
               snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '团队任务已达到自动追加上限，请检查结果并决定后续步骤。'));
               break;
             }
@@ -640,7 +639,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           if (revision?.status !== 'completed') break;
           const delegated = validateAgentTeamPlan(revision.output);
           const alreadyExpanded = snapshot.tasks.some((task) => task.id === delegatedTaskId(revisionId, delegated.tasks[0]?.id || ''));
-          if (!alreadyExpanded && snapshot.tasks.length + delegated.tasks.length > 23) {
+          if (!alreadyExpanded && snapshot.tasks.length + delegated.tasks.length > MAX_TEAM_RUN_TASKS) {
             snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '新增任务超过团队规模上限，请缩小目标后追加指示。'));
             break;
           }
@@ -976,10 +975,18 @@ export async function recoverAgentTeamRuns() {
     changed ||= recovered;
   }
   for (const run of runs) {
-    if (run.run.status !== 'completed' || run.run.deliveryStatus === 'published' || currentWorkflowScope() !== storageScope) continue;
+    if (currentWorkflowScope() !== storageScope) break;
+    await indexedDbWorkflowRepository.registerOutboxConsumer(storageScope, run.run.id, 'team-delivery');
     try {
-      await currentTeamWorkflow().publish(run.run.id);
-      changed = true;
+      if (run.run.status === 'completed' && run.run.deliveryStatus !== 'published') {
+        await currentTeamWorkflow().publish(run.run.id);
+        changed = true;
+      }
+      while (currentWorkflowScope() === storageScope) {
+        const events = await indexedDbWorkflowRepository.listOutboxEvents(storageScope, run.run.id, 'team-delivery', 1000);
+        if (!events.length) break;
+        await indexedDbWorkflowRepository.acknowledgeOutboxEvents(storageScope, run.run.id, 'team-delivery', events.at(-1)!.sequence);
+      }
     } catch (error) {
       console.error('[agent-team:delivery-recovery-failed]', { runId: run.run.id, error });
     }

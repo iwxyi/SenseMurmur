@@ -22,6 +22,19 @@ describe('agent team plan', () => {
     expect(plan.roles[0].schemaVersion).toBe(1);
   });
 
+  it('accepts forty shot tasks while keeping a hard plan limit', () => {
+    const plan = valid();
+    plan.tasks = Array.from({ length: 40 }, (_, index) => ({
+      id: `shot_${index + 1}`, roleId: 'researcher', goal: `镜头 ${index + 1}`,
+      dependsOn: index === 0 ? [] : [`shot_${index}`], acceptance: '有可核对结果',
+    }));
+    expect(validateAgentTeamPlan(plan).tasks).toHaveLength(40);
+    plan.tasks.push(...Array.from({ length: 9 }, (_, index) => ({
+      id: `extra_${index + 1}`, roleId: 'researcher', goal: '补充镜头', dependsOn: [], acceptance: '完成',
+    })));
+    expect(() => validateAgentTeamPlan(plan)).toThrow('规模超出限制');
+  });
+
   it('migrates legacy plans and roles in memory while rejecting unknown contract versions', () => {
     const legacy = validateAgentTeamPlan(valid());
     expect(legacy).toMatchObject({ schemaVersion: 1, roles: [{ schemaVersion: 1 }] });
@@ -182,7 +195,7 @@ describe('agent team plan', () => {
       expect(() => validateAgentTeamPlan(internal)).toThrow('内部规划步骤冲突');
     }
     const oversized = valid();
-    oversized.roles = Array.from({ length: 7 }, (_, index) => ({ ...oversized.roles[0], id: `role_${index}` }));
+    oversized.roles = Array.from({ length: 9 }, (_, index) => ({ ...oversized.roles[0], id: `role_${index}` }));
     expect(() => validateAgentTeamPlan(oversized)).toThrow('规模超出限制');
   });
 });

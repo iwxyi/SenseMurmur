@@ -90,6 +90,31 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('executes and persists a forty-step dependent plan across the expanded capacity', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `forty-step-${runId}`;
+    const scope = `forty-step-scope-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    const plan = {
+      summary: '四十镜头脚本',
+      roles: [{ id: 'writer', name: '编剧', responsibility: '编写镜头脚本', method: '逐镜头接续', acceptance: '镜头顺序完整', allowedTools: ['text_generation'] }],
+      tasks: Array.from({ length: 40 }, (_, index) => ({
+        id: `shot_${index + 1}`, roleId: 'writer', goal: `编写第 ${index + 1} 个镜头`,
+        dependsOn: index === 0 ? [] : [`shot_${index}`], acceptance: '包含镜头内容',
+      })),
+      finalAcceptance: '四十个镜头均完成',
+    };
+    generate.mockResolvedValueOnce(JSON.stringify(plan));
+    for (let index = 1; index <= 40; index += 1) generate.mockResolvedValueOnce(`镜头 ${index} 内容`);
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const result = await workflow.start(runId, chatId, '生成四十镜头脚本');
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks).toHaveLength(41);
+    expect(result.snapshot.tasks.filter((task) => task.kind === 'agent_text' && task.status === 'completed')).toHaveLength(40);
+    expect((await workflow.read(runId))?.tasks.find((task) => task.id === 'shot_40')?.output).toBe('镜头 40 内容');
+    expect(generate).toHaveBeenCalledTimes(41);
+  });
+
   it('passes the completed image attachment to a dependent image task', async () => {
     const runId = crypto.randomUUID();
     const chatId = `image-chain-${runId}`;
@@ -246,7 +271,8 @@ describe('agent team workflow', () => {
     expect(result.snapshot.run.status).toBe('completed');
     const evidence = generate.mock.calls[0][2][0].content;
     expect(evidence).toContain('视频附件已保存');
-    expect(evidence).toContain('另有 2 项已完成记录未列出');
+    expect(evidence).toContain('另有 0 项已完成记录未列出');
+    expect(evidence).toContain('note_12');
   });
   it('resumes an already expanded automatic plan near the task limit without blocking it again', async () => {
     const runId = crypto.randomUUID();
@@ -771,7 +797,7 @@ describe('agent team workflow', () => {
     const first = await workflow.publish(runId);
     const second = await workflow.publish(runId);
     const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId).filter((item) => item.sourceMessageId.startsWith(`team-delivery-${runId}:`));
-    expect(artifacts.map((item) => [item.kind, item.title])).toEqual([['table', '比較表'], ['document', '调研报告']]);
+    expect(artifacts.map((item) => [item.kind, item.title]).sort((left, right) => left[0].localeCompare(right[0]))).toEqual([['document', '调研报告'], ['table', '比較表']]);
     expect(artifacts).toHaveLength(2);
     expect(first.id).toBe(second.id);
     const delivered = useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.find((message) => message.id === `team-delivery-${runId}`);
@@ -868,6 +894,7 @@ describe('agent team workflow', () => {
     expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)).toHaveLength(0);
 
     expect(await recoverAgentTeamRuns()).toBe(true);
+    expect(await indexedDbWorkflowRepository.listOutboxEvents(scope, runId, 'team-delivery')).toHaveLength(0);
     expect(await recoverAgentTeamRuns()).toBe(false);
     const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId);
     expect(artifacts).toHaveLength(1);
@@ -875,6 +902,7 @@ describe('agent team workflow', () => {
     expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.filter((message) => message.id === `team-delivery-${runId}`)).toHaveLength(1);
     expect(generate).toHaveBeenCalledTimes(2);
     expect((await indexedDbWorkflowRepository.read(scope, runId))?.run.deliveryStatus).toBe('published');
+    expect(await indexedDbWorkflowRepository.listOutboxEvents(scope, runId, 'team-delivery')).toHaveLength(0);
   });
 
   it('retries delivery after artifacts are saved but the final message write fails', async () => {
