@@ -1313,6 +1313,7 @@ describe('agent team workflow', () => {
     const prepared = await indexedDbWorkflowRepository.read(scope, runId);
     expect(prepared?.run.deliveryStatus).toBe('pending');
     expect(prepared?.run.deliveryIssue).toBe('save_failed');
+    if (failure === 'artifact') await expect(workflow.publish(runId, prepared!.run.planVersion)).rejects.toThrow('没有待处理的内容冲突');
     await indexedDbWorkflowRepository.registerOutboxConsumer(scope, runId, 'team-delivery');
     expect((await indexedDbWorkflowRepository.listOutboxEvents(scope, runId, 'team-delivery')).length).toBeGreaterThan(0);
     expect(prepared?.run.delivery?.message.id).toBe(`team-delivery-${runId}`);
@@ -1338,8 +1339,6 @@ describe('agent team workflow', () => {
       expect((await workflow.read(runId))?.run.deliveryStatus).toBe('pending');
       expect((await workflow.read(runId))?.run.deliveryIssue).toBe('artifact_conflict');
       expect(generate).toHaveBeenCalledTimes(2);
-      await indexedDbWorkflowRepository.transact(scope, runId, (current) => ({ snapshot: { ...current!, run: { ...current!.run, status: 'cancelled' } }, value: undefined }));
-      return;
     }
     if (failure === 'edited-message') {
       const message = useMessageStore.getState().messageWindowsByChatId[chatId]!.messages.find((item) => item.id === `team-delivery-${runId}`)!;
@@ -1348,7 +1347,33 @@ describe('agent team workflow', () => {
       expect((await workflow.read(runId))?.run.deliveryStatus).toBe('pending');
       expect((await workflow.read(runId))?.run.deliveryIssue).toBe('message_conflict');
       expect(generate).toHaveBeenCalledTimes(2);
-      await indexedDbWorkflowRepository.transact(scope, runId, (current) => ({ snapshot: { ...current!, run: { ...current!.run, status: 'cancelled' } }, value: undefined }));
+    }
+    if (failure === 'edited-artifact' || failure === 'edited-message') {
+      await expect(workflow.publish(runId, prepared!.run.planVersion + 1)).rejects.toThrow('交付版本冲突');
+      const copyInterrupted = vi.spyOn(useAssistantArtifactStore.getState(), 'applyWorkflowDelivery').mockImplementationOnce(() => { throw new Error('模拟副本保存中断'); });
+      await expect(workflow.publish(runId, prepared!.run.planVersion)).rejects.toThrow('模拟副本保存中断');
+      copyInterrupted.mockRestore();
+      const copyIntent = (await workflow.read(runId))!.run.deliveryCopy!;
+      expect(copyIntent.copyOfPlanVersion).toBe(prepared!.run.planVersion);
+      expect((await workflow.read(runId))!.run.delivery).toEqual(prepared!.run.delivery);
+      await expect(indexedDbWorkflowRepository.transact(scope, runId, (current) => {
+        current!.run.deliveryCopy!.message.content = '篡改副本';
+        return { snapshot: current!, value: undefined };
+      })).rejects.toThrow('另存清单不可修改');
+      const restored = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+      await restored.publish(runId);
+      await restored.publish(runId, prepared!.run.planVersion);
+      const final = (await restored.read(runId))!;
+      expect(final.run.deliveryStatus).toBe('published');
+      expect(final.run.deliveryCopy).toEqual(copyIntent);
+      const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId);
+      expect(artifacts).toHaveLength(2);
+      expect(artifacts.find((item) => item.id === copyIntent.artifacts[0].after.id)?.versions[0].content).toBe('已保存的报告内容');
+      if (failure === 'edited-artifact') expect(artifacts.find((item) => item.id === prepared!.run.delivery!.artifacts[0].after.id)?.versions[0].content).toBe('用户亲自修改的内容');
+      const savedMessages = useMessageStore.getState().messageWindowsByChatId[chatId]!.messages;
+      expect(savedMessages.filter((item) => item.id === copyIntent.message.id)).toHaveLength(1);
+      if (failure === 'edited-message') expect(savedMessages.find((item) => item.id === `team-delivery-${runId}`)?.content).toBe('用户修改了交付消息');
+      expect(generate).toHaveBeenCalledTimes(2);
       return;
     }
 

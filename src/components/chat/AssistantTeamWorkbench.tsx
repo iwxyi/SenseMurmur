@@ -6,6 +6,7 @@ import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
 import { buildAgentTeamTaskRevisionRequest, isRecoverableAgentTeamRun } from '../../services/agentTeamWorkflow';
 import TeamTaskExecutionHistory from './TeamTaskExecutionHistory';
 import { workflowDeliveryIssueLabel } from '../../services/workflowDelivery';
+import TeamDeliveryConflictPanel from './TeamDeliveryConflictPanel';
 
 interface Props {
   runs: WorkflowSnapshot[];
@@ -18,6 +19,7 @@ interface Props {
   onPause: (run: WorkflowSnapshot) => Promise<void>;
   onUpdateModelCallLimit: (run: WorkflowSnapshot, limit?: number) => Promise<void>;
   onUpdateDeadline: (run: WorkflowSnapshot, deadlineAt?: number) => Promise<void>;
+  onSaveDeliveryCopy: (run: WorkflowSnapshot) => Promise<void>;
   onDelegate: (run: WorkflowSnapshot, request: string) => Promise<void>;
   onAbandonReview: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
   onResumeAfterReviewRetry: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
@@ -50,7 +52,7 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onResumeAll, onCreate, onInstruct, onPause, onUpdateModelCallLimit, onUpdateDeadline, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterPlanRetry }: Props) {
+export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onResumeAll, onCreate, onInstruct, onPause, onUpdateModelCallLimit, onUpdateDeadline, onSaveDeliveryCopy, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterPlanRetry }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -118,6 +120,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           {run.run.pauseReason && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">{run.run.pauseReason}</Typography>}
           {run.run.goalSpec?.deadlineAt && <Typography variant="caption" color="text.secondary">截止时间：{new Date(run.run.goalSpec.deadlineAt).toLocaleString()}</Typography>}
           {run.run.deliveryIssue && run.run.status === 'completed' && <Typography role="alert" variant="body2" color="error.main">{workflowDeliveryIssueLabel(run.run.deliveryIssue)}</Typography>}
+          {deliveryNeedsAttention && <TeamDeliveryConflictPanel key={`${run.run.id}:${run.run.planVersion}`} snapshot={run} canSave={canRun && !running} onSaveCopy={onSaveDeliveryCopy} />}
           {modelCallLimitReached && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">已达到模型调用上限。调整上限后可继续，已有结果会保留。</Typography>}
         </Box>
         {canRun && !running && run.run.status === 'paused' && run.run.goalSpec && <Box sx={{ display: 'grid', gap: 1 }}>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AssistantArtifactItem } from '../types/assistantArtifact';
-import { parseWorkflowDelivery, projectWorkflowArtifacts, type WorkflowDelivery } from './workflowDelivery';
+import { copyWorkflowDelivery, parseWorkflowDelivery, projectWorkflowArtifacts, type WorkflowDelivery } from './workflowDelivery';
 
 function item(id = 'artifact', content = '报告正文'): AssistantArtifactItem {
   return { id, chatId: 'chat', kind: 'document', title: '报告', sourceMessageId: 'source',
@@ -19,6 +19,26 @@ function delivery(): WorkflowDelivery {
 }
 
 describe('workflow delivery contract', () => {
+  it('copies only the saved candidate into deterministic new identities without changing the original', () => {
+    const original = delivery();
+    const saved = structuredClone(original);
+    const copy = copyWorkflowDelivery(original, 42);
+    expect(original).toEqual(saved);
+    expect(copy).toEqual(copyWorkflowDelivery(original, 42));
+    expect(copy.copyOfPlanVersion).toBe(1);
+    expect(copy.message.id).toBe('team-delivery-run:copy:1');
+    expect(copy.artifacts[0].before).toBeNull();
+    expect(copy.artifacts[0].after.id).not.toBe(original.artifacts[0].after.id);
+    expect(copy.artifacts[0].after.versions).toHaveLength(1);
+    expect(copy.artifacts[0].after.versions[0]).toMatchObject({ content: '报告正文', baseVersionId: null, createdAt: 42 });
+    expect(parseWorkflowDelivery(copy)).toEqual(copy);
+    expect(() => parseWorkflowDelivery({ ...copy, copyOfPlanVersion: 2 })).toThrow('来源版本');
+    expect(() => copyWorkflowDelivery(copy, 50)).toThrow('已另存');
+    const existing = item('artifact', '用户编辑');
+    const projected = projectWorkflowArtifacts([existing], copy.artifacts);
+    expect(projected.find((entry) => entry.id === existing.id)).toEqual(existing);
+    expect(projectWorkflowArtifacts(projected, copy.artifacts)).toEqual(projected);
+  });
   it('validates the versioned manifest and exact artifact/message association', () => {
     expect(parseWorkflowDelivery(delivery())).toEqual(delivery());
     const invalid = delivery();

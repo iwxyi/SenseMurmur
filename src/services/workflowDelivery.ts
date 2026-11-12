@@ -12,6 +12,7 @@ export interface WorkflowDelivery {
   chatId: string;
   planVersion: number;
   preparedAt: number;
+  copyOfPlanVersion?: number;
   artifacts: WorkflowArtifactProjection[];
   message: Message;
   previousMessageIdentity: string | null;
@@ -69,7 +70,9 @@ export function parseWorkflowDelivery(value: unknown): WorkflowDelivery {
     ids.add(entry.after.id);
   }
   const message = value.message;
-  if (!record(message) || message.id !== `team-delivery-${value.runId}` || message.clientKey !== message.id
+  if (value.copyOfPlanVersion !== undefined && value.copyOfPlanVersion !== value.planVersion) throw new Error('另存交付来源版本无效');
+  const messageId = `team-delivery-${value.runId}${value.copyOfPlanVersion === undefined ? '' : `:copy:${value.planVersion}`}`;
+  if (!record(message) || message.id !== messageId || message.clientKey !== message.id
     || message.chatId !== value.chatId || message.type !== 'ai' || message.senderId !== 'assistant'
     || typeof message.content !== 'string' || !Number.isFinite(message.timestamp) || message.isDeleted !== false
     || !record(message.metadata) || !record(message.metadata.assistant) || !Array.isArray(message.metadata.assistant.artifacts)) {
@@ -82,6 +85,42 @@ export function parseWorkflowDelivery(value: unknown): WorkflowDelivery {
       || ref.kind !== entry.after.kind || ref.title !== entry.after.title;
   })) throw new Error('工作流交付消息与产物不一致');
   return value as unknown as WorkflowDelivery;
+}
+
+export type WorkflowDeliveryBranch = NonNullable<Message['metadata']>['branching'];
+
+export function copyWorkflowDelivery(original: WorkflowDelivery, preparedAt: number, branching?: WorkflowDeliveryBranch): WorkflowDelivery {
+  parseWorkflowDelivery(original);
+  if (original.copyOfPlanVersion !== undefined) throw new Error('此交付已另存，请先检查另存内容');
+  const sourceId = `team-delivery-${original.runId}:copy:${original.planVersion}`;
+  const artifacts = original.artifacts.map(({ after }, index): WorkflowArtifactProjection => {
+    const current = after.versions.find((version) => version.id === after.currentVersionId)!;
+    const id = `${sourceId}:artifact:${index}`;
+    const versionId = `${id}:1`;
+    const sourceMessageId = `${sourceId}:${index}`;
+    return { before: null, after: {
+      id, chatId: original.chatId, kind: after.kind, title: `${after.title}（交付副本）`,
+      summary: after.summary, language: after.language, dataDescriptor: after.dataDescriptor,
+      sourceMessageId, currentVersionId: versionId,
+      versions: [{ ...structuredClone(current), id: versionId, artifactId: id, sourceMessageId,
+        baseVersionId: null, revision: 1, createdAt: preparedAt, updatedAt: preparedAt }],
+      revision: 1, createdAt: preparedAt, updatedAt: preparedAt, sortOrder: preparedAt, deletedAt: null,
+    } };
+  });
+  const message = structuredClone(original.message);
+  message.id = sourceId;
+  message.clientKey = sourceId;
+  message.timestamp = preparedAt;
+  message.content = '已保留现有内容，并另存团队交付。';
+  message.metadata!.assistant!.artifacts = artifacts.map(({ after }) => ({
+    id: after.id, kind: after.kind, title: after.title, versionId: after.currentVersionId,
+  }));
+  message.metadata!.branching = branching;
+  if (branching && (branching.nodeId !== sourceId || typeof branching.rootNodeId !== 'string'
+    || (branching.parentNodeId !== null && typeof branching.parentNodeId !== 'string')
+    || !Number.isSafeInteger(branching.sequence))) throw new Error('另存交付分支无效');
+  return parseWorkflowDelivery({ ...original, copyOfPlanVersion: original.planVersion, preparedAt,
+    artifacts, message, previousMessageIdentity: null });
 }
 
 // Ignore cloud bookkeeping, but compare the exact authored item and versions.

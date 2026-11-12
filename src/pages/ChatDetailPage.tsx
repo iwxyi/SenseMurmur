@@ -50,7 +50,7 @@ import { useChatSurfaceActions } from '../hooks/useChatSurfaceActions';
 import { useReplyOperation } from '../hooks/useReplyOperation';
 import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, getAssistantBackgroundStreamingSnapshot, listAssistantBackgroundReplies, resumeAssistantBackgroundReply, retryAssistantBackgroundReply, subscribeAssistantBackgroundReplies, subscribeAssistantBackgroundRunChanges, subscribeAssistantBackgroundStreaming } from '../services/assistantBackgroundReply';
 import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
-import { abandonAgentTeamReview, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamPlan, retryAgentTeamReview, runAgentTeam, subscribeAgentTeamRuns, updateAgentTeamDeadline, updateAgentTeamModelCallLimit } from '../services/agentTeamWorkflow';
+import { abandonAgentTeamReview, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamPlan, retryAgentTeamReview, runAgentTeam, saveAgentTeamDeliveryCopy, subscribeAgentTeamRuns, updateAgentTeamDeadline, updateAgentTeamModelCallLimit } from '../services/agentTeamWorkflow';
 import { defaultWorkflowGoalSpec } from '../services/workflowGoalSpec';
 import { getDirectBackgroundRevision, isDirectBackgroundActive, listDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply, subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
 import { getAiDirectBackgroundRevision, isAiDirectBackgroundActive, listAiDirectBackgroundReplies, resumeAiDirectBackgroundReply, startAiDirectBackgroundReply, subscribeAiDirectBackgroundReplies } from '../services/aiDirectBackgroundReply';
@@ -4635,6 +4635,7 @@ export default function ChatDetailPage() {
           onPause={async (selected) => { await pauseAgentTeamAfterCurrentBatch(selected.run.id); }}
           onUpdateModelCallLimit={async (selected, maxModelCalls) => { await updateAgentTeamModelCallLimit({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, maxModelCalls }); }}
           onUpdateDeadline={async (selected, deadlineAt) => { await updateAgentTeamDeadline({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, deadlineAt }); }}
+          onSaveDeliveryCopy={async (selected) => { await saveAgentTeamDeliveryCopy({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion }); }}
           onDelegate={async (selected, request) => { await delegateAgentTeamTask({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, request }); }}
           onAbandonReview={async (selected, task) => { await abandonAgentTeamReview({ runId: selected.run.id, reviewId: task.id, expectedPlanVersion: selected.run.planVersion }); }}
           onResumeAfterReviewRetry={async (selected, task) => {

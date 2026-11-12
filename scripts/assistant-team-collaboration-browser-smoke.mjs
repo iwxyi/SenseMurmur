@@ -173,6 +173,39 @@ try {
     const deadlineDone = await deadlineRuntime.resume(deadlineId);
     if (deadlineDone.run.status !== 'completed' || deadlineCalls !== 1
       || deadlineDone.run.goalSpec.preferences[0] !== '优先已有素材') throw new Error('Deadline recovery lost work or preferences');
+    const conflictId = 'browser-collab-conflict-' + crypto.randomUUID();
+    const conflictChatId = conflictId + '-chat';
+    const [{ useAssistantArtifactStore }, { useMessageStore }, { commitBufferedPersistenceWrites }] = await Promise.all([
+      import('/src/stores/useAssistantArtifactStore.ts'), import('/src/stores/useMessageStore.ts'), import('/src/stores/storePersistenceScope.ts'),
+    ]);
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: conflictChatId, type: 'assistant', name: '交付冲突验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null,
+      messageBranchState: { enabled: true, activeBranchName: 'main', activeLeafNodeId: null, refs: { main: { name: 'main', headNodeId: null, createdAt: now, updatedAt: now, version: 0 } } } }] }));
+    const conflictGoalSpec = { ...defaultWorkflowGoalSpec(run.run.goal), sourceBranch: { enabled: true, name: 'main', headNodeId: null } };
+    await runtime.create({ ...persistedRun, run: { ...persistedRun.run, id: conflictId, chatId: conflictChatId, goalSpec: conflictGoalSpec },
+      tasks: persistedRun.tasks.map((task) => ({ ...task, runId: conflictId,
+        ...(task.id === 'plan' ? { output: { ...plan, summary: '交付冲突验证' } } : {}) })) });
+    const conflictWorkflow = createAgentTeamWorkflow(config, currentWorkflowScope);
+    const applyDelivery = useAssistantArtifactStore.getState().applyWorkflowDelivery;
+    useAssistantArtifactStore.setState({ applyWorkflowDelivery: () => { throw new Error('Simulated artifact save interruption'); } });
+    try { await conflictWorkflow.publish(conflictId); throw new Error('Expected save interruption'); }
+    catch (error) { if (!error.message.includes('Simulated artifact save interruption')) throw error; }
+    finally { useAssistantArtifactStore.setState({ applyWorkflowDelivery: applyDelivery }); }
+    const conflictIntent = (await conflictWorkflow.read(conflictId)).run.delivery;
+    applyDelivery(conflictIntent.artifacts);
+    useAssistantArtifactStore.setState((state) => ({ items: state.items.map((item) => item.chatId === conflictChatId
+      ? { ...item, versions: item.versions.map((version) => ({ ...version, content: '用户保留的市场结论' })) } : item) }));
+    try { await conflictWorkflow.publish(conflictId); throw new Error('Expected user edit conflict'); }
+    catch (error) { if (!error.message.includes('产物已被修改')) throw error; }
+    const conflictRun = await conflictWorkflow.read(conflictId);
+    const baseCleanup = window.__cleanupCollaborationFixture;
+    window.__cleanupCollaborationFixture = async () => {
+      useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== conflictChatId) }));
+      useAssistantArtifactStore.setState((state) => ({ items: state.items.filter((item) => item.chatId !== conflictChatId) }));
+      useMessageStore.setState((state) => ({ messages: state.messages.filter((message) => message.chatId !== conflictChatId),
+        messageWindowsByChatId: Object.fromEntries(Object.entries(state.messageWindowsByChatId).filter(([id]) => id !== conflictChatId)) }));
+      await commitBufferedPersistenceWrites();
+      await baseCleanup();
+    };
     const resumableRun = { run: { ...run.run, id: 'browser-resume-run', status: 'paused', goalSpec: defaultWorkflowGoalSpec(run.run.goal) }, tasks: [
       { id: 'plan', runId: 'browser-resume-run', kind: 'team_plan', input: '研究市场机会', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
       { id: 'research', runId: 'browser-resume-run', kind: 'agent_text', input: { task: plan.tasks[0], role: plan.roles[0], goal: '研究市场机会' }, dependsOn: ['plan'], status: 'queued', attempt: 0, updatedAt: now },
@@ -192,11 +225,26 @@ try {
     const root = createRoot(container);
     window.__assistantTeamSmoke.root = root;
     root.render(React.createElement(Workbench, {
-      runs: [{ ...persistedRun, run: { ...persistedRun.run, deliveryStatus: 'pending', deliveryIssue: 'save_failed' } }, resumableRun, secondResumableRun, uncertainRun, recursiveRun], canRun: true, isRunActive: () => false, onResume: () => {},
+      runs: [{ ...persistedRun, run: { ...persistedRun.run, deliveryStatus: 'pending', deliveryIssue: 'save_failed' } }, resumableRun, secondResumableRun, uncertainRun, recursiveRun, conflictRun], canRun: true, isRunActive: () => false, onResume: () => {},
       onResumeAll: async (items) => { window.__assistantTeamSmoke.resumed = items.map((item) => item.run.id); }, onCreate: () => {},
       onInstruct: async () => {}, onPause: async () => {},
       onUpdateModelCallLimit: async (item, limit) => { window.__assistantTeamSmoke.limits.push({ runId: item.run.id, limit }); },
       onUpdateDeadline: async (item, deadlineAt) => { window.__assistantTeamSmoke.deadlines.push({ runId: item.run.id, deadlineAt }); },
+      onSaveDeliveryCopy: async (item) => {
+        await conflictWorkflow.publish(item.run.id, item.run.planVersion);
+        await createAgentTeamWorkflow(config, currentWorkflowScope).publish(item.run.id);
+        const saved = await conflictWorkflow.read(item.run.id);
+        const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(conflictChatId);
+        const messages = useMessageStore.getState().messageWindowsByChatId[conflictChatId]?.messages || [];
+        const copy = saved.run.deliveryCopy;
+        const chat = useChatStore.getState().chats.find((entry) => entry.id === conflictChatId);
+        if (saved.run.deliveryStatus !== 'published' || artifacts.length !== 2
+          || artifacts.find((entry) => entry.id === conflictIntent.artifacts[0].after.id)?.versions[0].content !== '用户保留的市场结论'
+          || messages.filter((entry) => entry.id === copy.message.id).length !== 1
+          || chat.messageBranchState.refs.main.headNodeId !== copy.message.id
+          || copy.message.metadata.branching.nodeId !== copy.message.id) throw new Error('Copy publication lost content or duplicated delivery');
+        window.__assistantTeamSmoke.deliveryCopy = { artifacts: artifacts.length, messages: messages.length, published: true, sourcePreserved: true };
+      },
       onDelegate: async (...args) => { window.__assistantTeamSmoke.calls.push(args); },
       onAbandonReview: async () => {}, onResumeAfterReviewRetry: async () => {}, onResumeAfterPlanRetry: async () => {},
     }));
@@ -246,7 +294,14 @@ try {
   await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).filter((button) => button.textContent.includes('研究负责人')).length === 3`), 'recursive child tasks visible');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).filter((button) => button.textContent.includes('研究负责人')).at(-1).click()`);
   await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('整理资料') && document.querySelector('[role="dialog"]').textContent.includes('证据：离线使用需求')`), 'nested child delivery visible');
-  console.log(JSON.stringify({ ok: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent === '交付冲突验证').click()`);
+  await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).some((button) => button.textContent === '对照当前内容与候选交付')`), 'delivery comparison action');
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '对照当前内容与候选交付').click()`);
+  await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('用户保留的市场结论') && document.querySelector('[role="dialog"]').textContent.includes('候选交付')`), 'current and candidate content visible');
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '保留现有内容，另存交付').click()`);
+  await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy?.published`), 'copy saved through workbench without overwriting original');
+  assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), { artifacts: 2, messages: 1, published: true, sourcePreserved: true });
+  console.log(JSON.stringify({ ok: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } catch (error) {
   console.error(JSON.stringify({ browserErrors: cdp.errors }));
   throw error;

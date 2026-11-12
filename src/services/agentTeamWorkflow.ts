@@ -853,7 +853,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (snapshot.run.status === 'active' && snapshot.tasks.every((task) => task.status === 'completed' || task.status === 'abandoned')) snapshot = await runtime.closePlan(runId, snapshot.run.planVersion);
       return { snapshot, summary: summarizeWorkflowRun(snapshot) };
     },
-    async publish(runId: string) {
+    async publish(runId: string, copyFromPlanVersion?: number) {
       if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队交付');
       const deliveryScope = scope();
       const deliveryStorageKeys = ['assistant-artifacts', 'messages', 'chats'].map((name) => scopedStorageKey(`${name}-${getLocalDataUserId()}`));
@@ -869,9 +869,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const publishWithinRunLock = (signal?: AbortSignal) => navigator.locks.request(workflowRunLockName(deliveryScope, runId), async () => {
       if (signal?.aborted) throw signal.reason || new Error('团队交付已暂停');
       assertDeliveryOwnership();
-      const snapshot = await runtime.read(runId);
-      if (!snapshot || snapshot.run.status !== 'completed') throw new Error('团队任务尚未完成');
+      const savedSnapshot = await runtime.read(runId);
+      if (!savedSnapshot || savedSnapshot.run.status !== 'completed') throw new Error('团队任务尚未完成');
+      let snapshot: WorkflowSnapshot = savedSnapshot;
       if (snapshot.run.chatId !== chatId) throw new Error('团队交付会话已变化');
+      if (copyFromPlanVersion !== undefined && snapshot.run.planVersion !== copyFromPlanVersion) throw new Error('工作流交付版本冲突');
       try {
       await Promise.all([
         ensureAssistantArtifactStoreHydrated(),
@@ -882,8 +884,15 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       assertDeliveryOwnership();
       const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId && item.deletedAt == null);
       if (!chat || chat.type !== 'assistant') throw new Error('交付会话不可用');
-      const sourceId = `team-delivery-${runId}`;
-      let delivery = snapshot.run.delivery?.planVersion === snapshot.run.planVersion ? snapshot.run.delivery : undefined;
+      if (copyFromPlanVersion !== undefined) {
+        const copyId = `team-delivery-${runId}:copy:${copyFromPlanVersion}`;
+        const known = [...useMessageStore.getState().messages, ...(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages || [])];
+        const branch = attachMessageToActiveBranch(teamConversationContext(chat, snapshot.run.goalSpec), known,
+          { id: copyId, clientKey: copyId }).metadata?.branching;
+        snapshot = await runtime.prepareDeliveryCopy(runId, copyFromPlanVersion, branch);
+      }
+      let delivery = snapshot.run.deliveryCopy?.planVersion === snapshot.run.planVersion ? snapshot.run.deliveryCopy
+        : snapshot.run.delivery?.planVersion === snapshot.run.planVersion ? snapshot.run.delivery : undefined;
       if (delivery && snapshot.run.deliveryStatus === 'published') {
         const artifactId = delivery.artifacts[0].after.id;
         const existing = useAssistantArtifactStore.getState().items.find((item) => item.id === artifactId && item.deletedAt == null);
@@ -891,6 +900,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return existing;
       }
       if (!delivery) {
+      const sourceId = `team-delivery-${runId}`;
       const preparedAt = Date.now();
       const chatArtifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chat.id);
       const plan = validateAgentTeamPlan(snapshot.tasks.find((task) => task.id === 'plan')?.output);
@@ -961,6 +971,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       });
       }
       assertDeliveryOwnership();
+      const sourceId = delivery.message.id;
       const messageStore = useMessageStore.getState();
       const previous = [...messageStore.messages, ...(messageStore.messageWindowsByChatId[chat.id]?.messages || [])]
         .find((item) => item.id === sourceId || item.clientKey === sourceId);
@@ -991,7 +1002,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       return savedArtifacts[0];
       } catch (error) {
         if (scope() === deliveryScope) {
-          try { await runtime.recordDeliveryIssue(runId, snapshot.run.planVersion, error instanceof WorkflowDeliveryConflictError ? error.issue : 'save_failed'); }
+          try { await runtime.recordDeliveryIssue(runId, snapshot.run.planVersion, error instanceof WorkflowDeliveryConflictError ? error.issue : snapshot.run.deliveryIssue || 'save_failed'); }
           catch (saveError) { console.warn('[agent-team:delivery-issue-save-failed]', { error: saveError }); }
         }
         throw error;
@@ -1160,6 +1171,13 @@ export async function updateAgentTeamDeadline(params: { runId: string; expectedP
   const result = await currentTeamWorkflow().setDeadline(params.runId, params.expectedPlanVersion, params.deadlineAt);
   notifyTeam();
   return result;
+}
+
+export async function saveAgentTeamDeliveryCopy(params: { runId: string; expectedPlanVersion: number }) {
+  const auth = readAuthSnapshot();
+  if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
+  try { return await currentTeamWorkflow().publish(params.runId, params.expectedPlanVersion); }
+  finally { notifyTeam(); }
 }
 
 export async function instructAgentTeamTask(params: { runId: string; taskId: string; expectedPlanVersion: number; instruction: string }) {
