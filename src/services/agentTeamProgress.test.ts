@@ -53,6 +53,64 @@ describe('team progress detection', () => {
     expect(hasSemanticallyStalledTeamReview(snapshot, 'review_2')).toBe(false);
   });
 
+  function mediaFixture(kind: string, inspectionKind: string) {
+    const snapshot = fixture();
+    const media = (id: string): WorkflowTask => ({ id, runId: 'run', kind, input: { task: { goal: '蓝色主角跑向右侧', acceptance: '保持蓝色与运动方向' } },
+      output: '附件已保存，不能由此推断质量', dependsOn: [], status: 'completed', attempt: 1, updatedAt: 1 });
+    const inspect = (id: string, source: string): WorkflowTask => ({ ...media(id), kind: inspectionKind,
+      dependsOn: [source], output: '观察到主角变为红色；采样画面中朝左移动。未检查音轨。' });
+    snapshot.tasks = [media('media-before'), inspect('inspect-before', 'media-before'), snapshot.tasks[1],
+      media('media-after'), inspect('inspect-after', 'media-after'), snapshot.tasks[3]];
+    const previous = snapshot.tasks[2];
+    previous.input = { sourceTaskIds: ['media-before', 'inspect-before'] };
+    previous.status = 'running';
+    previous.output = prepareWorkflowReviewRecord(snapshot, previous.id, '保持蓝色和向右移动', [])({ complete: false, reason: '颜色和方向错误', nextRequest: '修正颜色和方向并检查' });
+    previous.status = 'completed';
+    const current = snapshot.tasks[5];
+    current.input = { sourceTaskIds: ['media-before', 'inspect-before', 'media-after', 'inspect-after'] };
+    current.status = 'running';
+    const comparison = teamReviewProgressComparison(snapshot, current.id, previous.output.criteriaSha256);
+    current.output = prepareWorkflowReviewRecord(snapshot, current.id, '保持蓝色和向右移动', [])(
+      { complete: false, reason: '观察报告中的缺陷未解决', nextRequest: '调整参考素材' },
+      parseTeamProgressAssessment(comparison, { progress: { status: 'stalled', reason: '两次检查均观察到相同的颜色和方向错误' } }));
+    current.status = 'completed';
+    return { snapshot, comparison };
+  }
+
+  it.each([
+    ['agent_image', 'agent_image_inspection'], ['agent_video', 'agent_video_inspection'], ['agent_media_composition', 'agent_video_inspection'],
+  ])('compares %s using complete inspection observations and binds source identity', (kind, inspectionKind) => {
+    const { snapshot, comparison } = mediaFixture(kind, inspectionKind);
+    expect(comparison?.comparison.observationScope).toContain('不证明音轨');
+    expect(comparison?.comparison.after[2]).toMatchObject({ kind, observationTaskIds: ['inspect-after'] });
+    expect(comparison?.comparison.after[2]).not.toHaveProperty('output');
+    expect(comparison?.comparison.after[3].output).toContain('主角变为红色');
+    expect(hasSemanticallyStalledTeamReview(snapshot, 'review_2')).toBe(true);
+    snapshot.tasks[3].attempt += 1;
+    expect(hasSemanticallyStalledTeamReview(snapshot, 'review_2')).toBe(false);
+  });
+
+  it.each(['uninspected-before', 'wrong-source', 'wrong-kind', 'incomplete', 'empty', 'audio', 'oversized'])('does not infer media stagnation with %s evidence', (change) => {
+    const { snapshot, comparison } = mediaFixture('agent_video', 'agent_video_inspection');
+    if (change === 'uninspected-before') snapshot.tasks[1].dependsOn = [];
+    if (change === 'wrong-source') snapshot.tasks[4].dependsOn = ['media-before'];
+    if (change === 'wrong-kind') snapshot.tasks[4].kind = 'agent_image_inspection';
+    if (change === 'incomplete') snapshot.tasks[4].status = 'running';
+    if (change === 'empty') snapshot.tasks[4].output = ' ';
+    if (change === 'audio') snapshot.tasks[3].kind = 'agent_audio';
+    if (change === 'oversized') snapshot.tasks[4].output = 'x'.repeat(13_000);
+    expect(teamReviewProgressComparison(snapshot, 'review_2', comparison!.comparison.criteriaSha256)).toBeNull();
+    expect(hasSemanticallyStalledTeamReview(snapshot, 'review_2')).toBe(false);
+  });
+
+  it.each(['report', 'source', 'dependency'])('invalidates a saved media assessment when its %s changes', (change) => {
+    const { snapshot } = mediaFixture('agent_video', 'agent_video_inspection');
+    if (change === 'report') snapshot.tasks[4].output = '采样中已正确保持蓝色并朝右';
+    if (change === 'source') snapshot.tasks[3].output = '另一份附件已保存';
+    if (change === 'dependency') snapshot.tasks[4].dependsOn.push('media-before');
+    expect(hasSemanticallyStalledTeamReview(snapshot, 'review_2')).toBe(false);
+  });
+
   it('does not compare changed criteria, incomplete evidence, media or oversized text', () => {
     for (const change of ['criteria', 'media', 'large', 'incomplete'] as const) {
       const { snapshot, comparison } = semanticFixture();

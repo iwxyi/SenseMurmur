@@ -1329,11 +1329,11 @@ describe('agent team workflow', () => {
     const workflow = createAgentTeamWorkflow(config, () => scope);
     const result = await workflow.start(runId, 'chat', '研究问题', true);
     expect(result.snapshot.run.status).toBe('paused');
-    expect(result.snapshot.tasks.find((task) => task.id === 'review_needs_user')?.error).toContain('没有产生新的文本交付');
+    expect(result.snapshot.tasks.find((task) => task.id === 'review_needs_user')?.error).toContain('没有产生可核对的实质进展');
     expect(result.snapshot.tasks.some((task) => task.id === 'auto_delegate_2')).toBe(false);
     if (paraphrased) {
       expect(result.snapshot.tasks.find((task) => task.id === 'review_2')?.output).toMatchObject({ progress: { status: 'stalled', previousReviewTaskId: 'review_1' } });
-      expect(generate.mock.calls[5][1]).toContain('完整文字证据');
+      expect(generate.mock.calls[5][1]).toContain('完整文字与检查证据');
       expect(generate.mock.calls[5][1]).toContain('暂时尚无资料，稍后继续查询');
     }
     const restarted = createAgentTeamWorkflow(config, () => scope);
@@ -1342,6 +1342,43 @@ describe('agent team workflow', () => {
     const updated = await restarted.addRevisionRequest(runId, result.snapshot.run.planVersion, '明确只使用已提供资料');
     expect(updated.tasks.some((task) => task.id === 'review_needs_user')).toBe(false);
   });
+  it.each(['image', 'video'] as const)('pauses repeated %s quality defects using inspection reports and preserves the decision after restart', async (kind) => {
+    if (kind === 'video') vi.stubGlobal('document', {});
+    const runId = crypto.randomUUID();
+    const scope = `media-stalled-${runId}`;
+    const generationTool = kind === 'image' ? 'image_generation' : 'video_generation';
+    const inspectionTool = kind === 'image' ? 'image_inspection' : 'video_inspection';
+    const plan = { summary: '制作与检查', roles: [{ id: 'director', name: '导演', responsibility: '制作并检查角色', method: '生成后检查', acceptance: '角色蓝色', allowedTools: [generationTool, inspectionTool] }],
+      tasks: [
+        { id: 'media', roleId: 'director', goal: '制作蓝色角色', dependsOn: [], tool: generationTool, acceptance: '角色蓝色' },
+        { id: 'inspect', roleId: 'director', goal: '检查角色颜色', dependsOn: ['media'], tool: inspectionTool, acceptance: '确认蓝色' },
+      ], finalAcceptance: '角色始终为蓝色' };
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'media', name: '媒体', type: kind, provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: kind === 'image' ? 'nano-banana-2' : 'MiniMax-H3', isDefault: true },
+      { id: 'vision', name: '视觉', type: 'text', provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o', isDefault: true },
+    ] });
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已保存' });
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ output: '视频已保存' });
+    vi.mocked(teamImageReference).mockReturnValue({ url: 'data:image/png;base64,AAAA', mimeType: 'image/png' });
+    vi.mocked(teamMediaAttachment).mockReturnValue({ id: 'saved', kind: 'video', url: 'data:video/mp4;base64,AAAA', status: 'ready', altText: '短片', createdAt: 1, updatedAt: 1 });
+    const inspection = kind === 'image' ? vi.mocked(inspectAgentTeamImages) : vi.mocked(inspectAgentTeamVideo);
+    inspection.mockImplementation(async (params) => { await params.beforeModelRequest?.(); return '观察到红色角色，颜色错误。未检查音轨。'; });
+    generate.mockResolvedValueOnce(JSON.stringify(plan))
+      .mockResolvedValueOnce(JSON.stringify({ complete: false, reason: '角色为红色', nextRequest: '重新制作并检查角色颜色' }))
+      .mockResolvedValueOnce(JSON.stringify(plan))
+      .mockResolvedValueOnce(JSON.stringify({ complete: false, reason: '仍是红色', nextRequest: '修改角色素材', progress: { status: 'stalled', reason: '两次检查均观察到红色角色，未解决颜色缺陷' } }));
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o' };
+    const result = await createAgentTeamWorkflow(config, () => scope).start(runId, 'chat', '制作蓝色角色并检查', true);
+    expect(result.snapshot.run.status, JSON.stringify(result.snapshot.tasks.filter((task) => task.status === 'failed'))).toBe('paused');
+    expect(result.snapshot.tasks.find((task) => task.id === 'review_2')?.output).toMatchObject({ progress: { status: 'stalled', previousReviewTaskId: 'review_1' } });
+    expect(generate.mock.calls[3][1]).toContain('observationScope');
+    expect(generate.mock.calls[3][1]).toContain('观察到红色角色');
+    expect(inspection).toHaveBeenCalledTimes(2);
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(generate).toHaveBeenCalledTimes(4);
+    expect(inspection).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['advanced', 'uncertain'])('continues automatic revision when progress is %s', async (status) => {
     const runId = crypto.randomUUID();
     const plan = { summary: '研究', roles: [{ id: 'writer', name: '研究员', responsibility: '研究', method: '核对', acceptance: '有来源', allowedTools: ['text_generation'] }],

@@ -151,11 +151,24 @@ try {
     let inspectionPixels;
     let revisionRequests = 0;
     let revisionPlan;
+    let stagnationResponses;
+    let stagnationRequests = 0;
     useSettingsStore.setState({ aiProfiles: [
       { id: 'speech-smoke', name: '测试旁白', type: 'tts', provider: 'openai', baseUrl: 'https://speech-smoke.invalid/v1', apiKey: 'test-fixture', model: 'tts-1', isDefault: true },
       { id: 'vision-smoke', name: '测试视觉', type: 'text', provider: 'openai', baseUrl: 'https://vision-smoke.invalid/v1', apiKey: 'test-fixture', model: 'gpt-4o', isDefault: true },
     ] });
     window.fetch = async (input, init) => {
+      if (String(input).startsWith('https://stagnation-smoke.invalid/')) {
+        const body = JSON.parse(init.body);
+        stagnationRequests++;
+        if (stagnationResponses.length === 1) {
+          const prompt = JSON.stringify(body.messages);
+          if (!prompt.includes('observationScope') || !prompt.includes('不证明音轨')) throw new Error('Media comparison lost its observation scope');
+        }
+        const content = stagnationResponses.shift();
+        if (!content) throw new Error('Unexpected repeated stagnation request');
+        return Response.json({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
+      }
       if (String(input).startsWith('https://revision-smoke.invalid/')) {
         const body = JSON.parse(init.body);
         if (!JSON.stringify(body.messages).includes('可复用历史素材目录') || !revisionPlan || revisionRequests++) throw new Error('Invalid or duplicate revision planning request');
@@ -277,7 +290,41 @@ try {
     const portraitAttempts = await runtime.indexedDbWorkflowRepository.listTaskAttempts(runtime.currentWorkflowScope(), runId, 'delegated_portrait');
     const portraitMessages = useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.filter((message) => message.id === 'team-composition-' + runId + '-delegated_portrait') || [];
     if (portraitAttempts.length !== 1 || portraitMessages.length !== 1 || revisionRequests !== 1 || speechRequests !== 1 || visionRequests !== 2 || imageChecks !== 1) throw new Error('Saved media revision duplicated work');
-    window.__compositionSmoke = { done: true, result: { status: after.run.status, stressClipsChecked: revisedPixels.length, savedMediaRevision: { width: portraitVideo.videoWidth, height: portraitVideo.videoHeight, revisionRequests, attempts: portraitAttempts.length, messageCount: portraitMessages.length }, rejectedGoalReplacement, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, visionRequests, imageChecks, inspectionPixels, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
+    const mediaStagnation = [];
+    for (const kind of ['image', 'video']) {
+      const stalledId = runId + '-stalled-' + kind;
+      const inspectionTool = kind + '_inspection';
+      const source = { id: 'source', roleId: role.id, tool: kind + '_generation', goal: '蓝色画面', acceptance: '画面全蓝', dependsOn: [] };
+      const check = { id: 'check', roleId: role.id, tool: inspectionTool, goal: '检查是否全蓝', acceptance: '画面全蓝', dependsOn: ['source'] };
+      const stalledPlan = validateAgentTeamPlan({ summary: '核对颜色', roles: [role], tasks: [source, check], finalAcceptance: '所有画面全蓝' });
+      const stalledSnapshot = { run: { id: stalledId, chatId, goal: '所有画面全蓝', goalSpec: defaultWorkflowGoalSpec('所有画面全蓝'), status: 'paused', generation: 0, planVersion: 1, updatedAt: now, planOpen: true, autoReview: true }, tasks: [
+        { id: 'plan', runId: stalledId, kind: 'team_plan', input: '所有画面全蓝', output: stalledPlan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        { id: 'source', runId: stalledId, kind: 'agent_' + kind, input: { task: source, role, goal: '所有画面全蓝' }, output: '素材已保存', dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
+        { id: 'check', runId: stalledId, kind: 'agent_' + inspectionTool, input: { task: check, role, goal: '所有画面全蓝' }, dependsOn: ['plan', 'source'], status: 'queued', attempt: 0, updatedAt: now },
+      ] };
+      stalledSnapshot.run.goalSpec.allowedTools = [...role.allowedTools];
+      useMessageStore.getState().upsertMessage({ id: 'fixture-' + stalledId, chatId, type: 'ai', senderId: 'assistant', senderName: '助手', content: '测试素材', emotion: 0, timestamp: now, isDeleted: false,
+        metadata: { agentTeamMedia: { runId: stalledId, taskId: 'source' }, attachments: [{ id: 'source', kind, status: 'ready', altText: '颜色检查素材', url: kind === 'image' ? imageFixture : attachment.url, mimeType: kind === 'image' ? 'image/png' : 'video/mp4', createdAt: now, updatedAt: now }] } });
+      await runtime.indexedDbWorkflowRepository.transact(runtime.currentWorkflowScope(), stalledId, () => ({ snapshot: stalledSnapshot, value: undefined }));
+      const saved = listTeamSavedMedia(stalledSnapshot, ['source']).map((item) => ({ ...item, alias: 'original' }));
+      stagnationResponses = [
+        JSON.stringify({ complete: false, reason: '实际画面并非全蓝', nextRequest: '复查已有素材确认颜色缺陷' }),
+        JSON.stringify({ summary: '复查', roles: [role], tasks: [{ id: 'recheck', roleId: role.id, tool: inspectionTool, goal: '复查颜色缺陷', acceptance: '画面全蓝', dependsOn: [], savedMedia: saved }], finalAcceptance: '所有画面全蓝' }),
+        JSON.stringify({ complete: false, reason: '相同颜色缺陷仍存在', nextRequest: '更换素材', progress: { status: 'stalled', reason: '两次实际检查的颜色缺陷没有改善' } }),
+      ];
+      const config = { provider: 'openai', baseUrl: 'https://stagnation-smoke.invalid/v1', apiKey: 'test-fixture', model: 'gpt-4o' };
+      const stalled = await createAgentTeamWorkflow(config, runtime.currentWorkflowScope).resume(stalledId);
+      if (stalled.snapshot.run.status !== 'paused') throw new Error('Media stagnation did not pause: ' + JSON.stringify(stalled.snapshot.tasks));
+      const reviews = stalled.snapshot.tasks.filter((task) => task.kind === 'team_review').map((task) => task.output);
+      if (reviews.length !== 2 || reviews[1].progress?.status !== 'stalled') throw new Error('Missing persisted media progress assessment');
+      const counts = [stagnationRequests, imageChecks, visionRequests];
+      await createAgentTeamWorkflow(config, runtime.currentWorkflowScope).resume(stalledId);
+      const restored = await runtime.indexedDbWorkflowRepository.read(runtime.currentWorkflowScope(), stalledId);
+      if (JSON.stringify(counts) !== JSON.stringify([stagnationRequests, imageChecks, visionRequests])
+        || JSON.stringify(reviews) !== JSON.stringify(restored.tasks.filter((task) => task.kind === 'team_review').map((task) => task.output))) throw new Error('Media stagnation recovery repeated or changed inspection');
+      mediaStagnation.push({ kind, status: restored.run.status, reviewCount: reviews.length });
+    }
+    window.__compositionSmoke = { done: true, result: { status: after.run.status, mediaStagnation, stagnationRequests, stressClipsChecked: revisedPixels.length, savedMediaRevision: { width: portraitVideo.videoWidth, height: portraitVideo.videoHeight, revisionRequests, attempts: portraitAttempts.length, messageCount: portraitMessages.length }, rejectedGoalReplacement, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, visionRequests, imageChecks, inspectionPixels, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
     } finally { window.fetch = originalFetch; useSettingsStore.setState({ aiProfiles: originalProfiles }); }
   })().catch((error) => { window.__compositionSmoke = { done: true, error: String(error?.stack || error) }; });`);
   let result;
@@ -298,8 +345,10 @@ try {
   assert.ok(result.musicEnergy > 10 && result.musicEnergy > result.originalEnergy * 20, 'Music must loop into the second clip and original audio must be muted');
   assert.ok(result.narrationEnergy > 10 && result.narrationEnergy > result.originalEnergy * 10, 'Narration must be mixed into the second clip');
   assert.equal(result.speechRequests, 1, 'Recreating the workflow must not synthesize narration twice');
-  assert.equal(result.visionRequests, 2, 'Each planned inspection must run once across recovery');
-  assert.equal(result.imageChecks, 1, 'Saved image must be inspected once without an image generation model');
+  assert.equal(result.visionRequests, 4, 'Each planned inspection must run once across recovery');
+  assert.equal(result.imageChecks, 3, 'Saved images must be inspected once per step without an image generation model');
+  assert.equal(result.stagnationRequests, 6);
+  assert.deepEqual(result.mediaStagnation, ['image', 'video'].map((kind) => ({ kind, status: 'paused', reviewCount: 2 })));
   assert.ok(result.inspectionPixels[0][0] > 180 && result.inspectionPixels[0][2] < 40, 'Inspection must receive the actual red opening frame');
   assert.ok(result.inspectionPixels[1][2] > 180 && result.inspectionPixels[1][0] < 40, 'Inspection must receive the actual blue ending frame');
   assert.equal(result.messageCount, 1); assert.equal(result.attempt, 2);

@@ -173,7 +173,7 @@ try {
       const stalled = await workflow.start(stalledRunId, chatId, '研究市场且结论必须有来源', true);
       if (stalled.snapshot.run.status !== 'paused') throw new Error('重复返工未暂停');
       const block = stalled.snapshot.tasks.find((task) => task.id === 'review_needs_user');
-      if (!block?.error?.includes('没有产生新的文本交付')) throw new Error('未说明无进展原因');
+      if (!block?.error?.includes('没有产生可核对的实质进展')) throw new Error('未说明无进展原因');
       if (requests.length !== deliveryModelCalls + 6) throw new Error('无进展后仍有额外模型调用');
       const restarted = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'browser-smoke', baseUrl: 'https://mock-llm.invalid/v1', model: 'smoke-model' }, currentWorkflowScope);
       await restarted.resume(stalledRunId);

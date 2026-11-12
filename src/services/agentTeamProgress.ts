@@ -3,7 +3,12 @@ import { isPartialTeamReview, teamReviewLeafSources } from './agentTeamReviewEvi
 import { workflowJsonDigest } from './workflowToolRequest';
 import { parseWorkflowReviewRecord, type WorkflowReviewProgress } from './workflowReviewRecord';
 
-/** Compare complete text only; summaries and newly generated media cannot prove semantic stalling. */
+const OBSERVATION_KINDS = new Set(['agent_text', 'agent_web_search', 'agent_image_inspection', 'agent_video_inspection']);
+const MEDIA_INSPECTION_KINDS: Record<string, string> = {
+  agent_image: 'agent_image_inspection', agent_video: 'agent_video_inspection', agent_media_composition: 'agent_video_inspection',
+};
+
+/** Media comparisons require observations of each file; completion messages are not quality evidence. */
 export function teamReviewProgressComparison(snapshot: WorkflowSnapshot, reviewId: string, criteriaSha256: string) {
   const index = snapshot.tasks.findIndex((task) => task.id === reviewId);
   const current = snapshot.tasks[index];
@@ -22,16 +27,32 @@ export function teamReviewProgressComparison(snapshot: WorkflowSnapshot, reviewI
   const evidence = (ids: string[]) => ids.map((id) => snapshot.tasks.find((task) => task.id === id));
   const before = evidence(beforeIds);
   const after = evidence(afterIds);
-  if ([...before, ...after].some((task) => !task || task.runId !== snapshot.run.id || task.status !== 'completed'
-    || !['agent_text', 'agent_web_search'].includes(task.kind) || typeof task.output !== 'string')) return null;
+  const comparable = (tasks: typeof before) => tasks.every((task) => {
+    if (!task || task.runId !== snapshot.run.id || task.status !== 'completed' || typeof task.output !== 'string') return false;
+    if (OBSERVATION_KINDS.has(task.kind)) return true;
+    const inspectionKind = MEDIA_INSPECTION_KINDS[task.kind];
+    return Boolean(inspectionKind && tasks.some((inspection) => inspection?.kind === inspectionKind
+      && inspection.status === 'completed' && typeof inspection.output === 'string' && inspection.output.trim()
+      && inspection.dependsOn.includes(task.id)));
+  });
+  if (!comparable(before) || !comparable(after)) return null;
+  const hasMedia = [...before, ...after].some((task) => task && MEDIA_INSPECTION_KINDS[task.kind]);
+  const hasInspections = [...before, ...after].some((task) => task && ['agent_image_inspection', 'agent_video_inspection'].includes(task.kind));
   const entries = (tasks: typeof before) => tasks.map((task) => {
     const input = task!.input;
     const details = input && typeof input === 'object' && 'task' in input && input.task && typeof input.task === 'object' ? input.task : undefined;
-    return { taskId: task!.id, attempt: task!.attempt, inputSha256: workflowJsonDigest(input ?? null), output: task!.output,
+    const media = MEDIA_INSPECTION_KINDS[task!.kind];
+    return { taskId: task!.id, attempt: task!.attempt,
+      inputSha256: workflowJsonDigest(input ?? null),
+      ...(hasMedia || hasInspections ? { kind: task!.kind, dependenciesSha256: workflowJsonDigest(task!.dependsOn) } : {}),
+      ...(media ? { outputSha256: workflowJsonDigest(task!.output),
+        observationTaskIds: tasks.filter((inspection) => inspection?.kind === media && inspection.dependsOn.includes(task!.id)).map((inspection) => inspection!.id) }
+        : { output: task!.output }),
       goal: details && 'goal' in details && typeof details.goal === 'string' ? details.goal : undefined,
       acceptance: details && 'acceptance' in details && typeof details.acceptance === 'string' ? details.acceptance : undefined };
   });
   const comparison = { goal: snapshot.run.goal, goalSpec: snapshot.run.goalSpec, criteriaSha256, previousReviewTaskId: previous.id,
+    ...(hasMedia || hasInspections ? { observationScope: '仅比较检查任务的完整观察报告。图片检查只覆盖所提供图片；视频抽帧只覆盖报告中的采样时刻，不证明音轨、逐帧连续性或全部镜头质量。媒体摘要及文件摘要不证明质量；报告缺失或观察不足时必须判为 uncertain。' } : {}),
     previousVerdict: previous.output, before: entries(before), after: entries(after) };
   // Avoid turning bounded evidence into a claim about unseen text.
   if (JSON.stringify(comparison).length > 12_000) return null;
