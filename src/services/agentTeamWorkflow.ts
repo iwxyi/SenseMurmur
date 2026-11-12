@@ -1,7 +1,7 @@
 import { getUsablePreferredAIProfile, normalizeImageCapabilities, resolveAIModelInputCapabilities, type APIConfig } from '../types/settings';
 import { generateResponse } from './aiClient';
 import { planAgentTeam, validateAgentTeamPlan, type AgentTeamPlan, type AgentTeamTask } from './agentTeamPlan';
-import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
+import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
 import { ensureAssistantArtifactStoreHydrated, useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
@@ -29,7 +29,6 @@ const TOOL_TASK_KINDS = {
   text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio',
   image_inspection: 'agent_image_inspection', video_generation: 'agent_video',
 } as const;
-export const MAX_TEAM_RUN_TASKS = 64;
 
 function teamTaskKind(task: AgentTeamTask) { return TOOL_TASK_KINDS[task.tool || 'text_generation']; }
 function isAgentTaskKind(kind: string) { return Object.values(TOOL_TASK_KINDS).some((value) => value === kind); }
@@ -442,6 +441,17 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
     read: runtime.read,
     list: runtime.list,
     requestPauseAfterCurrentBatch: runtime.requestPauseAfterCurrentBatch,
+    async setModelCallLimit(runId: string, expectedPlanVersion: number, maxModelCalls?: number) {
+      if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务修改');
+      const storageScope = scope();
+      return navigator.locks.request(workflowRunLockName(storageScope, runId), { ifAvailable: true }, async (lock) => {
+        if (!lock) throw new Error('团队任务正在执行，请暂停后重试');
+        if (scope() !== storageScope) throw new Error('账号已切换，任务修改已停止');
+        const current = await runtime.read(runId);
+        if (!current || current.tasks[0]?.kind !== 'team_plan') throw new Error('团队任务不存在');
+        return runtime.setModelCallLimit(runId, expectedPlanVersion, maxModelCalls);
+      });
+    },
     async addRevisionRequest(runId: string, expectedPlanVersion: number, request: string) {
       const trimmed = request.trim();
       if (!trimmed || trimmed.length > 4000) throw new Error('追加要求应为 1 到 4000 个字符');
@@ -455,7 +465,6 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (current.run.status !== 'paused' && current.run.status !== 'completed') throw new Error('请先暂停整个团队任务');
         if (current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
         const hasReviewBlock = current.tasks.some((task) => task.id === 'review_needs_user' && task.status === 'waiting_user');
-        if (current.tasks.length - (hasReviewBlock ? 1 : 0) >= MAX_TEAM_RUN_TASKS) throw new Error('团队任务规模超出限制');
         if (current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown' || task.status === 'failed')) throw new Error('请先处理未完成或待核对的步骤');
         if (current.tasks.some((task) => task.kind === 'team_plan_revision' && task.status !== 'completed')) throw new Error('请先完成已追加的团队任务');
         const sourceTaskIds = current.tasks.filter((task) => isAgentTaskKind(task.kind)).map((task) => task.id);
@@ -533,10 +542,13 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return runtime.retryFailedTeamPlan(runId, expectedPlanVersion, taskId);
       });
     },
-    async start(runId: string, chatId: string, goal: string, autoReview = false, signal = getWorkspaceSignal()) {
+    async start(runId: string, chatId: string, goal: string, autoReview = false, signal = getWorkspaceSignal(), maxModelCalls?: number) {
+      if (maxModelCalls !== undefined && (!Number.isSafeInteger(maxModelCalls) || maxModelCalls < 1 || maxModelCalls > 1000)) {
+        throw new WorkflowPreflightError('模型调用次数上限必须是 1 到 1000 的整数');
+      }
       const now = Date.now();
       const initial: WorkflowSnapshot = {
-        run: { id: runId, chatId, goal, status: 'active', generation: 0, planVersion: 1, planOpen: true, autoReview, updatedAt: now },
+        run: { id: runId, chatId, goal, status: 'active', generation: 0, planVersion: 1, planOpen: true, autoReview, maxModelCalls, updatedAt: now },
         tasks: [{ id: 'plan', runId, kind: 'team_plan', input: goal, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
       };
       if (!await runtime.read(runId)) await runtime.create(initial);
@@ -579,15 +591,6 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       for (const revisionTask of snapshot.tasks.filter((task) => task.kind === 'team_plan_revision' && task.status === 'completed')) {
         if (revisionTask.id.startsWith('auto_delegate_') && snapshot.run.autoReview === false) continue;
         const delegated = validateAgentTeamPlan(revisionTask.output);
-        const alreadyExpanded = snapshot.tasks.some((task) => task.id === delegatedTaskId(revisionTask.id, delegated.tasks[0]?.id || ''));
-        if (!alreadyExpanded && snapshot.tasks.length + delegated.tasks.length > MAX_TEAM_RUN_TASKS) {
-          if (revisionTask.id.startsWith('auto_delegate_')) {
-            const reviewId = `review_${revisionTask.id.slice('auto_delegate_'.length)}`;
-            snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '新增任务超过团队规模上限，请缩小目标后追加指示。'));
-            break;
-          }
-          throw new Error('团队任务规模超出限制');
-        }
         const delegatedRoles = new Map(delegated.roles.map((role) => [role.id, role]));
         const contextTaskIds = isTeamRevisionInput(revisionTask.input) ? revisionTask.input.sourceTaskIds : [];
         const delegatedTasks = delegated.tasks.map((task): WorkflowTask => ({
@@ -624,10 +627,6 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const revisionId = `auto_delegate_${round}`;
           if (!snapshot.tasks.some((task) => task.id === revisionId)) {
             const sourceTaskIds = snapshot.tasks.filter((task) => isAgentTaskKind(task.kind)).map((task) => task.id);
-            if (snapshot.tasks.length >= MAX_TEAM_RUN_TASKS) {
-              snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '团队任务已达到自动追加上限，请检查结果并决定后续步骤。'));
-              break;
-            }
             snapshot = await runtime.addTasksOnce(runId, snapshot.run.planVersion, [{
               id: revisionId, runId, kind: 'team_plan_revision',
               input: { request: verdict.nextRequest!, sourceTaskIds } satisfies TeamRevisionInput,
@@ -638,11 +637,6 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const revision = snapshot.tasks.find((task) => task.id === revisionId);
           if (revision?.status !== 'completed') break;
           const delegated = validateAgentTeamPlan(revision.output);
-          const alreadyExpanded = snapshot.tasks.some((task) => task.id === delegatedTaskId(revisionId, delegated.tasks[0]?.id || ''));
-          if (!alreadyExpanded && snapshot.tasks.length + delegated.tasks.length > MAX_TEAM_RUN_TASKS) {
-            snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '新增任务超过团队规模上限，请缩小目标后追加指示。'));
-            break;
-          }
           const roles = new Map(delegated.roles.map((role) => [role.id, role]));
           const contextTaskIds = isTeamRevisionInput(revision.input) ? revision.input.sourceTaskIds : [];
           snapshot = await runtime.expandPlanOnce(runId, snapshot.run.planVersion, revisionId, delegated.tasks.map((task): WorkflowTask => ({
@@ -837,12 +831,14 @@ export async function listAgentTeamRuns(chatId?: string) {
 
 export function isRecoverableAgentTeamRun(snapshot: WorkflowSnapshot) {
   return snapshot.run.status === 'paused'
+    && (snapshot.run.maxModelCalls === undefined || countWorkflowModelCalls(snapshot) < snapshot.run.maxModelCalls
+      || snapshot.tasks.some((task) => task.status === 'waiting_external'))
     && snapshot.tasks.length > 0
     && snapshot.tasks.every((task) => task.status !== 'failed' && task.status !== 'result_unknown' && task.status !== 'waiting_user')
     && snapshot.tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency' || task.status === 'waiting_external');
 }
 
-export async function runAgentTeam(params: { chatId: string; goal: string; runId?: string }) {
+export async function runAgentTeam(params: { chatId: string; goal: string; runId?: string; maxModelCalls?: number }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
   if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务执行');
@@ -856,7 +852,7 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
     return await scheduleBackgroundExecution(params.chatId, () => runWithConversationExecutionLock(originalScope, params.chatId, async (signal) => {
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队任务已暂停');
       const workflow = currentTeamWorkflow();
-      const result = params.runId ? await workflow.resume(runId, signal) : await workflow.start(runId, params.chatId, params.goal, true, signal);
+      const result = params.runId ? await workflow.resume(runId, signal) : await workflow.start(runId, params.chatId, params.goal, true, signal, params.maxModelCalls);
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队交付已暂停');
       if (result.snapshot.run.status === 'completed') await workflow.publish(runId);
       return result;
@@ -891,6 +887,14 @@ export async function pauseAgentTeamAfterCurrentBatch(runId: string) {
   const run = await workflow.read(runId);
   if (!run || run.tasks[0]?.kind !== 'team_plan') throw new Error('团队任务不存在');
   const result = await workflow.requestPauseAfterCurrentBatch(runId);
+  notifyTeam();
+  return result;
+}
+
+export async function updateAgentTeamModelCallLimit(params: { runId: string; expectedPlanVersion: number; maxModelCalls?: number }) {
+  const auth = readAuthSnapshot();
+  if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
+  const result = await currentTeamWorkflow().setModelCallLimit(params.runId, params.expectedPlanVersion, params.maxModelCalls);
   notifyTeam();
   return result;
 }

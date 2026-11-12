@@ -24,6 +24,11 @@ describe('agent team child collaboration', () => {
       tasks: [{ id: 'task', runId: 'run', kind: 'agent_text', input: {}, dependsOn: [], status: 'queued', attempt: 0, updatedAt: 1 }],
     };
     expect(isRecoverableAgentTeamRun(base)).toBe(true);
+    expect(isRecoverableAgentTeamRun({ ...base, run: { ...base.run, maxModelCalls: 1 }, tasks: [{ ...base.tasks[0], kind: 'agent_text', attempt: 1 }] })).toBe(false);
+    expect(isRecoverableAgentTeamRun({ ...base, run: { ...base.run, maxModelCalls: 1 }, tasks: [
+      { ...base.tasks[0], status: 'completed', attempt: 1 },
+      { ...base.tasks[0], id: 'media', kind: 'agent_video', status: 'waiting_external', externalTaskId: 'submitted-video', attempt: 1 },
+    ] })).toBe(true);
     expect(isRecoverableAgentTeamRun({ ...base, tasks: [{ ...base.tasks[0], status: 'result_unknown' }] })).toBe(false);
     expect(isRecoverableAgentTeamRun({ ...base, tasks: [{ ...base.tasks[0], status: 'waiting_user' }] })).toBe(false);
     expect(isRecoverableAgentTeamRun({ ...base, run: { ...base.run, status: 'completed' } })).toBe(false);
@@ -113,6 +118,15 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks.filter((task) => task.kind === 'agent_text' && task.status === 'completed')).toHaveLength(40);
     expect((await workflow.read(runId))?.tasks.find((task) => task.id === 'shot_40')?.output).toBe('镜头 40 内容');
     expect(generate).toHaveBeenCalledTimes(41);
+    await workflow.addRevisionRequest(runId, result.snapshot.run.planVersion, '为四十个镜头补充运镜说明');
+    generate.mockResolvedValueOnce(JSON.stringify(plan));
+    for (let index = 1; index <= 40; index += 1) generate.mockResolvedValueOnce(`补充镜头 ${index} 内容`);
+    const extended = await workflow.resume(runId);
+    expect(extended.snapshot.run.status).toBe('completed');
+    expect(extended.snapshot.tasks).toHaveLength(82);
+    expect(extended.snapshot.tasks.find((task) => task.id === 'delegated_shot_40')?.output).toBe('补充镜头 40 内容');
+    await workflow.resume(runId);
+    expect(generate).toHaveBeenCalledTimes(82);
   });
 
   it('passes the completed image attachment to a dependent image task', async () => {

@@ -98,6 +98,54 @@ describe('workflow run runtime', () => {
     expect(execute).toHaveBeenCalledTimes(1);
   });
 
+  it('reserves the remaining model-call allowance before a concurrent batch', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.run.maxModelCalls = 1;
+    plan.tasks = [
+      { ...plan.tasks[0], id: 'first', kind: 'agent_text' },
+      { ...plan.tasks[0], id: 'second', kind: 'agent_text' },
+    ];
+    const execute = vi.fn(async (task: { id: string }) => ({ output: task.id }));
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => `model-limit-${id}`);
+    await runtime.create(plan);
+    const first = await runtime.resume(id);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(first.run.status).toBe('paused');
+    expect(first.tasks.map((task) => task.status)).toEqual(['completed', 'queued']);
+    await runtime.resume(id);
+    expect(execute).toHaveBeenCalledTimes(1);
+    await expect(runtime.setModelCallLimit(id, first.run.planVersion, 1)).rejects.toThrow('新上限必须大于');
+    await expect(runtime.setModelCallLimit(id, first.run.planVersion + 1, 2)).rejects.toThrow('版本冲突');
+    const extended = await runtime.setModelCallLimit(id, first.run.planVersion, 2);
+    expect(extended.run.planVersion).toBe(first.run.planVersion + 1);
+    expect(execute).toHaveBeenCalledTimes(1);
+    const completed = await runtime.resume(id);
+    expect(completed.run.status).toBe('completed');
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it('collects an already submitted external result after the model-call allowance is exhausted', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.run.maxModelCalls = 1;
+    plan.tasks = [
+      { ...plan.tasks[0], id: 'text', kind: 'agent_text', status: 'completed', attempt: 1 },
+      { ...plan.tasks[0], id: 'video', kind: 'agent_video', status: 'waiting_external', externalTaskId: 'submitted-video', attempt: 1 },
+      { ...plan.tasks[0], id: 'summary', kind: 'agent_text', dependsOn: ['video'], status: 'waiting_dependency' },
+    ];
+    const execute = vi.fn();
+    const inspectExternal = vi.fn().mockResolvedValueOnce({ status: 'pending' }).mockResolvedValueOnce({ status: 'completed', output: 'saved-video.mp4' });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute, inspectExternal }, () => `external-limit-${id}`);
+    await runtime.create(plan);
+    expect((await runtime.resume(id)).run.status).toBe('active');
+    const collected = await runtime.resume(id);
+    expect(collected.run.status).toBe('paused');
+    expect(collected.tasks[1]).toMatchObject({ status: 'completed', output: 'saved-video.mp4', attempt: 1 });
+    expect(inspectExternal).toHaveBeenCalledTimes(2);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('rejects cyclic plans before persisting', async () => {
     const id = crypto.randomUUID();
     const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'test');

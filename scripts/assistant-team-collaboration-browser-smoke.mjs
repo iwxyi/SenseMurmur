@@ -86,13 +86,14 @@ try {
     const container = document.createElement('div');
     container.id = 'assistant-team-smoke-root';
     document.body.append(container);
-    window.__assistantTeamSmoke = { calls: [], resumed: [] };
+    window.__assistantTeamSmoke = { calls: [], resumed: [], limits: [] };
     const root = createRoot(container);
     window.__assistantTeamSmoke.root = root;
     root.render(React.createElement(Workbench, {
       runs: [run, resumableRun, secondResumableRun, uncertainRun], canRun: true, isRunActive: () => false, onResume: () => {},
       onResumeAll: async (items) => { window.__assistantTeamSmoke.resumed = items.map((item) => item.run.id); }, onCreate: () => {},
       onInstruct: async () => {}, onPause: async () => {},
+      onUpdateModelCallLimit: async (item, limit) => { window.__assistantTeamSmoke.limits.push({ runId: item.run.id, limit }); },
       onDelegate: async (...args) => { window.__assistantTeamSmoke.calls.push(args); },
       onAbandonReview: async () => {}, onResumeAfterReviewRetry: async () => {}, onResumeAfterPlanRetry: async () => {},
     }));
@@ -120,6 +121,16 @@ try {
   assert.match(request, /市场分析师/);
   assert.match(request, /原任务：研究市场竞争/);
   assert.match(request, /补充日本市场，并标注数据年份/);
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).filter((button) => button.textContent === '市场研究')[1].click()`);
+  await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('[role="dialog"] input[type="number"]'))`), 'model call limit input');
+  await cdp.evaluate(`(() => {
+    const input = document.querySelector('[role="dialog"] input[type="number"]');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '12');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '保存调用上限').click()`);
+  await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.limits.length === 1`), 'model call limit saved');
+  assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.limits[0]`), { runId: 'browser-resume-run', limit: 12 });
   console.log(JSON.stringify({ ok: true, childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } finally {
   await cdp.evaluate(`window.__assistantTeamSmoke?.root?.unmount(); document.querySelector('#assistant-team-smoke-root')?.remove();`).catch(() => undefined);

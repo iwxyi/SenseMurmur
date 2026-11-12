@@ -50,7 +50,7 @@ import { useChatSurfaceActions } from '../hooks/useChatSurfaceActions';
 import { useReplyOperation } from '../hooks/useReplyOperation';
 import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, getAssistantBackgroundStreamingSnapshot, listAssistantBackgroundReplies, resumeAssistantBackgroundReply, retryAssistantBackgroundReply, subscribeAssistantBackgroundReplies, subscribeAssistantBackgroundRunChanges, subscribeAssistantBackgroundStreaming } from '../services/assistantBackgroundReply';
 import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
-import { abandonAgentTeamReview, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamPlan, retryAgentTeamReview, runAgentTeam, subscribeAgentTeamRuns } from '../services/agentTeamWorkflow';
+import { abandonAgentTeamReview, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamPlan, retryAgentTeamReview, runAgentTeam, subscribeAgentTeamRuns, updateAgentTeamModelCallLimit } from '../services/agentTeamWorkflow';
 import { getDirectBackgroundRevision, isDirectBackgroundActive, listDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply, subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
 import { getAiDirectBackgroundRevision, isAiDirectBackgroundActive, listAiDirectBackgroundReplies, resumeAiDirectBackgroundReply, startAiDirectBackgroundReply, subscribeAiDirectBackgroundReplies } from '../services/aiDirectBackgroundReply';
 import { getGroupBackgroundRevision, listAiDirectBackgroundConversations, listGroupBackgroundConversations, subscribeGroupBackgroundConversations } from '../services/groupBackgroundConversation';
@@ -945,6 +945,7 @@ export default function ChatDetailPage() {
   const [teamRuns, setTeamRuns] = useState<WorkflowSnapshot[]>([]);
   const [teamGoalOpen, setTeamGoalOpen] = useState(false);
   const [teamGoal, setTeamGoal] = useState('');
+  const [teamModelCallLimit, setTeamModelCallLimit] = useState('');
   const [teamProgressTick, setTeamProgressTick] = useState(0);
   useEffect(() => {
     if (!hasActiveAgentTeamRuns()) return;
@@ -4629,6 +4630,7 @@ export default function ChatDetailPage() {
           onCreate={() => setTeamGoalOpen(true)}
           onInstruct={async (selected, task, instruction) => { await instructAgentTeamTask({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, instruction }); }}
           onPause={async (selected) => { await pauseAgentTeamAfterCurrentBatch(selected.run.id); }}
+          onUpdateModelCallLimit={async (selected, maxModelCalls) => { await updateAgentTeamModelCallLimit({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, maxModelCalls }); }}
           onDelegate={async (selected, request) => { await delegateAgentTeamTask({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, request }); }}
           onAbandonReview={async (selected, task) => { await abandonAgentTeamReview({ runId: selected.run.id, reviewId: task.id, expectedPlanVersion: selected.run.planVersion }); }}
           onResumeAfterReviewRetry={async (selected, task) => {
@@ -5048,22 +5050,25 @@ export default function ChatDetailPage() {
         <DialogContent>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>主 Agent 会规划步骤、调度可用工具并验收结果。当前支持文本、已开启的网页搜索，以及已配置的图片和单段视频生成；不支持音乐或视频合成。</Typography>
           <TextField autoFocus multiline minRows={4} fullWidth label="目标与验收要求" value={teamGoal} onChange={(event) => setTeamGoal(event.target.value)} />
+          <TextField sx={{ mt: 2 }} size="small" type="number" fullWidth label="模型调用次数上限（可选）" value={teamModelCallLimit} onChange={(event) => setTeamModelCallLimit(event.target.value)} slotProps={{ htmlInput: { min: 1, max: 1000, step: 1 } }} helperText="留空则不限制；计入规划、文本任务、图片检查和验收。此项不代表金额预算。" />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setTeamGoalOpen(false)}>取消</Button>
-          <Button disabled={!teamGoal.trim() || !navigator.locks?.request} onClick={() => {
+          <Button disabled={!teamGoal.trim() || !navigator.locks?.request || Boolean(teamModelCallLimit.trim() && (!Number.isSafeInteger(Number(teamModelCallLimit)) || Number(teamModelCallLimit) < 1 || Number(teamModelCallLimit) > 1000))} onClick={() => {
             if (!id) return;
             const goal = teamGoal.trim();
+            const maxModelCalls = teamModelCallLimit.trim() ? Number(teamModelCallLimit) : undefined;
             const chatId = id;
             setTeamGoalOpen(false);
             setTeamGoal('');
+            setTeamModelCallLimit('');
             void (async () => {
               const message = await addMessageStable({
                 chatId, type: 'user', senderId: 'user', senderName: currentUser?.nickname?.trim() || '我',
                 content: goal, emotion: 0, timestamp: getNextMessageTimestamp(),
               });
               void updateChat(chatId, { lastMessageAt: message.timestamp, latestMessage: message });
-              await runAgentTeam({ chatId, goal });
+              await runAgentTeam({ chatId, goal, maxModelCalls });
             })().catch((error) => showErrorToast(error instanceof Error ? error.message : '团队任务启动失败'));
           }}>开始</Button>
         </DialogActions>

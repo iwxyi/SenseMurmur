@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Stack, TextField, Typography } from '@mui/material';
 import type { WorkflowSnapshot, WorkflowTask } from '../../services/workflowRunRuntime';
-import { summarizeWorkflowRun } from '../../services/workflowRunRuntime';
+import { countWorkflowModelCalls, summarizeWorkflowRun } from '../../services/workflowRunRuntime';
 import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
-import { buildAgentTeamTaskRevisionRequest, isRecoverableAgentTeamRun, MAX_TEAM_RUN_TASKS } from '../../services/agentTeamWorkflow';
+import { buildAgentTeamTaskRevisionRequest, isRecoverableAgentTeamRun } from '../../services/agentTeamWorkflow';
 
 interface Props {
   runs: WorkflowSnapshot[];
@@ -14,6 +14,7 @@ interface Props {
   onCreate: () => void;
   onInstruct: (run: WorkflowSnapshot, task: WorkflowTask, instruction: string) => Promise<void>;
   onPause: (run: WorkflowSnapshot) => Promise<void>;
+  onUpdateModelCallLimit: (run: WorkflowSnapshot, limit?: number) => Promise<void>;
   onDelegate: (run: WorkflowSnapshot, request: string) => Promise<void>;
   onAbandonReview: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
   onResumeAfterReviewRetry: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
@@ -45,7 +46,7 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onResumeAll, onCreate, onInstruct, onPause, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterPlanRetry }: Props) {
+export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onResumeAll, onCreate, onInstruct, onPause, onUpdateModelCallLimit, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterPlanRetry }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -61,6 +62,9 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const [reviewActionRunId, setReviewActionRunId] = useState<string | null>(null);
   const [resumingAll, setResumingAll] = useState(false);
   const [resumeAllError, setResumeAllError] = useState<string | null>(null);
+  const [modelCallLimit, setModelCallLimit] = useState('');
+  const [savingLimit, setSavingLimit] = useState(false);
+  const [limitError, setLimitError] = useState<string | null>(null);
   if (!runs.length) return null;
   const run = runs.find((item) => item.run.id === selectedRunId) || runs[0];
   const task = run.tasks.find((item) => item.id === selectedTaskId) || null;
@@ -73,13 +77,13 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const childTasks = run.tasks.filter((item) => item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_image_inspection' || item.kind === 'agent_audio' || item.kind === 'agent_video');
   const blocked = summary.blocked.length > 0;
   const running = isRunActive(run.run.id);
+  const modelCallLimitReached = run.run.maxModelCalls !== undefined && countWorkflowModelCalls(run) >= run.run.maxModelCalls;
   const editable = Boolean(canRun && task && run.run.status === 'paused' && (task.kind === 'agent_text' || task.kind === 'agent_web_search' || task.kind === 'agent_image' || task.kind === 'agent_image_inspection' || task.kind === 'agent_audio' || task.kind === 'agent_video') && task.attempt === 0
     && (task.status === 'queued' || task.status === 'waiting_dependency'));
   const unknownReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'result_unknown');
   const failedReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'failed');
   const failedPlan = run.tasks.find((item) => (item.kind === 'team_plan' || item.kind === 'team_plan_revision') && item.status === 'failed');
   const canAddRevision = canRun && (run.run.status === 'paused' || run.run.status === 'completed')
-    && run.tasks.length < MAX_TEAM_RUN_TASKS
     && !run.tasks.some((item) => item.status === 'running' || item.status === 'result_unknown' || item.status === 'failed'
       || (item.kind === 'team_plan_revision' && item.status !== 'completed'));
   const canReviseSelectedTask = Boolean(canAddRevision && task && details && childTasks.includes(task)
@@ -101,8 +105,20 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
         </Stack>}
         <Box>
           <Typography variant="subtitle1" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{plan?.summary || run.run.goal}</Typography>
-          <Typography variant="body2" color="text.secondary">{run.run.pauseRequested ? '当前步骤完成后暂停' : running ? '运行中' : run.run.status === 'completed' ? '已完成' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '失败' : '等待执行'} · 已完成 {summary.completed.length}/{run.tasks.length} 步</Typography>
+          <Typography variant="body2" color="text.secondary">{run.run.pauseRequested ? '当前步骤完成后暂停' : running ? '运行中' : run.run.status === 'completed' ? '已完成' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '失败' : '等待执行'} · 已完成 {summary.completed.length}/{run.tasks.length} 步{run.run.maxModelCalls ? ` · 模型调用 ${countWorkflowModelCalls(run)}/${run.run.maxModelCalls}` : ''}</Typography>
+          {modelCallLimitReached && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">已达到模型调用上限。调整上限后可继续，已有结果会保留。</Typography>}
         </Box>
+        {canRun && !running && run.run.status === 'paused' && <Box sx={{ display: 'grid', gap: 1 }}>
+          <TextField size="small" type="number" label="新的模型调用总上限" value={modelCallLimit} onChange={(event) => { setModelCallLimit(event.target.value); setLimitError(null); }} disabled={savingLimit} helperText="留空表示不限制，保存后点击继续整个任务。" slotProps={{ htmlInput: { min: countWorkflowModelCalls(run) + 1, max: 1000, step: 1 } }} />
+          {limitError && <Typography variant="caption" color="error.main">{limitError}</Typography>}
+          <Button size="small" disabled={savingLimit || Boolean(modelCallLimit.trim() && (!Number.isSafeInteger(Number(modelCallLimit)) || Number(modelCallLimit) <= countWorkflowModelCalls(run) || Number(modelCallLimit) > 1000))} onClick={() => {
+            setSavingLimit(true);
+            void onUpdateModelCallLimit(run, modelCallLimit.trim() ? Number(modelCallLimit) : undefined)
+              .then(() => { setLimitError(null); setModelCallLimit(''); })
+              .catch((error: unknown) => setLimitError(error instanceof Error ? error.message : '调整模型调用上限失败'))
+              .finally(() => setSavingLimit(false));
+          }}>保存调用上限</Button>
+        </Box>}
         <Stack direction="row" spacing={0.75} sx={{ overflowX: 'auto', pb: 0.5 }}>
           <Chip size="small" clickable color={!task ? 'primary' : 'default'} label="总览与主 Agent" onClick={() => setSelectedTaskId(null)} />
           {childTasks.map((item, index) => <Chip key={item.id} size="small" clickable color={task?.id === item.id ? 'primary' : 'default'} label={`${taskDetails(item)?.role || `子 Agent ${index + 1}`} · ${taskStatus[item.status]}`} onClick={() => setSelectedTaskId(item.id)} />)}
@@ -193,7 +209,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
         }}>{resumingAll ? '正在恢复…' : `恢复所有可恢复任务 (${resumableRuns.length})`}</Button>}
         {canRun && <Button onClick={() => { setOpen(false); onCreate(); }}>新建团队任务</Button>}
         {canRun && running && !run.run.pauseRequested && <Button onClick={() => { void onPause(run).then(() => setPauseError(null)).catch((error: unknown) => setPauseError(error instanceof Error ? error.message : '暂停任务失败')); }}>当前步骤完成后暂停</Button>}
-        {canRun && !running && ((!blocked && run.run.status !== 'failed') || run.tasks.some((item) => (item.kind === 'agent_video' || item.kind === 'agent_image' || item.kind === 'agent_audio') && (item.status === 'failed' || item.status === 'result_unknown'))) && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : blocked ? '核对媒体结果' : '继续整个任务'}</Button>}
+        {canRun && !running && ((!blocked && run.run.status !== 'failed' && (!modelCallLimitReached || run.run.status === 'completed' || run.tasks.some((item) => item.status === 'waiting_external'))) || run.tasks.some((item) => (item.kind === 'agent_video' || item.kind === 'agent_image' || item.kind === 'agent_audio') && (item.status === 'failed' || item.status === 'result_unknown'))) && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : blocked || modelCallLimitReached ? '核对媒体结果' : '继续整个任务'}</Button>}
         <Button onClick={() => setOpen(false)}>关闭</Button>
       </DialogActions>
       {resumeAllError && <Typography role="alert" variant="caption" color="error.main" sx={{ px: 3, pb: 1 }}>{resumeAllError}</Typography>}

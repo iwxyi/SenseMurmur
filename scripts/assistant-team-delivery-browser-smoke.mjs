@@ -100,7 +100,13 @@ try {
     };
     try {
       const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'browser-smoke', baseUrl: 'https://mock-llm.invalid/v1', model: 'smoke-model' }, currentWorkflowScope);
-      const completed = await workflow.start(runId, chatId, '研究市场机会并交付报告和数据表');
+      const paused = await workflow.start(runId, chatId, '研究市场机会并交付报告和数据表', false, undefined, 2);
+      if (paused.snapshot.run.status !== 'paused' || requests.length !== 2) throw new Error('调用额度未正确暂停任务');
+      const recoveredWorkflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'browser-smoke', baseUrl: 'https://mock-llm.invalid/v1', model: 'smoke-model' }, currentWorkflowScope);
+      const persisted = await recoveredWorkflow.read(runId);
+      if (persisted.run.maxModelCalls !== 2) throw new Error('调用额度未持久化');
+      await recoveredWorkflow.setModelCallLimit(runId, persisted.run.planVersion, 3);
+      const completed = await recoveredWorkflow.resume(runId);
       if (completed.snapshot.run.status !== 'completed') throw new Error('真实 WorkflowRun 未完成：' + JSON.stringify(completed.snapshot));
       await workflow.publish(runId);
       const afterFirstDelivery = await indexedDbWorkflowRepository.read(currentWorkflowScope(), runId);
@@ -125,6 +131,7 @@ try {
         messages: messages.length,
         messagesAfterRepeat: messagesAfterRepeat.length,
         modelCalls: requests.length,
+        budgetRecovery: paused.snapshot.run.status === 'paused' && completed.snapshot.run.maxModelCalls === 3,
       };
     } finally { window.fetch = originalFetch; }
   })()`);
@@ -136,6 +143,7 @@ try {
   assert.equal(result.messages, 1);
   assert.equal(result.messagesAfterRepeat, 1);
   assert.equal(result.modelCalls, 3);
+  assert.equal(result.budgetRecovery, true);
   console.log(JSON.stringify({ ok: true, ...result }));
 } finally {
   cdp.close();

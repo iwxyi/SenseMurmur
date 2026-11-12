@@ -31,6 +31,7 @@ export interface WorkflowRun {
   autoReview?: boolean;
   pauseRequested?: boolean;
   deliveryStatus?: 'pending' | 'published';
+  maxModelCalls?: number;
   updatedAt: number;
 }
 
@@ -81,6 +82,7 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
     throw new Error('工作流恢复命令记录无效');
   }
   if (run.deliveryStatus !== undefined && run.deliveryStatus !== 'pending' && run.deliveryStatus !== 'published') throw new Error('工作流交付状态无效');
+  if (run.maxModelCalls !== undefined && (!Number.isSafeInteger(run.maxModelCalls) || (run.maxModelCalls as number) < 1 || (run.maxModelCalls as number) > 1000)) throw new Error('工作流模型调用上限无效');
 
   const taskIds = new Set<string>();
   for (const candidate of value.tasks) {
@@ -142,6 +144,12 @@ export function summarizeWorkflowRun(snapshot: WorkflowSnapshot): WorkflowResume
     result.runnable.push(task.id);
   }
   return result;
+}
+
+export function countWorkflowModelCalls(snapshot: WorkflowSnapshot): number {
+  return snapshot.tasks.filter((task) => task.kind === 'team_plan' || task.kind === 'team_plan_revision'
+    || task.kind === 'team_review' || task.kind === 'agent_text' || task.kind === 'agent_image_inspection')
+    .reduce((total, task) => total + task.attempt, 0);
 }
 
 export interface WorkflowTaskResult {
@@ -519,6 +527,17 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
+  async function setModelCallLimit(runId: string, expectedPlanVersion: number, maxModelCalls?: number) {
+    if (maxModelCalls !== undefined && (!Number.isSafeInteger(maxModelCalls) || maxModelCalls < 1 || maxModelCalls > 1000)) throw new Error('模型调用上限应为 1 到 1000 的整数');
+    return mutate(scope(), runId, (current) => {
+      if (current.run.status !== 'paused') throw new Error('请先暂停整个任务');
+      if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
+      if (maxModelCalls !== undefined && maxModelCalls <= countWorkflowModelCalls(current)) throw new Error('新上限必须大于已使用的模型调用次数');
+      const snapshot: WorkflowSnapshot = { ...current, run: { ...current.run, maxModelCalls, planVersion: current.run.planVersion + 1, updatedAt: Date.now() } };
+      return { snapshot, value: snapshot };
+    });
+  }
+
   async function addTasks(runId: string, expectedPlanVersion: number, additions: WorkflowTask[]) {
     if (!additions.length) throw new Error('工作流计划修订不能为空');
     return mutate(scope(), runId, (current) => {
@@ -729,7 +748,17 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         const completed = new Set(snapshot.tasks.filter((task) => task.status === 'completed').map((task) => task.id));
         const ready = snapshot.tasks.filter((task) => (task.status === 'queued' || task.status === 'waiting_dependency') && task.dependsOn.every((id) => completed.has(id)));
         const external = snapshot.tasks.filter((task) => task.status === 'waiting_external' && task.externalTaskId && executor.inspectExternal && !inspectedExternalIds.has(task.id));
-        const batch = [...ready, ...external].slice(0, concurrency);
+        const remainingModelCalls = snapshot.run.maxModelCalls === undefined ? Number.POSITIVE_INFINITY
+          : Math.max(0, snapshot.run.maxModelCalls - countWorkflowModelCalls(snapshot));
+        let selectedModelCalls = 0;
+        const batch = [...ready, ...external].filter((task) => {
+          if (task.status === 'waiting_external') return true;
+          if (task.kind !== 'team_plan' && task.kind !== 'team_plan_revision' && task.kind !== 'team_review'
+            && task.kind !== 'agent_text' && task.kind !== 'agent_image_inspection') return true;
+          if (selectedModelCalls >= remainingModelCalls) return false;
+          selectedModelCalls += 1;
+          return true;
+        }).slice(0, concurrency);
         if (!batch.length) break;
         const claimed = new Set(batch.filter((task) => ready.includes(task)).map((task) => task.id));
         const dispatchAllowed = await mutate(storageScope, runId, (current) => {
@@ -773,7 +802,11 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
           : current.tasks;
         const completed = !current.run.planOpen && tasks.every((task) => task.status === 'completed' || task.status === 'abandoned');
         const failed = tasks.some((task) => task.status === 'failed');
-        const snapshot = { ...current, tasks, run: { ...current.run, status: current.run.status !== 'active' ? current.run.status : signal.aborted || current.run.pauseRequested ? 'paused' as const : completed ? 'completed' as const : failed ? 'failed' as const : current.run.status, pauseRequested: false, updatedAt: Date.now() } };
+        const modelCallLimitReached = !failed && current.run.maxModelCalls !== undefined
+          && countWorkflowModelCalls({ ...current, tasks }) >= current.run.maxModelCalls
+          && !tasks.some((task) => task.status === 'waiting_external')
+          && tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency');
+        const snapshot = { ...current, tasks, run: { ...current.run, status: current.run.status !== 'active' ? current.run.status : signal.aborted || current.run.pauseRequested || modelCallLimitReached ? 'paused' as const : completed ? 'completed' as const : failed ? 'failed' as const : current.run.status, pauseRequested: false, updatedAt: Date.now() } };
         return { snapshot, value: snapshot };
       });
     }).finally(() => active.delete(activeKey));
@@ -800,5 +833,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamPlan, addTasksOnce, expandPlanOnce, closePlan, markDeliveryPublished, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, setModelCallLimit, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamPlan, addTasksOnce, expandPlanOnce, closePlan, markDeliveryPublished, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }
