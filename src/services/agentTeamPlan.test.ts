@@ -15,6 +15,20 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('permits only exact saved-media catalog entries in a new composition plan', async () => {
+    const source = { taskId: 'previous_shot', kind: 'video' as const, attempt: 2, outputSha256: 'a'.repeat(64) };
+    const candidate = { ...valid(), roles: [{ ...valid().roles[0], allowedTools: ['media_composition'] }],
+      tasks: [{ id: 'film', roleId: 'researcher', goal: '重新剪辑', acceptance: '可播放', tool: 'media_composition', dependsOn: [],
+        savedMedia: [{ ...source, alias: 'old_clip' }], composition: { clips: [{ taskId: 'old_clip' }] } }] };
+    const params = { api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '重新剪辑', mediaComposition: true };
+    for (const catalog of [undefined, [{ ...source, attempt: 1 }], [{ ...source, taskId: 'foreign' }], [{ ...source, outputSha256: 'b'.repeat(64) }]]) {
+      vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+      await expect(planAgentTeam({ ...params, savedMedia: catalog })).rejects.toThrow('未授权或版本不符');
+    }
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+    expect((await planAgentTeam({ ...params, savedMedia: [source] })).tasks[0].savedMedia).toEqual(candidate.tasks[0].savedMedia);
+  });
+
   it('validates typed delegated exports and their use in composition and inspection', () => {
     const role = { ...valid().roles[0], allowedTools: ['delegate_task', 'video_generation', 'audio_generation', 'media_composition', 'video_inspection', 'text_generation'] };
     const video = { id: 'scene', roleId: role.id, goal: '制作镜头', acceptance: '视频', dependsOn: [], tool: 'delegate_task', mediaOutput: 'video' };

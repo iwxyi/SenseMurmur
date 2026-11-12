@@ -19,6 +19,7 @@ import { composeAgentTeamMedia, inspectAgentTeamComposition, teamMediaAttachment
 import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
 import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
 import { countWorkflowModelCalls } from './workflowRunRuntime';
+import { listTeamSavedMedia } from './agentTeamSavedMedia';
 import * as persistence from '../stores/storePersistenceScope';
 
 vi.mock('./agentTeamMediaComposition', () => ({ canComposeTeamMedia: () => true, composeAgentTeamMedia: vi.fn(), inspectAgentTeamComposition: vi.fn(), teamMediaAttachment: vi.fn() }));
@@ -109,6 +110,48 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('recomposes saved media in a later plan without submitting another paid media task', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `saved-media-${runId}`;
+    const now = Date.now();
+    const role = { id: 'director', name: '导演', responsibility: '制作', method: '剪辑', acceptance: '成片', allowedTools: ['video_generation', 'audio_generation'] };
+    const tasks = [
+      { id: 'shot', roleId: role.id, goal: '拍摄', dependsOn: [], tool: 'video_generation', acceptance: '可播放' },
+      { id: 'music', roleId: role.id, goal: '伴奏', dependsOn: [], tool: 'audio_generation', acceptance: '可播放' },
+    ];
+    const snapshot: WorkflowSnapshot = {
+      run: { id: runId, chatId: 'chat', goal: '生成短片', status: 'completed', generation: 1, planVersion: 2, planOpen: false, updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '生成短片', output: { roles: [role], tasks, summary: '素材', finalAcceptance: '素材可用' }, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        ...tasks.map((task) => ({ id: task.id, runId, kind: task.id === 'shot' ? 'agent_video' : 'agent_audio', input: { task, role, goal: '生成短片' },
+          output: `${task.id} 已保存`, dependsOn: ['plan'], status: 'completed' as const, attempt: 1, updatedAt: now })),
+      ],
+    };
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot, value: undefined }));
+    const catalog = listTeamSavedMedia(snapshot, ['shot', 'music']);
+    const extraPlan = { summary: '重新剪辑', finalAcceptance: '成片可用', roles: [{ ...role, allowedTools: ['media_composition'] }],
+      tasks: [{ id: 'film', roleId: role.id, goal: '剪辑已保存镜头并叠加已有伴奏', tool: 'media_composition', acceptance: '可播放', dependsOn: [],
+        savedMedia: catalog.map((source) => ({ ...source, alias: `old_${source.taskId}` })),
+        composition: { clips: [{ taskId: 'old_shot' }], audioTracks: [{ taskId: 'old_music' }] } }] };
+    generate.mockResolvedValueOnce(JSON.stringify(extraPlan));
+    vi.mocked(composeAgentTeamMedia).mockResolvedValue({ output: '新成片已保存' });
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const workflow = createAgentTeamWorkflow(config, () => scope);
+    await workflow.addRevisionRequest(runId, 2, '只重新剪辑，不重新生成素材');
+    const result = await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(generate.mock.calls[0][1]).toContain('可复用历史素材目录');
+    expect(generate.mock.calls[0][1]).toContain(catalog[0].outputSha256);
+    const composition = vi.mocked(composeAgentTeamMedia).mock.calls[0][0];
+    expect(composition.resolveTaskId?.('old_shot')).toBe('shot');
+    expect(composition.resolveTaskId?.('old_music')).toBe('music');
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(composeAgentTeamMedia).toHaveBeenCalledTimes(1);
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+    expect(queueAgentTeamAudio).not.toHaveBeenCalled();
+  });
+
   it('binds the starting branch, pauses after outstanding planning, and restores the whole run', async () => {
     const runId = crypto.randomUUID();
     const scope = `branch-${runId}`;

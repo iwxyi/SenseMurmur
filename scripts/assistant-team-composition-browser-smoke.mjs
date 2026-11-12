@@ -141,11 +141,18 @@ try {
     let speechRequests = 0;
     let visionRequests = 0;
     let inspectionPixels;
+    let revisionRequests = 0;
+    let revisionPlan;
     useSettingsStore.setState({ aiProfiles: [
       { id: 'speech-smoke', name: '测试旁白', type: 'tts', provider: 'openai', baseUrl: 'https://speech-smoke.invalid/v1', apiKey: 'test-fixture', model: 'tts-1', isDefault: true },
       { id: 'vision-smoke', name: '测试视觉', type: 'text', provider: 'openai', baseUrl: 'https://vision-smoke.invalid/v1', apiKey: 'test-fixture', model: 'gpt-4o', isDefault: true },
     ] });
     window.fetch = async (input, init) => {
+      if (String(input).startsWith('https://revision-smoke.invalid/')) {
+        const body = JSON.parse(init.body);
+        if (!JSON.stringify(body.messages).includes('可复用历史素材目录') || !revisionPlan || revisionRequests++) throw new Error('Invalid or duplicate revision planning request');
+        return Response.json({ choices: [{ message: { role: 'assistant', content: JSON.stringify(revisionPlan) }, finish_reason: 'stop' }] });
+      }
       if (String(input).startsWith('https://vision-smoke.invalid/')) {
         const body = JSON.parse(init.body);
         const content = body.messages.at(-1).content;
@@ -217,7 +224,26 @@ try {
     const inspectionAttempts = await runtime.indexedDbWorkflowRepository.listTaskAttempts(runtime.currentWorkflowScope(), runId, 'inspect');
     if (inspection.modelInvocation?.state !== 'succeeded' || inspectionAttempts.length !== 1
       || JSON.stringify(inspectionAttempts[0].modelInvocation) !== JSON.stringify(inspection.modelInvocation)) throw new Error('Missing atomic model invocation journal');
-    window.__compositionSmoke = { done: true, result: { status: after.run.status, rejectedGoalReplacement, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, visionRequests, inspectionPixels, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
+    const { listTeamSavedMedia } = await import('/src/services/agentTeamSavedMedia.ts');
+    const savedMedia = listTeamSavedMedia(after, ['shot_a', 'shot_b', 'music', 'narration']).map((source) => ({ ...source, alias: 'old_' + source.taskId }));
+    revisionPlan = { summary: '复用已有素材制作竖屏版', roles: [{ ...role, allowedTools: ['media_composition'] }], finalAcceptance: '竖屏版有配乐和旁白',
+      tasks: [{ id: 'portrait', roleId: role.id, goal: '复用已有素材制作竖屏版本', acceptance: '顺序不变且有伴奏旁白', dependsOn: [], tool: 'media_composition', savedMedia,
+        composition: { clips: [{ taskId: 'old_shot_a', startSeconds: 0.1, durationSeconds: 0.4 }, { taskId: 'old_shot_b', durationSeconds: 0.4 }],
+          audioTracks: [{ taskId: 'old_music', loop: true }, { taskId: 'old_narration', volume: 0.5, offsetSeconds: 0.4 }], aspectRatio: '9:16', originalAudioVolume: 0 } }] };
+    const revisionConfig = { provider: 'openai', baseUrl: 'https://revision-smoke.invalid/v1', apiKey: 'test-fixture', model: 'fixture' };
+    const revisionWorkflow = createAgentTeamWorkflow(revisionConfig, runtime.currentWorkflowScope);
+    await revisionWorkflow.addRevisionRequest(runId, after.run.planVersion, '请复用已生成的全部素材制作竖屏版，不重新生成或配音');
+    const revised = await createAgentTeamWorkflow(revisionConfig, runtime.currentWorkflowScope).resume(runId);
+    if (revised.snapshot.run.status !== 'completed') throw new Error('Saved media revision failed: ' + JSON.stringify(revised.snapshot.tasks));
+    const portrait = composition.teamMediaAttachment(runId, 'delegated_portrait');
+    if (!portrait?.url) throw new Error('Revised composition missing');
+    const portraitVideo = document.createElement('video'); portraitVideo.muted = true; portraitVideo.src = portrait.url;
+    await new Promise((resolve, reject) => { portraitVideo.onloadedmetadata = resolve; portraitVideo.onerror = () => reject(new Error('Revised video cannot decode')); });
+    await createAgentTeamWorkflow(revisionConfig, runtime.currentWorkflowScope).resume(runId);
+    const portraitAttempts = await runtime.indexedDbWorkflowRepository.listTaskAttempts(runtime.currentWorkflowScope(), runId, 'delegated_portrait');
+    const portraitMessages = useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.filter((message) => message.id === 'team-composition-' + runId + '-delegated_portrait') || [];
+    if (portraitAttempts.length !== 1 || portraitMessages.length !== 1 || revisionRequests !== 1 || speechRequests !== 1 || visionRequests !== 1) throw new Error('Saved media revision duplicated work');
+    window.__compositionSmoke = { done: true, result: { status: after.run.status, savedMediaRevision: { width: portraitVideo.videoWidth, height: portraitVideo.videoHeight, revisionRequests, attempts: portraitAttempts.length, messageCount: portraitMessages.length }, rejectedGoalReplacement, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, visionRequests, inspectionPixels, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
     } finally { window.fetch = originalFetch; useSettingsStore.setState({ aiProfiles: originalProfiles }); }
   })().catch((error) => { window.__compositionSmoke = { done: true, error: String(error?.stack || error) }; });`);
   let result;
@@ -228,6 +254,7 @@ try {
   }
   assert.ok(result, 'Composition exceeded three minutes');
   assert.equal(result.status, 'completed');
+  assert.deepEqual(result.savedMediaRevision, { width: 720, height: 1280, revisionRequests: 1, attempts: 1, messageCount: 1 });
   assert.equal(result.rejectedGoalReplacement, true);
   assert.equal(result.width, 1280); assert.equal(result.height, 720);
   assert.ok(result.duration >= 0.75 && result.duration < 1.1);

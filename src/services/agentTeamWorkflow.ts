@@ -36,6 +36,7 @@ import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoa
 import { describeWorkflowToolRequest } from './workflowToolRequest';
 import { parseWorkflowReviewVerdict, prepareWorkflowReviewRecord } from './workflowReviewRecord';
 import { analyzeWorkflowRevisionImpact, parseWorkflowRevisionImpact, type WorkflowRevisionImpact } from './workflowRevisionImpact';
+import { assertTeamSavedMedia, listTeamSavedMedia } from './agentTeamSavedMedia';
 
 const TOOL_TASK_KINDS = {
   text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio', speech_generation: 'agent_audio',
@@ -218,6 +219,7 @@ function sameAgentTeamTask(left: AgentTeamPlan['tasks'][number], right: AgentTea
     && left.deliverable?.title === right.deliverable?.title
     && left.deliverable?.language === right.deliverable?.language
     && JSON.stringify(left.composition) === JSON.stringify(right.composition)
+    && JSON.stringify(left.savedMedia) === JSON.stringify(right.savedMedia)
     && JSON.stringify(left.speech) === JSON.stringify(right.speech)
     && leftDependencies.size === rightDependencies.size
     && [...leftDependencies].every((id) => rightDependencies.has(id));
@@ -309,7 +311,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
-        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}${revisionContext}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities, delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
+        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}${revisionContext}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities,
+          savedMedia: listTeamSavedMedia(snapshot, task.input.sourceTaskIds), delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         assertGoalPlanAuthorized(snapshot, plan);
         return { output: plan };
@@ -356,6 +359,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         throw new WorkflowPreflightError('团队任务与已保存计划不一致');
       }
       const selectedTool = input.task.tool || 'text_generation';
+      assertTeamSavedMedia({ ...plan, tasks: [input.task] }, snapshot, input.contextTaskIds || []);
       assertGoalPlanAuthorized(snapshot, plan);
       if (task.kind !== teamTaskKind(input.task)) throw new WorkflowPreflightError('团队任务工具与计划不一致');
       if (signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
@@ -390,6 +394,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           .map((entry) => ({ ...entry, output: entry.output.slice(0, 600) }));
         const delegated = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n只拆分当前子目标：${input.task.goal}\n用户补充指示：${input.userInstruction || '无'}\n验收：${input.task.acceptance}\n${input.task.mediaOutput ? `必须交付一份 ${input.task.mediaOutput} 媒体，计划根字段 resultTaskId 必须指定对应的最终媒体任务。` : ''}\n本岗位可用工具：${role.allowedTools.join('、')}\n已有交付：${JSON.stringify(prior)}`,
           chatId: snapshot.run.chatId, ...capabilities,
+          savedMedia: listTeamSavedMedia(snapshot, contextTaskIds),
           webSearch: can('web_search') && Boolean(chat.modeState && resolveChatAgentCapabilities(chat).webSearch),
           imageGeneration: can('image_generation') && capabilities.imageGeneration,
           audioGeneration: can('audio_generation') && capabilities.audioGeneration,
@@ -414,7 +419,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (!input.task.composition) throw new WorkflowPreflightError('缺少音视频合成配置');
         const clips = new Set(input.task.composition.clips.map((clip) => clip.taskId));
         const sources = Object.fromEntries([...input.task.composition.clips, ...(input.task.composition.audioTracks || [])].map(({ taskId }) => [taskId,
-          resolveTeamMediaTask(snapshot, input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, taskId) : taskId, clips.has(taskId) ? 'video' : 'audio')]));
+          resolveTeamMediaTask(snapshot, input.task.savedMedia?.find((media) => media.alias === taskId)?.taskId
+            ?? (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, taskId) : taskId), clips.has(taskId) ? 'video' : 'audio')]));
         await context.beginToolInvocation(describeWorkflowToolRequest('media_composition', { plan: input.task.composition, sources }));
         return composeAgentTeamMedia({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
