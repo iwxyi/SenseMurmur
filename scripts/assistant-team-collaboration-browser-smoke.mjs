@@ -183,6 +183,21 @@ try {
       if (done.run.status !== 'completed' || savedTextRequests !== 2
         || done.tasks.find((task) => task.id === 'research').attempt !== 1
         || done.tasks.find((task) => task.id === 'research').output !== originalText) throw new Error('Exact saved text recovery failed');
+      const beforeRevision = await indexedDbWorkflowRepository.listPlanRevisions(currentWorkflowScope(), textRunId);
+      const beforeAttempts = await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), textRunId, 'research');
+      let rejectedMutation = false;
+      try {
+        await indexedDbWorkflowRepository.transact(currentWorkflowScope(), textRunId, (current) => {
+          current.tasks.find((task) => task.id === 'research').output = '覆盖旧稿';
+          current.run.planVersion++;
+          return { snapshot: current, value: undefined };
+        });
+      } catch (error) { rejectedMutation = error.message.includes('已完成的任务记录不可修改'); }
+      if (!rejectedMutation || JSON.stringify(await restoredText.read(textRunId)) !== JSON.stringify(done)
+        || JSON.stringify(await indexedDbWorkflowRepository.listPlanRevisions(currentWorkflowScope(), textRunId)) !== JSON.stringify(beforeRevision)
+        || JSON.stringify(await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), textRunId, 'research')) !== JSON.stringify(beforeAttempts)) {
+        throw new Error('Completed source evidence mutation did not roll back atomically');
+      }
     } finally {
       window.fetch = originalFetch;
       useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== textChatId) }));

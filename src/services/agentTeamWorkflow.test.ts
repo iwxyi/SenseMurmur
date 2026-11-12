@@ -227,23 +227,31 @@ describe('agent team workflow', () => {
     ] };
     await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot, value: undefined }));
     const savedText = listTeamSavedText(snapshot, ['source']).map((entry) => ({ ...entry, alias: 'original' }));
+    const originalRead = indexedDbWorkflowRepository.read.bind(indexedDbWorkflowRepository);
+    const read = vi.spyOn(indexedDbWorkflowRepository, 'read');
     generate.mockImplementationOnce(async () => {
-      await indexedDbWorkflowRepository.transact(scope, runId, (current) => ({ snapshot: { ...current!,
-        tasks: current!.tasks.map((task) => task.id === 'source' ? { ...task, output: '已经变化的正文' } : task) }, value: undefined }));
+      // Simulate a source read corrupted outside the protected transaction boundary.
+      read.mockImplementation(async (storageScope, id) => {
+        const current = await originalRead(storageScope, id);
+        if (current && storageScope === scope && id === runId) current.tasks.find((task) => task.id === 'source')!.output = '已经变化的正文';
+        return current;
+      });
       return JSON.stringify({ summary: '原稿配音', finalAcceptance: '准确', roles: [{ ...role, allowedTools: ['speech_generation'] }],
         tasks: [{ id: 'voice', roleId: role.id, goal: '配音', tool: 'speech_generation', acceptance: '准确', dependsOn: [], savedText, speech: { textTaskId: 'original' } }] });
     });
     useSettingsStore.setState({ aiProfiles: [{ id: 'tts', name: '配音', type: 'tts', provider: 'openai', apiKey: 'test', baseUrl: '', model: 'tts-1', isDefault: true }] });
     const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
     const workflow = createAgentTeamWorkflow(config, () => scope);
-    await workflow.addRevisionRequest(runId, 2, '用原稿配音');
-    const result = await workflow.resume(runId);
-    expect(result.snapshot.run.status).toBe('failed');
-    expect(result.snapshot.tasks.find((task) => task.kind === 'agent_audio')).toMatchObject({ status: 'failed', error: expect.stringContaining('版本已变化') });
-    expect(queueAgentTeamAudio).not.toHaveBeenCalled();
-    await createAgentTeamWorkflow(config, () => scope).resume(runId);
-    expect(queueAgentTeamAudio).not.toHaveBeenCalled();
-    expect(generate).toHaveBeenCalledTimes(1);
+    try {
+      await workflow.addRevisionRequest(runId, 2, '用原稿配音');
+      const result = await workflow.resume(runId);
+      expect(result.snapshot.run.status).toBe('failed');
+      expect(result.snapshot.tasks.find((task) => task.kind === 'agent_audio')).toMatchObject({ status: 'failed', error: expect.stringContaining('版本已变化') });
+      expect(queueAgentTeamAudio).not.toHaveBeenCalled();
+      await createAgentTeamWorkflow(config, () => scope).resume(runId);
+      expect(queueAgentTeamAudio).not.toHaveBeenCalled();
+      expect(generate).toHaveBeenCalledTimes(1);
+    } finally { read.mockRestore(); }
   });
 
   it('recomposes saved media in a later plan without submitting another paid media task', async () => {

@@ -45,6 +45,47 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it.each(['output', 'input', 'attempt', 'status', 'kind', 'dependsOn', 'expansion', 'externalTaskId', 'remove'] as const)(
+    'preserves completed task evidence and atomically rejects changes to %s', async (field) => {
+      const id = crypto.randomUUID();
+      const scope = `completed-${id}`;
+      const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: async () => ({ output: '原始交付' }) }, () => scope);
+      const initial = snapshot(id);
+      initial.tasks.push({ ...initial.tasks[0], id: 'context' });
+      await runtime.create(initial);
+      const completed = await runtime.resume(id);
+      const attempts = await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script');
+      const events = await indexedDbWorkflowRepository.listEvents(scope, id);
+      const revisions = await indexedDbWorkflowRepository.listPlanRevisions(scope, id);
+      await indexedDbWorkflowRepository.registerOutboxConsumer(scope, id, 'completed-test');
+      const outbox = await indexedDbWorkflowRepository.listOutboxEvents(scope, id, 'completed-test');
+      await expect(indexedDbWorkflowRepository.transact(scope, id, (current) => {
+        const source = current!.tasks[0];
+        if (field === 'output') source.output = '被改写的正文';
+        if (field === 'input') source.input = '被改写的原要求';
+        if (field === 'attempt') source.attempt += 1;
+        if (field === 'status') source.status = 'queued';
+        if (field === 'kind') source.kind = 'other';
+        if (field === 'dependsOn') source.dependsOn = ['context'];
+        if (field === 'expansion') {
+          source.expansion = { taskIds: ['context'], context: '替换的子计划' };
+          source.dependsOn = ['context'];
+        }
+        if (field === 'externalTaskId') source.externalTaskId = 'different-provider-task';
+        if (field === 'remove') current!.tasks = [];
+        current!.run.planVersion += 1;
+        return { snapshot: current!, value: undefined };
+      })).rejects.toThrow('已完成的任务记录不可修改');
+      expect(await runtime.read(id)).toEqual(completed);
+      expect(await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script')).toEqual(attempts);
+      expect(await indexedDbWorkflowRepository.listEvents(scope, id)).toEqual(events);
+      expect(await indexedDbWorkflowRepository.listPlanRevisions(scope, id)).toEqual(revisions);
+      expect(await indexedDbWorkflowRepository.listOutboxEvents(scope, id, 'completed-test')).toEqual(outbox);
+      await runtime.resume(id);
+      expect(await runtime.read(id)).toEqual(completed);
+    },
+  );
+
   it('validates targeted revision ownership and preserves its input across transactions', async () => {
     const id = crypto.randomUUID();
     const scope = `revision-${id}`;

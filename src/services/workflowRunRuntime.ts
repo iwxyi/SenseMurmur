@@ -585,9 +585,17 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
               const nextTask = migratedNext.tasks.find((item) => item.id === task.id);
               if (!nextTask || JSON.stringify(nextTask.input) !== JSON.stringify(task.input)) throw new Error('已保存的定向修订不可修改');
             }
-            if (task.kind !== 'team_review' || !isRecord(task.output) || task.output.schemaVersion === undefined) continue;
             const nextTask = migratedNext.tasks.find((item) => item.id === task.id);
-            if (!nextTask || nextTask.attempt !== task.attempt || JSON.stringify(nextTask.output) !== JSON.stringify(task.output)) throw new Error('已保存的验收记录不可修改');
+            if (task.kind === 'team_review' && isRecord(task.output) && task.output.schemaVersion !== undefined
+              && (!nextTask || nextTask.attempt !== task.attempt || JSON.stringify(nextTask.output) !== JSON.stringify(task.output))) throw new Error('已保存的验收记录不可修改');
+            if (task.status === 'completed') {
+              const evidence = (item: WorkflowTask) => ({ id: item.id, runId: item.runId, kind: item.kind,
+                status: item.status, attempt: item.attempt, input: item.input, output: item.output,
+                dependsOn: item.dependsOn, expansion: item.expansion, externalTaskId: item.externalTaskId });
+              if (!nextTask || JSON.stringify(evidence(nextTask)) !== JSON.stringify(evidence(task))) {
+                throw new Error('已完成的任务记录不可修改，请追加新任务进行修订');
+              }
+            }
           }
           if (migratedCurrent && JSON.stringify(migratedCurrent.run.goalSpec) !== JSON.stringify(migratedNext.run.goalSpec)) {
             const before = migratedCurrent.run;
