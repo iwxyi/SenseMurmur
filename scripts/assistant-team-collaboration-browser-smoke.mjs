@@ -642,6 +642,23 @@ try {
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '答复并继续').click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.userResponse?.completed`), 'user answer persisted and downstream resumed');
   assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.userResponse`), { completed: true, modelRequests: 2, answer: '日本独立开发者' });
+  const narrationRequest = await cdp.evaluate(`(async () => {
+    const { synthesizeSpeech } = await import('/src/services/speech.ts');
+    const originalFetch = window.fetch;
+    let request;
+    const workflowUsage = { schemaVersion: 1, runId: 'browser-narration', taskId: 'narration', attempt: 2, kind: 'tool' };
+    window.fetch = async (input, init) => {
+      const url = new URL(String(input), location.origin);
+      if (url.pathname !== '/api/speech/tts') return originalFetch(input, init);
+      request = JSON.parse(init.body);
+      return new Response(JSON.stringify({ provider: 'fixture', mimeType: 'audio/wav', audioDataUrl: 'data:audio/wav;base64,AAAA' }), { headers: { 'Content-Type': 'application/json' } });
+    };
+    try {
+      await synthesizeSpeech({ text: '旁白正文', workflowUsage });
+      return request;
+    } finally { window.fetch = originalFetch; }
+  })()`);
+  assert.deepEqual(narrationRequest, { text: '旁白正文', workflowUsage: { schemaVersion: 1, runId: 'browser-narration', taskId: 'narration', attempt: 2, kind: 'tool' } });
   await cdp.evaluate(`(async () => {
     const [{ useAuthStore }, { api }, { default: Panel }] = await Promise.all([
       import('/src/stores/useAuthStore.ts'), import('/src/services/api.ts'), import('/src/components/chat/TeamUsagePanel.tsx'),

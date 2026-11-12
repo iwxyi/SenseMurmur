@@ -31,7 +31,7 @@ export default function TeamUsagePanel({ runId }: { runId: string }) {
         <Typography variant="body2">已结算 {unit.settledAmount} {unitLabel(unit.billingUnit)} · 预留 {unit.reservedAmount} {unitLabel(unit.billingUnit)}</Typography>
         <Typography variant="caption" color="text.secondary">已结束 {unit.settledRequests} 次 · 待结算 {unit.pendingRequests} 次{unit.unpricedRequests ? ` · 费用未知 ${unit.unpricedRequests} 次` : ''}</Typography>
       </Box>) : <Typography variant="body2" color="text.secondary">暂无关联账单</Typography>}
-      <Typography variant="caption" color="text.secondary">截至 {new Date(summary.asOf).toLocaleString()} 的可查平台记录；不含未关联的历史调用、直连第三方及部分语音费用。预留金额并非最终费用。</Typography>
+      <Typography variant="caption" color="text.secondary">截至 {new Date(summary.asOf).toLocaleString()} 的可查平台记录；不含未关联的历史调用、直连第三方及未关联的语音费用。预留金额并非最终费用。</Typography>
     </>}
   </Box>;
 }

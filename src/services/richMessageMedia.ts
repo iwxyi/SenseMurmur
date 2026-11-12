@@ -875,6 +875,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
           chatId: workingMessage.chatId,
           messageId: workingMessage.serverId || workingMessage.id,
           attachmentId: attachment.id,
+          workflowUsage: workingMessage.metadata?.workflowUsage,
         }, { signal })
       : null;
     const latestAttachment = getLatestRichMediaMessage(messageId, workingMessage).metadata?.attachments?.find((item) => item.id === attachment.id);

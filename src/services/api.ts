@@ -1371,6 +1371,7 @@ class ApiClient {
   }
 
   async synthesizeSpeech(data: {
+    workflowUsage?: import('../types/workflowUsage').WorkflowUsageReference;
     providerCode?: string;
     modelId?: string;
     text: string;

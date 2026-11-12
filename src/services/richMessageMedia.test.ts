@@ -24,6 +24,7 @@ vi.mock('./api', () => ({
     getAiMediaTaskByRequestKey: vi.fn(),
     updateMessageMetadata: vi.fn(),
     searchDoutu: vi.fn(),
+    synthesizeSpeech: vi.fn(),
   },
 }));
 
@@ -205,6 +206,23 @@ describe('processRichMessageMedia', () => {
     artifactStoreState.createImageArtifactFromAttachment.mockReset();
     vi.mocked(api.updateMessageMetadata).mockResolvedValue({});
     vi.mocked(api.getAiMediaTaskByRequestKey).mockRejectedValue(new ApiError('任务不存在', { status: 404 }));
+  });
+
+  it('keeps the original workflow attempt on the managed narration request', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const workflowUsage = { schemaVersion: 1 as const, runId: 'run', taskId: 'narration', attempt: 1, kind: 'tool' as const };
+    vi.mocked(api.synthesizeSpeech).mockResolvedValue({ provider: 'fixture', mimeType: 'audio/mpeg', audioDataUrl: 'data:audio/mpeg;base64,AAAA' });
+    const message = buildQueuedImageMessage({ serverId: 'server-narration', metadata: { workflowUsage, attachments: [{
+      id: 'narration-1', kind: 'audio', status: 'queued', promptText: '森林深处，一场追逐开始了。', altText: '旁白', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    await processRichMessageMedia({ message, aiProfiles: [{ ...imageProfile, type: 'tts', provider: 'managed:fixture', model: 'speech-tts' }],
+      upsertMessage: (next) => upserts.push(next) });
+    await waitForExpectation(() => expect(api.synthesizeSpeech).toHaveBeenCalledWith(expect.objectContaining({
+      workflowUsage, text: '森林深处，一场追逐开始了。', attachmentId: 'narration-1',
+    }), expect.objectContaining({ signal: expect.any(AbortSignal) })));
+    await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0].status).toBe('ready'));
   });
 
   it.each([false, true])('polls video tasks and stores the playable result (resume: %s)', async (resume) => {
