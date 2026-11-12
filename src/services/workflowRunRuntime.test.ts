@@ -198,6 +198,44 @@ describe('workflow run runtime', () => {
       expect(countWorkflowModelCalls(paused)).toBe(0);
     } finally { vi.restoreAllMocks(); }
   });
+  it.each(['model', 'tool'] as const)('rechecks dispatch authorization at the actual %s request boundary', async (kind) => {
+    const id = crypto.randomUUID();
+    const scope = `boundary-guard-${id}`;
+    let blocked = false;
+    const request = vi.fn();
+    const initial = snapshot(id);
+    initial.tasks = [{ ...initial.tasks[0], kind: kind === 'model' ? 'agent_text' : 'agent_video' }];
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+      tracksModelInvocations: true, tracksToolInvocations: true,
+      dispatchBlockReason: () => blocked ? '来源分支已切换' : undefined,
+      execute: async (_task, _signal, context) => {
+        blocked = true;
+        if (kind === 'model') await context.beginModelInvocation();
+        else await context.beginToolInvocation();
+        request();
+        return { output: '不应发送' };
+      },
+    }, () => scope);
+    await runtime.create(initial);
+    const paused = await runtime.resume(id);
+    expect(request).not.toHaveBeenCalled();
+    expect(paused.run).toMatchObject({ status: 'paused', pauseReason: '来源分支已切换' });
+    expect(paused.tasks[0].status).toBe('queued');
+    expect((kind === 'model' ? paused.tasks[0].modelInvocation : paused.tasks[0].toolInvocation)?.state).toBe('not_started');
+    expect(countWorkflowModelCalls(paused)).toBe(0);
+    const restored = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+      tracksModelInvocations: true, tracksToolInvocations: true,
+      execute: async (_task, _signal, context) => {
+        if (kind === 'model') await context.beginModelInvocation();
+        else await context.beginToolInvocation();
+        request();
+        return { output: '已完成' };
+      },
+    }, () => scope);
+    expect((await restored.resume(id)).run.status).toBe('completed');
+    expect(request).toHaveBeenCalledOnce();
+  });
+
   it('persists a dispatch pause and resumes only unfinished tasks after the guard clears', async () => {
     const id = crypto.randomUUID();
     const scope = `dispatch-guard-${id}`;

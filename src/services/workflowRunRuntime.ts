@@ -1069,8 +1069,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                   || item?.status !== 'running' || item.attempt !== task.attempt + 1 || item.modelInvocation?.state !== 'reserved') {
                   throw new WorkflowPreflightError('模型调用的运行权已失效或已开始');
                 }
-                const deadlineReason = workflowDeadlineBlockReason(current.run.goalSpec);
-                if (deadlineReason) throw new WorkflowPreflightError(deadlineReason);
+                const reason = workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current);
+                if (reason) throw new WorkflowPreflightError(reason);
                 const now = Math.max(Date.now(), item.modelInvocation.reservedAt);
                 return { snapshot: { ...current, run: { ...current.run, updatedAt: now }, tasks: current.tasks.map((candidate) => candidate.id === task.id
                   ? { ...candidate, updatedAt: now, modelInvocation: { ...item.modelInvocation!, state: 'started', startedAt: now } } : candidate) }, value: undefined };
@@ -1118,10 +1118,11 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
             await mutate(storageScope, runId, (current) => ({ snapshot: scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' ? current : { ...current, tasks: current.tasks.map((item) => {
               if (item.id !== task.id) return item;
               const definiteFailure = error instanceof WorkflowPreflightError || invocationUnstarted(item);
-              const deadlineBeforeRequest = invocationUnstarted(item) && workflowDeadlineBlockReason(current.run.goalSpec);
+              const blockedBeforeRequest = invocationUnstarted(item)
+                && (workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current));
               return { ...(isReady ? finishInvocation(item, definiteFailure ? 'failed' : 'result_unknown', Date.now()) : item),
-                status: deadlineBeforeRequest ? 'queued' : !isReady ? 'waiting_external' : definiteFailure ? 'failed' : 'result_unknown',
-                error: deadlineBeforeRequest ? undefined : error instanceof Error ? error.message : '任务状态查询失败', updatedAt: Date.now() };
+                status: blockedBeforeRequest ? 'queued' : !isReady ? 'waiting_external' : definiteFailure ? 'failed' : 'result_unknown',
+                error: blockedBeforeRequest ? undefined : error instanceof Error ? error.message : '任务状态查询失败', updatedAt: Date.now() };
             }) }, value: undefined }));
             if (!isReady) inspectedExternalIds.add(task.id);
           }

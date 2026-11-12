@@ -188,6 +188,28 @@ try {
       const { workflowToolInvocationId, workflowToolOperationKey } = await import('/src/services/workflowToolInvocation.ts');
       const { describeWorkflowToolRequest } = await import('/src/services/workflowToolRequest.ts');
       const toolRunId = runId + '-tools';
+      const { createWorkflowRunRuntime } = await import('/src/services/workflowRunRuntime.ts');
+      for (const kind of ['model', 'tool']) {
+        const boundaryRunId = runId + '-boundary-' + kind;
+        let blocked = false;
+        let submitted = 0;
+        const boundaryRuntime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+          tracksModelInvocations: true, tracksToolInvocations: true,
+          dispatchBlockReason: () => blocked ? '来源分支已切换' : undefined,
+          execute: async (_task, _signal, context) => {
+            blocked = true;
+            if (kind === 'model') await context.beginModelInvocation();
+            else await context.beginToolInvocation();
+            submitted += 1;
+            return { output: '不能提交' };
+          },
+        }, currentWorkflowScope);
+        await boundaryRuntime.create({ run: { id: boundaryRunId, chatId, goal: '请求边界保护', status: 'active', generation: 0, planVersion: 1, updatedAt: now },
+          tasks: [{ id: 'step', runId: boundaryRunId, kind: kind === 'model' ? 'agent_text' : 'agent_video', input: null, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }] });
+        const paused = await boundaryRuntime.resume(boundaryRunId);
+        if (submitted !== 0 || paused.run.status !== 'paused' || paused.tasks[0].status !== 'queued'
+          || (kind === 'model' ? paused.tasks[0].modelInvocation : paused.tasks[0].toolInvocation).state !== 'not_started') throw new Error('请求边界未复核来源分支或未释放预留');
+      }
       await indexedDbWorkflowRepository.transact(currentWorkflowScope(), toolRunId, () => ({ snapshot: {
         run: { id: toolRunId, chatId, goal: '工具重载恢复', status: 'paused', generation: 1, planVersion: 1, updatedAt: now },
         tasks: ['reserved', 'started', 'accepted'].map((state) => ({ id: state, runId: toolRunId, kind: 'agent_video',
@@ -216,6 +238,7 @@ try {
         stalledModelCalls,
         stalledRunId,
         reviewRecords,
+        requestBoundaryGuard: true,
       };
     } finally { window.fetch = originalFetch; }
   })()`);
