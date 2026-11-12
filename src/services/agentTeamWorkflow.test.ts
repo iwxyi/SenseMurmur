@@ -1747,18 +1747,35 @@ describe('agent team workflow', () => {
       await expect(workflow.publish(runId, prepared!.run.planVersion)).rejects.toThrow('模拟副本保存中断');
       copyInterrupted.mockRestore();
       const copyIntent = (await workflow.read(runId))!.run.deliveryCopy!;
+      const decisions = (await workflow.read(runId))!.run.decisions!;
+      expect(decisions).toHaveLength(1);
+      expect(decisions[0]).toMatchObject({ planVersion: prepared!.run.planVersion, action: 'preserve_and_copy_delivery',
+        scope: { conflict: failure === 'edited-artifact' ? 'artifact_conflict' : 'message_conflict' } });
+      await expect(indexedDbWorkflowRepository.transact(scope, runId, (current) => {
+        current!.run.decisions = [];
+        return { snapshot: current!, value: undefined };
+      })).rejects.toThrow('决策不可删除');
+      const beforeRejectedDecision = await workflow.read(runId);
+      const outboxBeforeRejectedDecision = await indexedDbWorkflowRepository.listOutboxEvents(scope, runId, 'team-delivery');
+      await expect(indexedDbWorkflowRepository.transact(scope, runId, (current) => {
+        current!.run.decisions![0].scope.candidateSha256 = '0'.repeat(64);
+        return { snapshot: current!, value: undefined };
+      })).rejects.toThrow('决策与交付范围不一致');
+      expect(await workflow.read(runId)).toEqual(beforeRejectedDecision);
+      expect(await indexedDbWorkflowRepository.listOutboxEvents(scope, runId, 'team-delivery')).toEqual(outboxBeforeRejectedDecision);
       expect(copyIntent.copyOfPlanVersion).toBe(prepared!.run.planVersion);
       expect((await workflow.read(runId))!.run.delivery).toEqual(prepared!.run.delivery);
       await expect(indexedDbWorkflowRepository.transact(scope, runId, (current) => {
         current!.run.deliveryCopy!.message.content = '篡改副本';
         return { snapshot: current!, value: undefined };
-      })).rejects.toThrow('另存清单不可修改');
+      })).rejects.toThrow(/另存清单不可修改|决策另存结果与候选不一致/);
       const restored = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
       await restored.publish(runId);
       await restored.publish(runId, prepared!.run.planVersion);
       const final = (await restored.read(runId))!;
       expect(final.run.deliveryStatus).toBe('published');
       expect(final.run.deliveryCopy).toEqual(copyIntent);
+      expect(final.run.decisions).toEqual(decisions);
       const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId);
       expect(artifacts).toHaveLength(2);
       expect(artifacts.find((item) => item.id === copyIntent.artifacts[0].after.id)?.versions[0].content).toBe('已保存的报告内容');

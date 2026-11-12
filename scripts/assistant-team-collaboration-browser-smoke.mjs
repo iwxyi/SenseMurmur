@@ -504,13 +504,15 @@ try {
         const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(conflictChatId);
         const messages = useMessageStore.getState().messageWindowsByChatId[conflictChatId]?.messages || [];
         const copy = saved.run.deliveryCopy;
+        if (saved.run.decisions?.length !== 1 || saved.run.decisions[0].action !== 'preserve_and_copy_delivery'
+          || saved.run.decisions[0].planVersion !== copy.planVersion) throw new Error('Copy decision was lost or duplicated on recovery');
         const chat = useChatStore.getState().chats.find((entry) => entry.id === conflictChatId);
         if (saved.run.deliveryStatus !== 'published' || artifacts.length !== 2
           || artifacts.find((entry) => entry.id === conflictIntent.artifacts[0].after.id)?.versions[0].content !== '用户保留的市场结论'
           || messages.filter((entry) => entry.id === copy.message.id).length !== 1
           || chat.messageBranchState.refs.main.headNodeId !== copy.message.id
           || copy.message.metadata.branching.nodeId !== copy.message.id) throw new Error('Copy publication lost content or duplicated delivery');
-        window.__assistantTeamSmoke.deliveryCopy = { artifacts: artifacts.length, messages: messages.length, published: true, sourcePreserved: true };
+        window.__assistantTeamSmoke.deliveryCopy = { artifacts: artifacts.length, messages: messages.length, published: true, sourcePreserved: true, decisions: saved.run.decisions.length };
       },
       onDelegate: async (...args) => {
         const [selected, request, targetTaskId] = args;
@@ -580,7 +582,7 @@ try {
   await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('用户保留的市场结论') && document.querySelector('[role="dialog"]').textContent.includes('候选交付')`), 'current and candidate content visible');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '保留现有内容，另存交付').click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy?.published`), 'copy saved through workbench without overwriting original');
-  assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), { artifacts: 2, messages: 1, published: true, sourcePreserved: true });
+  assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), { artifacts: 2, messages: 1, published: true, sourcePreserved: true, decisions: 1 });
   await cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root button').click()`);
   await waitFor(() => cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root')?.textContent.includes('工具执行已完成')`), 'persisted tool history visible');
   assert.doesNotMatch(await cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root').textContent`), /browser-collab-|agent_web_search|research/);

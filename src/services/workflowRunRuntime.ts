@@ -10,6 +10,7 @@ import { parseWorkflowToolRequest, workflowToolRequestKind, type WorkflowToolReq
 import { parseWorkflowReviewRecord } from './workflowReviewRecord';
 import { parseWorkflowRevisionImpact } from './workflowRevisionImpact';
 import { parseTeamReviewInput } from './agentTeamReviewEvidence';
+import { assertWorkflowDecisions, assertWorkflowDecisionTransition, deliveryCopyDecision, type WorkflowDecisionRecord } from './workflowDecision';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -50,6 +51,7 @@ export interface WorkflowRun {
   delivery?: WorkflowDelivery;
   deliveryCopy?: WorkflowDelivery;
   deliveryIssue?: WorkflowDeliveryIssue;
+  decisions?: WorkflowDecisionRecord[];
   maxModelCalls?: number;
   updatedAt: number;
 }
@@ -115,6 +117,7 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
       || copy.chatId !== run.chatId || copy.planVersion > parseWorkflowDelivery(run.delivery).planVersion) throw new Error('另存交付归属无效');
   }
   if (run.maxModelCalls !== undefined && (!Number.isSafeInteger(run.maxModelCalls) || (run.maxModelCalls as number) < 1 || (run.maxModelCalls as number) > 1000)) throw new Error('工作流模型调用上限无效');
+  assertWorkflowDecisions(run as unknown as WorkflowRun);
 
   const taskIds = new Set<string>();
   for (const candidate of value.tasks) {
@@ -373,6 +376,7 @@ function hasWorkflowStateChange(current: WorkflowSnapshot | null, next: Workflow
     || current.run.deliveryIssue !== next.run.deliveryIssue
     || JSON.stringify(current.run.delivery) !== JSON.stringify(next.run.delivery)
     || JSON.stringify(current.run.deliveryCopy) !== JSON.stringify(next.run.deliveryCopy)
+    || JSON.stringify(current.run.decisions) !== JSON.stringify(next.run.decisions)
     || current.run.pauseRequested !== next.run.pauseRequested
     || current.run.pauseReason !== next.run.pauseReason
     || current.run.planOpen !== next.run.planOpen;
@@ -630,6 +634,9 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
               || !previousDelivery || JSON.stringify(migratedNext.run.delivery) !== JSON.stringify(previousDelivery)
               || JSON.stringify(nextCopy) !== JSON.stringify(copyWorkflowDelivery(previousDelivery, nextCopy.preparedAt, nextCopy.message.metadata?.branching))) throw new Error('只能为当前冲突交付另存副本');
           }
+          assertWorkflowDecisionTransition(migratedCurrent?.run.decisions, migratedNext.run.decisions,
+            JSON.stringify(previousCopy) !== JSON.stringify(nextCopy) && nextCopy && previousDelivery
+              ? deliveryCopyDecision(previousDelivery, nextCopy, migratedCurrent!.run.deliveryIssue as WorkflowDecisionRecord['scope']['conflict']) : undefined);
           if (JSON.stringify(previousDelivery) !== JSON.stringify(migratedNext.run.delivery) && migratedNext.run.delivery
             && (migratedNext.run.status !== 'completed' || migratedNext.run.delivery.planVersion !== migratedNext.run.planVersion)) throw new Error('只能为当前已完成计划准备交付清单');
           if (previousDelivery && (!migratedNext.run.delivery || migratedNext.run.delivery.planVersion < previousDelivery.planVersion
@@ -968,8 +975,10 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         || current.run.delivery?.planVersion !== expectedPlanVersion) throw new Error('工作流交付版本冲突');
       if (current.run.deliveryCopy?.planVersion === expectedPlanVersion) return { snapshot: current, value: current };
       if (current.run.deliveryStatus === 'published' || !['artifact_conflict', 'message_conflict'].includes(current.run.deliveryIssue || '')) throw new Error('当前交付没有待处理的内容冲突');
+      const copy = copyWorkflowDelivery(current.run.delivery, Math.max(Date.now(), current.run.delivery.preparedAt), branching);
+      const decision = deliveryCopyDecision(current.run.delivery, copy, current.run.deliveryIssue as WorkflowDecisionRecord['scope']['conflict']);
       const snapshot: WorkflowSnapshot = { ...current, run: { ...current.run,
-        deliveryCopy: copyWorkflowDelivery(current.run.delivery, Date.now(), branching), deliveryIssue: undefined, updatedAt: Date.now() } };
+        deliveryCopy: copy, decisions: [...(current.run.decisions || []), decision], deliveryIssue: undefined, updatedAt: Date.now() } };
       return { snapshot, value: snapshot };
     });
   }
