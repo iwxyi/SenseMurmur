@@ -115,6 +115,34 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it.each([false, true])('gates actual image dispatch through persisted approval (model proposal: %s)', async (modelProposal) => {
+    const runId = crypto.randomUUID();
+    const scope = `approval-${runId}`;
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    useSettingsStore.setState({ aiProfiles: [{ id: 'image', name: '图片', type: 'image', provider: 'official-ace',
+      apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true,
+      imageCapabilities: { textToImage: true, referenceImage: true, multiReferenceImage: false, seed: false, negativePrompt: false } }] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '森林插画', roles: [{ id: 'artist', name: '画师',
+      responsibility: '绘制', method: '生成', acceptance: '图片', allowedTools: ['image_generation'] }],
+      tasks: [{ id: 'scene', roleId: 'artist', goal: '绘制森林', dependsOn: [], tool: 'image_generation', acceptance: '森林图',
+        ...(modelProposal ? { approval: { summary: '确认森林画面', consequences: '生成会产生费用，价格以服务结算为准' } } : {}) }],
+      finalAcceptance: '图片已保存' }));
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已保存' });
+    const goalSpec = { ...defaultWorkflowGoalSpec('绘制森林'), ...(!modelProposal ? { approvalTools: ['image_generation' as const] } : {}) };
+    const initial = await createAgentTeamWorkflow(config, () => scope).start(runId, 'chat', '绘制森林', false, undefined, undefined, goalSpec);
+    expect(initial.snapshot.tasks.find((task) => task.id === 'scene')).toMatchObject({ status: 'waiting_user', attempt: 0 });
+    expect(queueAgentTeamImage).not.toHaveBeenCalled();
+    const restored = createAgentTeamWorkflow(config, () => scope);
+    const waiting = await restored.resume(runId);
+    expect(queueAgentTeamImage).not.toHaveBeenCalled();
+    await restored.decideApproval(runId, 'scene', waiting.snapshot.run.planVersion, 'approved');
+    const finished = await restored.resume(runId);
+    expect(finished.snapshot.run.status).toBe('completed');
+    expect(queueAgentTeamImage).toHaveBeenCalledTimes(1);
+    await restored.resume(runId);
+    expect(queueAgentTeamImage).toHaveBeenCalledTimes(1);
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
   it('persists user questions across recovery and passes only real saved answers to downstream work', async () => {
     const runId = crypto.randomUUID();
     const scope = `user-response-${runId}`;

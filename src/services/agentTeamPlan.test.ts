@@ -15,6 +15,14 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('preserves explicit approval requirements and rejects incomplete proposals', () => {
+    const plan = valid();
+    const approval = { summary: '确认研究方向', consequences: '确认后开始模型分析' };
+    expect(validateAgentTeamPlan({ ...plan, tasks: [{ ...plan.tasks[0], approval }] }).tasks[0].approval).toEqual(approval);
+    for (const invalid of [null, {}, { summary: '', consequences: '开始' }, { summary: '确认', consequences: ' ' }]) {
+      expect(() => validateAgentTeamPlan({ ...plan, tasks: [{ ...plan.tasks[0], approval: invalid }] })).toThrow('审批');
+    }
+  });
   it('allows question answers as media context while requiring a separate narration writing task', () => {
     const plan = valid();
     const question = { ...plan.tasks[0], tool: 'user_input' };

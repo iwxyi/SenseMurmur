@@ -5,6 +5,7 @@ import { validateMediaCompositionPlan, type MediaCompositionPlan } from './media
 import { WORKFLOW_TOOLS, type WorkflowTool } from './workflowGoalSpec';
 import { sameTeamSavedTextVersion, type AgentTeamSavedText } from './agentTeamSavedText';
 import { parseTeamJsonSchema, type TeamJsonSchema } from './agentTeamJsonSchema';
+import { parseWorkflowApprovalRequirement, type WorkflowApprovalRequirement } from './workflowApproval';
 
 export interface AgentTeamRole {
   schemaVersion?: 1;
@@ -29,6 +30,7 @@ export interface AgentTeamTask {
   savedMedia?: Array<{ alias: string; taskId: string; kind: 'image' | 'video' | 'audio'; attempt: number; outputSha256: string }>;
   savedText?: AgentTeamSavedText[];
   speech?: { text?: string; textTaskId?: string };
+  approval?: WorkflowApprovalRequirement;
   deliverable?: {
     schemaVersion?: 1;
     kind: 'document' | 'code' | 'diagram' | 'html' | 'table' | 'json' | 'text';
@@ -189,6 +191,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
       ...(savedMedia ? { savedMedia } : {}),
       ...(savedText ? { savedText } : {}),
       ...(speech ? { speech } : {}),
+      ...(value.approval === undefined ? {} : { approval: parseWorkflowApprovalRequirement(value.approval) }),
       ...(deliverable ? { deliverable } : {}),
     };
   });
@@ -294,6 +297,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     params.savedText?.length ? `可复用历史文字交付目录：${JSON.stringify(params.savedText)}。text_generation、image_generation、video_generation、audio_generation、delegate_task 可声明 savedText:[{"alias":"original_script","taskId":"目录中的原任务标识","attempt":1,"outputSha256":"目录中的完整摘要"}]，除 alias 外逐字复制目录字段，最多8份；系统会按版本提供完整正文（每份最多12000字符），不要为读取原稿而重新创作。dependsOn 只列新计划任务，不列历史别名。speech_generation 可仅指定一份 savedText，并声明 speech:{"textTaskId":"original_script"} 与 dependsOn:[]，逐字朗读该正文；不得同时指定 literal text 或其他历史正文。别名不能与本计划任务或历史素材别名重名。目录摘要仅绑定当时文字记录，不保证其中事实已核实。` : '本次没有授权复用的历史文字目录，不得声明 savedText。',
     params.savedText?.some((entry) => entry.artifact) ? '历史文字目录中带 artifact:{id,versionId,filePath?} 的条目对应用户当前选中的产物版本；filePath 表示该版本中的指定文本文件，不带 filePath 表示单正文。不带 artifact 的条目对应任务原始交付。用户要求使用修改后的稿件或项目文件时，优先选择相应 artifact 条目，完整复制 artifact 和摘要。同一来源每个文件最多选一份版本，可用不同 alias 引用多个文件；仍最多8份。系统固定读取所选版本，不会随产物后续编辑而自动切换；缺失或正文变化会明确报错。此入口不读取图片、音视频或 HTML 交互状态。' : '',
     '另开放 user_input 用户提问工具：只有必须由用户补充关键信息才能继续时使用，goal 是清晰具体的问题，可依赖已完成步骤。系统等待用户真实答复，后续任务通过 dependsOn 读取答复；不得猜测答复或代替用户确认。它不扩大工具授权，不代表费用或外部操作的审批。用户已经要求自主完成时优先合理决策，避免不必要的追问。不为提问声明 deliverable。',
+    '任一任务可附 approval:{"summary":"将执行的具体方案","consequences":"执行影响、可能费用及不可撤回之处"} 请求用户审批；程序会在依赖完成后等待真实确认，再执行这一任务。仅在用户要求确认或执行有明确决策需要时使用，避免把普通自主步骤都交给用户。审批不扩大工具权限，不能虚构报价，也不能用 user_input 代替审批。',
     '只为需要用户单独打开、复用或编辑的任务声明 deliverable；可选类型 document、table、code、diagram、html、json、text。交付契约 schemaVersion 为 1，格式为 {"schemaVersion":1,"kind":"table","title":"市场比较表","language":"csv"}。json 交付必须是可解析的纯 JSON；字段要求写入任务验收标准。未声明时仍会纳入团队总结，不要给搜索、图片/音频/视频生成等每个步骤机械创建文字产物。只输出 JSON：{"schemaVersion":1,"summary":"...","roles":[{"schemaVersion":1,"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"...","deliverable":{"schemaVersion":1,"kind":"table","title":"比较表","language":"csv"}}],"finalAcceptance":"..."}',
   ].join('\n'), [{ role: 'user', content: goal + (context ? `\n${context}` : '') }], undefined, {
     responseFormat: 'json', maxTokens: 10_000, signal: params.signal, beforeModelRequest: params.beforeModelRequest,

@@ -2,6 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoalSpec, workflowDeadlineBlockReason, workflowGoalContext } from './workflowGoalSpec';
 
 describe('workflow goal contract', () => {
+  it('only allows approval policies for authorized tools', () => {
+    const base = { ...defaultWorkflowGoalSpec('制作图片'), allowedTools: ['image_generation'] };
+    expect(parseWorkflowGoalSpec({ ...base, approvalTools: ['image_generation'] }).approvalTools).toEqual(['image_generation']);
+    expect(() => parseWorkflowGoalSpec({ ...base, approvalTools: ['video_generation'] })).toThrow();
+    expect(() => parseWorkflowGoalSpec({ ...base, approvalTools: ['shell'] })).toThrow();
+  });
   it('preserves optional preferences and deadline without changing legacy contracts', () => {
     const legacy = defaultWorkflowGoalSpec('目标');
     expect(parseWorkflowGoalSpec(legacy)).not.toHaveProperty('preferences');

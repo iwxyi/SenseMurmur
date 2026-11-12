@@ -10,6 +10,8 @@ import TeamDeliveryConflictPanel from './TeamDeliveryConflictPanel';
 import { analyzeWorkflowRevisionImpact } from '../../services/workflowRevisionImpact';
 import { isPartialTeamReview } from '../../services/agentTeamReviewEvidence';
 import TeamUserInputPanel from './TeamUserInputPanel';
+import TeamApprovalPanel from './TeamApprovalPanel';
+import { pendingWorkflowApproval } from '../../services/workflowApproval';
 
 interface Props {
   runs: WorkflowSnapshot[];
@@ -20,6 +22,7 @@ interface Props {
   onCreate: () => void;
   onInstruct: (run: WorkflowSnapshot, task: WorkflowTask, instruction: string) => Promise<void>;
   onAnswer: (run: WorkflowSnapshot, task: WorkflowTask, answer: string) => Promise<void>;
+  onApproval: (run: WorkflowSnapshot, task: WorkflowTask, outcome: 'approved' | 'rejected') => Promise<void>;
   onPause: (run: WorkflowSnapshot) => Promise<void>;
   onUpdateModelCallLimit: (run: WorkflowSnapshot, limit?: number) => Promise<void>;
   onUpdateDeadline: (run: WorkflowSnapshot, deadlineAt?: number) => Promise<void>;
@@ -56,7 +59,7 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onResumeAll, onCreate, onInstruct, onAnswer, onPause, onUpdateModelCallLimit, onUpdateDeadline, onSaveDeliveryCopy, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterTaskRetry }: Props) {
+export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onResumeAll, onCreate, onInstruct, onAnswer, onApproval, onPause, onUpdateModelCallLimit, onUpdateDeadline, onSaveDeliveryCopy, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterTaskRetry }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -93,7 +96,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const deliveryNeedsAttention = deliveryPending && Boolean(run.run.deliveryIssue);
   const running = isRunActive(run.run.id);
   const modelCallLimitReached = run.run.maxModelCalls !== undefined && countWorkflowModelCalls(run) >= run.run.maxModelCalls;
-  const editable = Boolean(canRun && task && run.run.status === 'paused' && childTasks.includes(task) && task.kind !== 'agent_media_composition' && details?.tool !== 'speech_generation' && task.attempt === 0
+  const editable = Boolean(canRun && task && !task.approvals?.length && run.run.status === 'paused' && childTasks.includes(task) && task.kind !== 'agent_media_composition' && details?.tool !== 'speech_generation' && task.attempt === 0
     && (task.status === 'queued' || task.status === 'waiting_dependency'));
   const unknownReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'result_unknown');
   const failedReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'failed');
@@ -122,16 +125,19 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
         </Stack>}
         <Box>
           <Typography variant="subtitle1" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{plan?.summary || run.run.goal}</Typography>
-          <Typography variant="body2" color="text.secondary">{run.run.pauseRequested ? '当前步骤完成后暂停' : running ? '运行中' : deliveryNeedsAttention ? '交付需处理' : deliveryPending ? '待交付' : run.run.status === 'completed' ? '已完成' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '失败' : '等待执行'} · 已完成 {summary.completed.length}/{run.tasks.length} 步{run.run.maxModelCalls ? ` · 模型调用 ${countWorkflowModelCalls(run)}/${run.run.maxModelCalls}` : ''}</Typography>
+          <Typography variant="body2" color="text.secondary">{run.run.pauseRequested ? '当前步骤完成后暂停' : running ? '运行中' : deliveryNeedsAttention ? '交付需处理' : deliveryPending ? '待交付' : run.run.status === 'completed' ? '已完成' : run.run.status === 'cancelled' ? '已取消' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '失败' : '等待执行'} · 已完成 {summary.completed.length}/{run.tasks.length} 步{run.run.maxModelCalls ? ` · 模型调用 ${countWorkflowModelCalls(run)}/${run.run.maxModelCalls}` : ''}</Typography>
           {run.run.pauseReason && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">{run.run.pauseReason}</Typography>}
           {run.run.goalSpec?.deadlineAt && <Typography variant="caption" color="text.secondary">截止时间：{new Date(run.run.goalSpec.deadlineAt).toLocaleString()}</Typography>}
           {run.run.deliveryIssue && run.run.status === 'completed' && <Typography role="alert" variant="body2" color="error.main">{workflowDeliveryIssueLabel(run.run.deliveryIssue)}</Typography>}
           {deliveryNeedsAttention && <TeamDeliveryConflictPanel key={`${run.run.id}:${run.run.planVersion}`} snapshot={run} canSave={canRun && !running} onSaveCopy={onSaveDeliveryCopy} />}
           {modelCallLimitReached && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">已达到模型调用上限。调整上限后可继续，已有结果会保留。</Typography>}
         </Box>
-        {run.tasks.filter((item) => item.kind === 'agent_user_input' && item.status === 'waiting_user').map((item) =>
+        {run.tasks.filter((item) => item.kind === 'agent_user_input' && item.status === 'waiting_user' && !pendingWorkflowApproval(item)).map((item) =>
           <TeamUserInputPanel key={`${run.run.id}:${item.id}:${run.run.planVersion}`} run={run} task={item}
             disabled={!canRun || running || !['active', 'paused'].includes(run.run.status)} onAnswer={onAnswer} />)}
+        {['active', 'paused'].includes(run.run.status) && run.tasks.filter((item) => pendingWorkflowApproval(item)).map((item) =>
+          <TeamApprovalPanel key={`${run.run.id}:${item.id}:${run.run.planVersion}`} run={run} task={item}
+            disabled={!canRun || running} onDecide={onApproval} />)}
         {canRun && !running && run.run.status === 'paused' && run.run.goalSpec && <Box sx={{ display: 'grid', gap: 1 }}>
           <TextField size="small" type="datetime-local" label="新的截止时间" value={deadline} onChange={(event) => { setDeadline(event.target.value); setDeadlineError(null); }} disabled={savingDeadline} slotProps={{ inputLabel: { shrink: true } }} helperText="留空并保存可取消截止时间。" />
           {deadlineError && <Typography role="alert" variant="caption" color="error.main">{deadlineError}</Typography>}

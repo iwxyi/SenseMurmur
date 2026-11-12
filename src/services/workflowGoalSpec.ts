@@ -10,6 +10,7 @@ export interface WorkflowGoalSpec {
   preferences?: string[];
   deadlineAt?: number;
   allowedTools: WorkflowTool[];
+  approvalTools?: WorkflowTool[];
   sourceBranch?: { enabled: boolean; name: string; headNodeId: string | null };
   execution: {
     location: 'client';
@@ -37,6 +38,8 @@ export function parseWorkflowGoalSpec(raw: unknown): WorkflowGoalSpec {
     || Number(value.deadlineAt) > 8_640_000_000_000_000)) throw new Error('目标契约截止时间无效');
   const allowedTools = stringList(value.allowedTools, '工具授权');
   if (allowedTools.some((tool) => !WORKFLOW_TOOLS.some((known) => known === tool))) throw new Error('目标契约包含未知工具');
+  const approvalTools = value.approvalTools === undefined ? undefined : stringList(value.approvalTools, '审批工具');
+  if (approvalTools?.some((tool) => !allowedTools.includes(tool))) throw new Error('审批工具必须在目标授权范围内');
   let sourceBranch: WorkflowGoalSpec['sourceBranch'];
   if (value.sourceBranch !== undefined) {
     const branch = value.sourceBranch;
@@ -55,6 +58,7 @@ export function parseWorkflowGoalSpec(raw: unknown): WorkflowGoalSpec {
     || !Number.isSafeInteger(execution.maxAutomaticReviewRounds) || Number(execution.maxAutomaticReviewRounds) < 0
     || Number(execution.maxAutomaticReviewRounds) > 3) throw new Error('目标契约执行上限无效');
   return { schemaVersion: 1, objective: value.objective, constraints, acceptance, allowedTools: allowedTools as WorkflowTool[],
+    ...(approvalTools === undefined ? {} : { approvalTools: approvalTools as WorkflowTool[] }),
     ...(preferences === undefined ? {} : { preferences }),
     ...(value.deadlineAt === undefined ? {} : { deadlineAt: Number(value.deadlineAt) }),
     ...(sourceBranch ? { sourceBranch } : {}),
@@ -69,7 +73,7 @@ export function defaultWorkflowGoalSpec(objective: string): WorkflowGoalSpec {
 
 export function workflowGoalContext(spec?: WorkflowGoalSpec): string {
   if (!spec) return '';
-  return `\n用户明确约束：${spec.constraints.length ? spec.constraints.join('；') : '未另行指定'}\n用户验收条件：${spec.acceptance.length ? spec.acceptance.join('；') : '按原始目标交付'}\n用户偏好（须服从明确约束）：${spec.preferences?.join('；') || '未另行指定'}${spec.deadlineAt ? `\n截止时间：${new Date(spec.deadlineAt).toISOString()}` : ''}\n本次任务授权工具：${spec.allowedTools.join('、') || '无'}。岗位授权及当前模型能力仍须分别满足；不得自行扩权。`;
+  return `\n用户明确约束：${spec.constraints.length ? spec.constraints.join('；') : '未另行指定'}\n用户验收条件：${spec.acceptance.length ? spec.acceptance.join('；') : '按原始目标交付'}\n用户偏好（须服从明确约束）：${spec.preferences?.join('；') || '未另行指定'}${spec.deadlineAt ? `\n截止时间：${new Date(spec.deadlineAt).toISOString()}` : ''}\n本次任务授权工具：${spec.allowedTools.join('、') || '无'}。岗位授权及当前模型能力仍须分别满足；不得自行扩权。${spec.approvalTools?.length ? `\n以下工具每次执行前须等待用户确认：${spec.approvalTools.join('、')}。程序保存确认决定后才会执行，不得自行声称已获批准。` : ''}`;
 }
 
 export function workflowDeadlineBlockReason(spec: WorkflowGoalSpec | undefined, now = Date.now()) {

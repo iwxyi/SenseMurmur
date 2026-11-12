@@ -13,6 +13,8 @@ import { parseTeamReviewInput } from './agentTeamReviewEvidence';
 import { assertWorkflowDecisions, assertWorkflowDecisionTransition, deliveryCopyDecision, type WorkflowDecisionRecord } from './workflowDecision';
 import { assertWorkflowUserResponse, createWorkflowUserResponse, type WorkflowUserResponse } from './workflowUserResponse';
 import { parseWorkflowModelRequest, type WorkflowModelRequest } from './workflowModelRequest';
+import { assertWorkflowApprovals, assertWorkflowApprovalTransition, pendingWorkflowApproval, proposeWorkflowApproval,
+  type WorkflowApproval, type WorkflowApprovalRequirement } from './workflowApproval';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -26,6 +28,7 @@ export interface WorkflowTask {
   input: unknown;
   output?: unknown;
   userResponse?: WorkflowUserResponse;
+  approvals?: WorkflowApproval[];
   externalTaskId?: string;
   error?: string;
   attempt: number;
@@ -139,6 +142,7 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
     if (new Set(candidate.dependsOn).size !== candidate.dependsOn.length) throw new Error('工作流任务依赖重复');
     if (!TASK_STATUSES.has(candidate.status as WorkflowTaskStatus)) throw new Error('工作流任务状态无效');
     assertWorkflowUserResponse(candidate as unknown as WorkflowTask, Number(run.planVersion));
+    assertWorkflowApprovals(value as unknown as WorkflowSnapshot, candidate as unknown as WorkflowTask);
     if (!Number.isSafeInteger(candidate.attempt) || (candidate.attempt as number) < 0) throw new Error('工作流任务尝试次数无效');
     if (candidate.kind === 'team_review' && isRecord(candidate.input) && candidate.input.schemaVersion !== undefined) parseTeamReviewInput(candidate.input);
     if (candidate.kind === 'team_plan_revision' && isRecord(candidate.input) && candidate.input.impact !== undefined) {
@@ -279,6 +283,7 @@ export interface WorkflowExecutor {
   tracksModelInvocations?: boolean;
   tracksToolInvocations?: boolean;
   dispatchBlockReason?(snapshot: WorkflowSnapshot): string | undefined;
+  approvalRequirement?(task: WorkflowTask, snapshot: WorkflowSnapshot): WorkflowApprovalRequirement | undefined;
   execute(task: WorkflowTask, signal: AbortSignal, context: WorkflowExecutionContext): Promise<WorkflowTaskResult>;
   inspectExternal?(task: WorkflowTask, signal: AbortSignal): Promise<{ status: 'pending' | 'completed' | 'failed'; output?: unknown; error?: string }>;
   reconcileInterrupted?(task: WorkflowTask): Promise<{ status: 'queued' | 'waiting_external' | 'completed' | 'failed'; externalTaskId?: string; output?: unknown; error?: string } | null>;
@@ -602,6 +607,7 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
           const migratedCurrent = current === undefined ? null : migrateWorkflowSnapshot(current);
           const next = update(migratedCurrent === null ? null : structuredClone(migratedCurrent));
           const migratedNext = migrateWorkflowSnapshot(next.snapshot);
+          assertWorkflowApprovalTransition(migratedCurrent, migratedNext);
           for (const task of migratedCurrent?.tasks ?? []) {
             if (task.kind === 'team_plan_revision' && isRecord(task.input) && task.input.impact !== undefined) {
               const nextTask = migratedNext.tasks.find((item) => item.id === task.id);
@@ -879,6 +885,26 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
+  async function decideApproval(runId: string, taskId: string, expectedPlanVersion: number, outcome: 'approved' | 'rejected') {
+    if (outcome !== 'approved' && outcome !== 'rejected') throw new Error('审批决定无效');
+    return mutate(scope(), runId, (current) => {
+      if (current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
+      if (!['paused', 'active'].includes(current.run.status) || current.tasks.some((task) => task.status === 'running')) throw new Error('请等待当前步骤结束后审批');
+      const task = current.tasks.find((item) => item.id === taskId);
+      const pending = task && pendingWorkflowApproval(task);
+      if (!task || task.status !== 'waiting_user' || !pending) throw new Error('该步骤没有等待审批');
+      const now = Math.max(Date.now(), pending.proposedAt);
+      const next: WorkflowSnapshot = { ...current,
+        run: { ...current.run, planVersion: current.run.planVersion + 1,
+          ...(outcome === 'rejected' ? { status: 'cancelled' as const, generation: current.run.generation + 1, pauseReason: '你已拒绝执行，任务组已停止' } : {}), updatedAt: now },
+        tasks: current.tasks.map((item) => item.id !== taskId ? item : { ...item, status: outcome === 'approved' ? 'queued' : 'cancelled',
+          error: outcome === 'approved' ? undefined : '你已拒绝执行', updatedAt: now,
+          approvals: item.approvals!.map((approval) => approval !== pending ? approval : { ...approval,
+            decision: { actor: 'local_user', outcome, planVersion: expectedPlanVersion, decidedAt: now } }) }) };
+      return { snapshot: next, value: next };
+    });
+  }
+
   async function blockForUser(runId: string, expectedPlanVersion: number, block: WorkflowTask) {
     return mutate(scope(), runId, (current) => {
       if (current.run.planVersion !== expectedPlanVersion || current.run.status !== 'active') throw new Error('工作流计划版本冲突');
@@ -1098,6 +1124,21 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         const generation = snapshot.run.generation;
         const completed = new Set(snapshot.tasks.filter((task) => task.status === 'completed').map((task) => task.id));
         const ready = snapshot.tasks.filter((task) => (task.status === 'queued' || task.status === 'waiting_dependency') && task.dependsOn.every((id) => completed.has(id)));
+        const requiresApproval = ready.filter((task) => executor.approvalRequirement?.(task, snapshot)
+          && !(task.approvals?.at(-1)?.attempt === task.attempt + 1 && task.approvals.at(-1)?.decision?.outcome === 'approved'));
+        if (requiresApproval.length) {
+          await mutate(storageScope, runId, (current) => {
+            if (scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' || current.run.pauseRequested) return { snapshot: current, value: undefined };
+            return { snapshot: { ...current, tasks: current.tasks.map((task) => {
+              if (!requiresApproval.some((item) => item.id === task.id)) return task;
+              const requirement = executor.approvalRequirement?.(task, current);
+              if (!requirement) throw new Error('审批要求已改变');
+              return { ...task, status: 'waiting_user' as const, error: '等待你确认执行', updatedAt: Date.now(),
+                approvals: [...(task.approvals ?? []), proposeWorkflowApproval(current, task, requirement)] };
+            }) }, value: undefined };
+          });
+          continue;
+        }
         const external = snapshot.tasks.filter((task) => task.status === 'waiting_external' && task.externalTaskId && executor.inspectExternal && !inspectedExternalIds.has(task.id));
         const remainingModelCalls = snapshot.run.maxModelCalls === undefined ? Number.POSITIVE_INFINITY
           : Math.max(0, snapshot.run.maxModelCalls - countWorkflowModelCalls(snapshot));
@@ -1243,7 +1284,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
           && countWorkflowModelCalls({ ...current, tasks }) >= current.run.maxModelCalls
           && !tasks.some((task) => task.status === 'waiting_external')
           && tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency');
-        const waitingForUser = !failed && tasks.some((task) => task.kind === 'agent_user_input' && task.status === 'waiting_user')
+        const waitingForUser = !failed && tasks.some((task) => task.status === 'waiting_user' && (task.kind === 'agent_user_input' || pendingWorkflowApproval(task)))
           && !tasks.some((task) => task.status === 'waiting_external');
         const snapshot = { ...current, tasks, run: { ...current.run, status: current.run.status !== 'active' ? current.run.status : signal.aborted || current.run.pauseRequested || modelCallLimitReached || waitingForUser ? 'paused' as const : completed ? 'completed' as const : failed ? 'failed' as const : current.run.status, pauseRequested: false, updatedAt: Date.now() } };
         return { snapshot, value: snapshot };
@@ -1272,5 +1313,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, setModelCallLimit, setDeadline, addTasks, addTeamRevision, replaceUserBlockWithTasks, answerUserInput, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamTask, addTasksOnce, expandPlanOnce, closePlan, prepareDelivery, prepareDeliveryCopy, markDeliveryPublished, recordDeliveryIssue, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, setModelCallLimit, setDeadline, addTasks, addTeamRevision, replaceUserBlockWithTasks, answerUserInput, decideApproval, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamTask, addTasksOnce, expandPlanOnce, closePlan, prepareDelivery, prepareDeliveryCopy, markDeliveryPublished, recordDeliveryIssue, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }

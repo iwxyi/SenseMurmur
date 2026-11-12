@@ -221,6 +221,7 @@ function sameAgentTeamTask(left: AgentTeamPlan['tasks'][number], right: AgentTea
     && JSON.stringify(left.savedMedia) === JSON.stringify(right.savedMedia)
     && JSON.stringify(left.savedText) === JSON.stringify(right.savedText)
     && JSON.stringify(left.speech) === JSON.stringify(right.speech)
+    && JSON.stringify(left.approval) === JSON.stringify(right.approval)
     && leftDependencies.size === rightDependencies.size
     && [...leftDependencies].every((id) => rightDependencies.has(id));
 }
@@ -277,6 +278,14 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
   const runtime: ReturnType<typeof createWorkflowRunRuntime> = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
     tracksModelInvocations: true,
     tracksToolInvocations: true,
+    approvalRequirement(task, snapshot) {
+      if (!isTeamTaskInput(task.input)) return undefined;
+      const input = task.input;
+      const tool = input.task.tool || 'text_generation';
+      return input.task.approval || (snapshot.run.goalSpec?.approvalTools?.includes(tool)
+        ? { summary: input.task.goal, consequences: '执行本步骤可能产生模型或服务费用，实际金额以服务商结算为准。已提交的生成任务无法撤回已发生费用。' }
+        : undefined);
+    },
     dispatchBlockReason(snapshot) {
       return teamConversationBlockReason(useChatStore.getState().chats.find((chat) => chat.id === snapshot.run.chatId), snapshot.run.goalSpec);
     },
@@ -725,6 +734,18 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return runtime.answerUserInput(runId, taskId, expectedPlanVersion, answer);
       });
     },
+    async decideApproval(runId: string, taskId: string, expectedPlanVersion: number, outcome: 'approved' | 'rejected') {
+      if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务修改');
+      const storageScope = scope();
+      return navigator.locks.request(workflowRunLockName(storageScope, runId), { ifAvailable: true }, async (lock) => {
+        if (!lock) throw new Error('团队任务正在执行，请等待当前步骤结束');
+        if (scope() !== storageScope) throw new Error('账号已切换，审批已停止');
+        const snapshot = await runtime.read(runId);
+        if (!snapshot) throw new Error('团队任务不存在');
+        requireActiveAssistantChat(snapshot.run.chatId);
+        return runtime.decideApproval(runId, taskId, expectedPlanVersion, outcome);
+      });
+    },
     async instructQueuedTask(runId: string, taskId: string, expectedPlanVersion: number, instruction: string) {
       const trimmed = instruction.trim();
       if (!trimmed || trimmed.length > 4000) throw new Error('补充指示应为 1 到 4000 个字符');
@@ -740,6 +761,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const target = current.tasks.find((task) => task.id === taskId);
           if (!target || !isAgentTaskKind(target.kind) || !isTeamTaskInput(target.input) || target.attempt !== 0
             || (target.status !== 'queued' && target.status !== 'waiting_dependency')) throw new Error('只能修改尚未执行的子任务');
+          if (target.approvals?.length) throw new Error('已提出审批的方案不可修改，请追加修订任务');
           if (target.input.task.tool === 'speech_generation') throw new WorkflowPreflightError('配音正文已确定，请通过追加任务修订正文后重新配音');
           const next: WorkflowSnapshot = {
             ...current,
@@ -808,6 +830,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
     },
     async resume(runId: string, signal = getWorkspaceSignal()) {
       const beforeResume = await runtime.read(runId);
+      if (beforeResume?.run.status === 'cancelled') return { snapshot: beforeResume, summary: summarizeWorkflowRun(beforeResume) };
       if (beforeResume?.tasks.some((task) => task.id === 'review_needs_user' && task.status === 'waiting_user')) {
         return { snapshot: beforeResume, summary: summarizeWorkflowRun(beforeResume) };
       }
@@ -1254,6 +1277,14 @@ export async function answerAgentTeamUserInput(params: { runId: string; taskId: 
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
   const result = await currentTeamWorkflow().answerUserInput(params.runId, params.taskId, params.expectedPlanVersion, params.answer);
+  notifyTeam();
+  return result;
+}
+
+export async function decideAgentTeamApproval(params: { runId: string; taskId: string; expectedPlanVersion: number; outcome: 'approved' | 'rejected' }) {
+  const auth = readAuthSnapshot();
+  if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
+  const result = await currentTeamWorkflow().decideApproval(params.runId, params.taskId, params.expectedPlanVersion, params.outcome);
   notifyTeam();
   return result;
 }

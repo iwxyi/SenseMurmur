@@ -50,8 +50,8 @@ import { useChatSurfaceActions } from '../hooks/useChatSurfaceActions';
 import { useReplyOperation } from '../hooks/useReplyOperation';
 import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, getAssistantBackgroundStreamingSnapshot, listAssistantBackgroundReplies, resumeAssistantBackgroundReply, retryAssistantBackgroundReply, subscribeAssistantBackgroundReplies, subscribeAssistantBackgroundRunChanges, subscribeAssistantBackgroundStreaming } from '../services/assistantBackgroundReply';
 import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
-import { abandonAgentTeamReview, answerAgentTeamUserInput, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamTask, retryAgentTeamReview, runAgentTeam, saveAgentTeamDeliveryCopy, subscribeAgentTeamRuns, updateAgentTeamDeadline, updateAgentTeamModelCallLimit } from '../services/agentTeamWorkflow';
-import { defaultWorkflowGoalSpec } from '../services/workflowGoalSpec';
+import { abandonAgentTeamReview, answerAgentTeamUserInput, decideAgentTeamApproval, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamTask, retryAgentTeamReview, runAgentTeam, saveAgentTeamDeliveryCopy, subscribeAgentTeamRuns, updateAgentTeamDeadline, updateAgentTeamModelCallLimit } from '../services/agentTeamWorkflow';
+import { defaultWorkflowGoalSpec, type WorkflowGoalSpec } from '../services/workflowGoalSpec';
 import { getDirectBackgroundRevision, isDirectBackgroundActive, listDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply, subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
 import { getAiDirectBackgroundRevision, isAiDirectBackgroundActive, listAiDirectBackgroundReplies, resumeAiDirectBackgroundReply, startAiDirectBackgroundReply, subscribeAiDirectBackgroundReplies } from '../services/aiDirectBackgroundReply';
 import { getGroupBackgroundRevision, listAiDirectBackgroundConversations, listGroupBackgroundConversations, subscribeGroupBackgroundConversations } from '../services/groupBackgroundConversation';
@@ -949,6 +949,7 @@ export default function ChatDetailPage() {
   const [teamModelCallLimit, setTeamModelCallLimit] = useState('');
   const [teamPreferences, setTeamPreferences] = useState('');
   const [teamDeadline, setTeamDeadline] = useState('');
+  const [teamMediaApproval, setTeamMediaApproval] = useState(false);
   const [teamProgressTick, setTeamProgressTick] = useState(0);
   useEffect(() => {
     if (!hasActiveAgentTeamRuns()) return;
@@ -4636,6 +4637,10 @@ export default function ChatDetailPage() {
             await answerAgentTeamUserInput({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, answer });
             void runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id }).catch((error) => showErrorToast(error instanceof Error ? error.message : '答复已保存，继续团队任务失败'));
           }}
+          onApproval={async (selected, task, outcome) => {
+            await decideAgentTeamApproval({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, outcome });
+            if (outcome === 'approved') void runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id }).catch((error) => showErrorToast(error instanceof Error ? error.message : '审批已保存，继续团队任务失败'));
+          }}
           onPause={async (selected) => { await pauseAgentTeamAfterCurrentBatch(selected.run.id); }}
           onUpdateModelCallLimit={async (selected, maxModelCalls) => { await updateAgentTeamModelCallLimit({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, maxModelCalls }); }}
           onUpdateDeadline={async (selected, deadlineAt) => { await updateAgentTeamDeadline({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, deadlineAt }); }}
@@ -5060,6 +5065,7 @@ export default function ChatDetailPage() {
           <TextField autoFocus multiline minRows={4} fullWidth label="目标与验收要求" value={teamGoal} onChange={(event) => setTeamGoal(event.target.value)} />
           <TextField sx={{ mt: 2 }} size="small" multiline minRows={2} fullWidth label="偏好（可选）" value={teamPreferences} onChange={(event) => setTeamPreferences(event.target.value)} slotProps={{ htmlInput: { maxLength: 2000 } }} />
           <TextField sx={{ mt: 2 }} size="small" type="datetime-local" fullWidth label="截止时间（可选）" value={teamDeadline} onChange={(event) => setTeamDeadline(event.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
+          <FormControlLabel sx={{ mt: 1 }} control={<Checkbox checked={teamMediaApproval} onChange={(event) => setTeamMediaApproval(event.target.checked)} />} label="每次生成图片、音乐、配音或视频前由我确认" />
           <TextField sx={{ mt: 2 }} size="small" type="number" fullWidth label="模型调用次数上限（可选）" value={teamModelCallLimit} onChange={(event) => setTeamModelCallLimit(event.target.value)} slotProps={{ htmlInput: { min: 1, max: 1000, step: 1 } }} helperText="留空则不限制；计入规划、文本任务、图片检查和验收。此项不代表金额预算。" />
         </DialogContent>
         <DialogActions>
@@ -5072,7 +5078,8 @@ export default function ChatDetailPage() {
             }
             const goal = teamGoal.trim();
             const maxModelCalls = teamModelCallLimit.trim() ? Number(teamModelCallLimit) : undefined;
-            const goalSpec = { ...defaultWorkflowGoalSpec(goal), preferences: teamPreferences.trim() ? [teamPreferences.trim()] : [],
+            const goalSpec: WorkflowGoalSpec = { ...defaultWorkflowGoalSpec(goal), preferences: teamPreferences.trim() ? [teamPreferences.trim()] : [],
+              ...(teamMediaApproval ? { approvalTools: ['image_generation', 'audio_generation', 'speech_generation', 'video_generation'] } : {}),
               ...(teamDeadline ? { deadlineAt: new Date(teamDeadline).getTime() } : {}) };
             const chatId = id;
             setTeamGoalOpen(false);
@@ -5080,6 +5087,7 @@ export default function ChatDetailPage() {
             setTeamModelCallLimit('');
             setTeamPreferences('');
             setTeamDeadline('');
+            setTeamMediaApproval(false);
             void (async () => {
               const message = await addMessageStable({
                 chatId, type: 'user', senderId: 'user', senderName: currentUser?.nickname?.trim() || '我',
