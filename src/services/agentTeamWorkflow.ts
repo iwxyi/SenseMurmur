@@ -1,6 +1,6 @@
 import { getUsablePreferredAIProfile, normalizeImageCapabilities, resolveAIModelInputCapabilities, type APIConfig } from '../types/settings';
 import { generateResponse } from './aiClient';
-import { planAgentTeam, teamTaskMediaKind, validateAgentTeamPlan, type AgentTeamPlan, type AgentTeamTask } from './agentTeamPlan';
+import { directTeamMediaReferences, planAgentTeam, teamTaskMediaKind, validateAgentTeamPlan, type AgentTeamPlan, type AgentTeamTask } from './agentTeamPlan';
 import { assertTeamMediaOutput, resolveTeamDelegationMedia, resolveTeamMediaTask } from './agentTeamMediaReference';
 import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, invocationUnstarted, reconcileWorkflowTaskInvocation, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
 import { ensureAssistantArtifactStoreHydrated, useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
@@ -69,7 +69,7 @@ async function teamMediaCapabilities() {
   const media = { imageGeneration: Boolean(imageProfile), imageReferenceImages: Boolean(imageProfile && imageCapabilities.referenceImage),
     maxImageReferenceImages: imageProfile && imageCapabilities.referenceImage ? imageCapabilities.multiReferenceImage ? undefined : 1 : 0,
     audioGeneration: Boolean(audioProfile), speechGeneration: Boolean(getUsablePreferredAIProfile(profiles, 'tts')),
-    imageInspection: Boolean(imageProfile && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput),
+    imageInspection: Boolean(textProfile && resolveAIModelInputCapabilities(textProfile).imageInput),
     videoInspection: Boolean(typeof document !== 'undefined' && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput),
     mediaComposition: canComposeTeamMedia() };
   const videoProfile = getUsablePreferredAIProfile(profiles, 'video');
@@ -125,18 +125,22 @@ function selectReviewEvidence(snapshot: WorkflowSnapshot, taskIds: string[]) {
 
 function countImageUpstream(task: AgentTeamTask, byId: Map<string, AgentTeamTask>) {
   const visited = new Set<string>();
-  const visit = (current: AgentTeamTask) => current.dependsOn.forEach((id) => {
-    if (visited.has(id)) return;
-    visited.add(id);
-    const upstream = byId.get(id);
-    if (upstream && upstream.tool !== 'delegate_task') visit(upstream);
-  });
+  const saved = new Set<string>();
+  const visit = (current: AgentTeamTask) => {
+    current.savedMedia?.filter((media) => media.kind === 'image').forEach((media) => saved.add(media.taskId));
+    current.dependsOn.forEach((id) => {
+      if (visited.has(id)) return;
+      visited.add(id);
+      const upstream = byId.get(id);
+      if (upstream && upstream.tool !== 'delegate_task') visit(upstream);
+    });
+  };
   visit(task);
-  return [...visited].filter((id) => teamTaskMediaKind(byId.get(id)) === 'image').length;
+  return [...visited].filter((id) => teamTaskMediaKind(byId.get(id)) === 'image').length + saved.size;
 }
 
 function directImageDependencies(task: AgentTeamTask, byId: Map<string, AgentTeamTask>) {
-  return task.dependsOn.filter((id) => teamTaskMediaKind(byId.get(id)) === 'image');
+  return directTeamMediaReferences(task, byId, 'image');
 }
 
 function parseTeamReview(value: unknown): { complete: boolean; reason: string; nextRequest?: string } {
@@ -437,7 +441,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (imageTaskIds.length && (!imageProfile || !imageCapabilities.referenceImage)) throw new WorkflowPreflightError('当前图片模型不支持参考图片');
         if (imageTaskIds.length > 1 && !imageCapabilities.multiReferenceImage) throw new WorkflowPreflightError('当前图片模型只支持一张参考图片');
         const referenceImages = imageTaskIds.map((id) => {
-          const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
+          const dependencyId = input.task.savedMedia?.find((media) => media.alias === id)?.taskId
+            ?? (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id);
           const reference = teamImageReference(task.runId, resolveTeamMediaTask(snapshot, dependencyId, 'image'));
           if (!reference) throw new WorkflowPreflightError('图片任务的参考图片文件尚未就绪');
           return reference;
@@ -458,7 +463,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const capabilities = resolveAIModelInputCapabilities(profile);
         if (!profile || !capabilities.imageInput) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
         const imageTaskIds = directImageDependencies(input.task, new Map(plan.tasks.map((item) => [item.id, item])))
-          .map((id) => resolveTeamMediaTask(snapshot, input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id, 'image'));
+          .map((id) => resolveTeamMediaTask(snapshot, input.task.savedMedia?.find((media) => media.alias === id)?.taskId
+            ?? (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id), 'image'));
         if (!imageTaskIds.length || imageTaskIds.length > capabilities.maxAttachments) throw new WorkflowPreflightError('图片检查的参考图片数量不符合当前模型限制');
         const references = imageTaskIds.map((id) => teamImageReference(task.runId, id));
         if (references.some((reference) => !reference)) throw new WorkflowPreflightError('图片检查的参考图片尚未就绪');
@@ -475,8 +481,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'text');
         const capabilities = resolveAIModelInputCapabilities(profile);
         if (!profile || !capabilities.imageInput || capabilities.maxAttachments < 1) throw new WorkflowPreflightError('当前文字模型不支持视频抽帧检查');
-        const videoTaskIds = input.task.dependsOn.filter((id) => teamTaskMediaKind(plan.tasks.find((source) => source.id === id)) === 'video')
-          .map((id) => resolveTeamMediaTask(snapshot, input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id, 'video'));
+        const videoTaskIds = directTeamMediaReferences(input.task, new Map(plan.tasks.map((source) => [source.id, source])), 'video')
+          .map((id) => resolveTeamMediaTask(snapshot, input.task.savedMedia?.find((media) => media.alias === id)?.taskId
+            ?? (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id), 'video'));
         if (videoTaskIds.length !== 1) throw new WorkflowPreflightError('视频检查需要唯一的成片文件');
         const attachment = teamMediaAttachment(task.runId, videoTaskIds[0]);
         if (!attachment?.url || attachment.kind !== 'video') throw new WorkflowPreflightError('待检查视频尚未保存在当前聊天，请先恢复视频文件');
@@ -522,6 +529,10 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (selectedTool === 'video_generation') {
         const existingVideo = inspectAgentTeamVideoAttachment(task.runId, task.id);
         const upstreamTaskIds = new Set<string>();
+        const savedImageTaskIds = new Set<string>();
+        const collectSavedImages = (source: AgentTeamTask) => source.savedMedia?.filter((media) => media.kind === 'image')
+          .forEach((media) => savedImageTaskIds.add(resolveTeamMediaTask(snapshot, media.taskId, 'image')));
+        collectSavedImages(input.task);
         const collectUpstream = (id: string) => {
           const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
           if (upstreamTaskIds.has(dependencyId)) return;
@@ -529,13 +540,16 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           if (!dependency) throw new WorkflowPreflightError('视频的上游素材尚未就绪');
           upstreamTaskIds.add(dependencyId);
           const dependencyInput = isTeamTaskInput(dependency.input) ? dependency.input : null;
-          if (dependency.kind !== 'agent_delegation') dependencyInput?.task.dependsOn.forEach(collectUpstream);
+          if (dependency.kind !== 'agent_delegation' && dependencyInput) {
+            collectSavedImages(dependencyInput.task);
+            dependencyInput.task.dependsOn.forEach(collectUpstream);
+          }
         };
         input.task.dependsOn.forEach(collectUpstream);
-        const imageTaskIds = [...new Set([...upstreamTaskIds].filter((id) => {
+        const imageTaskIds = [...new Set([...[...upstreamTaskIds].filter((id) => {
           const source = snapshot.tasks.find((item) => item.id === id);
           return source && isTeamTaskInput(source.input) && teamTaskMediaKind(source.input.task) === 'image';
-        }).map((id) => resolveTeamMediaTask(snapshot, id, 'image')))];
+        }).map((id) => resolveTeamMediaTask(snapshot, id, 'image')), ...savedImageTaskIds])];
         const hasImageDependency = imageTaskIds.length > 0;
         if (!existingVideo || existingVideo.status === 'queued') {
           const capabilities = await teamMediaCapabilities();

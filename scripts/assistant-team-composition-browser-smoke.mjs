@@ -106,9 +106,15 @@ try {
         id: 'fixture-' + taskId, kind: taskId === 'music' ? 'audio' : 'video', status: 'ready', altText: '测试素材', url, createdAt: now, updatedAt: now,
       }] },
     });
-    const role = { id: 'director', name: '导演', responsibility: '制作短片', method: '拼接配乐', acceptance: '成片可用', allowedTools: ['delegate_task', 'text_generation', 'speech_generation', 'video_generation', 'audio_generation', 'media_composition', 'video_inspection'] };
+    const imageCanvas = document.createElement('canvas'); imageCanvas.width = 32; imageCanvas.height = 32;
+    imageCanvas.getContext('2d').fillStyle = '#00ff00'; imageCanvas.getContext('2d').fillRect(0, 0, 32, 32);
+    const imageFixture = imageCanvas.toDataURL('image/png');
+    useMessageStore.getState().upsertMessage({ id: 'image-fixture-' + runId, chatId, type: 'ai', senderId: 'assistant', senderName: '助手', content: '场景素材',
+      emotion: 0, timestamp: now, isDeleted: false, metadata: { agentTeamMedia: { runId, taskId: 'frame' }, attachments: [{ id: 'frame', kind: 'image', status: 'ready', altText: '绿色场景', url: imageFixture, mimeType: 'image/png', createdAt: now, updatedAt: now }] } });
+    const role = { id: 'director', name: '导演', responsibility: '制作短片', method: '拼接配乐', acceptance: '成片可用', allowedTools: ['delegate_task', 'text_generation', 'speech_generation', 'image_generation', 'image_inspection', 'video_generation', 'audio_generation', 'media_composition', 'video_inspection'] };
     const tasks = ['shot_a', 'shot_b', 'music'].map((id) => ({ id, roleId: role.id, goal: id, dependsOn: [], acceptance: '素材已保存', tool: 'delegate_task', mediaOutput: id === 'music' ? 'audio' : 'video' }));
     tasks.push({ id: 'script', roleId: role.id, goal: '只写旁白正文', dependsOn: [], acceptance: '有正文', tool: 'text_generation' });
+    tasks.push({ id: 'frame', roleId: role.id, goal: '绿色场景', dependsOn: [], acceptance: '有图片', tool: 'image_generation' });
     tasks.push({ id: 'narration', roleId: role.id, goal: '制作旁白，不朗读这条指令', dependsOn: ['script'], acceptance: '旁白可播放', tool: 'speech_generation', speech: { textTaskId: 'script' } });
     tasks.push({ id: 'film', roleId: role.id, goal: '合并两镜头并循环配乐，叠加旁白，关闭原声', dependsOn: ['shot_a', 'shot_b', 'music', 'narration'], tool: 'media_composition', acceptance: '视频带音乐与旁白',
       composition: { clips: [{ taskId: 'shot_a', startSeconds: 0.1, durationSeconds: 0.4 }, { taskId: 'shot_b', durationSeconds: 0.4 }], audioTracks: [{ taskId: 'music', loop: true }, { taskId: 'narration', volume: 0.5, offsetSeconds: 0.4 }], aspectRatio: '16:9', originalAudioVolume: 0 } });
@@ -120,7 +126,7 @@ try {
     goalSpec.allowedTools = [...role.allowedTools];
     const snapshot = { run: { id: runId, chatId, goal: '合成验证', goalSpec, status: 'paused', generation: 0, planVersion: 1, updatedAt: now, planOpen: true }, tasks: [
       { id: 'plan', runId, kind: 'team_plan', input: '合成验证', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
-      ...plan.tasks.map((task) => ({ id: task.id, runId, kind: task.tool === 'delegate_task' ? 'agent_delegation' : task.id === 'narration' ? 'agent_audio' : task.id === 'script' ? 'agent_text' : task.id === 'film' ? 'agent_media_composition' : 'agent_video_inspection',
+      ...plan.tasks.map((task) => ({ id: task.id, runId, kind: task.tool === 'delegate_task' ? 'agent_delegation' : task.id === 'frame' ? 'agent_image' : task.id === 'narration' ? 'agent_audio' : task.id === 'script' ? 'agent_text' : task.id === 'film' ? 'agent_media_composition' : 'agent_video_inspection',
         input: { task, role: plan.roles[0], goal: '合成验证' }, output: ['film', 'narration', 'inspect'].includes(task.id) ? undefined : task.id === 'script' ? '森林深处，一场追逐开始了。' : '素材已保存', dependsOn: ['plan', ...task.dependsOn], status: task.id === 'film' ? 'running' : ['narration', 'inspect'].includes(task.id) ? 'waiting_dependency' : 'completed', attempt: ['narration', 'inspect'].includes(task.id) ? 0 : 1, updatedAt: now })),
     ] };
     for (const parent of snapshot.tasks.filter((task) => task.kind === 'agent_delegation')) {
@@ -140,6 +146,7 @@ try {
     const originalProfiles = useSettingsStore.getState().aiProfiles;
     let speechRequests = 0;
     let visionRequests = 0;
+    let imageChecks = 0;
     let inspectionPixels;
     let revisionRequests = 0;
     let revisionPlan;
@@ -157,6 +164,11 @@ try {
         const body = JSON.parse(init.body);
         const content = body.messages.at(-1).content;
         const images = content.filter((item) => item.type === 'image_url');
+        if (images.length === 1) {
+          if (images[0].image_url.url !== imageFixture) throw new Error('Historical image bytes changed or missing');
+          imageChecks++;
+          return Response.json({ choices: [{ message: { role: 'assistant', content: '实际图片为绿色场景。' }, finish_reason: 'stop' }] });
+        }
         if (images.length !== 6 || !content.some((item) => item.type === 'text' && item.text.includes('未检查音轨'))) throw new Error('Missing video frames or inspection scope');
         inspectionPixels = await Promise.all([images[0], images.at(-1)].map(async (item) => {
           if (!item.image_url.url.startsWith('data:image/jpeg;base64,')) throw new Error('Inspection did not receive real JPEG frames');
@@ -226,15 +238,21 @@ try {
       || JSON.stringify(inspectionAttempts[0].modelInvocation) !== JSON.stringify(inspection.modelInvocation)) throw new Error('Missing atomic model invocation journal');
     const { listTeamSavedMedia } = await import('/src/services/agentTeamSavedMedia.ts');
     const savedMedia = listTeamSavedMedia(after, ['shot_a', 'shot_b', 'music', 'narration']).map((source) => ({ ...source, alias: 'old_' + source.taskId }));
-    revisionPlan = { summary: '复用已有素材制作竖屏版', roles: [{ ...role, allowedTools: ['media_composition'] }], finalAcceptance: '竖屏版有配乐和旁白',
+    const savedFilm = listTeamSavedMedia(after, ['film']).map((source) => ({ ...source, alias: 'old_film' }));
+    const savedFrame = listTeamSavedMedia(after, ['frame']).map((source) => ({ ...source, alias: 'old_frame' }));
+    revisionPlan = { summary: '复用已有素材制作竖屏版并复查原片', roles: [{ ...role, allowedTools: ['media_composition', 'video_inspection', 'image_inspection'] }], finalAcceptance: '竖屏版有配乐和旁白',
       tasks: [{ id: 'portrait', roleId: role.id, goal: '复用已有素材制作竖屏版本', acceptance: '顺序不变且有伴奏旁白', dependsOn: [], tool: 'media_composition', savedMedia,
         composition: { clips: [{ taskId: 'old_shot_a', startSeconds: 0.1, durationSeconds: 0.4 }, { taskId: 'old_shot_b', durationSeconds: 0.4 }],
-          audioTracks: [{ taskId: 'old_music', loop: true }, { taskId: 'old_narration', volume: 0.5, offsetSeconds: 0.4 }], aspectRatio: '9:16', originalAudioVolume: 0 } }] };
+          audioTracks: [{ taskId: 'old_music', loop: true }, { taskId: 'old_narration', volume: 0.5, offsetSeconds: 0.4 }], aspectRatio: '9:16', originalAudioVolume: 0 } },
+        { id: 'reinspect', roleId: role.id, goal: '复查历史成片的镜头顺序', acceptance: '先红后蓝', dependsOn: [], tool: 'video_inspection', savedMedia: savedFilm },
+        { id: 'check_frame', roleId: role.id, goal: '检查历史场景图', acceptance: '绿色场景', dependsOn: [], tool: 'image_inspection', savedMedia: savedFrame }] };
     const revisionConfig = { provider: 'openai', baseUrl: 'https://revision-smoke.invalid/v1', apiKey: 'test-fixture', model: 'fixture' };
     const revisionWorkflow = createAgentTeamWorkflow(revisionConfig, runtime.currentWorkflowScope);
     await revisionWorkflow.addRevisionRequest(runId, after.run.planVersion, '请复用已生成的全部素材制作竖屏版，不重新生成或配音');
     const revised = await createAgentTeamWorkflow(revisionConfig, runtime.currentWorkflowScope).resume(runId);
     if (revised.snapshot.run.status !== 'completed') throw new Error('Saved media revision failed: ' + JSON.stringify(revised.snapshot.tasks));
+    if (revised.snapshot.tasks.find((task) => task.id === 'delegated_reinspect')?.status !== 'completed') throw new Error('Historical video inspection missing');
+    if (revised.snapshot.tasks.find((task) => task.id === 'delegated_check_frame')?.status !== 'completed') throw new Error('Historical image inspection missing');
     const portrait = composition.teamMediaAttachment(runId, 'delegated_portrait');
     if (!portrait?.url) throw new Error('Revised composition missing');
     const portraitVideo = document.createElement('video'); portraitVideo.muted = true; portraitVideo.src = portrait.url;
@@ -242,8 +260,8 @@ try {
     await createAgentTeamWorkflow(revisionConfig, runtime.currentWorkflowScope).resume(runId);
     const portraitAttempts = await runtime.indexedDbWorkflowRepository.listTaskAttempts(runtime.currentWorkflowScope(), runId, 'delegated_portrait');
     const portraitMessages = useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.filter((message) => message.id === 'team-composition-' + runId + '-delegated_portrait') || [];
-    if (portraitAttempts.length !== 1 || portraitMessages.length !== 1 || revisionRequests !== 1 || speechRequests !== 1 || visionRequests !== 1) throw new Error('Saved media revision duplicated work');
-    window.__compositionSmoke = { done: true, result: { status: after.run.status, savedMediaRevision: { width: portraitVideo.videoWidth, height: portraitVideo.videoHeight, revisionRequests, attempts: portraitAttempts.length, messageCount: portraitMessages.length }, rejectedGoalReplacement, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, visionRequests, inspectionPixels, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
+    if (portraitAttempts.length !== 1 || portraitMessages.length !== 1 || revisionRequests !== 1 || speechRequests !== 1 || visionRequests !== 2 || imageChecks !== 1) throw new Error('Saved media revision duplicated work');
+    window.__compositionSmoke = { done: true, result: { status: after.run.status, savedMediaRevision: { width: portraitVideo.videoWidth, height: portraitVideo.videoHeight, revisionRequests, attempts: portraitAttempts.length, messageCount: portraitMessages.length }, rejectedGoalReplacement, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, visionRequests, imageChecks, inspectionPixels, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
     } finally { window.fetch = originalFetch; useSettingsStore.setState({ aiProfiles: originalProfiles }); }
   })().catch((error) => { window.__compositionSmoke = { done: true, error: String(error?.stack || error) }; });`);
   let result;
@@ -263,7 +281,8 @@ try {
   assert.ok(result.musicEnergy > 10 && result.musicEnergy > result.originalEnergy * 20, 'Music must loop into the second clip and original audio must be muted');
   assert.ok(result.narrationEnergy > 10 && result.narrationEnergy > result.originalEnergy * 10, 'Narration must be mixed into the second clip');
   assert.equal(result.speechRequests, 1, 'Recreating the workflow must not synthesize narration twice');
-  assert.equal(result.visionRequests, 1, 'Recovery must not inspect a completed video twice');
+  assert.equal(result.visionRequests, 2, 'Each planned inspection must run once across recovery');
+  assert.equal(result.imageChecks, 1, 'Saved image must be inspected once without an image generation model');
   assert.ok(result.inspectionPixels[0][0] > 180 && result.inspectionPixels[0][2] < 40, 'Inspection must receive the actual red opening frame');
   assert.ok(result.inspectionPixels[1][2] > 180 && result.inspectionPixels[1][0] < 40, 'Inspection must receive the actual blue ending frame');
   assert.equal(result.messageCount, 1); assert.equal(result.attempt, 2);

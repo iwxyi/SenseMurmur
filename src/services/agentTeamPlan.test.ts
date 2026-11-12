@@ -15,6 +15,24 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('enforces image reference capability and count for saved sources', async () => {
+    const sources = [1, 2].map((index) => ({ taskId: `previous_${index}`, kind: 'image' as const, attempt: 1, outputSha256: String(index).repeat(64) }));
+    const params = { api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '复用旧图', savedMedia: sources };
+    for (const tool of ['image_generation', 'video_generation'] as const) {
+      const candidate = { ...valid(), roles: [{ ...valid().roles[0], allowedTools: [tool] }],
+        tasks: [{ id: 'edit', roleId: 'researcher', goal: '复用旧图', acceptance: '有效', tool, dependsOn: [],
+          savedMedia: sources.map((source, index) => ({ ...source, alias: `old_${index}` })) }] };
+      vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+      await expect(planAgentTeam({ ...params, imageGeneration: true, videoGeneration: true })).rejects.toThrow('不支持参考图片');
+      if (tool === 'image_generation') {
+        vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+        await expect(planAgentTeam({ ...params, imageGeneration: true, imageReferenceImages: true, maxImageReferenceImages: 1 })).rejects.toThrow('最多支持');
+      }
+      vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+      expect((await planAgentTeam({ ...params, imageGeneration: true, videoGeneration: true, imageReferenceImages: true, videoReferenceImages: true })).tasks[0].savedMedia).toHaveLength(2);
+    }
+  });
+
   it('permits only exact saved-media catalog entries in a new composition plan', async () => {
     const source = { taskId: 'previous_shot', kind: 'video' as const, attempt: 2, outputSha256: 'a'.repeat(64) };
     const candidate = { ...valid(), roles: [{ ...valid().roles[0], allowedTools: ['media_composition'] }],

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { generateResponse, listAvailableModels } from './aiClient';
 import { buildAgentTeamTaskRevisionRequest, createAgentTeamWorkflow, isRecoverableAgentTeamRun, recoverAgentTeamRuns } from './agentTeamWorkflow';
@@ -85,6 +85,8 @@ const search = vi.mocked(appApi.searchWeb);
 vi.mock('./aiClient', () => ({ generateResponse: vi.fn(), listAvailableModels: vi.fn() }));
 const generate = vi.mocked(generateResponse);
 
+afterEach(() => vi.unstubAllGlobals());
+
 beforeEach(() => {
   vi.stubGlobal('indexedDB', new IDBFactory());
   vi.stubGlobal('IDBKeyRange', IDBKeyRange);
@@ -110,6 +112,59 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it.each(['image_generation', 'video_generation', 'image_inspection', 'video_inspection'] as const)('reuses historical media for %s after restoring the run', async (tool) => {
+    if (tool === 'video_inspection') vi.stubGlobal('document', {});
+    const runId = crypto.randomUUID();
+    const scope = `saved-reference-${runId}`;
+    const now = Date.now();
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'vision', name: '视觉', type: 'text', provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o', isDefault: true },
+      { id: 'video', name: '视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true },
+      { id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true,
+        imageCapabilities: { textToImage: true, referenceImage: true, multiReferenceImage: false, seed: false, negativePrompt: false } },
+    ] });
+    const video = tool === 'video_inspection';
+    const sourceTool = video ? 'video_generation' : 'image_generation';
+    const role = { id: 'editor', name: '编辑', responsibility: '修改', method: '复用', acceptance: '有效', allowedTools: [sourceTool] };
+    const sourceTask = { id: 'source', roleId: role.id, goal: '素材', acceptance: '已保存', dependsOn: [], tool: sourceTool };
+    const snapshot: WorkflowSnapshot = {
+      run: { id: runId, chatId: 'chat', goal: '修改素材', status: 'completed', generation: 1, planVersion: 2, planOpen: false, updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '素材', output: { roles: [role], tasks: [sourceTask], summary: '素材', finalAcceptance: '素材可用' }, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        { id: 'source', runId, kind: video ? 'agent_video' : 'agent_image', input: { task: sourceTask, role, goal: '修改素材' }, output: '已保存', dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
+      ],
+    };
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot, value: undefined }));
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '复用', finalAcceptance: '修改完成', roles: [{ ...role, allowedTools: [tool] }],
+      tasks: [{ id: 'edit', roleId: role.id, goal: '编辑或检查已有素材', tool, acceptance: '完成', dependsOn: [],
+        savedMedia: listTeamSavedMedia(snapshot, ['source']).map((media) => ({ ...media, alias: 'original' })) }] }));
+    const reference = { url: 'data:image/png;base64,saved', mimeType: 'image/png' };
+    vi.mocked(teamImageReference).mockReturnValue(reference);
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '新图片已保存' });
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'new-video' });
+    vi.mocked(inspectAgentTeamImages).mockImplementation(async (params) => { await params.beforeModelRequest?.(); return '图片符合'; });
+    vi.mocked(teamMediaAttachment).mockReturnValue({ id: 'source', kind: 'video', status: 'ready', url: 'data:video/mp4;base64,saved', altText: '成片', createdAt: now, updatedAt: now });
+    vi.mocked(inspectAgentTeamVideo).mockImplementation(async (params) => { await params.beforeModelRequest?.(); return '视频符合'; });
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o' };
+    await createAgentTeamWorkflow(config, () => scope).addRevisionRequest(runId, 2, '复用之前的素材');
+    const workflow = createAgentTeamWorkflow(config, () => scope);
+    const result = await workflow.resume(runId);
+    expect(result.snapshot.run.status, JSON.stringify(result.snapshot.tasks)).toBe(tool === 'video_generation' ? 'active' : 'completed');
+    if (tool === 'image_generation') expect(queueAgentTeamImage).toHaveBeenCalledWith(expect.objectContaining({ referenceImages: [reference] }));
+    if (tool === 'video_generation') expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ referenceImages: [reference] }));
+    if (tool === 'image_inspection') expect(inspectAgentTeamImages).toHaveBeenCalledWith(expect.objectContaining({ references: [reference] }));
+    if (tool === 'video_inspection') expect(inspectAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ url: 'data:video/mp4;base64,saved' }));
+    if (!video) expect(teamImageReference).toHaveBeenCalledWith(runId, 'source');
+    if (tool !== 'image_generation') expect(queueAgentTeamImage).not.toHaveBeenCalled();
+    if (tool !== 'video_generation') expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(queueAgentTeamImage).toHaveBeenCalledTimes(tool === 'image_generation' ? 1 : 0);
+    expect(queueAgentTeamVideo).toHaveBeenCalledTimes(tool === 'video_generation' ? 1 : 0);
+    expect(inspectAgentTeamImages).toHaveBeenCalledTimes(tool === 'image_inspection' ? 1 : 0);
+    expect(inspectAgentTeamVideo).toHaveBeenCalledTimes(video ? 1 : 0);
+  });
+
   it('recomposes saved media in a later plan without submitting another paid media task', async () => {
     const runId = crypto.randomUUID();
     const scope = `saved-media-${runId}`;

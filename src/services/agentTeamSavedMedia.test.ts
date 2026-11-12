@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateAgentTeamPlan } from './agentTeamPlan';
+import { directTeamMediaReferences, validateAgentTeamPlan } from './agentTeamPlan';
 import { assertTeamSavedMedia, listTeamSavedMedia } from './agentTeamSavedMedia';
 import type { WorkflowSnapshot } from './workflowRunRuntime';
 
@@ -22,6 +22,25 @@ function plan(snapshot = fixture()) {
 }
 
 describe('saved media in later plans', () => {
+  it('allows saved images for reference and inspection, and a saved video for inspection', () => {
+    const base = plan();
+    const source = base.tasks[0].savedMedia![0];
+    for (const tool of ['image_generation', 'video_generation', 'image_inspection', 'video_inspection'] as const) {
+      const kind = tool === 'video_inspection' ? 'video' : 'image';
+      const candidate = validateAgentTeamPlan({ ...base, roles: [{ ...base.roles[0], allowedTools: [tool] }],
+        tasks: [{ id: 'inspect', roleId: base.roles[0].id, goal: '复用', acceptance: '有效', tool, dependsOn: [],
+          savedMedia: [{ ...source, alias: 'old_media', kind }] }] });
+      expect(directTeamMediaReferences(candidate.tasks[0], new Map(), kind)).toEqual(['old_media']);
+      expect(() => validateAgentTeamPlan({ ...candidate, tasks: [{ ...candidate.tasks[0],
+        savedMedia: [{ ...source, alias: 'old_media', kind: 'audio' }] }] })).toThrow('版本');
+    }
+    const snapshot = fixture();
+    snapshot.tasks.push({ ...snapshot.tasks[0], id: 'image', kind: 'agent_image', input: { task: { tool: 'image_generation' } } });
+    expect(listTeamSavedMedia(snapshot, ['image'])).toMatchObject([{ taskId: 'image', kind: 'image' }]);
+    snapshot.tasks[2].input = { task: null };
+    expect(listTeamSavedMedia(snapshot, ['image'])).toEqual([]);
+  });
+
   it('binds eligible completed sources without copying output text or file addresses', () => {
     const snapshot = fixture();
     const catalog = listTeamSavedMedia(snapshot, ['shot', 'music']);

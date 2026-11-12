@@ -23,7 +23,7 @@ export interface AgentTeamTask {
   tool?: AgentTeamRole['allowedTools'][number];
   mediaOutput?: 'image' | 'video' | 'audio';
   composition?: MediaCompositionPlan;
-  savedMedia?: Array<{ alias: string; taskId: string; kind: 'video' | 'audio'; attempt: number; outputSha256: string }>;
+  savedMedia?: Array<{ alias: string; taskId: string; kind: 'image' | 'video' | 'audio'; attempt: number; outputSha256: string }>;
   speech?: { text?: string; textTaskId?: string };
   deliverable?: {
     kind: 'document' | 'code' | 'diagram' | 'html' | 'table' | 'json' | 'text';
@@ -48,6 +48,11 @@ export function teamTaskMediaKind(task: AgentTeamTask | undefined): AgentTeamTas
   if (task.tool === 'video_generation' || task.tool === 'media_composition') return 'video';
   if (task.tool === 'audio_generation' || task.tool === 'speech_generation') return 'audio';
   return undefined;
+}
+
+export function directTeamMediaReferences(task: AgentTeamTask, byId: Map<string, AgentTeamTask>, kind: NonNullable<AgentTeamTask['mediaOutput']>) {
+  return [...task.dependsOn.filter((id) => teamTaskMediaKind(byId.get(id)) === kind),
+    ...(task.savedMedia || []).filter((media) => media.kind === kind).map((media) => media.alias)];
 }
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,39}$/;
@@ -106,13 +111,15 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     const composition = tool === 'media_composition' ? validateMediaCompositionPlan(value.composition) : undefined;
     let savedMedia: AgentTeamTask['savedMedia'];
     if (value.savedMedia !== undefined) {
-      if (tool !== 'media_composition' || !Array.isArray(value.savedMedia) || !value.savedMedia.length || value.savedMedia.length > 52) throw new Error('历史素材只能用于合成且数量必须有效');
+      if (!['media_composition', 'image_generation', 'video_generation', 'image_inspection', 'video_inspection'].includes(tool)
+        || !Array.isArray(value.savedMedia) || !value.savedMedia.length || value.savedMedia.length > (tool === 'media_composition' ? 52 : 8)) throw new Error('历史素材的工具或数量无效');
       savedMedia = value.savedMedia.map((entry) => {
         const media = record(entry);
-        if (!['video', 'audio'].includes(String(media.kind)) || !Number.isSafeInteger(media.attempt) || Number(media.attempt) < 1
+        const kinds = tool === 'media_composition' ? ['video', 'audio'] : tool === 'video_inspection' ? ['video'] : ['image'];
+        if (!kinds.includes(String(media.kind)) || !Number.isSafeInteger(media.attempt) || Number(media.attempt) < 1
           || typeof media.outputSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(media.outputSha256)) throw new Error('历史素材版本无效');
         return { alias: identifier(media.alias, '历史素材别名'), taskId: requiredText(media.taskId, '历史素材任务', 256),
-          kind: media.kind as 'video' | 'audio', attempt: Number(media.attempt), outputSha256: media.outputSha256 };
+          kind: media.kind as 'image' | 'video' | 'audio', attempt: Number(media.attempt), outputSha256: media.outputSha256 };
       });
       if (new Set(savedMedia.map((media) => media.alias)).size !== savedMedia.length) throw new Error('历史素材别名重复');
     }
@@ -171,11 +178,11 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   };
   tasks.forEach((task) => visit(task.id));
   if (tasks.some((task) => task.tool === 'image_inspection'
-    && !task.dependsOn.some((id) => teamTaskMediaKind(tasksById.get(id)) === 'image'))) {
+    && !directTeamMediaReferences(task, tasksById, 'image').length)) {
     throw new Error('图片检查必须直接依赖图片生成任务');
   }
   if (tasks.some((task) => task.tool === 'video_inspection'
-    && task.dependsOn.filter((id) => teamTaskMediaKind(tasksById.get(id)) === 'video').length !== 1)) {
+    && directTeamMediaReferences(task, tasksById, 'video').length !== 1)) {
     throw new Error('视频检查必须直接依赖唯一的视频生成或合成任务');
   }
   if (tasks.some((task) => task.tool === 'audio_generation'
@@ -243,7 +250,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; chat
     params.videoInspection ? '另开放 video_inspection 视频抽帧检查工具。必须直接依赖唯一的 video_generation 或 media_composition 任务；系统读取该任务已保存的视频并按时间均匀抽取最多6帧，使用当前视觉模型检查实际画面。它只能判断抽样内容，不能检查音轨、逐帧流畅度或保证全部镜头正确。需要检查成片时在合成之后安排此任务；不能为了检查而重新生成视频。' : '当前设备或模型不支持视频抽帧检查，不得安排 video_inspection。',
     params.speechGeneration ? '另开放 speech_generation 旁白配音工具，使用用户配置的 TTS 模型及默认音色。必须声明 speech:{"text":"需要逐字朗读的正文"} 且 dependsOn:[]，或先安排 text_generation 只撰写旁白正文，再声明 speech:{"textTaskId":"narration_script"} 且 dependsOn:["narration_script"]。二者只能选一。goal 描述制作目的，不能混入配音正文；系统只朗读 speech 指定内容，不朗读岗位说明或验收要求。请控制正文长度以适配视频时长，配音不能直接作为 video_generation 的输入，应交给 media_composition 叠加。' : '当前未配置 TTS 模型，不得安排 speech_generation 配音。',
     params.mediaComposition ? '另开放 media_composition 本地音视频合成工具，可按顺序拼接、裁剪视频并叠加最多4条音乐或旁白音轨。它不是视频生成工具，不调用付费模型。合成任务必须声明 composition:{"clips":[{"taskId":"shot_a","startSeconds":0,"durationSeconds":5},{"taskId":"shot_b"}],"audioTracks":[{"taskId":"music","volume":0.7,"offsetSeconds":0,"loop":true}],"aspectRatio":"16:9","originalAudioVolume":0.3}。clips 必填且按播放顺序排列，引用的任务必须直接在 dependsOn 中，视频来源须为 video_generation 或 media_composition，音轨来源须为 audio_generation 或 speech_generation。其余参数均可省略，画面比例可选16:9、9:16、1:1，不裁切主体而用留边统一画幅；最长10分钟，素材合计不超过256MiB，输出720p级MP4。多个镜头先各自生成再交给合成任务；不要让 video_generation 直接依赖音视频。不得声称已视觉检查成片。' : '当前设备不支持本地音视频合成，不得安排 media_composition。',
-    params.mediaComposition && params.savedMedia?.length ? `可复用历史素材目录：${JSON.stringify(params.savedMedia)}。如果只需重新剪辑或更换配乐，直接复用符合要求的素材，不重新生成。合成任务可增加 savedMedia:[{"alias":"old_clip","taskId":"目录中的原任务标识","kind":"video","attempt":1,"outputSha256":"目录中的完整摘要"}]，除 alias 外必须逐字复制目录字段。composition 的 clips/audioTracks 中使用 alias；dependsOn 只列本次新计划任务，不列历史素材别名。支持历史视频与音频混用，以及历史素材与本次新生成素材混用。不能使用目录外素材、猜测任务标识或将素材摘要当文件地址。` : '本次没有授权复用的历史音视频目录，不得声明 savedMedia。',
+    params.savedMedia?.length ? `可复用历史素材目录：${JSON.stringify(params.savedMedia)}。优先复用符合要求的素材，不重新生成。任务可增加 savedMedia:[{"alias":"old_clip","taskId":"目录中的原任务标识","kind":"video","attempt":1,"outputSha256":"目录中的完整摘要"}]，除 alias 外必须逐字复制目录字段。dependsOn 只列本次新计划任务，不列历史素材别名。media_composition 接收历史视频/音频，在 composition.clips/audioTracks 中使用 alias；image_generation、image_inspection、video_generation 仅接收历史图片，自动将全部 savedMedia 图片作为参考或检查输入；video_inspection 接收唯一历史视频。检查任务允许使用历史素材替代新计划内的媒体依赖。参考图仍受当前模型能力和数量限制，不支持参考图时不得使用历史图片生成。历史素材可与本次新生成素材混用。不能使用目录外素材、猜测任务标识或将摘要当文件地址。` : '本次没有授权复用的历史素材目录，不得声明 savedMedia。',
     '只为需要用户单独打开、复用或编辑的任务声明 deliverable；可选类型 document、table、code、diagram、html、json、text。格式为 {"kind":"table","title":"市场比较表","language":"csv"}。未声明时仍会纳入团队总结，不要给搜索、图片/音频/视频生成等每个步骤机械创建文字产物。只输出 JSON：{"schemaVersion":1,"summary":"...","roles":[{"schemaVersion":1,"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"...","deliverable":{"kind":"table","title":"比较表","language":"csv"}}],"finalAcceptance":"..."}',
   ].join('\n'), [{ role: 'user', content: goal }], undefined, {
     responseFormat: 'json', maxTokens: 10_000, signal: params.signal,
@@ -266,11 +273,11 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; chat
   if (!params.webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索');
   if (!params.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');
   if (!params.imageReferenceImages && plan.tasks.some((task) => task.tool === 'image_generation'
-    && task.dependsOn.some((id) => teamTaskMediaKind(plan.tasks.find((source) => source.id === id)) === 'image'))) {
+    && directTeamMediaReferences(task, new Map(plan.tasks.map((source) => [source.id, source])), 'image').length > 0)) {
     throw new WorkflowPreflightError('当前图片模型不支持参考图片');
   }
   if (params.maxImageReferenceImages && plan.tasks.some((task) => task.tool === 'image_generation'
-    && task.dependsOn.filter((id) => teamTaskMediaKind(plan.tasks.find((source) => source.id === id)) === 'image').length > params.maxImageReferenceImages!)) {
+    && directTeamMediaReferences(task, new Map(plan.tasks.map((source) => [source.id, source])), 'image').length > params.maxImageReferenceImages!)) {
     throw new WorkflowPreflightError(`当前图片模型最多支持 ${params.maxImageReferenceImages} 张参考图片`);
   }
   if (!params.audioGeneration && plan.tasks.some((task) => task.tool === 'audio_generation')) throw new WorkflowPreflightError('当前未配置音乐生成模型');
@@ -280,7 +287,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; chat
   if (!params.videoInspection && plan.tasks.some((task) => task.tool === 'video_inspection')) throw new WorkflowPreflightError('当前设备或文字模型不支持视频抽帧检查');
   if (!params.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(params.videoUnavailableReason || '当前未配置视频模型');
   const tasksById = new Map(plan.tasks.map((task) => [task.id, task]));
-  const dependsOnImage = (task: AgentTeamTask, visited = new Set<string>()): boolean => task.dependsOn.some((dependency) => {
+  const dependsOnImage = (task: AgentTeamTask, visited = new Set<string>()): boolean => Boolean(task.savedMedia?.some((media) => media.kind === 'image')) || task.dependsOn.some((dependency) => {
     if (visited.has(dependency)) return false;
     const upstream = tasksById.get(dependency);
     if (!upstream) return false;

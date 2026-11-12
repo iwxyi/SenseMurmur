@@ -8,9 +8,10 @@ type SavedMedia = NonNullable<AgentTeamTask['savedMedia']>[number];
 export function listTeamSavedMedia(snapshot: WorkflowSnapshot, sourceTaskIds: string[]): Omit<SavedMedia, 'alias'>[] {
   return sourceTaskIds.flatMap((id) => {
     const task = snapshot.tasks.find((item) => item.id === id);
-    if (!task || task.status !== 'completed' || task.attempt < 1 || !task.input || typeof task.input !== 'object' || !('task' in task.input)) return [];
+    if (!task || task.status !== 'completed' || task.attempt < 1 || !task.input || typeof task.input !== 'object' || !('task' in task.input)
+      || !task.input.task || typeof task.input.task !== 'object' || Array.isArray(task.input.task)) return [];
     const kind = teamTaskMediaKind(task.input.task as AgentTeamTask);
-    if (kind !== 'video' && kind !== 'audio') return [];
+    if (kind !== 'image' && kind !== 'video' && kind !== 'audio') return [];
     resolveTeamMediaTask(snapshot, id, kind);
     return [{ taskId: id, kind, attempt: task.attempt, outputSha256: workflowJsonDigest(task.output) }];
   });
