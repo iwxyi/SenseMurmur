@@ -46,7 +46,7 @@ describe('workflow run runtime', () => {
     expect(upgraded?.schemaVersion).toBe(1);
     expect(upgraded?.run.goal).toBe('制作短片');
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = testIndexedDb!.open('pneumata-workflow-runs', 3);
+      const request = testIndexedDb!.open('pneumata-workflow-runs', 4);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -54,6 +54,7 @@ describe('workflow run runtime', () => {
     expect(db.objectStoreNames.contains('events')).toBe(true);
     expect(db.objectStoreNames.contains('outbox')).toBe(true);
     expect(db.objectStoreNames.contains('outbox_consumers')).toBe(true);
+    expect(db.objectStoreNames.contains('task_attempts')).toBe(true);
     db.close();
   });
 
@@ -70,6 +71,41 @@ describe('workflow run runtime', () => {
     expect(second.run.status).toBe('completed');
     expect(second.tasks[1].output).toBe('video.mp4');
     expect(execute).toHaveBeenCalledTimes(2);
+    const attempts = await indexedDbWorkflowRepository.listTaskAttempts('test', id, 'video');
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({ attempt: 1, status: 'completed', externalTaskId: 'upstream-1' });
+    expect(attempts[0].finishedAt).toBeGreaterThanOrEqual(attempts[0].startedAt);
+    await runtime.resume(id);
+    expect(await indexedDbWorkflowRepository.listTaskAttempts('test', id, 'video')).toEqual(attempts);
+    expect(await indexedDbWorkflowRepository.listTaskAttempts('other-user', id, 'video')).toEqual([]);
+  });
+
+  it('commits the execution record before dispatch and preserves it across retries', async () => {
+    const id = crypto.randomUUID();
+    const scope = `attempt-${id}`;
+    const plan = snapshot(id);
+    plan.tasks = [plan.tasks[0]];
+    const execute = vi.fn(async () => {
+      const attempts = await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script');
+      expect(attempts.at(-1)).toMatchObject({ attempt: execute.mock.calls.length, status: 'running', planVersion: 1 });
+      if (execute.mock.calls.length === 1) throw new Error('connection interrupted');
+      return { output: 'done' };
+    });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => scope);
+    await runtime.create(plan);
+    await runtime.resume(id);
+    const first = (await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script'))[0];
+    expect(first.status).toBe('result_unknown');
+    await indexedDbWorkflowRepository.transact(scope, id, (current) => {
+      if (!current) throw new Error('missing');
+      return { snapshot: { ...current, run: { ...current.run, status: 'active' }, tasks: current.tasks.map((task) => ({ ...task, status: 'queued' })) }, value: undefined };
+    });
+    expect(await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script')).toEqual([first]);
+    await runtime.resume(id);
+    const attempts = await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script');
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toEqual(first);
+    expect(attempts[1]).toMatchObject({ attempt: 2, status: 'completed' });
   });
 
   it('reconciles an interrupted submitted task before deciding whether to resend', async () => {
@@ -256,6 +292,7 @@ describe('workflow run runtime', () => {
     expect(await indexedDbWorkflowRepository.listEvents('event-atomicity-test', id)).toHaveLength(1);
     expect((await indexedDbWorkflowRepository.listOutboxEvents('event-atomicity-test', id, 'atomicity-check')).map((event) => event.sequence)).toEqual([1]);
     expect((await runtime.read(id))?.run.planVersion).toBe(1);
+    expect(await indexedDbWorkflowRepository.listTaskAttempts('event-atomicity-test', id, 'script')).toEqual([]);
   });
 
   it('migrates legacy snapshots without rewriting their task history', async () => {
@@ -263,7 +300,7 @@ describe('workflow run runtime', () => {
     const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'test');
     await runtime.create(snapshot(id));
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = testIndexedDb!.open('pneumata-workflow-runs', 3);
+      const request = testIndexedDb!.open('pneumata-workflow-runs', 4);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -281,6 +318,7 @@ describe('workflow run runtime', () => {
     expect(migrated?.schemaVersion).toBe(1);
     expect(migrated?.tasks[0]).toMatchObject({ status: 'completed', output: '已交付', attempt: 1 });
     expect(migrated?.tasks).toHaveLength(2);
+    expect(await indexedDbWorkflowRepository.listTaskAttempts('test', id, 'script')).toEqual([]);
   });
 
   it('rejects a late result after pause changes the run generation', async () => {

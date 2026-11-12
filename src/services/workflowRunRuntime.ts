@@ -1,5 +1,6 @@
 import { scopedStorageKey } from '../constants/brand';
 import { getLocalDataUserId } from './authStorageScope';
+import { claimedTaskAttempt, parseWorkflowTaskAttempt, settleTaskAttempt, type WorkflowTaskAttempt } from './workflowTaskAttempt';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -171,6 +172,7 @@ export class WorkflowPreflightError extends Error {
 }
 
 export interface WorkflowRepository {
+  listTaskAttempts(scope: string, runId: string, taskId: string): Promise<WorkflowTaskAttempt[]>;
   read(scope: string, runId: string): Promise<WorkflowSnapshot | null>;
   list(scope: string): Promise<WorkflowSnapshot[]>;
   listEvents(scope: string, runId: string, afterSequence?: number): Promise<WorkflowEvent[]>;
@@ -185,6 +187,7 @@ const STORE = 'runs';
 const EVENT_STORE = 'events';
 const OUTBOX_STORE = 'outbox';
 const CONSUMER_STORE = 'outbox_consumers';
+const ATTEMPT_STORE = 'task_attempts';
 const EVENT_RETENTION_PER_RUN = 256;
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -192,15 +195,20 @@ function openDb(): Promise<IDBDatabase> {
   if (typeof indexedDB === 'undefined') return Promise.reject(new Error('此设备不支持工作流持久化'));
   if (dbPromise) return dbPromise;
   const pending: Promise<IDBDatabase> = new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 3);
+    const request = indexedDB.open(DB_NAME, 4);
     request.onupgradeneeded = () => {
       const database = request.result;
       if (!database.objectStoreNames.contains(STORE)) database.createObjectStore(STORE);
       if (!database.objectStoreNames.contains(EVENT_STORE)) database.createObjectStore(EVENT_STORE, { keyPath: 'key' });
       if (!database.objectStoreNames.contains(OUTBOX_STORE)) database.createObjectStore(OUTBOX_STORE, { keyPath: 'key' });
       if (!database.objectStoreNames.contains(CONSUMER_STORE)) database.createObjectStore(CONSUMER_STORE, { keyPath: 'key' });
+      if (!database.objectStoreNames.contains(ATTEMPT_STORE)) database.createObjectStore(ATTEMPT_STORE);
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const database = request.result;
+      database.onversionchange = () => { database.close(); dbPromise = null; };
+      resolve(database);
+    };
     request.onerror = () => reject(request.error || new Error('打开工作流存储失败'));
     request.onblocked = () => reject(new Error('工作流存储被其他页面阻塞'));
   });
@@ -259,6 +267,19 @@ export function currentWorkflowScope() {
 }
 
 export const indexedDbWorkflowRepository: WorkflowRepository = {
+  async listTaskAttempts(scope, runId, taskId) {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(ATTEMPT_STORE, 'readonly');
+      const prefix = `${rowKey(scope, runId)}\n${JSON.stringify(taskId)}\n`;
+      const request = tx.objectStore(ATTEMPT_STORE).getAll(IDBKeyRange.bound(prefix, prefix + '\uffff'));
+      request.onsuccess = () => {
+        try { resolve(request.result.map(parseWorkflowTaskAttempt)); } catch (error) { reject(error); }
+      };
+      request.onerror = () => reject(request.error || new Error('读取任务执行历史失败'));
+      tx.onabort = () => reject(tx.error || new Error('读取任务执行历史中止'));
+    });
+  },
   async read(scope, runId) {
     const db = await openDb();
     return new Promise((resolve, reject) => {
@@ -423,7 +444,7 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
   async transact(scope, runId, update) {
     const db = await openDb();
     return new Promise((resolve, reject) => {
-      const tx = db.transaction([STORE, EVENT_STORE, OUTBOX_STORE], 'readwrite');
+      const tx = db.transaction([STORE, EVENT_STORE, OUTBOX_STORE, ATTEMPT_STORE], 'readwrite');
       const store = tx.objectStore(STORE);
       const request = store.get(rowKey(scope, runId));
       let value: unknown;
@@ -436,6 +457,23 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
           value = next.value;
           store.put(migratedNext, rowKey(scope, runId));
           const changedTasks = changedTaskStates(migratedCurrent, migratedNext);
+          const beforeTasks = new Map(migratedCurrent?.tasks.map((task) => [task.id, task]));
+          const attempts = tx.objectStore(ATTEMPT_STORE);
+          for (const task of migratedNext.tasks) {
+            const before = beforeTasks.get(task.id);
+            if (!task.attempt || !before) continue;
+            const key = `${rowKey(scope, runId)}\n${JSON.stringify(task.id)}\n${String(task.attempt).padStart(16, '0')}`;
+            if (task.status === 'running' && task.attempt === before.attempt + 1) {
+              attempts.add(claimedTaskAttempt(migratedNext, task), key);
+            } else if (task.attempt === before.attempt && (task.status !== before.status || task.externalTaskId !== before.externalTaskId)) {
+              const attemptRequest = attempts.get(key);
+              attemptRequest.onsuccess = () => {
+                if (attemptRequest.result === undefined) return;
+                try { attempts.put(settleTaskAttempt(parseWorkflowTaskAttempt(attemptRequest.result), task), key); }
+                catch (error) { tx.abort(); reject(error); }
+              };
+            }
+          }
           if (!hasWorkflowStateChange(migratedCurrent, migratedNext, changedTasks)) return;
           const prefix = eventPrefix(scope, runId);
           const eventStore = tx.objectStore(EVENT_STORE);

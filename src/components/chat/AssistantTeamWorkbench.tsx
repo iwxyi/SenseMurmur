@@ -4,6 +4,7 @@ import type { WorkflowSnapshot, WorkflowTask } from '../../services/workflowRunR
 import { countWorkflowModelCalls, summarizeWorkflowRun } from '../../services/workflowRunRuntime';
 import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
 import { buildAgentTeamTaskRevisionRequest, isRecoverableAgentTeamRun } from '../../services/agentTeamWorkflow';
+import TeamTaskExecutionHistory from './TeamTaskExecutionHistory';
 
 interface Props {
   runs: WorkflowSnapshot[];
@@ -131,6 +132,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           {details.method && <Typography variant="body2"><strong>方法</strong> {details.method}</Typography>}
           {details.acceptance && <Typography variant="body2"><strong>验收</strong> {details.acceptance}</Typography>}
           {task.error && <Typography variant="body2" color="error.main"><strong>问题</strong> {task.error}</Typography>}
+          <TeamTaskExecutionHistory key={`${run.run.id}:${task.id}`} runId={run.run.id} taskId={task.id} updatedAt={task.updatedAt} statusLabels={taskStatus} />
           {typeof (task.input as { userInstruction?: unknown })?.userInstruction === 'string' && <Typography variant="body2"><strong>用户指示</strong> {String((task.input as { userInstruction: string }).userInstruction)}</Typography>}
           {canInstructSelectedTask && <Box sx={{ display: 'grid', gap: 1 }}>
             <TextField multiline minRows={2} fullWidth size="small" label={editable ? '补充该子任务的指示' : '与该子 Agent 继续协作'} value={instruction} onChange={(event) => { setInstruction(event.target.value); setInstructionError(null); }} slotProps={{ htmlInput: { maxLength: 4000 } }} disabled={savingInstruction} />
@@ -197,7 +199,10 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
               void onDelegate(run, delegateRequest).then(() => { setDelegateRequest(''); setDelegateError(null); }).catch((error: unknown) => setDelegateError(error instanceof Error ? error.message : '追加任务失败')).finally(() => setSavingDelegate(false));
             }}>保存追加任务</Button>
           </Box>}
-          {run.tasks.map((item, index) => <Typography key={item.id} variant="body2" color="text.secondary">{index + 1}. {item.kind === 'team_plan' ? '规划团队' : item.kind === 'team_plan_revision' ? '规划追加任务' : item.kind === 'team_review' ? '主 Agent 验收交付' : item.kind === 'team_review_block' ? '等待用户决定' : taskDetails(item)?.goal || '执行任务'} · {taskStatus[item.status]}</Typography>)}
+          {run.tasks.map((item, index) => <Box key={item.id}>
+            <Typography variant="body2" color="text.secondary">{index + 1}. {item.kind === 'team_plan' ? '规划团队' : item.kind === 'team_plan_revision' ? '规划追加任务' : item.kind === 'team_review' ? '主 Agent 验收交付' : item.kind === 'team_review_block' ? '等待用户决定' : taskDetails(item)?.goal || '执行任务'} · {taskStatus[item.status]}</Typography>
+            {['team_plan', 'team_plan_revision', 'team_review'].includes(item.kind) && <TeamTaskExecutionHistory runId={run.run.id} taskId={item.id} updatedAt={item.updatedAt} statusLabels={taskStatus} />}
+          </Box>)}
         </Box>}
       </DialogContent>
       <DialogActions>

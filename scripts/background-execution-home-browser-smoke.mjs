@@ -83,7 +83,7 @@ try {
     const fixtureChatPrefix = 'home-resume-smoke-chat';
     const fixtureRunPrefix = 'home-resume-smoke-run';
     const fixtureDb = await new Promise((resolve, reject) => {
-      const request = indexedDB.open('pneumata-workflow-runs', 3);
+      const request = indexedDB.open('pneumata-workflow-runs', 4);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
