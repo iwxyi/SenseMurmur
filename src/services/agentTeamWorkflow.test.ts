@@ -632,7 +632,8 @@ describe('agent team workflow', () => {
     const scope = `recursive-${runId}`;
     const role = { id: 'lead', name: '负责人', responsibility: '交付研究', method: '按需拆分', acceptance: '有证据', allowedTools: ['text_generation', 'delegate_task'] };
     const makePlan = (id: string, goal: string, tool: string) => ({ summary: goal, roles: [role],
-      tasks: [{ id, roleId: role.id, goal, tool, dependsOn: [], acceptance: '有证据' }], finalAcceptance: '报告可用' });
+      tasks: [{ id, roleId: role.id, goal, tool, dependsOn: [], acceptance: '有证据' }], finalAcceptance: '报告可用',
+      delegationChecks: [{ taskId: id, status: 'narrower', reason: '仅交付市场需求证据，不承担完整产品研究' }] });
     generate.mockResolvedValueOnce(JSON.stringify(makePlan('research', '研究产品机会', 'delegate_task')))
       .mockResolvedValueOnce(JSON.stringify(makePlan('market', '分析市场需求', 'delegate_task')))
       .mockResolvedValueOnce(JSON.stringify(makePlan('findings', '整理已提供的需求证据', 'text_generation')))
@@ -726,12 +727,37 @@ describe('agent team workflow', () => {
     expect(generate.mock.calls[4][2][0].content).toContain('已完成的证据');
   });
 
+  it.each(['repeated', 'uncertain', 'missing'] as const)('blocks semantic delegation loops before child expansion and preserves failure on recovery: %s', async (status) => {
+    const runId = crypto.randomUUID();
+    const scope = `semantic-delegation-${runId}`;
+    const role = { id: 'lead', name: '负责人', responsibility: '调研', method: '拆分', acceptance: '完整', allowedTools: ['delegate_task', 'text_generation'] };
+    const makePlan = (id: string, goal: string) => ({ summary: goal, roles: [role],
+      tasks: [{ id, goal, roleId: role.id, tool: 'delegate_task', dependsOn: [], acceptance: '完整报告' }], finalAcceptance: '完整' });
+    generate.mockResolvedValueOnce(JSON.stringify(makePlan('research', '研究产品的市场机会')))
+      .mockResolvedValueOnce(JSON.stringify({ ...makePlan('again', '全面分析该产品在市场上的发展潜力'),
+        ...(status === 'missing' ? {} : { delegationChecks: [{ taskId: 'again', status, reason: '与父目标承担相同范围，只有措辞不同' }] }) }));
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const workflow = createAgentTeamWorkflow(config, () => scope);
+    const failed = (await workflow.start(runId, 'chat', '研究产品机会', false)).snapshot;
+    expect(failed.run.status).toBe('failed');
+    expect(failed.tasks).toHaveLength(2);
+    expect(failed.tasks.find((task) => task.id === 'research')?.expansion).toBeUndefined();
+    expect(failed.tasks.find((task) => task.id === 'research')).toMatchObject({ status: 'failed',
+      error: expect.stringContaining(status === 'missing' ? '范围检查记录' : '范围无法确认') });
+    expect(generate.mock.calls[1][1]).toContain('研究产品的市场机会');
+    expect(generate.mock.calls[1][1]).toContain('换措辞');
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(countWorkflowModelCalls(failed)).toBe(2);
+  });
+
   it.each(['complete', 'depth', 'repeat'] as const)('enforces recursive delegation boundaries: %s', async (mode) => {
     const runId = crypto.randomUUID();
     const role = { id: 'lead', name: '负责人', responsibility: '研究', method: '拆分', acceptance: '证据', allowedTools: ['delegate_task', 'text_generation'] };
     const plan = (id: string, goal: string, tool = 'delegate_task') => JSON.stringify({ summary: goal,
       roles: [{ ...role, allowedTools: tool === 'text_generation' ? ['text_generation'] : role.allowedTools }],
-      tasks: [{ id, goal, roleId: role.id, tool, dependsOn: [], acceptance: '证据' }], finalAcceptance: '报告' });
+      tasks: [{ id, goal, roleId: role.id, tool, dependsOn: [], acceptance: '证据' }], finalAcceptance: '报告',
+      delegationChecks: [{ taskId: id, status: 'narrower', reason: '仅负责当前局部证据，不承担完整祖先任务' }] });
     generate.mockResolvedValueOnce(plan('first', '研究机会'))
       .mockResolvedValueOnce(plan('second', mode === 'repeat' ? '研究机会' : '分析市场'))
       .mockResolvedValueOnce(plan('third', '分析客户'))

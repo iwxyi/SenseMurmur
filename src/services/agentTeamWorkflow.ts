@@ -430,7 +430,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           imageInspection: can('image_inspection') && capabilities.imageInspection,
           videoInspection: can('video_inspection') && capabilities.videoInspection,
           mediaComposition: can('media_composition') && capabilities.mediaComposition,
-          delegation: ancestors.length < 2, signal, beforeModelRequest: context.beginModelInvocation });
+          delegation: ancestors.length < 2,
+          delegationAncestors: [...ancestors, task].map((source) => {
+            if (!isTeamTaskInput(source.input)) throw new WorkflowPreflightError('委派祖先契约无效');
+            return { goal: source.input.task.goal, acceptance: source.input.task.acceptance };
+          }), signal, beforeModelRequest: context.beginModelInvocation });
         assertInheritedPlanAuthorized(snapshot, task, delegated);
         if (input.task.mediaOutput) assertTeamMediaOutput(delegated, input.task.mediaOutput);
         validateAvailableTeamTools(delegated, capabilities, Boolean(chat.modeState && resolveChatAgentCapabilities(chat).webSearch));

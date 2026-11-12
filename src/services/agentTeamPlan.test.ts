@@ -15,6 +15,22 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('persists semantic scope evidence only after validating every delegated goal', async () => {
+    const candidate = { ...valid(), roles: [{ ...valid().roles[0], allowedTools: ['delegate_task', 'text_generation'] }],
+      tasks: [{ ...valid().tasks[0], tool: 'delegate_task' }],
+      delegationChecks: [{ taskId: 'research', status: 'narrower', reason: '仅分析需求，不承担完整产品交付' }] };
+    const params = { api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '开发并交付产品', delegation: true,
+      delegationAncestors: [{ goal: '开发并交付产品', acceptance: '可运行交付' }] };
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+    const plan = await planAgentTeam(params);
+    expect(plan.delegationReview?.checks).toEqual(candidate.delegationChecks);
+    expect(validateAgentTeamPlan(JSON.parse(JSON.stringify(plan))).delegationReview).toEqual(plan.delegationReview);
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify({ ...candidate, delegationChecks: undefined, delegationReview: plan.delegationReview }));
+    await expect(planAgentTeam(params)).rejects.toThrow('范围检查记录');
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify({ ...candidate,
+      delegationChecks: [{ ...candidate.delegationChecks[0], status: 'uncertain' }] }));
+    await expect(planAgentTeam(params)).rejects.toThrow('范围无法确认');
+  });
   it('preserves explicit approval requirements and rejects incomplete proposals', () => {
     const plan = valid();
     const approval = { summary: '确认研究方向', consequences: '确认后开始模型分析' };

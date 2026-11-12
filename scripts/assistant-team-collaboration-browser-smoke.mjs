@@ -119,7 +119,8 @@ try {
     let recursiveRequests = 0;
     const recursivePlan = (id, goal, tool) => JSON.stringify({ summary: goal,
       roles: [{ id: 'lead', name: '研究负责人', responsibility: '调研', method: '分解验证', acceptance: '有依据', allowedTools: tool === 'delegate_task' ? ['delegate_task', 'text_generation'] : ['text_generation'] }],
-      tasks: [{ id, roleId: 'lead', goal, tool, dependsOn: [], acceptance: '有依据' }], finalAcceptance: '可用报告' });
+      tasks: [{ id, roleId: 'lead', goal, tool, dependsOn: [], acceptance: '有依据' }], finalAcceptance: '可用报告',
+      delegationChecks: [{ taskId: id, status: 'narrower', reason: '仅研究市场证据，不承担整体机会报告' }] });
     const replies = [recursivePlan('research', '研究机会', 'delegate_task'), recursivePlan('market', '分析市场', 'delegate_task'),
       recursivePlan('evidence', '整理资料', 'text_generation'), '证据：离线使用需求', '市场交付：优先离线', '研究交付：离线方案'];
     const config = { provider: 'openai', baseUrl: 'https://delegation-smoke.invalid/v1', apiKey: 'test-fixture', model: 'fixture' };
@@ -139,6 +140,7 @@ try {
         || paused.snapshot.tasks.filter((task) => task.expansion).length !== 2) throw new Error('Delegation budget did not pause expanded children');
       const restored = createAgentTeamWorkflow(config, currentWorkflowScope);
       const saved = await restored.read(recursiveId);
+      if (!saved.tasks.find((task) => task.id === 'research').expansion.context.delegationReview?.basisSha256) throw new Error('Missing durable delegation scope review');
       await restored.setModelCallLimit(recursiveId, saved.run.planVersion, 6);
       recursiveRun = (await restored.resume(recursiveId)).snapshot;
       if (recursiveRun.run.status !== 'completed' || recursiveRequests !== 6
@@ -147,6 +149,25 @@ try {
       if (recursiveRequests !== 6) throw new Error('Recovery duplicated model requests');
       const attempts = await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), recursiveId, 'research');
       if (attempts.length !== 2 || attempts.some((attempt) => attempt.status !== 'completed')) throw new Error('Delegation attempt journal incomplete');
+      const blockedId = recursiveId + '-semantic-loop';
+      const blockedReplies = [recursivePlan('research', '研究产品市场机会', 'delegate_task'), JSON.stringify({
+        ...JSON.parse(recursivePlan('again', '全面分析产品的市场发展潜力', 'delegate_task')),
+        delegationChecks: [{ taskId: 'again', status: 'repeated', reason: '只换了措辞，仍负责同一完整目标' }],
+      })];
+      let blockedRequests = 0;
+      window.fetch = async (input, init) => {
+        if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
+        if (blockedRequests === 1 && !JSON.parse(init.body).messages.some((message) => String(message.content).includes('delegationChecks'))) throw new Error('Missing semantic scope instructions');
+        const content = blockedReplies[blockedRequests++];
+        if (!content) throw new Error('Semantic loop dispatched extra work');
+        return Response.json({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
+      };
+      const blocked = (await createAgentTeamWorkflow(config, currentWorkflowScope).start(blockedId, recursiveChatId, '研究市场', false)).snapshot;
+      if (blocked.run.status !== 'failed' || blocked.tasks.length !== 2
+        || !blocked.tasks.find((task) => task.id === 'research').error.includes('范围无法确认')) throw new Error('Semantic loop was expanded');
+      const reloaded = createAgentTeamWorkflow(config, currentWorkflowScope);
+      await reloaded.resume(blockedId);
+      if (blockedRequests !== 2 || (await reloaded.read(blockedId)).tasks.length !== 2) throw new Error('Semantic failure was not durable');
     } finally {
       window.fetch = originalFetch;
       useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== recursiveChatId) }));
