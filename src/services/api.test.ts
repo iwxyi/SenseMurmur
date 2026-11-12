@@ -35,6 +35,31 @@ function mockJsonFetch(body: Record<string, unknown>) {
   });
 }
 
+describe('workflow budget API', () => {
+  beforeEach(() => { installLocalStorage(); });
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  it('encodes the Run query and preserves an unconfigured budget as null', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(null));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await api.getWorkflowBudget('run:test/one')).toBeNull();
+    const url = new URL(String(fetchMock.mock.calls[0][0]), 'http://localhost');
+    expect(url.pathname).toBe('/api/ai/usage/workflow/budget');
+    expect(url.searchParams.get('runId')).toBe('run:test/one');
+  });
+
+  it('sends money as an exact decimal string with the observed revision', async () => {
+    const result = { schemaVersion: 1, runId: 'run', revision: 3, limitAmount: '999999999999999999.123456' };
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(result));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await api.configureWorkflowBudget('run', { limitAmount: result.limitAmount, billingUnit: 'point', expectedRevision: 2 })).toEqual(result);
+    expect(fetchMock.mock.calls[0][1].method).toBe('PUT');
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual({
+      runId: 'run', limitAmount: result.limitAmount, billingUnit: 'point', expectedRevision: 2,
+    });
+  });
+});
+
 describe('api sync changes', () => {
   beforeEach(() => {
     vi.stubGlobal('localStorage', {

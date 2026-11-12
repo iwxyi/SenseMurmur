@@ -9,6 +9,7 @@ import { advanceTeamConversation, teamConversationContext } from './agentTeamCon
 import type { WorkflowGoalSpec } from './workflowGoalSpec';
 import { processRichMessageMedia } from './richMessageMedia';
 import { WorkflowPreflightError } from './workflowRunRuntime';
+import { inspectTeamMediaAdmission, recoverTeamMediaAdmission } from './agentTeamMediaAdmission';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { isLocalOnlyMediaMode } from './richMessageMedia';
 import type { WorkflowTaskResult } from './workflowRunRuntime';
@@ -28,6 +29,8 @@ export function inspectAgentTeamVideoAttachment(runId: string, taskId: string) {
   const message = teamVideoMessage(runId, taskId);
   const attachment = message?.metadata?.attachments?.find((item) => item.kind === 'video');
   if (!message || !attachment) return null;
+  const admission = inspectTeamMediaAdmission(attachment);
+  if (admission) return admission;
   if (attachment.status === 'ready') {
     if (!attachment.url) return { status: 'failed' as const, error: '视频任务已完成，但文件尚未保存到聊天，请在附件中重试获取文件' };
     return { status: 'completed' as const, output: `视频已生成并保存在当前聊天附件。内容：${(attachment.promptText || attachment.altText).slice(0, 2000)}` };
@@ -73,7 +76,7 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
   const chat = useChatStore.getState().chats.find((item) => item.id === params.chatId && item.type === 'assistant' && item.deletedAt == null);
   if (!chat) throw new WorkflowPreflightError('助手会话已删除');
   if (params.signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
-  const existing = teamVideoMessage(params.runId, params.taskId);
+  const existing = recoverTeamMediaAdmission(teamVideoMessage(params.runId, params.taskId), 'video', params.usageReference);
   if (existing) {
     const result = inspectAgentTeamVideoAttachment(params.runId, params.taskId);
     if (result?.status === 'waiting_external') return { externalTaskId: result.externalTaskId };

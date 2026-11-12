@@ -727,6 +727,10 @@ async function createPublicAiRequestError(response: Response, fallbackPrefix: st
     AI_IMAGE_SIZE_UNSUPPORTED: '当前模型不支持所选图片尺寸，请调整后重试。',
   };
   const knownBusinessErrorMessages: Record<string, string> = {
+    WORKFLOW_BUDGET_EXHAUSTED: '任务金额预算不足，请调整预算后继续。',
+    WORKFLOW_BUDGET_UNRESOLVED: '任务有尚未核实的费用，核对完成后才能继续。',
+    WORKFLOW_BUDGET_QUOTE_REQUIRED: '当前调用尚无可靠报价，未提交生成请求。',
+    WORKFLOW_BUDGET_UNIT_MISMATCH: '调用计费单位与任务预算不一致。',
     VIP_LIMIT_EXCEEDED: '已达到当前会员权益上限。',
     AI_POINTS_INSUFFICIENT: 'AI 点数不足，暂时无法继续生成。',
     AI_ACCESS_DISABLED: '当前账号的 AI 服务已被停用。',

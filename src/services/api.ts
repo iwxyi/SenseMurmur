@@ -949,6 +949,15 @@ class ApiClient {
     return this.request<import('../types/workflowUsage').WorkflowUsageSummary>('GET', `/ai/usage/workflow?${query.toString()}`);
   }
 
+  async getWorkflowBudget(runId: string) {
+    const query = new URLSearchParams({ runId });
+    return this.request<import('../types/workflowUsage').WorkflowBudget | null>('GET', `/ai/usage/workflow/budget?${query.toString()}`);
+  }
+
+  async configureWorkflowBudget(runId: string, input: { limitAmount: string; billingUnit: string; expectedRevision: number }) {
+    return this.request<import('../types/workflowUsage').WorkflowBudget>('PUT', '/ai/usage/workflow/budget', { runId, ...input });
+  }
+
   async getAiUsageSummary(params: { groupBy: 'day' | 'month'; page?: number; limit?: number }) {
     const query = new URLSearchParams({ groupBy: params.groupBy });
     if (params.page) query.set('page', String(params.page));

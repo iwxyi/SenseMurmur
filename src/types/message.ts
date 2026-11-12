@@ -68,6 +68,7 @@ export interface MessageAttachment {
   thumbnailAssetId?: string;
   checksum?: string;
   error?: string;
+  admissionRejection?: { code: string; status: number };
   createdAt: number;
   updatedAt: number;
 }

@@ -10,6 +10,7 @@ import type { WorkflowGoalSpec } from './workflowGoalSpec';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { isLocalOnlyMediaMode, processRichMessageMedia } from './richMessageMedia';
 import { WorkflowPreflightError, type WorkflowTaskResult } from './workflowRunRuntime';
+import { inspectTeamMediaAdmission, recoverTeamMediaAdmission } from './agentTeamMediaAdmission';
 
 function teamImageMessage(runId: string, taskId: string): Message | null {
   const state = useMessageStore.getState();
@@ -32,6 +33,8 @@ export function teamImageReference(runId: string, taskId: string) {
 export function inspectAgentTeamImageAttachment(runId: string, taskId: string) {
   const attachment = teamImageMessage(runId, taskId)?.metadata?.attachments?.find((item) => item.kind === 'image');
   if (!attachment) return null;
+  const admission = inspectTeamMediaAdmission(attachment);
+  if (admission) return admission;
   if (attachment.status === 'ready') return attachment.url
     ? { status: 'completed' as const, output: `图片已生成并保存在当前聊天附件。内容：${(attachment.promptText || attachment.altText).slice(0, 2000)}` }
     : { status: 'failed' as const, error: '图片已生成，但文件尚未保存到聊天' };
@@ -77,7 +80,7 @@ export async function queueAgentTeamImage(params: { runId: string; taskId: strin
   const chat = useChatStore.getState().chats.find((item) => item.id === params.chatId && item.type === 'assistant' && item.deletedAt == null);
   if (!chat) throw new WorkflowPreflightError('助手会话已删除');
   if (params.signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
-  const existing = teamImageMessage(params.runId, params.taskId);
+  const existing = recoverTeamMediaAdmission(teamImageMessage(params.runId, params.taskId), 'image', params.usageReference);
   const prior = inspectAgentTeamImageAttachment(params.runId, params.taskId);
   if (prior?.status === 'completed') return { output: prior.output };
   if (prior?.status === 'failed') throw new WorkflowPreflightError(prior.error);
@@ -105,6 +108,7 @@ export async function queueAgentTeamImage(params: { runId: string; taskId: strin
   if (params.signal.aborted) throw new Error('图片任务已中断，提交结果需要核对');
   await processRichMessageMedia({ message: synced, aiProfiles: [profile],
     sharesConversationLease: true,
+    executionSignal: params.signal,
     upsertMessage: (next) => useMessageStore.getState().upsertMessage(next) });
   const result = inspectAgentTeamImageAttachment(params.runId, params.taskId);
   if (result?.status === 'completed') return { output: result.output };

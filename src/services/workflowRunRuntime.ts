@@ -16,6 +16,7 @@ import { parseWorkflowModelRequest, type WorkflowModelRequest } from './workflow
 import { assertWorkflowApprovals, assertWorkflowApprovalTransition, pendingWorkflowApproval, proposeWorkflowApproval, workflowApprovalMatches,
   type WorkflowApproval, type WorkflowApprovalRequirement } from './workflowApproval';
 import type { WorkflowUsageReference } from '../types/workflowUsage';
+import { workflowAdmissionBlockReason } from './workflowAdmission';
 import { parseWorkflowCapabilityIssue, type WorkflowCapabilityIssue, type WorkflowCapabilityRequirement } from './workflowCapability';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
@@ -262,7 +263,7 @@ export function invocationUnstarted(task: WorkflowTask) {
 function finishInvocation(task: WorkflowTask, state: 'succeeded' | 'failed' | 'result_unknown', now: number, externalTaskId?: string, reconciled = false): WorkflowTask {
   const next = finishModelInvocation(task, state, now);
   const invocation = task.toolInvocation;
-  if (!invocation || invocation.state === 'not_started' || (!reconciled && !['reserved', 'started', 'waiting_external'].includes(invocation.state))) return next;
+  if (!invocation || invocation.state === 'not_started' || invocation.state === 'rejected' || (!reconciled && !['reserved', 'started', 'waiting_external'].includes(invocation.state))) return next;
   const waiting = invocation.state !== 'reserved' && state === 'succeeded' && Boolean(externalTaskId);
   const { finishedAt: previousFinishedAt, ...activeInvocation } = invocation;
   void previousFinishedAt;
@@ -280,6 +281,13 @@ export function reconcileWorkflowTaskInvocation(task: WorkflowTask): WorkflowTas
   return task;
 }
 
+export function rejectWorkflowTaskAdmission(task: WorkflowTask, reason: string): WorkflowTask {
+  const finished = finishInvocation(task, 'failed', Date.now());
+  return { ...finished, status: 'queued', error: reason, updatedAt: Date.now(),
+    ...(finished.modelInvocation?.state === 'failed' ? { modelInvocation: { ...finished.modelInvocation, state: 'rejected' as const } } : {}),
+    ...(finished.toolInvocation?.state === 'failed' ? { toolInvocation: { ...finished.toolInvocation, state: 'rejected' as const } } : {}) };
+}
+
 export interface WorkflowTaskResult {
   output?: unknown;
   waitingForUser?: true;
@@ -294,7 +302,7 @@ export interface WorkflowExecutor {
   approvalRequirement?(task: WorkflowTask, snapshot: WorkflowSnapshot): WorkflowApprovalRequirement | undefined;
   execute(task: WorkflowTask, signal: AbortSignal, context: WorkflowExecutionContext): Promise<WorkflowTaskResult>;
   inspectExternal?(task: WorkflowTask, signal: AbortSignal): Promise<{ status: 'pending' | 'completed' | 'failed'; output?: unknown; error?: string }>;
-  reconcileInterrupted?(task: WorkflowTask): Promise<{ status: 'queued' | 'waiting_external' | 'completed' | 'failed'; externalTaskId?: string; output?: unknown; error?: string } | null>;
+  reconcileInterrupted?(task: WorkflowTask): Promise<{ status: 'queued' | 'waiting_external' | 'completed' | 'failed'; externalTaskId?: string; output?: unknown; error?: string; admissionRejected?: true } | null>;
 }
 
 export interface WorkflowExecutionContext {
@@ -1099,10 +1107,13 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
           if (!result) continue;
           await mutate(storageScope, runId, (current) => ({ snapshot: {
             ...current,
+            run: result.admissionRejected ? { ...current.run, pauseRequested: true, pauseReason: result.error, updatedAt: Date.now() } : current.run,
             tasks: current.tasks.map((item) => item.id === task.id && item.status === 'running' ? {
+              ...(result.admissionRejected ? rejectWorkflowTaskAdmission(item, result.error || '请求未获受理，请检查任务预算。') : {
               ...finishInvocation(item, result.status === 'failed' ? 'failed' : result.status === 'queued' ? 'result_unknown' : 'succeeded', Date.now(), result.status === 'waiting_external' ? result.externalTaskId ?? item.externalTaskId : undefined),
               status: result.status, externalTaskId: result.externalTaskId ?? item.externalTaskId,
               output: result.output ?? item.output, error: result.error, updatedAt: Date.now(),
+              }),
             } : item),
           }, value: undefined }));
         }
@@ -1288,11 +1299,17 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
               return { snapshot: next, value: undefined }; });
             if ('status' in result && result.status === 'pending') inspectedExternalIds.add(task.id);
           } catch (error) {
-            await mutate(storageScope, runId, (current) => ({ snapshot: scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' ? current : { ...current, tasks: current.tasks.map((item) => {
+            const admissionReason = isReady ? workflowAdmissionBlockReason(error) : undefined;
+            await mutate(storageScope, runId, (current) => ({ snapshot: scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' ? current : { ...current,
+              run: admissionReason ? { ...current.run, pauseRequested: true, pauseReason: admissionReason, updatedAt: Date.now() } : current.run,
+              tasks: current.tasks.map((item) => {
               if (item.id !== task.id) return item;
+              if (admissionReason) {
+                return rejectWorkflowTaskAdmission(item, admissionReason);
+              }
               const definiteFailure = error instanceof WorkflowPreflightError || invocationUnstarted(item);
               const blockedBeforeRequest = invocationUnstarted(item)
-                && (workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current));
+                && (current.run.pauseRequested || workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current));
               return { ...(isReady ? finishInvocation(item, definiteFailure ? 'failed' : 'result_unknown', Date.now()) : item),
                 status: blockedBeforeRequest ? 'queued' : !isReady ? 'waiting_external' : definiteFailure ? 'failed' : 'result_unknown',
                 capabilityIssue: !blockedBeforeRequest && isReady && error instanceof WorkflowPreflightError && error.capability

@@ -12,6 +12,7 @@ import { isPartialTeamReview } from '../../services/agentTeamReviewEvidence';
 import TeamUserInputPanel from './TeamUserInputPanel';
 import TeamApprovalPanel from './TeamApprovalPanel';
 import TeamUsagePanel from './TeamUsagePanel';
+import TeamBudgetPanel from './TeamBudgetPanel';
 import { pendingWorkflowApproval } from '../../services/workflowApproval';
 import { WORKFLOW_CAPABILITY_RECOVERY } from '../../services/workflowCapability';
 
@@ -135,6 +136,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           {modelCallLimitReached && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">已达到模型调用上限。调整上限后可继续，已有结果会保留。</Typography>}
         </Box>
         <TeamUsagePanel key={run.run.id} runId={run.run.id} />
+        <TeamBudgetPanel key={`budget:${run.run.id}`} runId={run.run.id} canEdit={canRun && !running && ['paused', 'failed'].includes(run.run.status)} />
         {run.tasks.filter((item) => item.kind === 'agent_user_input' && item.status === 'waiting_user' && !pendingWorkflowApproval(item)).map((item) =>
           <TeamUserInputPanel key={`${run.run.id}:${item.id}:${run.run.planVersion}`} run={run} task={item}
             disabled={!canRun || running || !['active', 'paused'].includes(run.run.status)} onAnswer={onAnswer} />)}

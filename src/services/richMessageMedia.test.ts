@@ -512,6 +512,19 @@ describe('processRichMessageMedia', () => {
     });
   });
 
+  it('persists a budget admission rejection and returns its structured error to the team runtime', async () => {
+    const rejection = Object.assign(new Error('任务金额预算不足'), { code: 'WORKFLOW_BUDGET_EXHAUSTED', status: 402 });
+    vi.mocked(generateVideoWithAdapter).mockRejectedValue(rejection);
+    const message = buildQueuedImageMessage({ metadata: { agentTeamMedia: { runId: 'budget', taskId: 'shot' }, attachments: [{
+      id: 'video-1', kind: 'video', status: 'queued', altText: '视频', promptText: '追逐场景', createdAt: 123, updatedAt: 123,
+    }] } });
+    const upserts: Message[] = [];
+    await expect(processRichMessageMedia({ message, aiProfiles: [{ ...imageProfile, type: 'video', model: 'MiniMax-H3' }],
+      upsertMessage: (next) => upserts.push(next) })).rejects.toBe(rejection);
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'failed',
+      admissionRejection: { code: 'WORKFLOW_BUDGET_EXHAUSTED', status: 402 } });
+  });
+
   it('recovers a submitted video by request key without submitting or charging again', async () => {
     vi.mocked(api.getAiMediaTaskByRequestKey).mockResolvedValue({ task_id: 'saved-task', model: 'MiniMax-H3', status: 'running', result: null,
       chargedAmount: null, reservedAmount: 1, createdAt: 1, updatedAt: 2 });

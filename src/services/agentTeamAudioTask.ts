@@ -10,6 +10,7 @@ import type { WorkflowGoalSpec } from './workflowGoalSpec';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { isLocalOnlyMediaMode, processRichMessageMedia } from './richMessageMedia';
 import { WorkflowPreflightError, type WorkflowTaskResult } from './workflowRunRuntime';
+import { inspectTeamMediaAdmission, recoverTeamMediaAdmission } from './agentTeamMediaAdmission';
 
 function teamAudioMessage(runId: string, taskId: string): Message | null {
   const state = useMessageStore.getState();
@@ -22,6 +23,8 @@ function teamAudioMessage(runId: string, taskId: string): Message | null {
 export function inspectAgentTeamAudioAttachment(runId: string, taskId: string) {
   const attachment = teamAudioMessage(runId, taskId)?.metadata?.attachments?.find((item) => item.kind === 'audio');
   if (!attachment) return null;
+  const admission = inspectTeamMediaAdmission(attachment);
+  if (admission) return admission;
   const label = attachment.audioPurpose === 'music_generation' ? '音乐' : '旁白';
   if (attachment.status === 'ready') return attachment.url
     ? { status: 'completed' as const, output: `${label}已生成并保存在当前聊天附件。${label === '旁白' ? '正文' : '主题'}：${(attachment.promptText || attachment.altText).slice(0, 2000)}` }
@@ -62,7 +65,7 @@ export async function queueAgentTeamAudio(params: { runId: string; taskId: strin
   const chat = useChatStore.getState().chats.find((item) => item.id === params.chatId && item.type === 'assistant' && item.deletedAt == null);
   if (!chat) throw new WorkflowPreflightError('助手会话已删除');
   if (params.signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
-  const existing = teamAudioMessage(params.runId, params.taskId);
+  const existing = recoverTeamMediaAdmission(teamAudioMessage(params.runId, params.taskId), 'audio', params.usageReference);
   const prior = inspectAgentTeamAudioAttachment(params.runId, params.taskId);
   if (prior?.status === 'completed') return { output: prior.output };
   if (prior?.status === 'failed') throw new WorkflowPreflightError(prior.error);

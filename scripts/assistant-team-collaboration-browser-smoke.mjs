@@ -99,6 +99,34 @@ try {
     }, currentWorkflowScope);
     await runtime.create({ ...run, run: { ...run.run, status: 'active' }, tasks: run.tasks.map((task) => task.id === 'research' ? { ...task, status: 'queued', attempt: 0, output: undefined } : task) });
     const persistedRun = await runtime.resume(runId);
+    const admissionId = 'browser-collab-admission-' + crypto.randomUUID();
+    let budgetAllowed = false;
+    let admissionRequests = 0;
+    const admissionExecutor = { tracksModelInvocations: true, execute: async (_task, _signal, context) => {
+      await context.beginModelInvocation();
+      admissionRequests++;
+      if (!budgetAllowed) throw Object.assign(new Error('private diagnostic'), {
+        diagnostic: { status: 402, code: 'WORKFLOW_BUDGET_EXHAUSTED' },
+      });
+      return { output: '预算恢复后的交付' };
+    } };
+    const admissionRuntime = createWorkflowRunRuntime(indexedDbWorkflowRepository, admissionExecutor, currentWorkflowScope);
+    await admissionRuntime.create({ run: { ...run.run, id: admissionId, status: 'active' }, tasks: [{
+      id: 'admission', runId: admissionId, kind: 'agent_text', input: '生成报告', dependsOn: [], status: 'queued', attempt: 0, updatedAt: now,
+    }] });
+    const admissionPaused = await admissionRuntime.resume(admissionId);
+    if (admissionPaused.run.status !== 'paused' || admissionPaused.tasks[0].status !== 'queued'
+      || admissionPaused.tasks[0].modelInvocation.state !== 'rejected' || admissionRequests !== 1
+      || admissionPaused.run.pauseReason.includes('private')) throw new Error('Budget rejection was not safely paused');
+    const rejectedAttempts = await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), admissionId, 'admission');
+    if (rejectedAttempts[0]?.status !== 'failed') throw new Error('Rejected attempt was not persisted');
+    budgetAllowed = true;
+    const admissionRestored = createWorkflowRunRuntime(indexedDbWorkflowRepository, admissionExecutor, currentWorkflowScope);
+    const admissionDone = await admissionRestored.resume(admissionId);
+    if (admissionDone.run.status !== 'completed' || admissionRequests !== 2
+      || JSON.stringify((await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), admissionId, 'admission'))[0]) !== JSON.stringify(rejectedAttempts[0])) {
+      throw new Error('Budget resume lost the rejected attempt or repeated a request');
+    }
     const capabilityRunId = 'browser-collab-capability-' + crypto.randomUUID();
     let capabilityRepaired = false;
     let capabilityExecutions = 0;
@@ -785,8 +813,9 @@ try {
   })()`);
   assert.deepEqual(narrationRequest, { text: '旁白正文', workflowUsage: { schemaVersion: 1, runId: 'browser-narration', taskId: 'narration', attempt: 2, kind: 'tool' } });
   await cdp.evaluate(`(async () => {
-    const [{ useAuthStore }, { api }, { default: Panel }] = await Promise.all([
+    const [{ useAuthStore }, { api }, { default: Panel }, { default: BudgetPanel }] = await Promise.all([
       import('/src/stores/useAuthStore.ts'), import('/src/services/api.ts'), import('/src/components/chat/TeamUsagePanel.tsx'),
+      import('/src/components/chat/TeamBudgetPanel.tsx'),
     ]);
     const main = await (await fetch('/src/main.tsx')).text();
     const dependency = (name) => main.split('"').find((part) => part.startsWith('/node_modules/.vite/deps/' + name + '.js?'));
@@ -794,13 +823,18 @@ try {
     const React = react.default || react;
     const auth = useAuthStore.getState();
     const originalQuery = api.getWorkflowUsage;
+    const originalBudgetQuery = api.getWorkflowBudget;
+    const originalBudgetSave = api.configureWorkflowBudget;
     const container = document.createElement('div');
     container.id = 'workflow-usage-smoke';
     document.body.appendChild(container);
     const root = (dom.createRoot || dom.default?.createRoot)(container);
     window.__usageCalls = 0;
+    window.__budgetCalls = 0;
+    window.__budgetSaves = [];
     window.__usageCleanup = () => {
       root.unmount(); container.remove(); api.getWorkflowUsage = originalQuery;
+      api.getWorkflowBudget = originalBudgetQuery; api.configureWorkflowBudget = originalBudgetSave;
       useAuthStore.setState({ token: auth.token, isLoggedIn: auth.isLoggedIn });
     };
     api.getWorkflowUsage = async (runId) => {
@@ -811,20 +845,48 @@ try {
         { billingUnit: 'usd', settledAmount: '0.100000', reservedAmount: '0', settledRequests: 1, pendingRequests: 0, unpricedRequests: 0 },
       ] };
     };
+    api.getWorkflowBudget = async (runId) => {
+      if (runId !== 'fee-fixture') throw new Error('Wrong budget Run queried');
+      window.__budgetCalls++;
+      return null;
+    };
+    api.configureWorkflowBudget = async (runId, input) => {
+      window.__budgetSaves.push({ runId, ...input });
+      if (window.__budgetSaves.length > 1) throw new Error('预算已更新，请刷新后重试');
+      return { schemaVersion: 1, runId, billingUnit: input.billingUnit, limitAmount: '12.345678', revision: 1,
+        committedAmount: '3.000000', reservedAmount: '1.000000', remainingAmount: '9.345678',
+        exceeded: false, unresolvedRequests: 1, updatedAt: Date.now() };
+    };
     useAuthStore.setState({ token: 'browser-fixture-only', isLoggedIn: true });
-    root.render(React.createElement(Panel, { runId: 'fee-fixture' }));
+    root.render(React.createElement(React.Fragment, null,
+      React.createElement(Panel, { runId: 'fee-fixture' }),
+      React.createElement(BudgetPanel, { runId: 'fee-fixture', canEdit: true })));
   })()`);
   await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('#workflow-usage-smoke button'))`), 'on-demand fee action');
   assert.equal(await cdp.evaluate(`window.__usageCalls`), 0, 'Mounting must not query fees');
+  assert.equal(await cdp.evaluate(`window.__budgetCalls`), 0, 'Mounting must not query budgets');
   await cdp.evaluate(`document.querySelector('#workflow-usage-smoke button').click()`);
   await waitFor(() => cdp.evaluate(`document.querySelector('#workflow-usage-smoke [role="alert"]')?.textContent.includes('费用暂时不可用')`), 'fee error visible');
   await cdp.evaluate(`document.querySelector('#workflow-usage-smoke button').click()`);
   await waitFor(() => cdp.evaluate(`document.querySelector('#workflow-usage-smoke')?.textContent.includes('已结算 0.300003 积分')`), 'settled and reserved amounts visible');
   assert.match(await cdp.evaluate(`document.querySelector('#workflow-usage-smoke').textContent`), /预留 0.500000 积分.*费用未知 1 次.*0.100000 美元/s);
+  await cdp.evaluate(`Array.from(document.querySelectorAll('#workflow-usage-smoke button')).find((button) => button.textContent === '任务预算').click()`);
+  await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('#workflow-usage-smoke input'))`), 'budget editor available');
+  await cdp.evaluate(`document.querySelector('#workflow-usage-smoke input').focus()`);
+  await cdp.send('Input.insertText', { text: '12.345678' });
+  await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('#workflow-usage-smoke button')).some((button) => button.textContent === '保存预算' && !button.disabled)`), 'valid decimal budget');
+  await cdp.evaluate(`Array.from(document.querySelectorAll('#workflow-usage-smoke button')).find((button) => button.textContent === '保存预算').click()`);
+  await waitFor(() => cdp.evaluate(`document.querySelector('#workflow-usage-smoke')?.textContent.includes('剩余 9.345678 积分')`), 'saved budget and remaining amount');
+  assert.deepEqual(await cdp.evaluate(`window.__budgetSaves`), [{ runId: 'fee-fixture', limitAmount: '12.345678', billingUnit: 'point', expectedRevision: 0 }]);
+  assert.match(await cdp.evaluate(`document.querySelector('#workflow-usage-smoke').textContent`), /1 次调用的费用待核对/);
+  await cdp.evaluate(`Array.from(document.querySelectorAll('#workflow-usage-smoke button')).find((button) => button.textContent === '保存预算').click()`);
+  await waitFor(() => cdp.evaluate(`document.querySelector('#workflow-usage-smoke')?.textContent.includes('预算已更新，请刷新后重试')`), 'budget revision conflict surfaced');
+  assert.equal(await cdp.evaluate(`window.__budgetSaves[1].expectedRevision`), 1);
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   assert.equal(await cdp.evaluate(`document.querySelector('#workflow-usage-smoke').scrollWidth <= 390`), true);
   await cdp.send('Emulation.clearDeviceMetricsOverride');
   assert.equal(await cdp.evaluate(`window.__usageCalls`), 2, 'Rendering and resizing must not poll fees');
+  assert.equal(await cdp.evaluate(`window.__budgetCalls`), 1, 'Rendering and resizing must not poll budgets');
   await cdp.evaluate(`window.__usageCleanup()`);
   console.log(JSON.stringify({ ok: true, capabilityRecovery: await cdp.evaluate(`window.__assistantTeamSmoke.capabilityRecovery`), userResponse: await cdp.evaluate(`window.__assistantTeamSmoke.userResponse`), outputContractRetry: true, exactSavedTextRecovery: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } catch (error) {

@@ -7,6 +7,7 @@ import { generateAudioWithAdapter, generateImageWithAdapter, generateVideoWithAd
 import { waitForAiMediaTask } from './aiClient';
 import { readAuthSnapshot } from './authSnapshot';
 import { logRecoverableError, reportRecoverableError } from './diagnostics';
+import { workflowAdmissionRejection } from './workflowAdmission';
 import { redactAiDiagnosticValue } from './aiDiagnosticText';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
 import { synthesizeSpeech, usesManagedSpeechProfile } from './speech';
@@ -929,6 +930,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
     const errorText = uncertainSubmission
       ? '提交请求已中断，正在核对服务端是否已接收；确认前不会重新生成。'
       : toMediaGenerationErrorText(error, attachment.kind);
+    const admissionRejection = !entry.taskId ? workflowAdmissionRejection(error) : undefined;
     richMediaGenerationErrors.set(entry.id, {
       id: entry.id,
       title: attachment.kind === 'sticker' ? '聊天表情包搜索' : attachment.kind === 'image' ? '聊天图片生成' : attachment.kind === 'video' ? '聊天视频生成' : '聊天语音生成',
@@ -942,10 +944,12 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
       patch: {
         status: uncertainSubmission ? 'generating' : 'failed',
         error: errorText,
+        admissionRejection,
         generationJobId,
       },
       upsertMessage: entry.upsertMessage,
     });
+    if (admissionRejection && workingMessage.metadata?.agentTeamMedia) throw error;
   }
 }
 

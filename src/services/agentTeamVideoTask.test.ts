@@ -26,6 +26,45 @@ beforeEach(() => {
 });
 
 describe('agent team video task', () => {
+  it('reuses a persisted budget-rejected placeholder with the new attempt reference', async () => {
+    const usageReference = { schemaVersion: 1 as const, runId: 'budget-run', taskId: 'shot', attempt: 2, kind: 'tool' as const };
+    const message: Message = { id: 'budget-video', chatId: 'team-video-chat', type: 'ai', senderId: 'assistant', senderName: '助手', content: '视频', emotion: 0,
+      timestamp: 1, isDeleted: false, metadata: { agentTeamMedia: { runId: 'budget-run', taskId: 'shot' },
+        workflowUsage: { ...usageReference, attempt: 1 }, attachments: [{
+          id: 'attachment', kind: 'video', status: 'failed', altText: '视频', generationJobId: 'old-generation',
+          admissionRejection: { code: 'WORKFLOW_BUDGET_EXHAUSTED', status: 402 }, createdAt: 1, updatedAt: 2,
+        }] } };
+    useMessageStore.setState({ messages: [message] });
+    expect(inspectAgentTeamVideoAttachment('budget-run', 'shot')).toEqual({
+      status: 'queued', admissionRejected: true, error: '任务金额预算不足，请调整预算后继续。',
+    });
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message: current, upsertMessage }) => {
+      expect(current.id).toBe(message.id);
+      expect(current.metadata?.workflowUsage).toEqual(usageReference);
+      expect(current.metadata?.attachments?.[0]).toMatchObject({ status: 'queued', admissionRejection: undefined, generationJobId: undefined });
+      upsertMessage({ ...current, metadata: { ...current.metadata, attachments: current.metadata!.attachments!.map((item) => ({
+        ...item, status: 'generating', mediaTaskId: 'accepted-after-budget', updatedAt: Date.now(),
+      })) } });
+    });
+    expect(await queueAgentTeamVideo({ runId: 'budget-run', taskId: 'shot', chatId: 'team-video-chat', prompt: '森林',
+      usageReference, signal: new AbortController().signal })).toEqual({ externalTaskId: 'accepted-after-budget' });
+    expect(useMessageStore.getState().messages).toHaveLength(1);
+  });
+
+  it('does not resubmit an accepted video carrying stale admission metadata', async () => {
+    const message: Message = { id: 'accepted-video', chatId: 'team-video-chat', type: 'ai', senderId: 'assistant', senderName: '助手',
+      content: '视频', emotion: 0, timestamp: 1, isDeleted: false,
+      metadata: { agentTeamMedia: { runId: 'accepted-run', taskId: 'shot' }, attachments: [{
+        id: 'accepted-attachment', kind: 'video', status: 'failed', altText: '视频', mediaTaskId: 'already-accepted',
+        admissionRejection: { code: 'WORKFLOW_BUDGET_EXHAUSTED', status: 402 }, error: '已提交任务需要核对', createdAt: 1, updatedAt: 2,
+      }] } };
+    useMessageStore.setState({ messages: [message] });
+    await expect(queueAgentTeamVideo({ runId: 'accepted-run', taskId: 'shot', chatId: 'team-video-chat', prompt: '森林',
+      signal: new AbortController().signal })).rejects.toThrow('已提交任务需要核对');
+    expect(processRichMessageMedia).not.toHaveBeenCalled();
+    expect(useMessageStore.getState().messages[0]).toEqual(message);
+  });
+
   it('keeps the approved video model and dimensions when defaults change', async () => {
     useSettingsStore.setState({ aiProfiles: [{ ...videoProfile, model: 'different-model', videoDefaults: { aspectRatio: '9:16' } }] });
     const approvedProfile = { ...videoProfile, videoDefaults: { aspectRatio: '16:9', resolution: '720p', duration: 6 } };

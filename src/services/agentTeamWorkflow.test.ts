@@ -1859,12 +1859,13 @@ describe('agent team workflow', () => {
     expect(generate).not.toHaveBeenCalled();
   });
 
-  it.each(['reserved', 'started', 'accepted'] as const)('recovers the %s tool journal at application startup', async (state) => {
+  it.each(['reserved', 'started', 'accepted', 'rejected'] as const)('recovers the %s tool journal at application startup', async (state) => {
     const runId = `team-${crypto.randomUUID()}`;
     const scope = currentWorkflowScope();
     const now = Date.now();
     vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue(state === 'accepted'
-      ? { status: 'waiting_external', externalTaskId: 'accepted-job' } : null);
+      ? { status: 'waiting_external', externalTaskId: 'accepted-job' }
+      : state === 'rejected' ? { status: 'queued', admissionRejected: true, error: '任务金额预算不足，请调整预算后继续。' } : null);
     await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
       run: { id: runId, chatId: 'chat', goal: '制作视频', status: 'active', generation: 1, planVersion: 1, planOpen: true, updatedAt: now },
       tasks: [{ id: 'plan', runId, kind: 'team_plan', input: '制作视频', dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
@@ -1876,8 +1877,8 @@ describe('agent team workflow', () => {
     expect(await recoverAgentTeamRuns()).toBe(true);
     const saved = await indexedDbWorkflowRepository.read(scope, runId);
     expect(saved?.tasks[1]).toMatchObject({
-      status: state === 'reserved' ? 'queued' : state === 'accepted' ? 'waiting_external' : 'result_unknown',
-      toolInvocation: { state: state === 'reserved' ? 'not_started' : state === 'accepted' ? 'waiting_external' : 'result_unknown' },
+      status: state === 'reserved' || state === 'rejected' ? 'queued' : state === 'accepted' ? 'waiting_external' : 'result_unknown',
+      toolInvocation: { state: state === 'reserved' ? 'not_started' : state === 'accepted' ? 'waiting_external' : state === 'rejected' ? 'rejected' : 'result_unknown' },
     });
     expect(queueAgentTeamVideo).not.toHaveBeenCalled();
   });

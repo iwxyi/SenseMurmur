@@ -8,10 +8,12 @@ import type { WorkflowToolInvocation } from '../../services/workflowToolInvocati
 const invocationLabels: Record<WorkflowModelInvocation['state'], string> = {
   reserved: '等待调用模型', started: '模型请求已开始', succeeded: '模型请求已完成',
   failed: '模型调用后处理失败', result_unknown: '模型结果待核对', not_started: '未调用模型',
+  rejected: '请求因预算限制未获受理',
 };
 const toolInvocationLabels: Record<WorkflowToolInvocation['state'], string> = {
   reserved: '等待执行工具', started: '客户端已开始执行工具', waiting_external: '等待生成任务结果',
   succeeded: '工具执行已完成', failed: '工具执行失败', result_unknown: '工具结果待核对', not_started: '未执行工具',
+  rejected: '请求因预算限制未获受理',
 };
 
 interface Props { runId: string; taskId: string; updatedAt: number; statusLabels: Record<WorkflowTaskStatus, string> }

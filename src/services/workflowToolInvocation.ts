@@ -11,7 +11,7 @@ export interface WorkflowToolInvocation {
   attempt: number;
   kind: typeof WORKFLOW_TOOL_TASK_KINDS[number];
   planVersion: number;
-  state: 'reserved' | 'started' | 'waiting_external' | 'succeeded' | 'failed' | 'result_unknown' | 'not_started';
+  state: 'reserved' | 'started' | 'waiting_external' | 'succeeded' | 'failed' | 'result_unknown' | 'not_started' | 'rejected';
   reservedAt: number;
   startedAt?: number;
   finishedAt?: number;
@@ -41,7 +41,7 @@ export function parseWorkflowToolInvocation(raw: unknown): WorkflowToolInvocatio
     || typeof value.kind !== 'string' || !isWorkflowToolTask(value.kind)
     || value.operationKey !== workflowToolOperationKey(value.runId, value.taskId)
     || value.id !== workflowToolInvocationId(value.runId, value.taskId, Number(value.attempt))) throw new Error('工具调用关联无效');
-  if (!['reserved', 'started', 'waiting_external', 'succeeded', 'failed', 'result_unknown', 'not_started'].includes(String(value.state))) throw new Error('工具调用状态无效');
+  if (!['reserved', 'started', 'waiting_external', 'succeeded', 'failed', 'result_unknown', 'not_started', 'rejected'].includes(String(value.state))) throw new Error('工具调用状态无效');
   const unstarted = value.state === 'reserved' || value.state === 'not_started';
   const request = value.request === undefined ? undefined : parseWorkflowToolRequest(value.request);
   if (request && (unstarted || workflowToolRequestKind(request) !== value.kind)) throw new Error('工具请求摘要与调用不一致');

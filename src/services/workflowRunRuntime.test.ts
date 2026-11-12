@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowExecutionContext, type WorkflowSnapshot, type WorkflowTask } from './workflowRunRuntime';
+import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, reconcileWorkflowTaskInvocation, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowExecutionContext, type WorkflowSnapshot, type WorkflowTask } from './workflowRunRuntime';
 import { workflowModelInvocationId } from './workflowModelInvocation';
 import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
 import { workflowToolInvocationId, workflowToolOperationKey } from './workflowToolInvocation';
@@ -46,6 +46,81 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it.each(['model', 'tool'] as const)('pauses a rejected %s admission and resumes the whole run without losing its attempt', async (kind) => {
+    const id = crypto.randomUUID();
+    const scope = `admission-${id}`;
+    let allowed = false;
+    const execute = vi.fn(async (_task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => {
+      if (kind === 'model') await context.beginModelInvocation();
+      else await context.beginToolInvocation();
+      if (!allowed) throw Object.assign(new Error('internal details must not appear'), kind === 'model'
+        ? { diagnostic: { code: 'WORKFLOW_BUDGET_EXHAUSTED', status: 402 } }
+        : { code: 'WORKFLOW_BUDGET_EXHAUSTED', status: 402 });
+      return { output: '完成' };
+    });
+    const executor = { tracksModelInvocations: true, tracksToolInvocations: true, execute };
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, executor, () => scope);
+    await runtime.create({ run: snapshot(id).run,
+      tasks: [{ ...snapshot(id).tasks[0], kind: kind === 'model' ? 'agent_text' : 'agent_video' }] });
+    const paused = await runtime.resume(id);
+    expect(paused.run).toMatchObject({ status: 'paused', pauseReason: '任务金额预算不足，请调整预算后继续。' });
+    expect(paused.tasks[0]).toMatchObject({ status: 'queued', attempt: 1 });
+    const invocation = kind === 'model' ? paused.tasks[0].modelInvocation : paused.tasks[0].toolInvocation;
+    expect(invocation?.state).toBe('rejected');
+    expect(reconcileWorkflowTaskInvocation(paused.tasks[0])).toEqual(paused.tasks[0]);
+    const attempts = await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script');
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({ status: 'failed', attempt: 1 });
+    allowed = true;
+    const restored = createWorkflowRunRuntime(indexedDbWorkflowRepository, executor, () => scope);
+    const done = await restored.resume(id);
+    expect(done.run.status).toBe('completed');
+    expect(done.tasks[0]).toMatchObject({ status: 'completed', attempt: 2, output: '完成' });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect((await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script'))[0]).toEqual(attempts[0]);
+  });
+
+  it('keeps concurrent results when another request is rejected by the budget', async () => {
+    const id = crypto.randomUUID();
+    const scope = `admission-concurrent-${id}`;
+    let otherStarted!: () => void;
+    const started = new Promise<void>((resolve) => { otherStarted = resolve; });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksModelInvocations: true,
+      execute: async (task, _signal, context) => {
+        await context.beginModelInvocation();
+        if (task.id === 'script') {
+          await started;
+          throw Object.assign(new Error('budget'), { code: 'WORKFLOW_BUDGET_EXHAUSTED', status: 402 });
+        }
+        otherStarted();
+        return { output: '已经完成的工作' };
+      },
+    }, () => scope);
+    await runtime.create({ run: snapshot(id).run, tasks: snapshot(id).tasks.map((task) => ({
+      ...task, kind: 'agent_text', dependsOn: [], status: 'queued',
+    })) });
+    const result = await runtime.resume(id);
+    expect(result.run.status).toBe('paused');
+    expect(result.tasks[0].status).toBe('queued');
+    expect(result.tasks[1]).toMatchObject({ status: 'completed', output: '已经完成的工作' });
+  });
+
+  it.each([
+    { code: 'WORKFLOW_BUDGET_EXHAUSTED', status: 500 },
+    { code: 'ACE_UPSTREAM_REJECTED', status: 402 },
+    { code: 'WORKFLOW_BUDGET_SETTLEMENT_CONFLICT', status: 409 },
+  ])('preserves uncertainty for non-admission errors: $code/$status', async (details) => {
+    const id = crypto.randomUUID();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksModelInvocations: true,
+      execute: async (_task, _signal, context) => {
+        await context.beginModelInvocation();
+        throw Object.assign(new Error('request uncertain'), details);
+      },
+    }, () => `uncertain-${id}`);
+    await runtime.create({ run: snapshot(id).run, tasks: [{ ...snapshot(id).tasks[0], kind: 'agent_text' }] });
+    expect((await runtime.resume(id)).tasks[0].status).toBe('result_unknown');
+  });
+
   it.each(['run', 'task'] as const)('rejects unknown nested %s contract versions before execution', async (field) => {
     const id = crypto.randomUUID();
     const execute = vi.fn();
@@ -216,7 +291,7 @@ describe('workflow run runtime', () => {
     expect(result.tasks[0]).toMatchObject({ status: 'completed', toolInvocation: { request } });
   });
 
-  it.each(['reserved', 'started', 'accepted'] as const)('recovers a %s tool execution without resubmitting accepted media', async (state) => {
+  it.each(['reserved', 'started', 'accepted', 'rejected'] as const)('recovers a %s tool execution without resubmitting accepted media', async (state) => {
     const id = crypto.randomUUID();
     const scope = `recover-tool-${id}`;
     const initial = snapshot(id);
@@ -229,15 +304,21 @@ describe('workflow run runtime', () => {
       await context.beginToolInvocation();
       return { output: '已完成' };
     });
-    const reconcileInterrupted = vi.fn(async () => state === 'accepted' ? { status: 'waiting_external' as const, externalTaskId: 'saved-task' } : null);
+    const reconcileInterrupted = vi.fn(async () => state === 'accepted'
+      ? { status: 'waiting_external' as const, externalTaskId: 'saved-task' }
+      : state === 'rejected' ? { status: 'queued' as const, admissionRejected: true as const, error: '任务金额预算不足，请调整预算后继续。' } : null);
     const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksToolInvocations: true, execute, reconcileInterrupted,
       inspectExternal: async () => ({ status: 'completed', output: '已领取文件' }) }, () => scope);
     await runtime.create(initial);
     const result = await runtime.resume(id);
-    expect(result.tasks[0].status).toBe(state === 'started' ? 'result_unknown' : 'completed');
-    expect(result.tasks[0].toolInvocation?.state).toBe(state === 'started' ? 'result_unknown' : 'succeeded');
+    expect(result.tasks[0].status).toBe(state === 'started' ? 'result_unknown' : state === 'rejected' ? 'queued' : 'completed');
+    expect(result.tasks[0].toolInvocation?.state).toBe(state === 'started' ? 'result_unknown' : state === 'rejected' ? 'rejected' : 'succeeded');
     expect(execute).toHaveBeenCalledTimes(state === 'reserved' ? 1 : 0);
     expect(reconcileInterrupted).toHaveBeenCalledTimes(state === 'reserved' ? 0 : 1);
+    if (state === 'rejected') {
+      expect(result.run).toMatchObject({ status: 'paused', pauseReason: '任务金额预算不足，请调整预算后继续。' });
+      return;
+    }
     await runtime.resume(id);
     expect(execute).toHaveBeenCalledTimes(state === 'reserved' ? 1 : 0);
   });

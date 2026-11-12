@@ -8,7 +8,7 @@ export interface WorkflowModelInvocation {
   runId: string;
   taskId: string;
   attempt: number;
-  state: 'reserved' | 'started' | 'succeeded' | 'failed' | 'result_unknown' | 'not_started';
+  state: 'reserved' | 'started' | 'succeeded' | 'failed' | 'result_unknown' | 'not_started' | 'rejected';
   reservedAt: number;
   startedAt?: number;
   finishedAt?: number;
@@ -30,7 +30,7 @@ export function parseWorkflowModelInvocation(raw: unknown): WorkflowModelInvocat
   if (typeof value.runId !== 'string' || !value.runId || typeof value.taskId !== 'string' || !value.taskId
     || !Number.isSafeInteger(value.attempt) || Number(value.attempt) < 1
     || value.id !== workflowModelInvocationId(value.runId, value.taskId, Number(value.attempt))) throw new Error('模型调用关联无效');
-  if (!['reserved', 'started', 'succeeded', 'failed', 'result_unknown', 'not_started'].includes(String(value.state))) throw new Error('模型调用状态无效');
+  if (!['reserved', 'started', 'succeeded', 'failed', 'result_unknown', 'not_started', 'rejected'].includes(String(value.state))) throw new Error('模型调用状态无效');
   if (!Number.isFinite(value.reservedAt)
     || (value.startedAt !== undefined && (!Number.isFinite(value.startedAt) || Number(value.startedAt) < Number(value.reservedAt)))
     || (value.finishedAt !== undefined && (!Number.isFinite(value.finishedAt) || Number(value.finishedAt) < Number(value.startedAt ?? value.reservedAt)))) throw new Error('模型调用时间无效');

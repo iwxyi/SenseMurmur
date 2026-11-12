@@ -2,7 +2,7 @@ import { getUsablePreferredAIProfile, normalizeImageCapabilities, resolveAIModel
 import { generateWorkflowModelResponse as generateResponse } from './workflowModelResponse';
 import { directTeamMediaReferences, planAgentTeam, teamTaskMediaKind, validateAgentTeamPlan, type AgentTeamPlan, type AgentTeamTask } from './agentTeamPlan';
 import { assertTeamMediaOutput, resolveTeamDelegationMedia, resolveTeamMediaTask } from './agentTeamMediaReference';
-import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, invocationUnstarted, reconcileWorkflowTaskInvocation, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
+import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, invocationUnstarted, reconcileWorkflowTaskInvocation, rejectWorkflowTaskAdmission, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
 import { ensureAssistantArtifactStoreHydrated, useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
@@ -1406,16 +1406,19 @@ export async function recoverAgentTeamRuns() {
               return { ...task, status: result ? 'completed' : 'queued', output: result?.output, error: undefined, updatedAt: Date.now() };
             }
             const image = task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(task.runId, task.id) : null;
-            if (image?.status === 'queued') return { ...task, status: 'queued', updatedAt: Date.now() };
+            if (image?.status === 'queued') return 'admissionRejected' in image
+              ? rejectWorkflowTaskAdmission(task, image.error) : { ...task, status: 'queued', updatedAt: Date.now() };
             if (image?.status === 'completed') return { ...task, status: 'completed', output: image.output, updatedAt: Date.now() };
             if (image?.status === 'failed') return { ...task, status: 'failed', error: image.error, updatedAt: Date.now() };
             const audio = task.kind === 'agent_audio' ? inspectAgentTeamAudioAttachment(task.runId, task.id) : null;
-            if (audio?.status === 'queued') return { ...task, status: 'queued', updatedAt: Date.now() };
+            if (audio?.status === 'queued') return 'admissionRejected' in audio
+              ? rejectWorkflowTaskAdmission(task, audio.error) : { ...task, status: 'queued', updatedAt: Date.now() };
             if (audio?.status === 'waiting_external') return { ...task, status: 'waiting_external', externalTaskId: audio.externalTaskId, updatedAt: Date.now() };
             if (audio?.status === 'completed') return { ...task, status: 'completed', output: audio.output, updatedAt: Date.now() };
             if (audio?.status === 'failed') return { ...task, status: 'failed', error: audio.error, updatedAt: Date.now() };
             const video = task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(task.runId, task.id) : null;
-            if (video?.status === 'queued') return { ...task, status: 'queued', updatedAt: Date.now() };
+            if (video?.status === 'queued') return 'admissionRejected' in video
+              ? rejectWorkflowTaskAdmission(task, video.error) : { ...task, status: 'queued', updatedAt: Date.now() };
             if (video?.status === 'waiting_external') return { ...task, status: 'waiting_external', externalTaskId: video.externalTaskId, updatedAt: Date.now() };
             if (video?.status === 'completed') return { ...task, status: 'completed', output: video.output, updatedAt: Date.now() };
             if (video?.status === 'failed') return { ...task, status: 'failed', error: video.error, updatedAt: Date.now() };

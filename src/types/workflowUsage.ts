@@ -18,3 +18,17 @@ export interface WorkflowUsageSummary {
     unpricedRequests: number;
   }>;
 }
+
+export interface WorkflowBudget {
+  schemaVersion: 1;
+  runId: string;
+  billingUnit: string;
+  limitAmount: string;
+  revision: number;
+  committedAmount: string;
+  reservedAmount: string;
+  remainingAmount: string;
+  exceeded: boolean;
+  unresolvedRequests: number;
+  updatedAt: number;
+}
