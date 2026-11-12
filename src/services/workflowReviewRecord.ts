@@ -8,6 +8,7 @@ export interface WorkflowReviewVerdict {
 }
 
 export interface WorkflowReviewRecord extends WorkflowReviewVerdict {
+  progress?: WorkflowReviewProgress;
   schemaVersion: 1;
   runId: string;
   taskId: string;
@@ -17,6 +18,13 @@ export interface WorkflowReviewRecord extends WorkflowReviewVerdict {
   criteriaSha256: string;
   evidenceSha256: string;
   sources: Array<{ taskId: string; kind: string; attempt: number; outputSha256: string }>;
+}
+
+export interface WorkflowReviewProgress {
+  previousReviewTaskId: string;
+  comparisonSha256: string;
+  status: 'advanced' | 'stalled' | 'uncertain';
+  reason: string;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -38,6 +46,15 @@ function digest(value: unknown): value is string { return typeof value === 'stri
 export function parseWorkflowReviewRecord(value: unknown): WorkflowReviewRecord {
   const entry = record(value);
   const verdict = parseWorkflowReviewVerdict(entry);
+  let progress: WorkflowReviewProgress | undefined;
+  if (entry.progress !== undefined) {
+    const value = record(entry.progress);
+    if (!nonempty(value.previousReviewTaskId) || !digest(value.comparisonSha256)
+      || typeof value.status !== 'string' || !['advanced', 'stalled', 'uncertain'].includes(value.status)
+      || !nonempty(value.reason) || value.reason.length > 1000) throw new Error('验收进展比较无效');
+    progress = { previousReviewTaskId: value.previousReviewTaskId, comparisonSha256: value.comparisonSha256,
+      status: value.status as WorkflowReviewProgress['status'], reason: value.reason };
+  }
   if (entry.schemaVersion !== 1 || !nonempty(entry.runId) || !nonempty(entry.taskId)
     || !positive(entry.attempt) || !positive(entry.planVersion)
     || typeof entry.reviewedAt !== 'number' || !Number.isFinite(entry.reviewedAt) || entry.reviewedAt < 0
@@ -53,7 +70,7 @@ export function parseWorkflowReviewRecord(value: unknown): WorkflowReviewRecord 
   });
   return { ...verdict, schemaVersion: 1, runId: entry.runId, taskId: entry.taskId, attempt: entry.attempt,
     planVersion: entry.planVersion, reviewedAt: entry.reviewedAt, criteriaSha256: entry.criteriaSha256,
-    evidenceSha256: entry.evidenceSha256, sources };
+    evidenceSha256: entry.evidenceSha256, sources, ...(progress ? { progress } : {}) };
 }
 
 // Bind the actual summarized evidence, while retaining hashes of the full source outputs.
@@ -75,5 +92,5 @@ export function prepareWorkflowReviewRecord(snapshot: WorkflowSnapshot, taskId: 
     criteriaSha256: workflowJsonDigest({ goal: snapshot.run.goal, goalSpec: snapshot.run.goalSpec, finalAcceptance }),
     evidenceSha256: workflowJsonDigest(evidence), sources };
   parseWorkflowReviewRecord({ ...basis, complete: true, reason: '验收依据校验', reviewedAt: Date.now() });
-  return (verdict: WorkflowReviewVerdict): WorkflowReviewRecord => parseWorkflowReviewRecord({ ...verdict, ...basis, reviewedAt: Date.now() });
+  return (verdict: WorkflowReviewVerdict, progress?: WorkflowReviewProgress): WorkflowReviewRecord => parseWorkflowReviewRecord({ ...verdict, ...basis, ...(progress ? { progress } : {}), reviewedAt: Date.now() });
 }

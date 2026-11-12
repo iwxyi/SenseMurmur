@@ -68,6 +68,16 @@ describe('versioned workflow reviews', () => {
     expect(parseWorkflowReviewRecord({ ...result, apiKey: 'secret' })).toEqual(result);
   });
 
+  it('persists bounded progress provenance and rejects malformed comparisons', () => {
+    const finish = prepareWorkflowReviewRecord(fixture(), 'review', '可读', evidence);
+    const progress = { previousReviewTaskId: 'previous', comparisonSha256: 'a'.repeat(64), status: 'stalled' as const, reason: '只有改写' };
+    const result = finish({ complete: false, reason: '缺少来源', nextRequest: '查找资料' }, progress);
+    expect(parseWorkflowReviewRecord(structuredClone(result)).progress).toEqual(progress);
+    for (const change of [{ previousReviewTaskId: '' }, { comparisonSha256: 'bad' }, { status: ['stalled'] }, { status: 'unknown' }, { reason: '' }, { reason: 'x'.repeat(1001) }]) {
+      expect(() => parseWorkflowReviewRecord({ ...result, progress: { ...progress, ...change } })).toThrow('进展比较无效');
+    }
+  });
+
   it('rejects unclaimed review tasks and incomplete sources', () => {
     const snapshot = fixture();
     snapshot.tasks[1].status = 'queued';

@@ -1084,13 +1084,14 @@ describe('agent team workflow', () => {
     })).rejects.toThrow('验收记录不可修改');
     expect(generate).toHaveBeenCalledTimes(6);
   });
-  it('pauses repeated automatic revisions with unchanged evidence and remains blocked after restart', async () => {
+  it.each([false, true])('pauses stalled revisions and remains blocked after restart (paraphrased: %s)', async (paraphrased) => {
     const runId = crypto.randomUUID();
     const plan = { summary: '研究', roles: [{ id: 'writer', name: '研究员', responsibility: '研究', method: '核对来源', acceptance: '有来源', allowedTools: ['text_generation'] }],
       tasks: [{ id: 'research', roleId: 'writer', goal: '研究问题', dependsOn: [], acceptance: '有来源' }], finalAcceptance: '结论有来源' };
     const verdict = JSON.stringify({ complete: false, reason: '缺少来源', nextRequest: '补充来源' });
     generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('目前缺少来源')
-      .mockResolvedValueOnce(verdict).mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('目前缺少来源').mockResolvedValueOnce(verdict);
+      .mockResolvedValueOnce(verdict).mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce(paraphrased ? '暂时尚无资料，稍后继续查询' : '目前缺少来源')
+      .mockResolvedValueOnce(paraphrased ? JSON.stringify({ complete: false, reason: '没有新增资料', nextRequest: '查找可核验公开资料', progress: { status: 'stalled', reason: '只有改写和承诺，没有新增来源' } }) : verdict);
     const scope = `team-stalled-${runId}`;
     const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
     const workflow = createAgentTeamWorkflow(config, () => scope);
@@ -1098,12 +1099,34 @@ describe('agent team workflow', () => {
     expect(result.snapshot.run.status).toBe('paused');
     expect(result.snapshot.tasks.find((task) => task.id === 'review_needs_user')?.error).toContain('没有产生新的文本交付');
     expect(result.snapshot.tasks.some((task) => task.id === 'auto_delegate_2')).toBe(false);
+    if (paraphrased) {
+      expect(result.snapshot.tasks.find((task) => task.id === 'review_2')?.output).toMatchObject({ progress: { status: 'stalled', previousReviewTaskId: 'review_1' } });
+      expect(generate.mock.calls[5][1]).toContain('完整文字证据');
+      expect(generate.mock.calls[5][1]).toContain('暂时尚无资料，稍后继续查询');
+    }
     const restarted = createAgentTeamWorkflow(config, () => scope);
     await restarted.resume(runId);
     expect(generate).toHaveBeenCalledTimes(6);
     const updated = await restarted.addRevisionRequest(runId, result.snapshot.run.planVersion, '明确只使用已提供资料');
     expect(updated.tasks.some((task) => task.id === 'review_needs_user')).toBe(false);
   });
+  it.each(['advanced', 'uncertain'])('continues automatic revision when progress is %s', async (status) => {
+    const runId = crypto.randomUUID();
+    const plan = { summary: '研究', roles: [{ id: 'writer', name: '研究员', responsibility: '研究', method: '核对', acceptance: '有来源', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'research', roleId: 'writer', goal: '研究问题', dependsOn: [], acceptance: '有来源' }], finalAcceptance: '结论有来源' };
+    generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('尚无资料')
+      .mockResolvedValueOnce(JSON.stringify({ complete: false, reason: '缺少来源', nextRequest: '补充来源' }))
+      .mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('找到资料线索，尚需核对')
+      .mockResolvedValueOnce(JSON.stringify({ complete: false, reason: '尚需核对', nextRequest: '核对资料线索', progress: { status, reason: '新增了可核对线索' } }))
+      .mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('已核对资料，结论完整')
+      .mockResolvedValueOnce(JSON.stringify({ complete: true, reason: '已完成' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `progress-${runId}`);
+    const result = await workflow.start(runId, 'chat', '研究问题', true);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks.some((task) => task.id === 'review_needs_user')).toBe(false);
+    expect(generate).toHaveBeenCalledTimes(9);
+  });
+
   it('retains early media evidence when a long run has later text results', async () => {
     const runId = crypto.randomUUID();
     const now = Date.now();

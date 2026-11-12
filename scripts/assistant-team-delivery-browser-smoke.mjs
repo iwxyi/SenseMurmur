@@ -166,7 +166,9 @@ try {
       useAssistantArtifactStore.setState((state) => ({ items: state.items.map((item) => item.id === table.id ? edited.item : item) }));
       const stalledPlan = { ...plan, tasks: [plan.tasks[0]] };
       const verdict = JSON.stringify({ complete: false, reason: '缺少公开来源', nextRequest: '补充公开来源' });
-      responseSequence = [JSON.stringify(stalledPlan), '目前没有来源', verdict, JSON.stringify(stalledPlan), '目前没有来源', verdict];
+      const stalledVerdict = JSON.stringify({ complete: false, reason: '依然没有可核验资料', nextRequest: '查找公开数据并引用',
+        progress: { status: 'stalled', reason: '只改写了缺少来源的表述，没有新增资料' } });
+      responseSequence = [JSON.stringify(stalledPlan), '目前没有来源', verdict, JSON.stringify(stalledPlan), '尚未找到资料，稍后继续研究', stalledVerdict];
       const stalledRunId = 'stalled-' + crypto.randomUUID();
       const stalled = await workflow.start(stalledRunId, chatId, '研究市场且结论必须有来源', true);
       if (stalled.snapshot.run.status !== 'paused') throw new Error('重复返工未暂停');
@@ -178,6 +180,8 @@ try {
       if (requests.length !== deliveryModelCalls + 6) throw new Error('重新打开后重复了无进展请求');
       const stalledModelCalls = requests.length - deliveryModelCalls;
       const reviewRecords = stalled.snapshot.tasks.filter((task) => task.kind === 'team_review').map((task) => task.output);
+      if (reviewRecords[1]?.progress?.status !== 'stalled' || reviewRecords[1]?.progress?.previousReviewTaskId !== 'review_1'
+        || !/^[a-f0-9]{64}$/.test(reviewRecords[1]?.progress?.comparisonSha256)) throw new Error('语义无进展判断未关联比较依据');
       if (reviewRecords.length !== 2 || reviewRecords.some((review) => review.schemaVersion !== 1
         || !review.sources.length || !/^[a-f0-9]{64}$/.test(review.evidenceSha256)
         || JSON.stringify(review).includes('目前没有来源'))) throw new Error('验收缺少依据摘要或复制了原文');
