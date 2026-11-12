@@ -193,6 +193,7 @@ function sameAgentTeamRole(left: AgentTeamPlan['roles'][number], right: AgentTea
   const leftTools = new Set(left.allowedTools);
   const rightTools = new Set(right.allowedTools);
   return left.id === right.id
+    && (left.schemaVersion ?? 1) === (right.schemaVersion ?? 1)
     && left.name === right.name
     && left.responsibility === right.responsibility
     && left.method === right.method
@@ -205,6 +206,7 @@ function sameAgentTeamTask(left: AgentTeamPlan['tasks'][number], right: AgentTea
   const leftDependencies = new Set(left.dependsOn);
   const rightDependencies = new Set(right.dependsOn);
   return left.id === right.id
+    && (left.schemaVersion ?? 1) === (right.schemaVersion ?? 1)
     && left.roleId === right.roleId
     && left.goal === right.goal
     && left.acceptance === right.acceptance

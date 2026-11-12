@@ -1,6 +1,7 @@
 import type { WorkflowSnapshot, WorkflowTask, WorkflowTaskStatus } from './workflowRunRuntime';
 import { parseWorkflowModelInvocation, type WorkflowModelInvocation } from './workflowModelInvocation';
 import { parseWorkflowToolInvocation, type WorkflowToolInvocation } from './workflowToolInvocation';
+import { workflowJsonDigest } from './workflowToolRequest';
 
 export interface WorkflowTaskAttempt {
   schemaVersion: 1;
@@ -14,6 +15,7 @@ export interface WorkflowTaskAttempt {
   updatedAt: number;
   finishedAt?: number;
   status: WorkflowTaskStatus;
+  definitionSha256?: string;
   externalTaskId?: string;
   modelInvocation?: WorkflowModelInvocation;
   toolInvocation?: WorkflowToolInvocation;
@@ -35,6 +37,8 @@ export function parseWorkflowTaskAttempt(raw: unknown): WorkflowTaskAttempt {
       || Number(value.finishedAt) > Number(value.updatedAt)))) throw new Error('任务执行记录时间无效');
   if (!['queued', 'running', 'waiting_dependency', 'waiting_external', 'waiting_user', 'result_unknown', 'completed', 'failed', 'cancelled', 'abandoned'].includes(String(value.status))) throw new Error('任务执行记录状态无效');
   if (value.externalTaskId !== undefined && typeof value.externalTaskId !== 'string') throw new Error('任务执行记录外部关联无效');
+  if (value.definitionSha256 !== undefined && (typeof value.definitionSha256 !== 'string'
+    || !/^[a-f0-9]{64}$/.test(value.definitionSha256))) throw new Error('任务执行记录定义摘要无效');
   const modelInvocation = value.modelInvocation === undefined ? undefined : parseWorkflowModelInvocation(value.modelInvocation);
   if (modelInvocation && (modelInvocation.runId !== value.runId || modelInvocation.taskId !== value.taskId || modelInvocation.attempt !== value.attempt)) throw new Error('任务执行记录调用关联无效');
   const toolInvocation = value.toolInvocation === undefined ? undefined : parseWorkflowToolInvocation(value.toolInvocation);
@@ -44,6 +48,7 @@ export function parseWorkflowTaskAttempt(raw: unknown): WorkflowTaskAttempt {
     schemaVersion: 1, runId: value.runId as string, taskId: value.taskId as string, kind: value.kind as string,
     attempt: value.attempt as number, generation: value.generation as number, planVersion: value.planVersion as number,
     startedAt: value.startedAt as number, updatedAt: value.updatedAt as number, status: value.status as WorkflowTaskStatus,
+    ...(value.definitionSha256 === undefined ? {} : { definitionSha256: value.definitionSha256 as string }),
     ...(value.finishedAt === undefined ? {} : { finishedAt: value.finishedAt as number }),
     ...(value.externalTaskId === undefined ? {} : { externalTaskId: value.externalTaskId as string }),
     ...(modelInvocation ? { modelInvocation } : {}),
@@ -53,9 +58,15 @@ export function parseWorkflowTaskAttempt(raw: unknown): WorkflowTaskAttempt {
 
 export function claimedTaskAttempt(snapshot: WorkflowSnapshot, task: WorkflowTask): WorkflowTaskAttempt {
   return { schemaVersion: 1, runId: task.runId, taskId: task.id, kind: task.kind, attempt: task.attempt,
+    definitionSha256: workflowTaskDefinitionDigest(task),
     generation: snapshot.run.generation, planVersion: snapshot.run.planVersion, status: 'running', startedAt: task.updatedAt, updatedAt: task.updatedAt,
     ...(task.modelInvocation ? { modelInvocation: task.modelInvocation } : {}),
     ...(task.toolInvocation ? { toolInvocation: task.toolInvocation } : {}) };
+}
+
+export function workflowTaskDefinitionDigest(task: WorkflowTask): string {
+  return workflowJsonDigest({ schemaVersion: task.schemaVersion ?? 1, runId: task.runId, id: task.id,
+    kind: task.kind, input: task.input, dependsOn: task.dependsOn });
 }
 
 export function settleTaskAttempt(attempt: WorkflowTaskAttempt, task: WorkflowTask): WorkflowTaskAttempt {

@@ -156,6 +156,7 @@ describe('agent team plan', () => {
     expect(plan.tasks[1].dependsOn).toEqual(['research']);
     expect(plan.schemaVersion).toBe(1);
     expect(plan.roles[0].schemaVersion).toBe(1);
+    expect(plan.tasks[0].schemaVersion).toBe(1);
   });
 
   it('accepts forty shot tasks while keeping a hard plan limit', () => {
@@ -173,11 +174,14 @@ describe('agent team plan', () => {
 
   it('migrates legacy plans and roles in memory while rejecting unknown contract versions', () => {
     const legacy = validateAgentTeamPlan(valid());
-    expect(legacy).toMatchObject({ schemaVersion: 1, roles: [{ schemaVersion: 1 }] });
+    expect(legacy).toMatchObject({ schemaVersion: 1, roles: [{ schemaVersion: 1 }], tasks: [{ schemaVersion: 1 }, { schemaVersion: 1 }] });
     expect(() => validateAgentTeamPlan({ ...valid(), schemaVersion: 2 })).toThrow('团队计划版本不受支持');
     const unsupportedRole = valid();
     unsupportedRole.roles[0] = { ...unsupportedRole.roles[0], schemaVersion: 2 } as typeof unsupportedRole.roles[number];
     expect(() => validateAgentTeamPlan(unsupportedRole)).toThrow('岗位契约版本不受支持');
+    const unsupportedTask = valid();
+    Object.assign(unsupportedTask.tasks[0], { schemaVersion: 2 });
+    expect(() => validateAgentTeamPlan(unsupportedTask)).toThrow('任务契约版本不受支持');
   });
 
   it('validates optional typed deliverables and preserves legacy tasks without one', () => {

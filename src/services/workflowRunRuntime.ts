@@ -16,6 +16,7 @@ import { assertWorkflowUserResponse, createWorkflowUserResponse, type WorkflowUs
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
 export interface WorkflowTask {
+  schemaVersion?: 1;
   id: string;
   runId: string;
   dependsOn: string[];
@@ -35,6 +36,7 @@ export interface WorkflowTask {
 }
 
 export interface WorkflowRun {
+  schemaVersion?: 1;
   id: string;
   chatId: string;
   goal: string;
@@ -95,6 +97,7 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
   if (value.schemaVersion !== undefined && value.schemaVersion !== 1) throw new Error('工作流快照版本不受支持');
   const run = value.run;
   const tasks = value.tasks;
+  if (run.schemaVersion !== undefined && run.schemaVersion !== 1) throw new Error('工作流运行契约版本不受支持');
   assertNonEmptyString(run.id, '运行 ID');
   assertNonEmptyString(run.chatId, '会话 ID');
   assertNonEmptyString(run.goal, '目标');
@@ -124,6 +127,7 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
   const taskIds = new Set<string>();
   for (const candidate of value.tasks) {
     if (!isRecord(candidate)) throw new Error('工作流任务结构无效');
+    if (candidate.schemaVersion !== undefined && candidate.schemaVersion !== 1) throw new Error('工作流任务契约版本不受支持');
     assertNonEmptyString(candidate.id, '任务 ID');
     assertNonEmptyString(candidate.runId, '任务运行 ID');
     assertNonEmptyString(candidate.kind, '任务类型');
@@ -177,7 +181,9 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
 
 function migrateWorkflowSnapshot(value: unknown): WorkflowSnapshot {
   assertWorkflowSnapshot(value);
-  return value.schemaVersion === 1 ? value : { ...value, schemaVersion: 1 };
+  if (value.schemaVersion === 1 && value.run.schemaVersion === 1 && value.tasks.every((task) => task.schemaVersion === 1)) return value;
+  return { ...value, schemaVersion: 1, run: { ...value.run, schemaVersion: 1 },
+    tasks: value.tasks.map((task) => task.schemaVersion === 1 ? task : { ...task, schemaVersion: 1 }) };
 }
 
 export interface WorkflowResumeSummary {
@@ -601,6 +607,10 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
               if (!nextTask || JSON.stringify(nextTask.input) !== JSON.stringify(task.input)) throw new Error('已保存的定向修订不可修改');
             }
             const nextTask = migratedNext.tasks.find((item) => item.id === task.id);
+            if (task.attempt > 0 && task.status !== 'completed' && (!nextTask || nextTask.kind !== task.kind
+              || JSON.stringify(nextTask.input) !== JSON.stringify(task.input))) {
+              throw new Error('已开始的任务定义不可修改，请追加新任务进行修订');
+            }
             if (task.userResponse && JSON.stringify(task.userResponse) !== JSON.stringify(nextTask?.userResponse)) throw new Error('已保存的用户答复不可修改');
             if (task.kind === 'team_review' && isRecord(task.input) && task.input.schemaVersion === 2
               && (!nextTask || nextTask.kind !== task.kind || JSON.stringify(nextTask.input) !== JSON.stringify(task.input)

@@ -2006,7 +2006,7 @@ describe('agent team workflow', () => {
     expect(generate).not.toHaveBeenCalled();
   });
 
-  it('resumes legacy task inputs after role schema migration without treating normalization as tampering', async () => {
+  it.each(['legacy', 'task-version', 'role-version'] as const)('validates saved task and role contract versions before requests: %s', async (variant) => {
     const runId = `team-${crypto.randomUUID()}`;
     const scope = 'team-legacy-role-version-test';
     const plan = {
@@ -2016,21 +2016,27 @@ describe('agent team workflow', () => {
       finalAcceptance: '可阅读',
     };
     const now = Date.now();
+    const taskInput = { task: { acceptance: '成稿', dependsOn: [], goal: '写报告', roleId: 'writer', id: 'write' },
+      role: { ...plan.roles[0] }, goal: '写报告' };
+    if (variant !== 'legacy') Object.assign(variant === 'task-version' ? taskInput.task : taskInput.role, { schemaVersion: 2 });
     const scoped = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
     await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
       run: { id: runId, chatId: 'chat', goal: '写报告', status: 'paused', generation: 1, planVersion: 2, planOpen: true, updatedAt: now },
       tasks: [
         { id: 'plan', runId, kind: 'team_plan', input: '写报告', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
-        { id: 'write', runId, kind: 'agent_text', input: {
-          task: { acceptance: '成稿', dependsOn: [], goal: '写报告', roleId: 'writer', id: 'write' },
-          role: plan.roles[0], goal: '写报告',
-        }, dependsOn: ['plan'], status: 'queued', attempt: 0, updatedAt: now },
+        { id: 'write', runId, kind: 'agent_text', input: taskInput, dependsOn: ['plan'], status: 'queued', attempt: 0, updatedAt: now },
       ],
     }, value: undefined }));
 
-    generate.mockResolvedValueOnce('已完成的报告');
+    if (variant === 'legacy') generate.mockResolvedValueOnce('已完成的报告');
     const resumed = await scoped.resume(runId);
-
+    if (variant !== 'legacy') {
+      expect(resumed.snapshot.tasks.find((task) => task.id === 'write')).toMatchObject({
+        status: 'failed', modelInvocation: { state: 'not_started' },
+      });
+      expect(generate).not.toHaveBeenCalled();
+      return;
+    }
     expect(resumed.snapshot.run.status).toBe('completed');
     expect(resumed.snapshot.tasks.find((task) => task.id === 'write')?.output).toBe('已完成的报告');
     expect(generate).toHaveBeenCalledOnce();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseWorkflowTaskAttempt, settleTaskAttempt, type WorkflowTaskAttempt } from './workflowTaskAttempt';
+import { claimedTaskAttempt, parseWorkflowTaskAttempt, settleTaskAttempt, workflowTaskDefinitionDigest, type WorkflowTaskAttempt } from './workflowTaskAttempt';
 import type { WorkflowTask } from './workflowRunRuntime';
 
 const attempt: WorkflowTaskAttempt = {
@@ -11,6 +11,20 @@ const task: WorkflowTask = {
 };
 
 describe('task attempt contract', () => {
+  it('binds each claim to the task definition without copying its private input', () => {
+    const source = { ...task, input: { prompt: 'private prompt', revision: 1 }, status: 'running' as const };
+    const claimed = claimedTaskAttempt({ run: { id: 'run', chatId: 'chat', goal: 'goal', status: 'active',
+      generation: 0, planVersion: 2, updatedAt: 30 }, tasks: [source] }, source);
+    expect(claimed.definitionSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(claimed.definitionSha256).toBe(workflowTaskDefinitionDigest({ ...source, schemaVersion: 1,
+      input: { revision: 1, prompt: 'private prompt' } }));
+    expect(workflowTaskDefinitionDigest({ ...source, input: { prompt: 'changed' } })).not.toBe(claimed.definitionSha256);
+    expect(workflowTaskDefinitionDigest({ ...source, dependsOn: ['other'] })).not.toBe(claimed.definitionSha256);
+    expect(JSON.stringify(claimed)).not.toContain('private prompt');
+    expect(parseWorkflowTaskAttempt(claimed)).toEqual(claimed);
+    expect(settleTaskAttempt(claimed, { ...source, status: 'completed' }).definitionSha256).toBe(claimed.definitionSha256);
+    expect(() => parseWorkflowTaskAttempt({ ...claimed, definitionSha256: 'invalid' })).toThrow('定义摘要');
+  });
   it('rejects unknown versions, invalid counters and inconsistent times', () => {
     expect(() => parseWorkflowTaskAttempt({ ...attempt, schemaVersion: 2 })).toThrow('版本');
     expect(() => parseWorkflowTaskAttempt({ ...attempt, attempt: 0 })).toThrow('代次');

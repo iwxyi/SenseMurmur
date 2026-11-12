@@ -329,6 +329,14 @@ try {
     const interruptedVersions = restoredIntent.artifacts.map((entry) => entry.after.currentVersionId);
     if (JSON.stringify(interruptedVersions) !== JSON.stringify(${JSON.stringify(result.interruptedVersions)})) throw new Error('恢复替换了原清单版本');
     const snapshot = await indexedDbWorkflowRepository.read(currentWorkflowScope(), runId);
+    const { workflowTaskDefinitionDigest } = await import('/src/services/workflowTaskAttempt.ts');
+    if (snapshot.schemaVersion !== 1 || snapshot.run.schemaVersion !== 1 || snapshot.tasks.some((task) => task.schemaVersion !== 1)) throw new Error('刷新后丢失运行或任务契约版本');
+    const definitionDigests = [];
+    for (const task of snapshot.tasks) {
+      const attempts = await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), runId, task.id);
+      if (attempts.length !== 1 || attempts[0].definitionSha256 !== workflowTaskDefinitionDigest(task)) throw new Error('刷新后执行记录未绑定真实任务定义');
+      definitionDigests.push(attempts[0].definitionSha256);
+    }
     const messages = [...useMessageStore.getState().messages, ...(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages || [])];
     const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId).filter((item) => item.sourceMessageId.startsWith('team-delivery-' + runId));
     const { getAssistantArtifactDataPreview } = await import('/src/services/assistantArtifactData.ts');
@@ -337,10 +345,11 @@ try {
     const resumedArtifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId).filter((item) => item.sourceMessageId.startsWith('team-delivery-' + interruptedRunId));
     if (resumedArtifacts.length !== 2 || resumedArtifacts.some((item) => item.versions.length !== 1)) throw new Error('清单恢复重复或丢失产物');
     return { published: snapshot?.run.deliveryStatus === 'published',
+      versionedDefinitions: definitionDigests.length === 3,
       message: messages.some((item) => item.id === 'team-delivery-' + runId),
       artifacts: artifacts.length, versions: artifacts.map((item) => item.versions.length).sort() };
   })()`);
-  assert.deepEqual(restored, { published: true, message: true, artifacts: 2, versions: [1, 2] });
+  assert.deepEqual(restored, { published: true, versionedDefinitions: true, message: true, artifacts: 2, versions: [1, 2] });
   delete result.runId;
   delete result.chatId;
   delete result.interruptedRunId;
@@ -351,6 +360,7 @@ try {
   result.intentRecovery = true;
   result.toolReloadRecovery = true;
   result.reviewReloadRecovery = true;
+  result.versionedTaskRecovery = true;
   console.log(JSON.stringify({ ok: true, ...result }));
 } finally {
   await cdp.evaluate('window.__cleanupDeliveryFixture?.()').catch((error) => console.error('Fixture cleanup failed:', error));

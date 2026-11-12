@@ -45,6 +45,38 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it.each(['run', 'task'] as const)('rejects unknown nested %s contract versions before execution', async (field) => {
+    const id = crypto.randomUUID();
+    const execute = vi.fn();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => 'nested-contract');
+    const initial = snapshot(id);
+    Object.assign(field === 'run' ? initial.run : initial.tasks[0], { schemaVersion: 2 });
+    await expect(runtime.create(initial)).rejects.toThrow('契约版本不受支持');
+    expect(await runtime.read(id)).toBeNull();
+    expect(execute).not.toHaveBeenCalled();
+    expect(await indexedDbWorkflowRepository.listEvents('nested-contract', id)).toEqual([]);
+  });
+
+  it.each(['running', 'waiting_external', 'result_unknown', 'failed', 'queued'] as const)(
+    'preserves started task definitions during %s and rolls back all records', async (status) => {
+      const id = crypto.randomUUID();
+      const scope = `definition-${id}`;
+      const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => scope);
+      const initial = snapshot(id);
+      initial.run.status = 'paused';
+      initial.tasks[0] = { ...initial.tasks[0], status, attempt: 1 };
+      await runtime.create(initial);
+      const before = await runtime.read(id);
+      const events = await indexedDbWorkflowRepository.listEvents(scope, id);
+      await expect(indexedDbWorkflowRepository.transact(scope, id, (current) => {
+        current!.tasks[0].input = 'changed after claim';
+        current!.run.planVersion += 1;
+        return { snapshot: current!, value: undefined };
+      })).rejects.toThrow('已开始的任务定义不可修改');
+      expect(await runtime.read(id)).toEqual(before);
+      expect(await indexedDbWorkflowRepository.listEvents(scope, id)).toEqual(events);
+      expect(await indexedDbWorkflowRepository.listPlanRevisions(scope, id)).toEqual([]);
+    });
   it.each(['output', 'input', 'attempt', 'status', 'kind', 'dependsOn', 'expansion', 'externalTaskId', 'remove'] as const)(
     'preserves completed task evidence and atomically rejects changes to %s', async (field) => {
       const id = crypto.randomUUID();
@@ -844,6 +876,8 @@ describe('workflow run runtime', () => {
     db.close();
     const migrated = await runtime.read(id);
     expect(migrated?.schemaVersion).toBe(1);
+    expect(migrated?.run.schemaVersion).toBe(1);
+    expect(migrated?.tasks.every((task) => task.schemaVersion === 1)).toBe(true);
     expect(migrated?.tasks[0]).toMatchObject({ status: 'completed', output: '已交付', attempt: 1 });
     expect(migrated?.tasks).toHaveLength(2);
     expect(await indexedDbWorkflowRepository.listTaskAttempts('test', id, 'script')).toEqual([]);

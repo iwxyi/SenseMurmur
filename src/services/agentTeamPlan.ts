@@ -17,6 +17,7 @@ export interface AgentTeamRole {
 }
 
 export interface AgentTeamTask {
+  schemaVersion?: 1;
   id: string;
   roleId: string;
   goal: string;
@@ -103,6 +104,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   if (roleIds.size !== roles.length) throw new Error('岗位 ID 重复');
   const tasks = source.tasks.map((item): AgentTeamTask => {
     const value = record(item);
+    if (value.schemaVersion !== undefined && value.schemaVersion !== 1) throw new Error('任务契约版本不受支持');
     const roleId = identifier(value.roleId, '任务岗位 ID');
     if (!roleIds.has(roleId)) throw new Error('任务引用了不存在的岗位');
     const tool = value.tool === undefined ? 'text_generation' : value.tool;
@@ -175,6 +177,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
       };
     }
     return {
+      schemaVersion: 1,
       id: identifier(value.id, '任务 ID'),
       roleId,
       goal: requiredText(value.goal, '任务目标', 1200),
