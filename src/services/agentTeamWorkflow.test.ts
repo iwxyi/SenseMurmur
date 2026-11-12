@@ -589,8 +589,18 @@ describe('agent team workflow', () => {
     expect(finished.snapshot.run.status).toBe('completed');
     expect(finished.snapshot.tasks.find((task) => task.id === 'auto_delegate_1_report')?.output).toBe('完整报告');
     expect(finished.snapshot.tasks.filter((task) => task.kind === 'team_review')).toHaveLength(2);
+    const reviews = finished.snapshot.tasks.filter((task) => task.kind === 'team_review');
+    expect(reviews[0].output).toMatchObject({ schemaVersion: 1, runId, taskId: 'review_1', attempt: 1,
+      sources: [{ taskId: 'research', kind: 'agent_text', attempt: 1 }] });
+    expect(reviews[1].output).toMatchObject({ schemaVersion: 1, taskId: 'review_2', complete: true });
+    const saved = JSON.stringify(reviews.map((task) => task.output));
     expect(generate.mock.calls[2][2][0].content).toContain('最终验收标准：报告可读');
-    await workflow.resume(runId);
+    const resumed = await workflow.resume(runId);
+    expect(JSON.stringify(resumed.snapshot.tasks.filter((task) => task.kind === 'team_review').map((task) => task.output))).toBe(saved);
+    await expect(indexedDbWorkflowRepository.transact('team-auto-review-test', runId, (current) => {
+      if (!current) throw new Error('Missing run');
+      return { snapshot: { ...current, tasks: current.tasks.map((task) => task.id === 'review_1' ? { ...task, output: { complete: true, reason: '篡改结论' } } : task) }, value: undefined };
+    })).rejects.toThrow('验收记录不可修改');
     expect(generate).toHaveBeenCalledTimes(6);
   });
   it('pauses repeated automatic revisions with unchanged evidence and remains blocked after restart', async () => {

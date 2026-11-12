@@ -7,6 +7,7 @@ import { isWorkflowModelTask, parseWorkflowModelInvocation, workflowModelInvocat
 import { copyWorkflowDelivery, parseWorkflowDelivery, type WorkflowDelivery, type WorkflowDeliveryBranch, type WorkflowDeliveryIssue } from './workflowDelivery';
 import { isWorkflowToolTask, parseWorkflowToolInvocation, workflowToolInvocationId, workflowToolOperationKey, type WorkflowToolInvocation } from './workflowToolInvocation';
 import { parseWorkflowToolRequest, workflowToolRequestKind, type WorkflowToolRequest } from './workflowToolRequest';
+import { parseWorkflowReviewRecord } from './workflowReviewRecord';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -125,6 +126,11 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
     if (new Set(candidate.dependsOn).size !== candidate.dependsOn.length) throw new Error('工作流任务依赖重复');
     if (!TASK_STATUSES.has(candidate.status as WorkflowTaskStatus)) throw new Error('工作流任务状态无效');
     if (!Number.isSafeInteger(candidate.attempt) || (candidate.attempt as number) < 0) throw new Error('工作流任务尝试次数无效');
+    if (candidate.kind === 'team_review' && isRecord(candidate.output) && candidate.output.schemaVersion !== undefined) {
+      const review = parseWorkflowReviewRecord(candidate.output);
+      if (review.runId !== run.id || review.taskId !== candidate.id || review.attempt !== candidate.attempt
+        || review.planVersion > Number(run.planVersion) || candidate.status !== 'completed') throw new Error('验收记录归属无效');
+    }
     if (candidate.unstartedModelAttempts !== undefined && (!isWorkflowModelTask(candidate.kind)
       || !Number.isSafeInteger(candidate.unstartedModelAttempts) || Number(candidate.unstartedModelAttempts) < 0
       || Number(candidate.unstartedModelAttempts) > Number(candidate.attempt))) throw new Error('工作流未调用次数无效');
@@ -565,6 +571,11 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
           const migratedCurrent = current === undefined ? null : migrateWorkflowSnapshot(current);
           const next = update(migratedCurrent === null ? null : structuredClone(migratedCurrent));
           const migratedNext = migrateWorkflowSnapshot(next.snapshot);
+          for (const task of migratedCurrent?.tasks ?? []) {
+            if (task.kind !== 'team_review' || !isRecord(task.output) || task.output.schemaVersion === undefined) continue;
+            const nextTask = migratedNext.tasks.find((item) => item.id === task.id);
+            if (!nextTask || nextTask.attempt !== task.attempt || JSON.stringify(nextTask.output) !== JSON.stringify(task.output)) throw new Error('已保存的验收记录不可修改');
+          }
           if (migratedCurrent && JSON.stringify(migratedCurrent.run.goalSpec) !== JSON.stringify(migratedNext.run.goalSpec)) {
             const before = migratedCurrent.run;
             const after = migratedNext.run;

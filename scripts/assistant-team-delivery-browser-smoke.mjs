@@ -169,6 +169,10 @@ try {
       await restarted.resume(stalledRunId);
       if (requests.length !== deliveryModelCalls + 6) throw new Error('重新打开后重复了无进展请求');
       const stalledModelCalls = requests.length - deliveryModelCalls;
+      const reviewRecords = stalled.snapshot.tasks.filter((task) => task.kind === 'team_review').map((task) => task.output);
+      if (reviewRecords.length !== 2 || reviewRecords.some((review) => review.schemaVersion !== 1
+        || !review.sources.length || !/^[a-f0-9]{64}$/.test(review.evidenceSha256)
+        || JSON.stringify(review).includes('目前没有来源'))) throw new Error('验收缺少依据摘要或复制了原文');
       const interruptedRunId = 'browser-team-delivery-' + crypto.randomUUID();
       responseSequence = [JSON.stringify(plan), '中断后应恢复的报告', '| 类别 | 数量 |\\n| A | 3 |'];
       await workflow.start(interruptedRunId, chatId, '验证交付清单恢复');
@@ -210,6 +214,8 @@ try {
           && messages[0]?.metadata?.branching?.parentNodeId === 'source-node',
         stalledStatus: stalled.snapshot.run.status,
         stalledModelCalls,
+        stalledRunId,
+        reviewRecords,
       };
     } finally { window.fetch = originalFetch; }
   })()`);
@@ -279,6 +285,13 @@ try {
     if (JSON.stringify(toolAttempts[0].toolInvocation.request) !== JSON.stringify(tools.tasks[0].toolInvocation.request)) throw new Error('任务历史与快照的请求摘要不一致');
     const interruptedRunId = ${JSON.stringify(result.interruptedRunId)};
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'browser-smoke', baseUrl: 'https://mock-llm.invalid/v1', model: 'smoke-model' }, currentWorkflowScope);
+    const stalledRunId = ${JSON.stringify(result.stalledRunId)};
+    const stalledBefore = await workflow.read(stalledRunId);
+    const reviewRecords = stalledBefore.tasks.filter((task) => task.kind === 'team_review').map((task) => task.output);
+    if (JSON.stringify(reviewRecords) !== JSON.stringify(${JSON.stringify(result.reviewRecords)})) throw new Error('刷新丢失或修改了历史验收依据');
+    await workflow.resume(stalledRunId);
+    const stalledAfter = await workflow.read(stalledRunId);
+    if (JSON.stringify(stalledAfter.tasks.filter((task) => task.kind === 'team_review').map((task) => task.output)) !== JSON.stringify(reviewRecords)) throw new Error('恢复重新生成了验收记录');
     await workflow.publish(interruptedRunId);
     await workflow.publish(interruptedRunId);
     const restoredIntent = (await workflow.read(interruptedRunId)).run.delivery;
@@ -298,9 +311,12 @@ try {
   delete result.chatId;
   delete result.interruptedRunId;
   delete result.interruptedVersions;
+  delete result.stalledRunId;
+  delete result.reviewRecords;
   result.reloadRecovery = true;
   result.intentRecovery = true;
   result.toolReloadRecovery = true;
+  result.reviewReloadRecovery = true;
   console.log(JSON.stringify({ ok: true, ...result }));
 } finally {
   await cdp.evaluate('window.__cleanupDeliveryFixture?.()').catch((error) => console.error('Fixture cleanup failed:', error));
