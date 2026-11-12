@@ -278,7 +278,17 @@ export default defineConfig(({ mode }) => {
           clientsClaim: false,
           skipWaiting: false,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+          globIgnores: ['**/ffmpeg-core*'],
           runtimeCaching: [
+            {
+              urlPattern: /\/assets\/ffmpeg-core-[^/]+\.(?:js|wasm)$/,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'local-media-composition-engine',
+                expiration: { maxEntries: 4, maxAgeSeconds: 60 * 60 * 24 * 90 },
+                cacheableResponse: { statuses: [200] },
+              },
+            },
             {
               urlPattern: /\/uploads\/avatars\/.*/i,
               handler: 'CacheFirst',

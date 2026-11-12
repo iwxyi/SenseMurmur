@@ -13,6 +13,9 @@ import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReferenc
 import { inspectAgentTeamImages } from './agentTeamImageInspection';
 import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
 import { conversationExecutionLockName } from './conversationExecutionLock';
+import { composeAgentTeamMedia, inspectAgentTeamComposition } from './agentTeamMediaComposition';
+
+vi.mock('./agentTeamMediaComposition', () => ({ canComposeTeamMedia: () => true, composeAgentTeamMedia: vi.fn(), inspectAgentTeamComposition: vi.fn() }));
 
 vi.mock('./agentTeamImageInspection', () => ({ inspectAgentTeamImages: vi.fn() }));
 vi.mock('./agentTeamAudioTask', () => ({ inspectAgentTeamAudioAttachment: vi.fn(), queueAgentTeamAudio: vi.fn() }));
@@ -92,9 +95,40 @@ beforeEach(() => {
   vi.mocked(inspectAgentTeamImages).mockReset();
   vi.mocked(inspectAgentTeamAudioAttachment).mockReset();
   vi.mocked(queueAgentTeamAudio).mockReset();
+  vi.mocked(composeAgentTeamMedia).mockReset();
+  vi.mocked(inspectAgentTeamComposition).mockReset();
 });
 
 describe('agent team workflow', () => {
+  it.each(['running', 'failed', 'result_unknown'] as const)('resumes %s local composition without resubmitting completed media', async (status) => {
+    const runId = crypto.randomUUID();
+    const scope = `composition-${runId}`;
+    const now = Date.now();
+    const role = { id: 'director', name: '导演', responsibility: '制作', method: '剪辑', acceptance: '成片', allowedTools: ['video_generation', 'media_composition'] };
+    const tasks = [
+      { id: 'shot', roleId: role.id, goal: '拍摄', dependsOn: [], tool: 'video_generation', acceptance: '可播放' },
+      { id: 'film', roleId: role.id, goal: '合成', dependsOn: ['shot'], tool: 'media_composition', acceptance: '可播放', composition: { clips: [{ taskId: 'shot' }] } },
+    ];
+    const plan = { roles: [role], tasks, summary: '短片', finalAcceptance: '成片' };
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
+      run: { id: runId, chatId: 'chat', goal: '生成短片', status: 'paused', generation: 1, planVersion: 1, planOpen: false, updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '生成短片', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        ...tasks.map((task) => ({ id: task.id, runId, kind: task.id === 'shot' ? 'agent_video' : 'agent_media_composition',
+          input: { task, role, goal: '生成短片' }, dependsOn: ['plan', ...task.dependsOn], status: task.id === 'shot' ? 'completed' as const : status, attempt: 1, updatedAt: now })),
+      ],
+    }, value: undefined }));
+    vi.mocked(composeAgentTeamMedia).mockResolvedValue({ output: '成片已保存' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const result = await workflow.resume(runId);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks[2]).toMatchObject({ status: 'completed', attempt: 2 });
+    expect(composeAgentTeamMedia).toHaveBeenCalledTimes(1);
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+    await workflow.resume(runId);
+    expect(composeAgentTeamMedia).toHaveBeenCalledTimes(1);
+  });
+
   it('executes and persists a forty-step dependent plan across the expanded capacity', async () => {
     const runId = crypto.randomUUID();
     const chatId = `forty-step-${runId}`;

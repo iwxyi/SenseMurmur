@@ -24,10 +24,11 @@ import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReferenc
 import { inspectAgentTeamImages } from './agentTeamImageInspection';
 import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
 import { listAvailableModels } from './aiClient';
+import { canComposeTeamMedia, composeAgentTeamMedia, inspectAgentTeamComposition } from './agentTeamMediaComposition';
 
 const TOOL_TASK_KINDS = {
   text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio',
-  image_inspection: 'agent_image_inspection', video_generation: 'agent_video',
+  image_inspection: 'agent_image_inspection', video_generation: 'agent_video', media_composition: 'agent_media_composition',
 } as const;
 
 function teamTaskKind(task: AgentTeamTask) { return TOOL_TASK_KINDS[task.tool || 'text_generation']; }
@@ -47,7 +48,8 @@ async function teamMediaCapabilities() {
   const imageCapabilities = normalizeImageCapabilities(imageProfile?.imageCapabilities);
   const media = { imageGeneration: Boolean(imageProfile), imageReferenceImages: Boolean(imageProfile && imageCapabilities.referenceImage),
     maxImageReferenceImages: imageProfile && imageCapabilities.referenceImage ? imageCapabilities.multiReferenceImage ? undefined : 1 : 0,
-    audioGeneration: Boolean(audioProfile), imageInspection: Boolean(imageProfile && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput) };
+    audioGeneration: Boolean(audioProfile), imageInspection: Boolean(imageProfile && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput),
+    mediaComposition: canComposeTeamMedia() };
   const videoProfile = getUsablePreferredAIProfile(profiles, 'video');
   if (!videoProfile) return { ...media, videoGeneration: false, videoReferenceImages: false, videoRequiresReferenceImage: false, maxVideoReferenceImages: 0, videoUnavailableReason: '当前未配置视频模型' };
   let videoReferenceImages = false;
@@ -173,6 +175,7 @@ function sameAgentTeamTask(left: AgentTeamPlan['tasks'][number], right: AgentTea
     && left.deliverable?.kind === right.deliverable?.kind
     && left.deliverable?.title === right.deliverable?.title
     && left.deliverable?.language === right.deliverable?.language
+    && JSON.stringify(left.composition) === JSON.stringify(right.composition)
     && leftDependencies.size === rightDependencies.size
     && [...leftDependencies].every((id) => rightDependencies.has(id));
 }
@@ -200,6 +203,7 @@ function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<R
   if (!webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索');
   if (!capabilities.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');
   if (!capabilities.audioGeneration && plan.tasks.some((task) => task.tool === 'audio_generation')) throw new WorkflowPreflightError('当前未配置音乐生成模型');
+  if (!capabilities.mediaComposition && plan.tasks.some((task) => task.tool === 'media_composition')) throw new WorkflowPreflightError('此设备不支持本地音视频合成');
   if (!capabilities.imageInspection && plan.tasks.some((task) => task.tool === 'image_inspection')) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
   if (!capabilities.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
   const byId = new Map(plan.tasks.map((task) => [task.id, task]));
@@ -292,6 +296,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const selectedTool = input.task.tool || 'text_generation';
       if (task.kind !== teamTaskKind(input.task)) throw new WorkflowPreflightError('团队任务工具与计划不一致');
       if (signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
+      if (selectedTool === 'media_composition') {
+        if (!input.task.composition) throw new WorkflowPreflightError('缺少音视频合成配置');
+        return composeAgentTeamMedia({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          plan: input.task.composition, resolveTaskId: (id) => input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id, signal });
+      }
       if (selectedTool === 'image_generation') {
         const imageTaskIds = input.task.dependsOn.filter((id) => plan.tasks.find((item) => item.id === id)?.tool === 'image_generation');
         const imageProfile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image');
@@ -430,6 +439,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       return { status: 'pending' as const };
     },
     async reconcileInterrupted(task) {
+      if (task.kind === 'agent_media_composition') return inspectAgentTeamComposition(task.runId, task.id) || { status: 'queued' as const };
       if (task.kind === 'agent_image') return inspectAgentTeamImageAttachment(task.runId, task.id);
       if (task.kind === 'agent_audio') return inspectAgentTeamAudioAttachment(task.runId, task.id);
       if (task.kind !== 'agent_video') return null;
@@ -558,6 +568,23 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const beforeResume = await runtime.read(runId);
       if (beforeResume?.tasks.some((task) => task.id === 'review_needs_user' && task.status === 'waiting_user')) {
         return { snapshot: beforeResume, summary: summarizeWorkflowRun(beforeResume) };
+      }
+      if (beforeResume?.tasks.some((task) => task.kind === 'agent_media_composition' && (task.status === 'failed' || task.status === 'result_unknown'))) {
+        const storageScope = scope();
+        if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务执行');
+        await navigator.locks.request(workflowRunLockName(storageScope, runId), { ifAvailable: true }, async (lock) => {
+          if (!lock) throw new Error('团队任务正在执行，请暂停后重试');
+          if (scope() !== storageScope) throw new Error('账号已切换，任务恢复已停止');
+          await indexedDbWorkflowRepository.transact(storageScope, runId, (current) => {
+            if (!current) throw new Error('团队任务记录不存在');
+            if (current.run.status === 'completed' || current.run.status === 'cancelled') return { snapshot: current, value: undefined };
+            return { snapshot: { ...current, tasks: current.tasks.map((task) => {
+              if (task.kind !== 'agent_media_composition' || (task.status !== 'failed' && task.status !== 'result_unknown')) return task;
+              const result = inspectAgentTeamComposition(runId, task.id);
+              return { ...task, status: result ? 'completed' as const : 'queued' as const, output: result?.output, error: undefined, updatedAt: Date.now() };
+            }) }, value: undefined };
+          });
+        });
       }
       if (beforeResume && beforeResume.tasks.some((task) => (task.status === 'failed' || task.status === 'result_unknown')
         && (task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(runId, task.id)?.status : task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(runId, task.id)?.status : task.kind === 'agent_audio' ? inspectAgentTeamAudioAttachment(runId, task.id)?.status : null) === 'completed')) {
@@ -956,6 +983,10 @@ export async function recoverAgentTeamRuns() {
           run: { ...current.run, status: 'paused', generation: current.run.generation + 1, updatedAt: Date.now() },
           tasks: current.tasks.map((task) => {
             if (task.status !== 'running') return task;
+            if (task.kind === 'agent_media_composition') {
+              const result = inspectAgentTeamComposition(task.runId, task.id);
+              return { ...task, status: result ? 'completed' : 'queued', output: result?.output, error: undefined, updatedAt: Date.now() };
+            }
             const image = task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(task.runId, task.id) : null;
             if (image?.status === 'queued') return { ...task, status: 'queued', updatedAt: Date.now() };
             if (image?.status === 'completed') return { ...task, status: 'completed', output: image.output, updatedAt: Date.now() };
