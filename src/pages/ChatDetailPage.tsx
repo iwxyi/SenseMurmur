@@ -50,7 +50,7 @@ import { useChatSurfaceActions } from '../hooks/useChatSurfaceActions';
 import { useReplyOperation } from '../hooks/useReplyOperation';
 import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, getAssistantBackgroundStreamingSnapshot, listAssistantBackgroundReplies, resumeAssistantBackgroundReply, retryAssistantBackgroundReply, subscribeAssistantBackgroundReplies, subscribeAssistantBackgroundRunChanges, subscribeAssistantBackgroundStreaming } from '../services/assistantBackgroundReply';
 import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
-import { abandonAgentTeamReview, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamTask, retryAgentTeamReview, runAgentTeam, saveAgentTeamDeliveryCopy, subscribeAgentTeamRuns, updateAgentTeamDeadline, updateAgentTeamModelCallLimit } from '../services/agentTeamWorkflow';
+import { abandonAgentTeamReview, answerAgentTeamUserInput, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamTask, retryAgentTeamReview, runAgentTeam, saveAgentTeamDeliveryCopy, subscribeAgentTeamRuns, updateAgentTeamDeadline, updateAgentTeamModelCallLimit } from '../services/agentTeamWorkflow';
 import { defaultWorkflowGoalSpec } from '../services/workflowGoalSpec';
 import { getDirectBackgroundRevision, isDirectBackgroundActive, listDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply, subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
 import { getAiDirectBackgroundRevision, isAiDirectBackgroundActive, listAiDirectBackgroundReplies, resumeAiDirectBackgroundReply, startAiDirectBackgroundReply, subscribeAiDirectBackgroundReplies } from '../services/aiDirectBackgroundReply';
@@ -4632,6 +4632,10 @@ export default function ChatDetailPage() {
           }}
           onCreate={() => setTeamGoalOpen(true)}
           onInstruct={async (selected, task, instruction) => { await instructAgentTeamTask({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, instruction }); }}
+          onAnswer={async (selected, task, answer) => {
+            await answerAgentTeamUserInput({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, answer });
+            void runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id }).catch((error) => showErrorToast(error instanceof Error ? error.message : '答复已保存，继续团队任务失败'));
+          }}
           onPause={async (selected) => { await pauseAgentTeamAfterCurrentBatch(selected.run.id); }}
           onUpdateModelCallLimit={async (selected, maxModelCalls) => { await updateAgentTeamModelCallLimit({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, maxModelCalls }); }}
           onUpdateDeadline={async (selected, deadlineAt) => { await updateAgentTeamDeadline({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, deadlineAt }); }}

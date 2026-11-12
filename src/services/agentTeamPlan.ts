@@ -108,6 +108,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     const tool = value.tool === undefined ? 'text_generation' : value.tool;
     if (typeof tool !== 'string' || !TOOLS.has(tool)) throw new Error('任务申请了不可用工具');
     const selectedTool = tool as AgentTeamRole['allowedTools'][number];
+    if (selectedTool === 'user_input' && value.deliverable !== undefined) throw new Error('用户提问不能声明生成产物');
     if (value.mediaOutput !== undefined && (tool !== 'delegate_task' || !['image', 'video', 'audio'].includes(String(value.mediaOutput)))) throw new Error('只有委派任务可以声明有效的媒体交付类型');
     if (!rolesById.get(roleId)?.allowedTools.includes(selectedTool)) throw new Error('任务使用了岗位未获授权的工具');
     if (!Array.isArray(value.dependsOn) || value.dependsOn.length > (tool === 'media_composition' ? 48 : 8)
@@ -218,7 +219,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     throw new Error('视频检查必须直接依赖唯一的视频生成或合成任务');
   }
   if (tasks.some((task) => task.tool === 'audio_generation'
-    && task.dependsOn.some((id) => !['text_generation', 'web_search'].includes(tasksById.get(id)?.tool || 'text_generation')))) {
+    && task.dependsOn.some((id) => !['text_generation', 'web_search', 'user_input'].includes(tasksById.get(id)?.tool || 'text_generation')))) {
     throw new Error('音乐任务目前只能依赖文字歌词或说明');
   }
   for (const task of tasks.filter((item) => item.tool === 'speech_generation')) {
@@ -236,7 +237,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
       const source = tasksById.get(id)!;
       return source.tool === 'delegate_task'
         ? Boolean(source.mediaOutput && source.mediaOutput !== 'image')
-        : !['text_generation', 'web_search', 'image_inspection', 'image_generation'].includes(source.tool || 'text_generation');
+        : !['text_generation', 'web_search', 'user_input', 'image_inspection', 'image_generation'].includes(source.tool || 'text_generation');
     }))) {
     throw new Error('图片任务只能依赖文字或已生成图片，不能读取音频与视频附件');
   }
@@ -290,6 +291,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     params.savedMedia?.length ? `可复用历史素材目录：${JSON.stringify(params.savedMedia)}。优先复用符合要求的素材，不重新生成。任务可增加 savedMedia:[{"alias":"old_clip","taskId":"目录中的原任务标识","kind":"video","attempt":1,"outputSha256":"目录中的完整摘要"}]，除 alias 外必须逐字复制目录字段。dependsOn 只列本次新计划任务，不列历史素材别名。media_composition 接收历史视频/音频，在 composition.clips/audioTracks 中使用 alias；image_generation、image_inspection、video_generation 仅接收历史图片，自动将全部 savedMedia 图片作为参考或检查输入；video_inspection 接收唯一历史视频。检查任务允许使用历史素材替代新计划内的媒体依赖。参考图仍受当前模型能力和数量限制，不支持参考图时不得使用历史图片生成。历史素材可与本次新生成素材混用。不能使用目录外素材、猜测任务标识或将摘要当文件地址。` : '本次没有授权复用的历史素材目录，不得声明 savedMedia。',
     params.savedText?.length ? `可复用历史文字交付目录：${JSON.stringify(params.savedText)}。text_generation、image_generation、video_generation、audio_generation、delegate_task 可声明 savedText:[{"alias":"original_script","taskId":"目录中的原任务标识","attempt":1,"outputSha256":"目录中的完整摘要"}]，除 alias 外逐字复制目录字段，最多8份；系统会按版本提供完整正文（每份最多12000字符），不要为读取原稿而重新创作。dependsOn 只列新计划任务，不列历史别名。speech_generation 可仅指定一份 savedText，并声明 speech:{"textTaskId":"original_script"} 与 dependsOn:[]，逐字朗读该正文；不得同时指定 literal text 或其他历史正文。别名不能与本计划任务或历史素材别名重名。目录摘要仅绑定当时文字记录，不保证其中事实已核实。` : '本次没有授权复用的历史文字目录，不得声明 savedText。',
     params.savedText?.some((entry) => entry.artifact) ? '历史文字目录中带 artifact:{id,versionId,filePath?} 的条目对应用户当前选中的产物版本；filePath 表示该版本中的指定文本文件，不带 filePath 表示单正文。不带 artifact 的条目对应任务原始交付。用户要求使用修改后的稿件或项目文件时，优先选择相应 artifact 条目，完整复制 artifact 和摘要。同一来源每个文件最多选一份版本，可用不同 alias 引用多个文件；仍最多8份。系统固定读取所选版本，不会随产物后续编辑而自动切换；缺失或正文变化会明确报错。此入口不读取图片、音视频或 HTML 交互状态。' : '',
+    '另开放 user_input 用户提问工具：只有必须由用户补充关键信息才能继续时使用，goal 是清晰具体的问题，可依赖已完成步骤。系统等待用户真实答复，后续任务通过 dependsOn 读取答复；不得猜测答复或代替用户确认。它不扩大工具授权，不代表费用或外部操作的审批。用户已经要求自主完成时优先合理决策，避免不必要的追问。不为提问声明 deliverable。',
     '只为需要用户单独打开、复用或编辑的任务声明 deliverable；可选类型 document、table、code、diagram、html、json、text。交付契约 schemaVersion 为 1，格式为 {"schemaVersion":1,"kind":"table","title":"市场比较表","language":"csv"}。json 交付必须是可解析的纯 JSON；字段要求写入任务验收标准。未声明时仍会纳入团队总结，不要给搜索、图片/音频/视频生成等每个步骤机械创建文字产物。只输出 JSON：{"schemaVersion":1,"summary":"...","roles":[{"schemaVersion":1,"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"...","deliverable":{"schemaVersion":1,"kind":"table","title":"比较表","language":"csv"}}],"finalAcceptance":"..."}',
   ].join('\n'), [{ role: 'user', content: goal + (context ? `\n${context}` : '') }], undefined, {
     responseFormat: 'json', maxTokens: 10_000, signal: params.signal,

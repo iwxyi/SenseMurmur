@@ -6,11 +6,12 @@ import { parseWorkflowGoalSpec, workflowDeadlineBlockReason, type WorkflowGoalSp
 import { isWorkflowModelTask, parseWorkflowModelInvocation, workflowModelInvocationId, type WorkflowModelInvocation } from './workflowModelInvocation';
 import { copyWorkflowDelivery, parseWorkflowDelivery, type WorkflowDelivery, type WorkflowDeliveryBranch, type WorkflowDeliveryIssue } from './workflowDelivery';
 import { isWorkflowToolTask, parseWorkflowToolInvocation, workflowToolInvocationId, workflowToolOperationKey, type WorkflowToolInvocation } from './workflowToolInvocation';
-import { parseWorkflowToolRequest, workflowToolRequestKind, type WorkflowToolRequest } from './workflowToolRequest';
+import { parseWorkflowToolRequest, workflowJsonDigest, workflowToolRequestKind, type WorkflowToolRequest } from './workflowToolRequest';
 import { parseWorkflowReviewRecord } from './workflowReviewRecord';
 import { parseWorkflowRevisionImpact } from './workflowRevisionImpact';
 import { parseTeamReviewInput } from './agentTeamReviewEvidence';
 import { assertWorkflowDecisions, assertWorkflowDecisionTransition, deliveryCopyDecision, type WorkflowDecisionRecord } from './workflowDecision';
+import { assertWorkflowUserResponse, createWorkflowUserResponse, type WorkflowUserResponse } from './workflowUserResponse';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -22,6 +23,7 @@ export interface WorkflowTask {
   kind: string;
   input: unknown;
   output?: unknown;
+  userResponse?: WorkflowUserResponse;
   externalTaskId?: string;
   error?: string;
   attempt: number;
@@ -131,6 +133,7 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
     if (!Array.isArray(candidate.dependsOn) || candidate.dependsOn.some((id) => typeof id !== 'string' || !id)) throw new Error('工作流任务依赖无效');
     if (new Set(candidate.dependsOn).size !== candidate.dependsOn.length) throw new Error('工作流任务依赖重复');
     if (!TASK_STATUSES.has(candidate.status as WorkflowTaskStatus)) throw new Error('工作流任务状态无效');
+    assertWorkflowUserResponse(candidate as unknown as WorkflowTask, Number(run.planVersion));
     if (!Number.isSafeInteger(candidate.attempt) || (candidate.attempt as number) < 0) throw new Error('工作流任务尝试次数无效');
     if (candidate.kind === 'team_review' && isRecord(candidate.input) && candidate.input.schemaVersion !== undefined) parseTeamReviewInput(candidate.input);
     if (candidate.kind === 'team_plan_revision' && isRecord(candidate.input) && candidate.input.impact !== undefined) {
@@ -260,6 +263,7 @@ export function reconcileWorkflowTaskInvocation(task: WorkflowTask): WorkflowTas
 
 export interface WorkflowTaskResult {
   output?: unknown;
+  waitingForUser?: true;
   externalTaskId?: string;
   spawn?: { tasks: WorkflowTask[]; context: unknown };
 }
@@ -597,6 +601,7 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
               if (!nextTask || JSON.stringify(nextTask.input) !== JSON.stringify(task.input)) throw new Error('已保存的定向修订不可修改');
             }
             const nextTask = migratedNext.tasks.find((item) => item.id === task.id);
+            if (task.userResponse && JSON.stringify(task.userResponse) !== JSON.stringify(nextTask?.userResponse)) throw new Error('已保存的用户答复不可修改');
             if (task.kind === 'team_review' && isRecord(task.input) && task.input.schemaVersion === 2
               && (!nextTask || nextTask.kind !== task.kind || JSON.stringify(nextTask.input) !== JSON.stringify(task.input)
                 || JSON.stringify(nextTask.dependsOn) !== JSON.stringify(task.dependsOn))) throw new Error('已保存的分批审核范围不可修改');
@@ -623,6 +628,14 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
             }
           }
           const previousDelivery = migratedCurrent?.run.delivery;
+          for (const task of migratedNext.tasks.filter((item) => item.userResponse)) {
+            const before = migratedCurrent?.tasks.find((item) => item.id === task.id);
+            if (!before?.userResponse && (!before || before.kind !== 'agent_user_input' || before.status !== 'waiting_user'
+              || !migratedCurrent || !['paused', 'active'].includes(migratedCurrent.run.status) || task.status !== 'completed'
+              || task.userResponse!.planVersion !== migratedCurrent.run.planVersion
+              || migratedNext.run.planVersion !== migratedCurrent.run.planVersion + 1
+              || workflowJsonDigest(before.input) !== workflowJsonDigest(task.input))) throw new Error('只能答复当前等待用户的步骤');
+          }
           const previousCopy = migratedCurrent?.run.deliveryCopy;
           const nextCopy = migratedNext.run.deliveryCopy;
           if (previousCopy && (!nextCopy || nextCopy.planVersion < previousCopy.planVersion
@@ -830,6 +843,24 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         run: { ...current.run, status: 'paused', planOpen: true, autoReview: false,
           planVersion: current.run.planVersion + 1, generation: completed ? current.run.generation + 1 : current.run.generation, updatedAt: Date.now() } };
       return { snapshot, value: snapshot };
+    });
+  }
+
+  async function answerUserInput(runId: string, taskId: string, expectedPlanVersion: number, answer: string) {
+    const output = answer.trim();
+    if (!output || output.length > 4000) throw new Error('答复应为 1 到 4000 个字符');
+    return mutate(scope(), runId, (current) => {
+      if (current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
+      if (!['paused', 'active'].includes(current.run.status) || current.tasks.some((task) => task.status === 'running')) throw new Error('请等待当前步骤结束后答复');
+      const task = current.tasks.find((item) => item.id === taskId);
+      if (!task || task.kind !== 'agent_user_input' || task.status !== 'waiting_user'
+        || task.userResponse || task.dependsOn.some((id) => current.tasks.find((item) => item.id === id)?.status !== 'completed')) throw new Error('该步骤没有等待用户答复');
+      const now = Date.now();
+      const next: WorkflowSnapshot = { ...current,
+        run: { ...current.run, planVersion: current.run.planVersion + 1, updatedAt: now },
+        tasks: current.tasks.map((item) => item.id !== taskId ? item : { ...item, status: 'completed', output,
+          userResponse: createWorkflowUserResponse(task, expectedPlanVersion, output, now), updatedAt: now }) };
+      return { snapshot: next, value: next };
     });
   }
 
@@ -1134,6 +1165,9 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
             await mutate(storageScope, runId, (current) => {
               if (scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active') return { snapshot: current, value: undefined };
               const spawn = 'spawn' in result ? result.spawn : undefined;
+              const waitingForUser = 'waitingForUser' in result && result.waitingForUser === true;
+              if (waitingForUser && (task.kind !== 'agent_user_input' || spawn || result.output !== undefined
+                || ('externalTaskId' in result && result.externalTaskId))) throw new WorkflowPreflightError('用户提问等待状态无效');
               const parent = current.tasks.find((item) => item.id === task.id);
               if (spawn && (!isReady || !parent || parent.expansion || ('externalTaskId' in result && result.externalTaskId) || !spawn.tasks.length || spawn.tasks.length > 48
                 || spawn.tasks.some((child) => child.runId !== runId || child.attempt !== 0 || child.expansion
@@ -1148,7 +1182,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                 return {
                 ...finishInvocation(item, 'status' in result && result.status === 'failed' ? 'failed' : 'succeeded', Date.now(),
                   'status' in result && result.status === 'pending' ? item.externalTaskId : 'externalTaskId' in result ? result.externalTaskId : undefined),
-                status: spawn ? 'waiting_dependency' : 'status' in result ? result.status === 'pending' ? 'waiting_external' : result.status === 'failed' ? 'failed' : 'completed' : result.externalTaskId ? 'waiting_external' : 'completed',
+                status: waitingForUser ? 'waiting_user' : spawn ? 'waiting_dependency' : 'status' in result ? result.status === 'pending' ? 'waiting_external' : result.status === 'failed' ? 'failed' : 'completed' : result.externalTaskId ? 'waiting_external' : 'completed',
                 ...(spawn ? { expansion: { taskIds: spawn.tasks.map((child) => child.id), context: spawn.context }, dependsOn: [...new Set([...item.dependsOn, ...spawn.tasks.map((child) => child.id)])] } : {}),
                 output: result.output ?? item.output,
                 externalTaskId: 'externalTaskId' in result ? result.externalTaskId : item.externalTaskId,
@@ -1192,7 +1226,9 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
           && countWorkflowModelCalls({ ...current, tasks }) >= current.run.maxModelCalls
           && !tasks.some((task) => task.status === 'waiting_external')
           && tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency');
-        const snapshot = { ...current, tasks, run: { ...current.run, status: current.run.status !== 'active' ? current.run.status : signal.aborted || current.run.pauseRequested || modelCallLimitReached ? 'paused' as const : completed ? 'completed' as const : failed ? 'failed' as const : current.run.status, pauseRequested: false, updatedAt: Date.now() } };
+        const waitingForUser = !failed && tasks.some((task) => task.kind === 'agent_user_input' && task.status === 'waiting_user')
+          && !tasks.some((task) => task.status === 'waiting_external');
+        const snapshot = { ...current, tasks, run: { ...current.run, status: current.run.status !== 'active' ? current.run.status : signal.aborted || current.run.pauseRequested || modelCallLimitReached || waitingForUser ? 'paused' as const : completed ? 'completed' as const : failed ? 'failed' as const : current.run.status, pauseRequested: false, updatedAt: Date.now() } };
         return { snapshot, value: snapshot };
       });
     }).finally(() => active.delete(activeKey));
@@ -1219,5 +1255,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, setModelCallLimit, setDeadline, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamTask, addTasksOnce, expandPlanOnce, closePlan, prepareDelivery, prepareDeliveryCopy, markDeliveryPublished, recordDeliveryIssue, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, setModelCallLimit, setDeadline, addTasks, addTeamRevision, replaceUserBlockWithTasks, answerUserInput, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamTask, addTasksOnce, expandPlanOnce, closePlan, prepareDelivery, prepareDeliveryCopy, markDeliveryPublished, recordDeliveryIssue, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }

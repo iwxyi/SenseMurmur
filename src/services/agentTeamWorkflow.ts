@@ -45,7 +45,7 @@ import { buildTeamReviewTasks, parseTeamReviewInput, preserveTeamReviewDefects, 
 const TOOL_TASK_KINDS = {
   text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio', speech_generation: 'agent_audio',
   image_inspection: 'agent_image_inspection', video_inspection: 'agent_video_inspection', video_generation: 'agent_video', media_composition: 'agent_media_composition',
-  delegate_task: 'agent_delegation',
+  delegate_task: 'agent_delegation', user_input: 'agent_user_input',
 } as const;
 
 function teamTaskKind(task: AgentTeamTask) { return TOOL_TASK_KINDS[task.tool || 'text_generation']; }
@@ -375,6 +375,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       assertGoalPlanAuthorized(snapshot, plan);
       if (task.kind !== teamTaskKind(input.task)) throw new WorkflowPreflightError('团队任务工具与计划不一致');
       if (signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
+      if (selectedTool === 'user_input') return { waitingForUser: true };
       if (selectedTool === 'delegate_task') {
         const ancestors = delegationAncestors(snapshot, task);
         if (ancestors.length >= 3) throw new WorkflowPreflightError('已达到最多3层委派，请直接执行具体工作');
@@ -532,7 +533,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
           const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
           if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('音乐的上游歌词或说明尚未就绪');
-          if (dependency.kind !== 'agent_text' && dependency.kind !== 'agent_web_search') throw new WorkflowPreflightError('音乐任务目前只能读取文字歌词或说明');
+          if (dependency.kind !== 'agent_text' && dependency.kind !== 'agent_web_search' && dependency.kind !== 'agent_user_input') throw new WorkflowPreflightError('音乐任务目前只能读取文字歌词或说明');
           return dependency.output.slice(0, 12_000);
         });
         const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
@@ -583,7 +584,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const upstream = [...upstreamTaskIds].map((dependencyId) => {
           const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
           if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('视频的上游素材尚未就绪');
-          return dependency.kind === 'agent_text' || dependency.kind === 'agent_web_search' || dependency.kind === 'agent_image_inspection' || dependency.kind === 'agent_delegation'
+          return dependency.kind === 'agent_text' || dependency.kind === 'agent_user_input' || dependency.kind === 'agent_web_search' || dependency.kind === 'agent_image_inspection' || dependency.kind === 'agent_delegation'
             ? dependency.output.slice(0, 12_000) : null;
         }).filter((content): content is string => content !== null);
         const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
@@ -647,6 +648,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       return { status: 'pending' as const };
     },
     async reconcileInterrupted(task) {
+      if (task.kind === 'agent_user_input') return { status: 'queued' as const };
       if (task.kind === 'agent_media_composition') return inspectAgentTeamComposition(task.runId, task.id) || { status: 'queued' as const };
       if (task.kind === 'agent_image') return inspectAgentTeamImageAttachment(task.runId, task.id);
       if (task.kind === 'agent_audio') return inspectAgentTeamAudioAttachment(task.runId, task.id);
@@ -710,6 +712,18 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return hasReviewBlock
           ? runtime.replaceUserBlockWithTasks(runId, expectedPlanVersion, [task])
           : runtime.addTeamRevision(runId, expectedPlanVersion, task);
+      });
+    },
+    async answerUserInput(runId: string, taskId: string, expectedPlanVersion: number, answer: string) {
+      if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务修改');
+      const storageScope = scope();
+      return navigator.locks.request(workflowRunLockName(storageScope, runId), { ifAvailable: true }, async (lock) => {
+        if (!lock) throw new Error('团队任务正在执行，请等待当前步骤结束');
+        if (scope() !== storageScope) throw new Error('账号已切换，答复已停止');
+        const snapshot = await runtime.read(runId);
+        if (!snapshot) throw new Error('团队任务不存在');
+        requireActiveAssistantChat(snapshot.run.chatId);
+        return runtime.answerUserInput(runId, taskId, expectedPlanVersion, answer);
       });
     },
     async instructQueuedTask(runId: string, taskId: string, expectedPlanVersion: number, instruction: string) {
@@ -1237,6 +1251,14 @@ export async function saveAgentTeamDeliveryCopy(params: { runId: string; expecte
   finally { notifyTeam(); }
 }
 
+export async function answerAgentTeamUserInput(params: { runId: string; taskId: string; expectedPlanVersion: number; answer: string }) {
+  const auth = readAuthSnapshot();
+  if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
+  const result = await currentTeamWorkflow().answerUserInput(params.runId, params.taskId, params.expectedPlanVersion, params.answer);
+  notifyTeam();
+  return result;
+}
+
 export async function instructAgentTeamTask(params: { runId: string; taskId: string; expectedPlanVersion: number; instruction: string }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
@@ -1295,6 +1317,7 @@ export async function recoverAgentTeamRuns() {
           tasks: current.tasks.map((task): WorkflowTask => {
             if (task.status !== 'running') return task;
             if (invocationUnstarted(task)) return reconcileWorkflowTaskInvocation({ ...task, status: 'queued', updatedAt: Date.now() });
+            if (task.kind === 'agent_user_input') return { ...task, status: 'queued', error: undefined, updatedAt: Date.now() };
             if (task.kind === 'agent_media_composition') {
               const result = inspectAgentTeamComposition(task.runId, task.id);
               return { ...task, status: result ? 'completed' : 'queued', output: result?.output, error: undefined, updatedAt: Date.now() };

@@ -61,6 +61,8 @@ export function claimedTaskAttempt(snapshot: WorkflowSnapshot, task: WorkflowTas
 export function settleTaskAttempt(attempt: WorkflowTaskAttempt, task: WorkflowTask): WorkflowTaskAttempt {
   // Re-queueing schedules a new attempt; it must not rewrite the previous outcome.
   if (task.status === 'queued' || task.status === 'waiting_dependency') {
+    if (task.kind === 'agent_user_input' && attempt.status === 'running') return { ...attempt, status: 'cancelled',
+      updatedAt: Math.max(task.updatedAt, attempt.updatedAt), finishedAt: Math.max(task.updatedAt, attempt.updatedAt) };
     if (task.status === 'waiting_dependency' && task.expansion && task.modelInvocation?.state === 'succeeded') {
       return { ...attempt, status: 'completed', updatedAt: Math.max(task.updatedAt, attempt.updatedAt),
         finishedAt: task.updatedAt, modelInvocation: task.modelInvocation };

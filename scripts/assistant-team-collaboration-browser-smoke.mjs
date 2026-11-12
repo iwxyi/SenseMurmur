@@ -456,9 +456,34 @@ try {
     try { await conflictWorkflow.publish(conflictId); throw new Error('Expected user edit conflict'); }
     catch (error) { if (!error.message.includes('产物已被修改')) throw error; }
     const conflictRun = await conflictWorkflow.read(conflictId);
+    const questionId = 'browser-collab-question-' + crypto.randomUUID();
+    const questionChatId = questionId + '-chat';
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: questionChatId, type: 'assistant', name: '用户答复验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));
+    const questionPlan = { summary: '用户答复验证', roles: [{ id: 'lead', name: '需求分析师', responsibility: '确认需求',
+      method: '询问关键事实', acceptance: '实际答复', allowedTools: ['user_input', 'text_generation'] }], tasks: [
+      { id: 'question', roleId: 'lead', goal: '目标市场是哪里？', tool: 'user_input', dependsOn: [], acceptance: '真实答复' },
+      { id: 'report', roleId: 'lead', goal: '给出市场建议', tool: 'text_generation', dependsOn: ['question'], acceptance: '对应市场' },
+    ], finalAcceptance: '可用建议' };
+    let questionRequests = 0;
+    const questionFetch = async (input, init) => {
+      if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
+      const request = JSON.parse(init.body);
+      const index = questionRequests++;
+      if (index === 1 && !JSON.stringify(request.messages).includes('日本独立开发者')) throw new Error('Real user answer missing from downstream model request');
+      if (index > 1) throw new Error('Question recovery duplicated a model request');
+      return Response.json({ choices: [{ message: { role: 'assistant', content: index === 0 ? JSON.stringify(questionPlan) : '面向日本独立开发者的建议' }, finish_reason: 'stop' }] });
+    };
+    let questionRun;
+    window.fetch = questionFetch;
+    try {
+      questionRun = (await createAgentTeamWorkflow(config, currentWorkflowScope).start(questionId, questionChatId, '研究产品受众', false)).snapshot;
+      questionRun = (await createAgentTeamWorkflow(config, currentWorkflowScope).resume(questionId)).snapshot;
+      if (questionRun.run.status !== 'paused' || questionRequests !== 1
+        || questionRun.tasks.find((task) => task.id === 'question').status !== 'waiting_user') throw new Error('User question did not persist across recovery');
+    } finally { window.fetch = originalFetch; }
     const baseCleanup = window.__cleanupCollaborationFixture;
     window.__cleanupCollaborationFixture = async () => {
-      useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== conflictChatId) }));
+      useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== conflictChatId && chat.id !== questionChatId) }));
       useAssistantArtifactStore.setState((state) => ({ items: state.items.filter((item) => item.chatId !== conflictChatId) }));
       useMessageStore.setState((state) => ({ messages: state.messages.filter((message) => message.chatId !== conflictChatId),
         messageWindowsByChatId: Object.fromEntries(Object.entries(state.messageWindowsByChatId).filter(([id]) => id !== conflictChatId)) }));
@@ -492,9 +517,24 @@ try {
     const root = createRoot(container);
     window.__assistantTeamSmoke.root = root;
     root.render(React.createElement(Workbench, {
-      runs: [{ ...persistedRun, run: { ...persistedRun.run, deliveryStatus: 'pending', deliveryIssue: 'save_failed' } }, resumableRun, secondResumableRun, uncertainRun, recursiveRun, conflictRun, outputRun], canRun: true, isRunActive: () => false, onResume: () => {},
+      runs: [{ ...persistedRun, run: { ...persistedRun.run, deliveryStatus: 'pending', deliveryIssue: 'save_failed' } }, resumableRun, secondResumableRun, uncertainRun, recursiveRun, conflictRun, outputRun, questionRun], canRun: true, isRunActive: () => false, onResume: () => {},
       onResumeAll: async (items) => { window.__assistantTeamSmoke.resumed = items.map((item) => item.run.id); }, onCreate: () => {},
       onInstruct: async () => {}, onPause: async () => {},
+      onAnswer: async (item, task, answer) => {
+        window.fetch = questionFetch;
+        try {
+          const workflow = createAgentTeamWorkflow(config, currentWorkflowScope);
+          await workflow.answerUserInput(item.run.id, task.id, item.run.planVersion, answer);
+          const restored = createAgentTeamWorkflow(config, currentWorkflowScope);
+          const completed = (await restored.resume(item.run.id)).snapshot;
+          await createAgentTeamWorkflow(config, currentWorkflowScope).resume(item.run.id);
+          const saved = await restored.read(item.run.id);
+          const response = saved.tasks.find((entry) => entry.id === task.id);
+          if (completed.run.status !== 'completed' || response.output !== answer || response.userResponse.actor !== 'local_user'
+            || response.userResponse.planVersion !== item.run.planVersion || questionRequests !== 2) throw new Error('Answer was not saved or recovery repeated generation');
+          window.__assistantTeamSmoke.userResponse = { completed: true, modelRequests: questionRequests, answer: response.output };
+        } finally { window.fetch = originalFetch; }
+      },
       onUpdateModelCallLimit: async (item, limit) => { window.__assistantTeamSmoke.limits.push({ runId: item.run.id, limit }); },
       onUpdateDeadline: async (item, deadlineAt) => { window.__assistantTeamSmoke.deadlines.push({ runId: item.run.id, deadlineAt }); },
       onSaveDeliveryCopy: async (item) => {
@@ -592,7 +632,17 @@ try {
   await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('JSON 不符合已声明的字段契约')`), 'output validation error visible');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '重试该任务并继续').click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.outputRetry === true`), 'failed JSON retried from workbench with preserved upstream');
-  console.log(JSON.stringify({ ok: true, outputContractRetry: true, exactSavedTextRecovery: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent === '用户答复验证').click()`);
+  await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('目标市场是哪里？')`), 'persisted user question visible');
+  await cdp.evaluate(`(() => {
+    const input = Array.from(document.querySelectorAll('[role="dialog"] textarea')).find((entry) => entry.id && document.querySelector('label[for="' + entry.id + '"]')?.textContent.includes('你的答复'));
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '日本独立开发者');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '答复并继续').click()`);
+  await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.userResponse?.completed`), 'user answer persisted and downstream resumed');
+  assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.userResponse`), { completed: true, modelRequests: 2, answer: '日本独立开发者' });
+  console.log(JSON.stringify({ ok: true, userResponse: await cdp.evaluate(`window.__assistantTeamSmoke.userResponse`), outputContractRetry: true, exactSavedTextRecovery: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } catch (error) {
   console.error(JSON.stringify({ browserErrors: cdp.errors }));
   throw error;

@@ -1,5 +1,5 @@
 export const WORKFLOW_TOOLS = ['text_generation', 'web_search', 'image_generation', 'audio_generation', 'speech_generation',
-  'video_generation', 'image_inspection', 'video_inspection', 'media_composition', 'delegate_task'] as const;
+  'video_generation', 'image_inspection', 'video_inspection', 'media_composition', 'delegate_task', 'user_input'] as const;
 export type WorkflowTool = typeof WORKFLOW_TOOLS[number];
 
 export interface WorkflowGoalSpec {

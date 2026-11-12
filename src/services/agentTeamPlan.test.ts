@@ -15,6 +15,18 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('allows question answers as media context while requiring a separate narration writing task', () => {
+    const plan = valid();
+    const question = { ...plan.tasks[0], tool: 'user_input' };
+    for (const tool of ['image_generation', 'audio_generation', 'video_generation']) {
+      const candidate = { ...plan, roles: [{ ...plan.roles[0], allowedTools: ['user_input', tool] }],
+        tasks: [question, { ...plan.tasks[1], tool }] };
+      expect(validateAgentTeamPlan(candidate).tasks[1].tool).toBe(tool);
+      expect(() => validateAgentTeamPlan({ ...candidate, tasks: [{ ...question, deliverable: { kind: 'document', title: '假答复' } }] })).toThrow('不能声明');
+    }
+    expect(() => validateAgentTeamPlan({ ...plan, roles: [{ ...plan.roles[0], allowedTools: ['user_input', 'speech_generation'] }],
+      tasks: [question, { ...plan.tasks[1], tool: 'speech_generation', speech: { textTaskId: question.id } }] })).toThrow();
+  });
   it('requires exact authorization for a pinned project file even if another file has the same digest', async () => {
     const source = { taskId: 'old', attempt: 1, outputSha256: 'a'.repeat(64), artifact: { id: 'project', versionId: 'v1', filePath: 'src/main.ts' } };
     const candidate = { ...valid(), tasks: [{ ...valid().tasks[0], savedText: [{ ...source, alias: 'main' }] }] };

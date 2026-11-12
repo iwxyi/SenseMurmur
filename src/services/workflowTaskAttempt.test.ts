@@ -22,6 +22,13 @@ describe('task attempt contract', () => {
     expect(settleTaskAttempt(attempt, { ...task, status: 'waiting_dependency' })).toEqual(attempt);
   });
 
+  it('closes the interrupted local question attempt before safely re-queueing it', () => {
+    const { finishedAt, ...running } = attempt;
+    void finishedAt;
+    expect(settleTaskAttempt({ ...running, kind: 'agent_user_input', status: 'running' }, { ...task, kind: 'agent_user_input' }))
+      .toMatchObject({ status: 'cancelled', updatedAt: 30, finishedAt: 30 });
+  });
+
   it('clears obsolete finish time when reconciling a pending external result', () => {
     const pending = settleTaskAttempt(attempt, { ...task, status: 'waiting_external', externalTaskId: 'upstream' });
     expect(pending.finishedAt).toBeUndefined();

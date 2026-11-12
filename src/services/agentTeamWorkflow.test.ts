@@ -115,6 +115,104 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('persists user questions across recovery and passes only real saved answers to downstream work', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `user-response-${runId}`;
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const role = { id: 'analyst', name: '分析师', responsibility: '需求分析', method: '先确认关键事实',
+      acceptance: '可执行建议', allowedTools: ['user_input', 'text_generation'] };
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '确认市场后研究', roles: [role], tasks: [
+      { id: 'question', roleId: role.id, goal: '目标市场是哪里？', tool: 'user_input', dependsOn: [], acceptance: '用户明确市场' },
+      { id: 'audience', roleId: role.id, goal: '目标用户是谁？', tool: 'user_input', dependsOn: [], acceptance: '用户明确受众' },
+      { id: 'independent', roleId: role.id, goal: '列出分析框架', tool: 'text_generation', dependsOn: [], acceptance: '框架' },
+      { id: 'report', roleId: role.id, goal: '研究市场', tool: 'text_generation', dependsOn: ['question', 'audience'], acceptance: '对应目标市场和受众' },
+    ], finalAcceptance: '建议' })).mockResolvedValueOnce('分析框架');
+    const started = await createAgentTeamWorkflow(config, () => scope).start(runId, 'chat', '研究产品', false);
+    expect(started.snapshot.run.status).toBe('paused');
+    expect(started.snapshot.tasks.find((task) => task.id === 'question')?.status).toBe('waiting_user');
+    expect(started.snapshot.tasks.find((task) => task.id === 'independent')?.status).toBe('completed');
+    expect(countWorkflowModelCalls(started.snapshot)).toBe(2);
+    const restored = createAgentTeamWorkflow(config, () => scope);
+    const waiting = await restored.resume(runId);
+    expect(waiting.snapshot.run.status).toBe('paused');
+    expect(generate).toHaveBeenCalledTimes(2);
+    const version = waiting.snapshot.run.planVersion;
+    for (const answer of ['', '  ', 'a'.repeat(4001)]) {
+      await expect(restored.answerUserInput(runId, 'question', version, answer)).rejects.toThrow('1 到 4000');
+    }
+    await expect(restored.answerUserInput(runId, 'report', version, '无效')).rejects.toThrow('没有等待');
+    const saved = await restored.answerUserInput(runId, 'question', version, '  日本市场  ');
+    const question = saved.tasks.find((task) => task.id === 'question')!;
+    expect(saved.run.planVersion).toBe(version + 1);
+    expect(question.output).toBe('日本市场');
+    expect(question.userResponse).toMatchObject({ schemaVersion: 1, runId, taskId: 'question', actor: 'local_user',
+      planVersion: version, inputSha256: workflowJsonDigest(question.input), outputSha256: workflowJsonDigest('日本市场') });
+    await expect(restored.answerUserInput(runId, 'audience', version, '开发者')).rejects.toThrow('计划已更新');
+    await expect(restored.answerUserInput(runId, 'question', saved.run.planVersion, '替换')).rejects.toThrow('没有等待');
+    await indexedDbWorkflowRepository.registerOutboxConsumer(scope, runId, 'test-reader');
+    const before = await indexedDbWorkflowRepository.listOutboxEvents(scope, runId, 'test-reader', 1000);
+    await expect(indexedDbWorkflowRepository.transact(scope, runId, (current) => ({ snapshot: { ...current!,
+      tasks: current!.tasks.map((task) => task.id === 'question' ? { ...task, userResponse: undefined } : task) }, value: undefined })))
+      .rejects.toThrow('缺少版本依据');
+    await expect(indexedDbWorkflowRepository.transact(scope, runId, (current) => ({ snapshot: { ...current!,
+      tasks: current!.tasks.map((task) => task.id === 'question' ? { ...task, userResponse: { ...task.userResponse!, respondedAt: 0 } } : task) }, value: undefined })))
+      .rejects.toThrow('已保存的用户答复不可修改');
+    expect(await indexedDbWorkflowRepository.listOutboxEvents(scope, runId, 'test-reader', 1000)).toEqual(before);
+    const stillWaiting = await restored.resume(runId);
+    expect(stillWaiting.snapshot.run.status).toBe('paused');
+    expect(generate).toHaveBeenCalledTimes(2);
+    await restored.answerUserInput(runId, 'audience', saved.run.planVersion, '开发者');
+    generate.mockResolvedValueOnce('日本开发者市场报告');
+    const finished = await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(finished.snapshot.run.status).toBe('completed');
+    expect(JSON.stringify(generate.mock.lastCall?.[2])).toContain('日本市场');
+    expect(JSON.stringify(generate.mock.lastCall?.[2])).toContain('开发者');
+    expect(countWorkflowModelCalls(finished.snapshot)).toBe(3);
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(generate).toHaveBeenCalledTimes(3);
+    const attempts = await indexedDbWorkflowRepository.listTaskAttempts(scope, runId, 'question');
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0].status).toBe('completed');
+  });
+
+  it('rejects questions when the saved goal contract does not authorize user_input', async () => {
+    const spec = defaultWorkflowGoalSpec('独立研究');
+    spec.allowedTools = spec.allowedTools.filter((tool) => tool !== 'user_input');
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '提问', roles: [{ id: 'lead', name: '研究员', responsibility: '研究',
+      method: '核实', acceptance: '完整', allowedTools: ['user_input'] }], tasks: [
+      { id: 'question', roleId: 'lead', goal: '哪个市场？', tool: 'user_input', dependsOn: [], acceptance: '明确' },
+    ], finalAcceptance: '完成' }));
+    const scope = crypto.randomUUID();
+    const result = await createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope)
+      .start(crypto.randomUUID(), 'chat', '独立研究', false, undefined, undefined, spec);
+    expect(result.snapshot.run.status).toBe('failed');
+    expect(result.snapshot.tasks).toHaveLength(1);
+    expect(result.snapshot.tasks[0].error).toMatch(/授权|允许/);
+  });
+
+  it.each([false, true])('safely restores an interrupted local question (application recovery: %s)', async (applicationRecovery) => {
+    const runId = crypto.randomUUID();
+    const scope = applicationRecovery ? currentWorkflowScope() : crypto.randomUUID();
+    const now = Date.now();
+    const role = { id: 'lead', name: '研究员', responsibility: '研究', method: '询问', acceptance: '答复', allowedTools: ['user_input'] };
+    const question = { id: 'question', roleId: 'lead', goal: '目标市场？', tool: 'user_input', dependsOn: [], acceptance: '明确' };
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
+      run: { id: runId, chatId: 'chat', goal: '研究', status: 'active', generation: 1, planVersion: 2, planOpen: true, updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '研究', output: { summary: '提问', roles: [role], tasks: [question], finalAcceptance: '答复' }, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        { id: 'question', runId, kind: 'agent_user_input', input: { task: question, role, goal: '研究' }, dependsOn: ['plan'], status: 'running', attempt: 1, updatedAt: now },
+      ],
+    }, value: undefined }));
+    if (applicationRecovery) {
+      expect(await recoverAgentTeamRuns()).toBe(true);
+      expect((await indexedDbWorkflowRepository.read(scope, runId))?.tasks[1].status).toBe('queued');
+    }
+    const result = await createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope).resume(runId);
+    expect(result.snapshot.run.status).toBe('paused');
+    expect(result.snapshot.tasks[1].status).toBe('waiting_user');
+    expect(generate).not.toHaveBeenCalled();
+  });
+
   it.each(['budget', 'reject', 'retry', 'abandon'] as const)('persists bounded review layers across %s recovery', async (scenario) => {
     const runId = crypto.randomUUID();
     const scope = `batch-review-${runId}`;
