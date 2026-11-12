@@ -2,6 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoalSpec, workflowDeadlineBlockReason, workflowGoalContext } from './workflowGoalSpec';
 
 describe('workflow goal contract', () => {
+  it('binds exact platform budget values without altering older contracts', () => {
+    const base = defaultWorkflowGoalSpec('目标');
+    expect(base).not.toHaveProperty('platformBudget');
+    const platformBudget = { revision: 2, billingUnit: 'point', limitAmount: '999999999999999999.123456' };
+    expect(parseWorkflowGoalSpec({ ...base, platformBudget }).platformBudget).toEqual(platformBudget);
+    for (const invalid of [null, [], {}, { ...platformBudget, revision: 0 }, { ...platformBudget, revision: 1.5 },
+      { ...platformBudget, billingUnit: '' }, { ...platformBudget, limitAmount: '1.2' }, { ...platformBudget, limitAmount: 1 }]) {
+      expect(() => parseWorkflowGoalSpec({ ...base, platformBudget: invalid })).toThrow('平台预算');
+    }
+  });
   it('only allows approval policies for authorized tools', () => {
     const base = { ...defaultWorkflowGoalSpec('制作图片'), allowedTools: ['image_generation'] };
     expect(parseWorkflowGoalSpec({ ...base, approvalTools: ['image_generation'] }).approvalTools).toEqual(['image_generation']);

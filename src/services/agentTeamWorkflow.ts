@@ -14,6 +14,7 @@ import { currentWorkflowScope, workflowRunLockName } from './workflowRunRuntime'
 import { attachMessageToActiveBranch } from './messageBranching';
 import { advanceTeamConversation, captureTeamSourceBranch, teamConversationBlockReason, teamConversationContext } from './agentTeamConversation';
 import type { Message } from '../types/message';
+import type { WorkflowBudget } from '../types/workflowUsage';
 import type { AssistantArtifactItem } from '../types/assistantArtifact';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { readAuthSnapshot } from './authSnapshot';
@@ -291,7 +292,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           : tool === 'image_inspection' || tool === 'video_inspection' ? 'text' : undefined;
       const profile = profileType ? getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, profileType) : undefined;
       const config = profileType ? profile : tool === 'media_composition' || tool === 'user_input' ? undefined : api;
-      return { ...requirement, executionSha256: workflowJsonDigest({ tool, model: config ? {
+      return { ...requirement, executionSha256: workflowJsonDigest({ tool, platformBudget: snapshot.run.goalSpec?.platformBudget, model: config ? {
         provider: config.provider, baseUrl: config.baseUrl, model: config.model,
         maxOutputTokens: config.maxOutputTokens, advancedOptions: config.advancedOptions,
         ...(profile ? { defaultImageSize: profile.defaultImageSize, videoDefaults: profile.videoDefaults,
@@ -722,6 +723,27 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
     read: runtime.read,
     list: runtime.list,
     requestPauseAfterCurrentBatch: runtime.requestPauseAfterCurrentBatch,
+    async setPlatformBudget(runId: string, expectedPlanVersion: number, input: { limitAmount: string; billingUnit: string; expectedRevision: number }): Promise<WorkflowBudget> {
+      if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务修改');
+      const storageScope = scope();
+      return navigator.locks.request(workflowRunLockName(storageScope, runId), { ifAvailable: true }, async (lock) => {
+        if (!lock) throw new Error('团队任务正在执行，请暂停后重试');
+        if (scope() !== storageScope) throw new Error('账号已切换，任务修改已停止');
+        const current = await runtime.read(runId);
+        if (!current?.run.goalSpec || current.tasks[0]?.kind !== 'team_plan') throw new Error('任务没有目标契约，请新建任务设置预算');
+        if (current.run.status !== 'paused' || current.tasks.some((task) => task.status === 'running')) throw new Error('请先暂停整个任务');
+        if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
+        if (scope() !== storageScope) throw new Error('账号已切换，任务修改已停止');
+        const budget = await appApi.configureWorkflowBudget(runId, input);
+        if (scope() !== storageScope) throw new Error('账号已切换，任务修改已停止');
+        if (!budget || budget.runId !== runId) throw new Error('平台未返回有效任务预算，请刷新核对后重试');
+        // A crash before the local commit leaves old requests fenced by the server revision.
+        await runtime.bindPlatformBudget(runId, expectedPlanVersion, {
+          revision: budget.revision, billingUnit: budget.billingUnit, limitAmount: budget.limitAmount,
+        });
+        return budget;
+      });
+    },
     async setDeadline(runId: string, expectedPlanVersion: number, deadlineAt?: number) {
       if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务修改');
       const storageScope = scope();
@@ -1317,6 +1339,14 @@ export async function updateAgentTeamDeadline(params: { runId: string; expectedP
   const result = await currentTeamWorkflow().setDeadline(params.runId, params.expectedPlanVersion, params.deadlineAt);
   notifyTeam();
   return result;
+}
+
+export async function updateAgentTeamPlatformBudget(params: { runId: string; expectedPlanVersion: number;
+  limitAmount: string; billingUnit: string; expectedRevision: number }) {
+  const auth = readAuthSnapshot();
+  if (auth.mode !== 'cloud' || auth.user?.agentEntitled !== true) throw new Error('当前账号没有平台 Agent 权限');
+  try { return await currentTeamWorkflow().setPlatformBudget(params.runId, params.expectedPlanVersion, params); }
+  finally { notifyTeam(); }
 }
 
 export async function saveAgentTeamDeliveryCopy(params: { runId: string; expectedPlanVersion: number }) {

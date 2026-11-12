@@ -9,6 +9,7 @@ export interface WorkflowGoalSpec {
   acceptance: string[];
   preferences?: string[];
   deadlineAt?: number;
+  platformBudget?: { revision: number; billingUnit: string; limitAmount: string };
   allowedTools: WorkflowTool[];
   approvalTools?: WorkflowTool[];
   sourceBranch?: { enabled: boolean; name: string; headNodeId: string | null };
@@ -34,6 +35,17 @@ export function parseWorkflowGoalSpec(raw: unknown): WorkflowGoalSpec {
   const constraints = stringList(value.constraints, '约束');
   const acceptance = stringList(value.acceptance, '验收条件');
   const preferences = value.preferences === undefined ? undefined : stringList(value.preferences, '偏好');
+  let platformBudget: WorkflowGoalSpec['platformBudget'];
+  if (value.platformBudget !== undefined) {
+    const budget = value.platformBudget as Record<string, unknown> | null;
+    if (!budget || typeof budget !== 'object' || Array.isArray(budget)
+      || !Number.isSafeInteger(budget.revision) || Number(budget.revision) < 1
+      || typeof budget.billingUnit !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(budget.billingUnit)
+      || typeof budget.limitAmount !== 'string' || !/^(?:0|[1-9]\d{0,17})\.\d{6}$/.test(budget.limitAmount)) {
+      throw new Error('目标契约平台预算无效');
+    }
+    platformBudget = { revision: Number(budget.revision), billingUnit: budget.billingUnit, limitAmount: budget.limitAmount };
+  }
   if (value.deadlineAt !== undefined && (!Number.isSafeInteger(value.deadlineAt) || Number(value.deadlineAt) <= 0
     || Number(value.deadlineAt) > 8_640_000_000_000_000)) throw new Error('目标契约截止时间无效');
   const allowedTools = stringList(value.allowedTools, '工具授权');
@@ -60,6 +72,7 @@ export function parseWorkflowGoalSpec(raw: unknown): WorkflowGoalSpec {
   return { schemaVersion: 1, objective: value.objective, constraints, acceptance, allowedTools: allowedTools as WorkflowTool[],
     ...(approvalTools === undefined ? {} : { approvalTools: approvalTools as WorkflowTool[] }),
     ...(preferences === undefined ? {} : { preferences }),
+    ...(platformBudget ? { platformBudget } : {}),
     ...(value.deadlineAt === undefined ? {} : { deadlineAt: Number(value.deadlineAt) }),
     ...(sourceBranch ? { sourceBranch } : {}),
     execution: { location: 'client', recovery: 'safe_steps_only', maxConcurrentTasks: execution.maxConcurrentTasks as number,

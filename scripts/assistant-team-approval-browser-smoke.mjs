@@ -119,7 +119,7 @@ try {
     return { status: snapshot.tasks[0].status, approvals: snapshot.tasks[0].approvals.length, calls: window.__approvalCalls };
   })()`);
   assert.deepEqual(changed, { status: 'waiting_user', approvals: 2, calls: 1 });
-  await waitFor(`document.body.textContent.includes('模型或生成设置已更改，请重新确认')`);
+  await waitFor(`document.body.textContent.includes('模型、生成设置或预算已更改，请重新确认')`);
   await evaluate(setup);
   assert.deepEqual(await evaluate(`(async () => {
     const id = '${runId}-config';

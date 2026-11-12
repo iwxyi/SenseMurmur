@@ -656,10 +656,15 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
           if (migratedCurrent && JSON.stringify(migratedCurrent.run.goalSpec) !== JSON.stringify(migratedNext.run.goalSpec)) {
             const before = migratedCurrent.run;
             const after = migratedNext.run;
-            const deadlineOnly = before.goalSpec && after.goalSpec
-              && JSON.stringify(parseWorkflowGoalSpec({ ...before.goalSpec, deadlineAt: undefined }))
-                === JSON.stringify(parseWorkflowGoalSpec({ ...after.goalSpec, deadlineAt: undefined }));
-            if (!deadlineOnly || before.status !== 'paused' || after.status !== 'paused'
+            const executionLimitsOnly = before.goalSpec && after.goalSpec
+              && JSON.stringify(parseWorkflowGoalSpec({ ...before.goalSpec, deadlineAt: undefined, platformBudget: undefined }))
+                === JSON.stringify(parseWorkflowGoalSpec({ ...after.goalSpec, deadlineAt: undefined, platformBudget: undefined }))
+              && (!before.goalSpec.platformBudget || Boolean(after.goalSpec.platformBudget
+                && after.goalSpec.platformBudget.billingUnit === before.goalSpec.platformBudget.billingUnit
+                && after.goalSpec.platformBudget.revision >= before.goalSpec.platformBudget.revision
+                && (after.goalSpec.platformBudget.revision !== before.goalSpec.platformBudget.revision
+                  || JSON.stringify(after.goalSpec.platformBudget) === JSON.stringify(before.goalSpec.platformBudget))));
+            if (!executionLimitsOnly || before.status !== 'paused' || after.status !== 'paused'
               || after.planVersion !== before.planVersion + 1 || migratedCurrent.tasks.some((task) => task.status === 'running')) {
               throw new Error('目标契约不能在执行中替换，请新建任务以变更目标授权');
             }
@@ -834,6 +839,18 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
       if (!current.run.goalSpec) throw new Error('旧任务没有目标契约，请新建任务设置截止时间');
       const goalSpec = parseWorkflowGoalSpec({ ...current.run.goalSpec, deadlineAt });
       if (workflowDeadlineBlockReason(goalSpec)) throw new Error('新的截止时间必须晚于当前时间');
+      const next: WorkflowSnapshot = { ...current, run: { ...current.run, goalSpec,
+        planVersion: current.run.planVersion + 1, updatedAt: Date.now() } };
+      return { snapshot: next, value: next };
+    });
+  }
+
+  async function bindPlatformBudget(runId: string, expectedPlanVersion: number, budget: NonNullable<WorkflowGoalSpec['platformBudget']>) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.status !== 'paused' || current.tasks.some((task) => task.status === 'running')) throw new Error('请先暂停整个任务');
+      if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
+      if (!current.run.goalSpec) throw new Error('旧任务没有目标契约，请新建任务设置预算');
+      const goalSpec = parseWorkflowGoalSpec({ ...current.run.goalSpec, platformBudget: budget });
       const next: WorkflowSnapshot = { ...current, run: { ...current.run, goalSpec,
         planVersion: current.run.planVersion + 1, updatedAt: Date.now() } };
       return { snapshot: next, value: next };
@@ -1212,7 +1229,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
           const isReady = claimed.has(task.id);
           const context: WorkflowExecutionContext = {
             usageReference: isReady && executor.tracksToolInvocations && isWorkflowToolTask(task.kind)
-              ? { schemaVersion: 1, runId, taskId: task.id, attempt: task.attempt + 1, kind: 'tool' } : undefined,
+              ? { schemaVersion: 1, runId, taskId: task.id, attempt: task.attempt + 1, kind: 'tool',
+                ...(snapshot.run.goalSpec?.platformBudget ? { budgetRevision: snapshot.run.goalSpec.platformBudget.revision } : {}) } : undefined,
             async beginToolInvocation(request) {
               signal.throwIfAborted();
               const description = request === undefined ? undefined : parseWorkflowToolRequest(request);
@@ -1256,7 +1274,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                     ...(description ? { request: description } : {}) } } : candidate) }, value: undefined };
               });
               signal.throwIfAborted();
-              return { schemaVersion: 1, runId, taskId: task.id, attempt: task.attempt + 1, kind: 'model' };
+              return { schemaVersion: 1, runId, taskId: task.id, attempt: task.attempt + 1, kind: 'model',
+                ...(snapshot.run.goalSpec?.platformBudget ? { budgetRevision: snapshot.run.goalSpec.platformBudget.revision } : {}) };
             },
           };
           try {
@@ -1362,5 +1381,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, setModelCallLimit, setDeadline, addTasks, addTeamRevision, replaceUserBlockWithTasks, answerUserInput, decideApproval, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamTask, addTasksOnce, expandPlanOnce, closePlan, prepareDelivery, prepareDeliveryCopy, markDeliveryPublished, recordDeliveryIssue, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, setModelCallLimit, setDeadline, bindPlatformBudget, addTasks, addTeamRevision, replaceUserBlockWithTasks, answerUserInput, decideApproval, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamTask, addTasksOnce, expandPlanOnce, closePlan, prepareDelivery, prepareDeliveryCopy, markDeliveryPublished, recordDeliveryIssue, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }

@@ -3,6 +3,7 @@ const BUDGET_REJECTIONS: Record<string, { status: number; message: string }> = {
   WORKFLOW_BUDGET_UNRESOLVED: { status: 409, message: '任务有待核对的费用，请完成核对后继续。' },
   WORKFLOW_BUDGET_QUOTE_REQUIRED: { status: 409, message: '当前调用没有可靠报价，请调整模型或配置后继续。' },
   WORKFLOW_BUDGET_UNIT_MISMATCH: { status: 409, message: '调用计费单位与任务预算不一致，请检查配置后继续。' },
+  WORKFLOW_BUDGET_REVISION_CONFLICT: { status: 409, message: '任务预算已更改，请刷新并确认预算后继续。' },
 };
 
 export function workflowAdmissionBlockReason(error: unknown): string | undefined {

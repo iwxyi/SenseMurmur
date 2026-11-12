@@ -21,9 +21,12 @@ export default function TeamApprovalPanel({ run, task, disabled, onDecide }: {
     }).finally(() => setSaving(false));
   }
   return <Box sx={{ display: 'grid', gap: 1, overflowWrap: 'anywhere' }}>
-    <Typography variant="subtitle2">{task.approvals?.at(-2)?.invalidatedAt !== undefined ? '模型或生成设置已更改，请重新确认' : '等待你的确认'}</Typography>
+    <Typography variant="subtitle2">{task.approvals?.at(-2)?.invalidatedAt !== undefined ? '模型、生成设置或预算已更改，请重新确认' : '等待你的确认'}</Typography>
     <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{approval.summary}</Typography>
     <Typography variant="body2" color="warning.main" sx={{ whiteSpace: 'pre-wrap' }}>{approval.consequences}</Typography>
+    {run.run.goalSpec?.platformBudget && <Typography variant="body2" color="text.secondary">
+      平台任务总预算 {run.run.goalSpec.platformBudget.limitAmount} {run.run.goalSpec.platformBudget.billingUnit === 'point' ? '积分' : run.run.goalSpec.platformBudget.billingUnit}
+    </Typography>}
     {task.dependsOn.map((id) => run.tasks.find((item) => item.id === id)).filter((item) => typeof item?.output === 'string').map((item) =>
       <Typography key={item!.id} variant="body2" color="text.secondary" sx={{ whiteSpace: 'pre-wrap', maxHeight: 160, overflowY: 'auto' }}>{String(item!.output).slice(0, 2000)}{String(item!.output).length > 2000 ? '…' : ''}</Typography>)}
     {error && <Typography role="alert" variant="caption" color="error.main">{error}</Typography>}

@@ -116,6 +116,47 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('binds a saved budget to the goal and requires approval again before submitting media', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `budget-approval-${runId}`;
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    useSettingsStore.setState({ aiProfiles: [{ id: 'image', name: '图片', type: 'image', provider: 'official-ace',
+      apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true }] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '森林插画', roles: [{ id: 'artist', name: '画师',
+      responsibility: '绘制', method: '生成', acceptance: '图片', allowedTools: ['image_generation'] }],
+      tasks: [{ id: 'scene', roleId: 'artist', goal: '绘制森林', dependsOn: [], tool: 'image_generation', acceptance: '森林图' }],
+      finalAcceptance: '图片已保存' }));
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已保存' });
+    const workflow = createAgentTeamWorkflow(config, () => scope);
+    const initial = await workflow.start(runId, 'chat', '绘制森林', false, undefined, undefined,
+      { ...defaultWorkflowGoalSpec('绘制森林'), approvalTools: ['image_generation'] });
+    await workflow.decideApproval(runId, 'scene', initial.snapshot.run.planVersion, 'approved');
+    const approved = (await workflow.read(runId))!;
+    const save = vi.spyOn(appApi, 'configureWorkflowBudget').mockResolvedValue({ schemaVersion: 1, runId,
+      revision: 1, billingUnit: 'point', limitAmount: '20.000000', committedAmount: '0.000000', reservedAmount: '0.000000',
+      remainingAmount: '20.000000', exceeded: false, unresolvedRequests: 0, updatedAt: Date.now() });
+    try {
+      await expect(workflow.setPlatformBudget(runId, approved.run.planVersion - 1,
+        { limitAmount: '20', billingUnit: 'point', expectedRevision: 0 })).rejects.toThrow('版本冲突');
+      expect(save).not.toHaveBeenCalled();
+      await workflow.setPlatformBudget(runId, approved.run.planVersion,
+        { limitAmount: '20', billingUnit: 'point', expectedRevision: 0 });
+      expect((await workflow.read(runId))?.run.goalSpec?.platformBudget).toEqual({ revision: 1, billingUnit: 'point', limitAmount: '20.000000' });
+      const restored = createAgentTeamWorkflow(config, () => scope);
+      const waiting = await restored.resume(runId);
+      const task = waiting.snapshot.tasks.find((item) => item.id === 'scene')!;
+      expect(task.status).toBe('waiting_user');
+      expect(task.approvals).toHaveLength(2);
+      expect(task.approvals?.[0].invalidatedAt).toBeDefined();
+      expect(queueAgentTeamImage).not.toHaveBeenCalled();
+      await restored.decideApproval(runId, 'scene', waiting.snapshot.run.planVersion, 'approved');
+      expect((await restored.resume(runId)).snapshot.run.status).toBe('completed');
+      expect(queueAgentTeamImage).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(queueAgentTeamImage).mock.calls[0][0].usageReference).toMatchObject({ budgetRevision: 1 });
+      await restored.resume(runId);
+      expect(queueAgentTeamImage).toHaveBeenCalledTimes(1);
+    } finally { save.mockRestore(); }
+  });
   it.each([false, true])('gates actual image dispatch through persisted approval (model proposal: %s)', async (modelProposal) => {
     const runId = crypto.randomUUID();
     const scope = `approval-${runId}`;

@@ -3,7 +3,7 @@ import { Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, D
 import type { WorkflowSnapshot, WorkflowTask } from '../../services/workflowRunRuntime';
 import { countWorkflowModelCalls, isRetryableTeamTask, summarizeWorkflowRun } from '../../services/workflowRunRuntime';
 import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
-import { buildAgentTeamTaskRevisionRequest, isRecoverableAgentTeamRun } from '../../services/agentTeamWorkflow';
+import { buildAgentTeamTaskRevisionRequest, isRecoverableAgentTeamRun, updateAgentTeamPlatformBudget } from '../../services/agentTeamWorkflow';
 import TeamTaskExecutionHistory from './TeamTaskExecutionHistory';
 import { workflowDeliveryIssueLabel } from '../../services/workflowDelivery';
 import TeamDeliveryConflictPanel from './TeamDeliveryConflictPanel';
@@ -136,7 +136,8 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           {modelCallLimitReached && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">已达到模型调用上限。调整上限后可继续，已有结果会保留。</Typography>}
         </Box>
         <TeamUsagePanel key={run.run.id} runId={run.run.id} />
-        <TeamBudgetPanel key={`budget:${run.run.id}`} runId={run.run.id} canEdit={canRun && !running && ['paused', 'failed'].includes(run.run.status)} />
+        <TeamBudgetPanel key={`budget:${run.run.id}`} runId={run.run.id} canEdit={canRun && !running && run.run.status === 'paused' && Boolean(run.run.goalSpec)}
+          onSave={(input) => updateAgentTeamPlatformBudget({ ...input, runId: run.run.id, expectedPlanVersion: run.run.planVersion })} />
         {run.tasks.filter((item) => item.kind === 'agent_user_input' && item.status === 'waiting_user' && !pendingWorkflowApproval(item)).map((item) =>
           <TeamUserInputPanel key={`${run.run.id}:${item.id}:${run.run.planVersion}`} run={run} task={item}
             disabled={!canRun || running || !['active', 'paused'].includes(run.run.status)} onAnswer={onAnswer} />)}

@@ -102,18 +102,20 @@ try {
     const admissionId = 'browser-collab-admission-' + crypto.randomUUID();
     let budgetAllowed = false;
     let admissionRequests = 0;
+    const admissionVersions = [];
     const admissionExecutor = { tracksModelInvocations: true, execute: async (_task, _signal, context) => {
-      await context.beginModelInvocation();
+      admissionVersions.push((await context.beginModelInvocation()).budgetRevision);
       admissionRequests++;
       if (!budgetAllowed) throw Object.assign(new Error('private diagnostic'), {
-        diagnostic: { status: 402, code: 'WORKFLOW_BUDGET_EXHAUSTED' },
+        diagnostic: { status: 409, code: 'WORKFLOW_BUDGET_REVISION_CONFLICT' },
       });
       return { output: '预算恢复后的交付' };
     } };
     const admissionRuntime = createWorkflowRunRuntime(indexedDbWorkflowRepository, admissionExecutor, currentWorkflowScope);
-    await admissionRuntime.create({ run: { ...run.run, id: admissionId, status: 'active' }, tasks: [{
+    await admissionRuntime.create({ run: { ...run.run, id: admissionId, status: 'paused', goalSpec: defaultWorkflowGoalSpec(run.run.goal) }, tasks: [{
       id: 'admission', runId: admissionId, kind: 'agent_text', input: '生成报告', dependsOn: [], status: 'queued', attempt: 0, updatedAt: now,
     }] });
+    await admissionRuntime.bindPlatformBudget(admissionId, run.run.planVersion, { revision: 1, billingUnit: 'point', limitAmount: '2.000000' });
     const admissionPaused = await admissionRuntime.resume(admissionId);
     if (admissionPaused.run.status !== 'paused' || admissionPaused.tasks[0].status !== 'queued'
       || admissionPaused.tasks[0].modelInvocation.state !== 'rejected' || admissionRequests !== 1
@@ -122,8 +124,11 @@ try {
     if (rejectedAttempts[0]?.status !== 'failed') throw new Error('Rejected attempt was not persisted');
     budgetAllowed = true;
     const admissionRestored = createWorkflowRunRuntime(indexedDbWorkflowRepository, admissionExecutor, currentWorkflowScope);
+    await admissionRestored.bindPlatformBudget(admissionId, admissionPaused.run.planVersion, { revision: 2, billingUnit: 'point', limitAmount: '3.000000' });
     const admissionDone = await admissionRestored.resume(admissionId);
     if (admissionDone.run.status !== 'completed' || admissionRequests !== 2
+      || JSON.stringify(admissionVersions) !== '[1,2]'
+      || admissionDone.run.goalSpec.platformBudget.revision !== 2
       || JSON.stringify((await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), admissionId, 'admission'))[0]) !== JSON.stringify(rejectedAttempts[0])) {
       throw new Error('Budget resume lost the rejected attempt or repeated a request');
     }
@@ -860,7 +865,8 @@ try {
     useAuthStore.setState({ token: 'browser-fixture-only', isLoggedIn: true });
     root.render(React.createElement(React.Fragment, null,
       React.createElement(Panel, { runId: 'fee-fixture' }),
-      React.createElement(BudgetPanel, { runId: 'fee-fixture', canEdit: true })));
+      React.createElement(BudgetPanel, { runId: 'fee-fixture', canEdit: true,
+        onSave: (input) => api.configureWorkflowBudget('fee-fixture', input) })));
   })()`);
   await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('#workflow-usage-smoke button'))`), 'on-demand fee action');
   assert.equal(await cdp.evaluate(`window.__usageCalls`), 0, 'Mounting must not query fees');

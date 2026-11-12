@@ -4,7 +4,8 @@ import { api } from '../../services/api';
 import { useAuthStore } from '../../stores/useAuthStore';
 import type { WorkflowBudget } from '../../types/workflowUsage';
 
-export default function TeamBudgetPanel({ runId, canEdit }: { runId: string; canEdit: boolean }) {
+export default function TeamBudgetPanel({ runId, canEdit, onSave }: { runId: string; canEdit: boolean;
+  onSave: (input: { limitAmount: string; billingUnit: string; expectedRevision: number }) => Promise<WorkflowBudget> }) {
   const authenticated = useAuthStore((state) => Boolean(state.token && state.isLoggedIn));
   const [budget, setBudget] = useState<WorkflowBudget | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -44,7 +45,7 @@ export default function TeamBudgetPanel({ runId, canEdit }: { runId: string; can
         <Button size="small" disabled={busy || !validAmount} onClick={() => {
           setBusy(true);
           setError(null);
-          void api.configureWorkflowBudget(runId, { limitAmount: amount.trim(), billingUnit: unit,
+          void onSave({ limitAmount: amount.trim(), billingUnit: unit,
             expectedRevision: budget?.revision ?? 0 }).then(update).catch((reason: unknown) => {
             setError(reason instanceof Error ? reason.message : '保存预算失败');
           }).finally(() => setBusy(false));

@@ -4,6 +4,7 @@ export interface WorkflowUsageReference {
   taskId: string;
   attempt: number;
   kind: 'model' | 'tool';
+  budgetRevision?: number;
 }
 
 export interface WorkflowUsageSummary {
