@@ -116,6 +116,77 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it.each(['saved', 'failed', 'scope-changed'] as const)('persists the first-planning budget gate before saving (%s)', async (outcome) => {
+    const runId = crypto.randomUUID();
+    const originalScope = `initial-budget-${runId}`;
+    let scope = originalScope;
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const budget = { schemaVersion: 1 as const, runId, revision: 1, billingUnit: 'point', limitAmount: '20.000000',
+      committedAmount: '0.000000', reservedAmount: '0.000000', remainingAmount: '20.000000',
+      exceeded: false, unresolvedRequests: 0, updatedAt: Date.now() };
+    let finishSave!: (value: typeof budget) => void;
+    let failSave!: (reason: Error) => void;
+    const save = vi.spyOn(appApi, 'configureWorkflowBudget').mockImplementation(() => new Promise((resolve, reject) => {
+      finishSave = resolve; failSave = reject;
+    }));
+    const planningReferences: unknown[] = [];
+    generate.mockImplementation(async (_api, _systemPrompt, _messages, _onChunk, options) => {
+      planningReferences.push(options?.aiUsage?.workflow);
+      return JSON.stringify({ summary: '报告', roles: [{ id: 'analyst', name: '分析师',
+        responsibility: '分析', method: '研究', acceptance: '结论', allowedTools: ['text_generation'] }],
+        tasks: [{ id: 'report', roleId: 'analyst', goal: '研究', dependsOn: [], tool: 'text_generation', acceptance: '结论' }],
+        finalAcceptance: '报告' });
+    });
+    try {
+      const workflow = createAgentTeamWorkflow(config, () => scope);
+      const starting = workflow.start(runId, 'chat', '研究', false, undefined, 1, undefined,
+        { limitAmount: '20', billingUnit: 'point' });
+      const settled = starting.then((result) => ({ result, error: undefined }), (error: unknown) => ({ result: undefined, error }));
+      await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+      const pending = (await workflow.read(runId))!;
+      expect(pending.run).toMatchObject({ status: 'paused', goalSpec: { requirePlatformBudget: true } });
+      expect(pending.tasks[0]).toMatchObject({ status: 'queued', attempt: 0 });
+      expect(isRecoverableAgentTeamRun(pending)).toBe(false);
+      expect(generate).not.toHaveBeenCalled();
+      if (outcome === 'failed') failSave(new Error('预算保存失败'));
+      else {
+        if (outcome === 'scope-changed') scope = `${originalScope}-other`;
+        finishSave(budget);
+      }
+      const result = await settled;
+      const restored = createAgentTeamWorkflow(config, () => originalScope);
+      if (outcome !== 'saved') {
+        expect(result.error).toBeInstanceOf(Error);
+        const blocked = await restored.resume(runId);
+        expect(blocked.snapshot.run.status).toBe('paused');
+        expect(blocked.snapshot.run.pauseReason).toContain('先保存平台任务预算');
+        expect(blocked.snapshot.tasks[0]).toMatchObject({ status: 'queued', attempt: 0 });
+        expect(generate).not.toHaveBeenCalled();
+        save.mockResolvedValue(budget);
+        await restored.setPlatformBudget(runId, blocked.snapshot.run.planVersion,
+          { limitAmount: '20', billingUnit: 'point', expectedRevision: 0 });
+        await restored.resume(runId);
+      }
+      const saved = (await restored.read(runId))!;
+      expect(saved.run.goalSpec).toMatchObject({ requirePlatformBudget: true, platformBudget: {
+        revision: 1, billingUnit: 'point', limitAmount: '20.000000',
+      } });
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(planningReferences).toEqual([expect.objectContaining({ runId, taskId: 'plan', budgetRevision: 1 })]);
+      await restored.resume(runId);
+      expect(generate).toHaveBeenCalledTimes(1);
+    } finally { save.mockRestore(); }
+  });
+
+  it.each(['-1', '1.0000001', '1e3', ''])('rejects invalid initial budget %s before creating a run', async (limitAmount) => {
+    const runId = crypto.randomUUID();
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `invalid-${runId}`);
+    await expect(workflow.start(runId, 'chat', '目标', false, undefined, undefined, undefined,
+      { limitAmount, billingUnit: 'point' })).rejects.toThrow('预算金额或单位无效');
+    expect(await workflow.read(runId)).toBeNull();
+    expect(generate).not.toHaveBeenCalled();
+  });
+
   it('binds a saved budget to the goal and requires approval again before submitting media', async () => {
     const runId = crypto.randomUUID();
     const scope = `budget-approval-${runId}`;

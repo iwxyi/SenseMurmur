@@ -46,6 +46,29 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it('blocks restored runs before claiming any attempt until the required initial budget is bound', async () => {
+    const id = crypto.randomUUID();
+    const scope = `required-budget-${id}`;
+    const execute = vi.fn(async () => ({ output: '完成' }));
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => scope);
+    await runtime.create({ ...snapshot(id), run: { ...snapshot(id).run, status: 'paused',
+      goalSpec: { ...defaultWorkflowGoalSpec('制作短片'), requirePlatformBudget: true } } });
+    const restored = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => scope);
+    const blocked = await restored.resume(id);
+    expect(blocked.run.status).toBe('paused');
+    expect(blocked.run.pauseReason).toContain('先保存平台任务预算');
+    expect(blocked.tasks.every((task) => task.attempt === 0)).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    await expect(indexedDbWorkflowRepository.transact(scope, id, (current) => {
+      if (!current?.run.goalSpec) throw new Error('missing goal');
+      delete current.run.goalSpec.requirePlatformBudget;
+      return { snapshot: current, value: undefined };
+    })).rejects.toThrow('不能在执行中替换');
+    await restored.bindPlatformBudget(id, blocked.run.planVersion, { revision: 1, billingUnit: 'point', limitAmount: '20.000000' });
+    expect((await restored.resume(id)).run.status).toBe('completed');
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
   it('persists budget binding and passes its version to model and tool admissions after recovery', async () => {
     const id = crypto.randomUUID();
     const scope = `budget-version-${id}`;

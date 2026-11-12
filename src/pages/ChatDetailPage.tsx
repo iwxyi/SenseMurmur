@@ -947,6 +947,7 @@ export default function ChatDetailPage() {
   const [teamGoalOpen, setTeamGoalOpen] = useState(false);
   const [teamGoal, setTeamGoal] = useState('');
   const [teamModelCallLimit, setTeamModelCallLimit] = useState('');
+  const [teamPlatformBudget, setTeamPlatformBudget] = useState('');
   const [teamPreferences, setTeamPreferences] = useState('');
   const [teamDeadline, setTeamDeadline] = useState('');
   const [teamMediaApproval, setTeamMediaApproval] = useState(false);
@@ -5067,10 +5068,14 @@ export default function ChatDetailPage() {
           <TextField sx={{ mt: 2 }} size="small" type="datetime-local" fullWidth label="截止时间（可选）" value={teamDeadline} onChange={(event) => setTeamDeadline(event.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
           <FormControlLabel sx={{ mt: 1 }} control={<Checkbox checked={teamMediaApproval} onChange={(event) => setTeamMediaApproval(event.target.checked)} />} label="每次生成图片、音乐、配音或视频前由我确认" />
           <TextField sx={{ mt: 2 }} size="small" type="number" fullWidth label="模型调用次数上限（可选）" value={teamModelCallLimit} onChange={(event) => setTeamModelCallLimit(event.target.value)} slotProps={{ htmlInput: { min: 1, max: 1000, step: 1 } }} helperText="留空则不限制；计入规划、文本任务、图片检查和验收。此项不代表金额预算。" />
+          {authMode === 'cloud' && <TextField sx={{ mt: 2 }} size="small" fullWidth label="平台任务总预算（积分，可选）" value={teamPlatformBudget}
+            onChange={(event) => setTeamPlatformBudget(event.target.value)} slotProps={{ htmlInput: { inputMode: 'decimal' } }}
+            error={Boolean(teamPlatformBudget.trim() && !/^(?:0|[1-9]\d{0,17})(?:\.\d{1,6})?$/.test(teamPlatformBudget.trim()))}
+            helperText="包含首次规划及后续平台调用；无可靠报价时暂停。直连第三方费用不包含在内。" />}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setTeamGoalOpen(false)}>取消</Button>
-          <Button disabled={!teamGoal.trim() || !navigator.locks?.request || Boolean(teamDeadline && !Number.isFinite(new Date(teamDeadline).getTime())) || Boolean(teamModelCallLimit.trim() && (!Number.isSafeInteger(Number(teamModelCallLimit)) || Number(teamModelCallLimit) < 1 || Number(teamModelCallLimit) > 1000))} onClick={() => {
+          <Button disabled={!teamGoal.trim() || !navigator.locks?.request || Boolean(teamDeadline && !Number.isFinite(new Date(teamDeadline).getTime())) || Boolean(teamModelCallLimit.trim() && (!Number.isSafeInteger(Number(teamModelCallLimit)) || Number(teamModelCallLimit) < 1 || Number(teamModelCallLimit) > 1000)) || Boolean(authMode === 'cloud' && teamPlatformBudget.trim() && !/^(?:0|[1-9]\d{0,17})(?:\.\d{1,6})?$/.test(teamPlatformBudget.trim()))} onClick={() => {
             if (!id) return;
             if (teamDeadline && new Date(teamDeadline).getTime() <= Date.now()) {
               showErrorToast('截止时间必须晚于当前时间');
@@ -5078,6 +5083,8 @@ export default function ChatDetailPage() {
             }
             const goal = teamGoal.trim();
             const maxModelCalls = teamModelCallLimit.trim() ? Number(teamModelCallLimit) : undefined;
+            const initialBudget = authMode === 'cloud' && teamPlatformBudget.trim()
+              ? { limitAmount: teamPlatformBudget.trim(), billingUnit: 'point' } : undefined;
             const goalSpec: WorkflowGoalSpec = { ...defaultWorkflowGoalSpec(goal), preferences: teamPreferences.trim() ? [teamPreferences.trim()] : [],
               ...(teamMediaApproval ? { approvalTools: ['image_generation', 'audio_generation', 'speech_generation', 'video_generation'] } : {}),
               ...(teamDeadline ? { deadlineAt: new Date(teamDeadline).getTime() } : {}) };
@@ -5085,6 +5092,7 @@ export default function ChatDetailPage() {
             setTeamGoalOpen(false);
             setTeamGoal('');
             setTeamModelCallLimit('');
+            setTeamPlatformBudget('');
             setTeamPreferences('');
             setTeamDeadline('');
             setTeamMediaApproval(false);
@@ -5094,7 +5102,7 @@ export default function ChatDetailPage() {
                 content: goal, emotion: 0, timestamp: getNextMessageTimestamp(),
               });
               void updateChat(chatId, { lastMessageAt: message.timestamp, latestMessage: message });
-              await runAgentTeam({ chatId, goal, maxModelCalls, goalSpec });
+              await runAgentTeam({ chatId, goal, maxModelCalls, goalSpec, initialBudget });
             })().catch((error) => showErrorToast(error instanceof Error ? error.message : '团队任务启动失败'));
           }}>开始</Button>
         </DialogActions>

@@ -33,7 +33,7 @@ import { listAvailableModels } from './aiClient';
 import { canComposeTeamMedia, composeAgentTeamMedia, inspectAgentTeamComposition, teamMediaAttachment } from './agentTeamMediaComposition';
 import { hasRepeatedTeamReviewWithoutProgress, hasSemanticallyStalledTeamReview, parseTeamProgressAssessment, teamReviewProgressComparison } from './agentTeamProgress';
 import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
-import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoalSpec, workflowDeadlineBlockReason, workflowGoalContext, type WorkflowGoalSpec } from './workflowGoalSpec';
+import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoalSpec, workflowGoalBlockReason, workflowGoalContext, type WorkflowGoalSpec } from './workflowGoalSpec';
 import { describeWorkflowToolRequest, workflowJsonDigest } from './workflowToolRequest';
 import { parseWorkflowReviewVerdict, prepareWorkflowReviewRecord } from './workflowReviewRecord';
 import { analyzeWorkflowRevisionImpact, parseWorkflowRevisionImpact, type WorkflowRevisionImpact } from './workflowRevisionImpact';
@@ -885,22 +885,37 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return runtime.retryFailedTeamTask(runId, expectedPlanVersion, taskId);
       });
     },
-    async start(runId: string, chatId: string, goal: string, autoReview = false, signal = getWorkspaceSignal(), maxModelCalls?: number, goalSpec?: WorkflowGoalSpec) {
+    async start(runId: string, chatId: string, goal: string, autoReview = false, signal = getWorkspaceSignal(), maxModelCalls?: number, goalSpec?: WorkflowGoalSpec, initialBudget?: { limitAmount: string; billingUnit: string }) {
+      const storageScope = scope();
       if (maxModelCalls !== undefined && (!Number.isSafeInteger(maxModelCalls) || maxModelCalls < 1 || maxModelCalls > 1000)) {
         throw new WorkflowPreflightError('模型调用次数上限必须是 1 到 1000 的整数');
       }
       const now = Date.now();
       const contract = goalSpec ? parseWorkflowGoalSpec(goalSpec) : defaultWorkflowGoalSpec(goal);
+      if (initialBudget && (!/^(?:0|[1-9]\d{0,17})(?:\.\d{1,6})?$/.test(initialBudget.limitAmount)
+        || !/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(initialBudget.billingUnit))) throw new WorkflowPreflightError('平台预算金额或单位无效');
+      if (initialBudget) contract.requirePlatformBudget = true;
       if (contract.objective !== goal) throw new WorkflowPreflightError('目标契约与运行目标不一致');
       const chat = requireActiveAssistantChat(chatId);
       const branchError = teamConversationBlockReason(chat, contract);
       if (branchError) throw new WorkflowPreflightError(branchError);
       contract.sourceBranch ??= captureTeamSourceBranch(chat);
       const initial: WorkflowSnapshot = {
-        run: { id: runId, chatId, goal, goalSpec: contract, status: 'active', generation: 0, planVersion: 1, planOpen: true, autoReview, maxModelCalls, updatedAt: now },
+        run: { id: runId, chatId, goal, goalSpec: contract, status: contract.requirePlatformBudget && !contract.platformBudget ? 'paused' : 'active',
+          ...(contract.requirePlatformBudget && !contract.platformBudget ? { pauseReason: workflowGoalBlockReason(contract) } : {}),
+          generation: 0, planVersion: 1, planOpen: true, autoReview, maxModelCalls, updatedAt: now },
         tasks: [{ id: 'plan', runId, kind: 'team_plan', input: goal, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
       };
-      if (!await runtime.read(runId)) await runtime.create(initial);
+      const existing = await runtime.read(runId);
+      if (scope() !== storageScope) throw new Error('账号已切换，任务创建已停止');
+      if (!existing) await runtime.create(initial);
+      if (scope() !== storageScope) throw new Error('账号已切换，任务创建已停止');
+      if (initialBudget && !existing) {
+        signal.throwIfAborted();
+        await this.setPlatformBudget(runId, 1, { ...initialBudget, expectedRevision: 0 });
+        signal.throwIfAborted();
+      }
+      if (scope() !== storageScope) throw new Error('账号已切换，任务创建已停止');
       return this.resume(runId, signal);
     },
     async resume(runId: string, signal = getWorkspaceSignal()) {
@@ -1264,7 +1279,7 @@ export async function listAgentTeamRuns(chatId?: string) {
 
 export function isRecoverableAgentTeamRun(snapshot: WorkflowSnapshot) {
   return snapshot.run.status === 'paused'
-    && !workflowDeadlineBlockReason(snapshot.run.goalSpec)
+    && !workflowGoalBlockReason(snapshot.run.goalSpec)
     && (snapshot.run.maxModelCalls === undefined || countWorkflowModelCalls(snapshot) < snapshot.run.maxModelCalls
       || snapshot.tasks.some((task) => task.status === 'waiting_external'))
     && snapshot.tasks.length > 0
@@ -1272,9 +1287,12 @@ export function isRecoverableAgentTeamRun(snapshot: WorkflowSnapshot) {
     && snapshot.tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency' || task.status === 'waiting_external');
 }
 
-export async function runAgentTeam(params: { chatId: string; goal: string; runId?: string; maxModelCalls?: number; goalSpec?: WorkflowGoalSpec }) {
+export async function runAgentTeam(params: { chatId: string; goal: string; runId?: string; maxModelCalls?: number; goalSpec?: WorkflowGoalSpec;
+  initialBudget?: { limitAmount: string; billingUnit: string } }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
+  if (params.initialBudget && auth.mode !== 'cloud') throw new Error('平台任务预算需要登录平台账号');
+  if (params.initialBudget && params.runId) throw new Error('已有任务请在工作台调整预算');
   if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务执行');
   const originalScope = currentWorkflowScope();
   if (activeTeamRuns.has(params.runId || '')) throw new Error('团队任务正在执行');
@@ -1286,7 +1304,7 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
     return await scheduleBackgroundExecution(params.chatId, () => runWithConversationExecutionLock(originalScope, params.chatId, async (signal) => {
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队任务已暂停');
       const workflow = currentTeamWorkflow();
-      const result = params.runId ? await workflow.resume(runId, signal) : await workflow.start(runId, params.chatId, params.goal, true, signal, params.maxModelCalls, params.goalSpec);
+      const result = params.runId ? await workflow.resume(runId, signal) : await workflow.start(runId, params.chatId, params.goal, true, signal, params.maxModelCalls, params.goalSpec, params.initialBudget);
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队交付已暂停');
       if (result.snapshot.run.status === 'completed') await workflow.publish(runId);
       return result;

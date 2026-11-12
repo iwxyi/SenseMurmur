@@ -2,7 +2,7 @@ import { scopedStorageKey } from '../constants/brand';
 import { getLocalDataUserId } from './authStorageScope';
 import { claimedTaskAttempt, parseWorkflowTaskAttempt, settleTaskAttempt, type WorkflowTaskAttempt } from './workflowTaskAttempt';
 import { appliedWorkflowPlanRevision, parseWorkflowPlanRevision, type WorkflowPlanRevision } from './workflowPlanRevision';
-import { parseWorkflowGoalSpec, workflowDeadlineBlockReason, type WorkflowGoalSpec } from './workflowGoalSpec';
+import { parseWorkflowGoalSpec, workflowDeadlineBlockReason, workflowGoalBlockReason, type WorkflowGoalSpec } from './workflowGoalSpec';
 import { isWorkflowModelTask, parseWorkflowModelInvocation, workflowModelInvocationId, type WorkflowModelInvocation } from './workflowModelInvocation';
 import { copyWorkflowDelivery, parseWorkflowDelivery, type WorkflowDelivery, type WorkflowDeliveryBranch, type WorkflowDeliveryIssue } from './workflowDelivery';
 import { isWorkflowToolTask, parseWorkflowToolInvocation, workflowToolInvocationId, workflowToolOperationKey, type WorkflowToolInvocation } from './workflowToolInvocation';
@@ -1163,7 +1163,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         if (scope() !== storageScope) break;
         const snapshot = await repository.read(storageScope, runId);
         if (!snapshot || snapshot.run.status !== 'active' || snapshot.run.pauseRequested) break;
-        const pauseReason = workflowDeadlineBlockReason(snapshot.run.goalSpec) || executor.dispatchBlockReason?.(snapshot);
+        const pauseReason = workflowGoalBlockReason(snapshot.run.goalSpec) || executor.dispatchBlockReason?.(snapshot);
         if (pauseReason) {
           await mutate(storageScope, runId, (current) => ({ snapshot: { ...current,
             run: { ...current.run, status: 'paused', pauseReason, updatedAt: Date.now() } }, value: undefined }));
@@ -1212,7 +1212,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
           if (scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' || current.run.pauseRequested) {
             return { snapshot: current, value: false };
           }
-          const reason = workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current);
+          const reason = workflowGoalBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current);
           if (reason) return { snapshot: { ...current, run: { ...current.run, status: 'paused', pauseReason: reason, updatedAt: Date.now() } }, value: false };
           for (const item of current.tasks.filter((task) => claimed.has(task.id))) {
             const requirement = executor.approvalRequirement?.(item, current);
@@ -1251,7 +1251,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                   || item?.status !== 'running' || item.attempt !== task.attempt + 1 || item.toolInvocation?.state !== 'reserved') {
                   throw new WorkflowPreflightError('工具调用的运行权已失效或已开始');
                 }
-                const reason = workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current);
+                const reason = workflowGoalBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current);
                 if (reason) throw new WorkflowPreflightError(reason);
                 const requirement = executor.approvalRequirement?.(item, current);
                 if (requirement && !workflowApprovalMatches(item, requirement, item.attempt)) throw new WorkflowPreflightError('执行配置已改变，请重新确认审批');
@@ -1273,7 +1273,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                   || item?.status !== 'running' || item.attempt !== task.attempt + 1 || item.modelInvocation?.state !== 'reserved') {
                   throw new WorkflowPreflightError('模型调用的运行权已失效或已开始');
                 }
-                const reason = workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current);
+                const reason = workflowGoalBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current);
                 if (reason) throw new WorkflowPreflightError(reason);
                 const requirement = executor.approvalRequirement?.(item, current);
                 if (requirement && !workflowApprovalMatches(item, requirement, item.attempt)) throw new WorkflowPreflightError('执行配置已改变，请重新确认审批');
@@ -1337,7 +1337,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
               }
               const definiteFailure = error instanceof WorkflowPreflightError || invocationUnstarted(item);
               const blockedBeforeRequest = invocationUnstarted(item)
-                && (current.run.pauseRequested || workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current));
+                && (current.run.pauseRequested || workflowGoalBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current));
               return { ...(isReady ? finishInvocation(item, definiteFailure ? 'failed' : 'result_unknown', Date.now()) : item),
                 status: blockedBeforeRequest ? 'queued' : !isReady ? 'waiting_external' : definiteFailure ? 'failed' : 'result_unknown',
                 capabilityIssue: !blockedBeforeRequest && isReady && error instanceof WorkflowPreflightError && error.capability

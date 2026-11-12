@@ -189,6 +189,51 @@ try {
     const replies = [recursivePlan('research', '研究机会', 'delegate_task'), recursivePlan('market', '分析市场', 'delegate_task'),
       recursivePlan('evidence', '整理资料', 'text_generation'), '证据：离线使用需求', '市场交付：优先离线', '研究交付：离线方案'];
     const config = { provider: 'openai', baseUrl: 'https://delegation-smoke.invalid/v1', apiKey: 'test-fixture', model: 'fixture' };
+    const { api: initialBudgetApi } = await import('/src/services/api.ts');
+    const originalInitialBudgetSave = initialBudgetApi.configureWorkflowBudget;
+    const initialBudgetId = 'browser-collab-initial-budget-' + crypto.randomUUID();
+    let initialPlanningRequests = 0;
+    let rejectInitialSave;
+    let initialSaveStarted = false;
+    initialBudgetApi.configureWorkflowBudget = async () => {
+      initialSaveStarted = true;
+      return new Promise((_resolve, reject) => { rejectInitialSave = reject; });
+    };
+    window.fetch = async (input, init) => {
+      if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
+      initialPlanningRequests++;
+      return Response.json({ choices: [{ message: { role: 'assistant', content: recursivePlan('report', '研究市场', 'text_generation') }, finish_reason: 'stop' }] });
+    };
+    try {
+      const initialWorkflow = createAgentTeamWorkflow(config, currentWorkflowScope);
+      const starting = initialWorkflow.start(initialBudgetId, recursiveChatId, '研究市场', false,
+        new AbortController().signal, 1, undefined, { limitAmount: '20', billingUnit: 'point' });
+      const settled = starting.then(() => false, () => true);
+      for (let tries = 0; !initialSaveStarted && tries < 100; tries++) await new Promise((resolve) => setTimeout(resolve, 10));
+      if (!initialSaveStarted) throw new Error('Initial budget save never started');
+      const pending = await initialWorkflow.read(initialBudgetId);
+      if (pending.run.status !== 'paused' || !pending.run.goalSpec.requirePlatformBudget
+        || pending.tasks[0].attempt !== 0 || initialPlanningRequests !== 0) throw new Error('Planning bypassed the initial budget save');
+      rejectInitialSave(new Error('预算保存失败'));
+      if (!await settled) throw new Error('Initial budget save failure was hidden');
+      const restored = createAgentTeamWorkflow(config, currentWorkflowScope);
+      const blocked = (await restored.resume(initialBudgetId)).snapshot;
+      if (blocked.run.status !== 'paused' || !blocked.run.pauseReason.includes('先保存平台任务预算')
+        || blocked.tasks[0].attempt !== 0 || initialPlanningRequests !== 0) throw new Error('Restored planning bypassed missing budget');
+      initialBudgetApi.configureWorkflowBudget = async (runId) => ({ schemaVersion: 1, runId, revision: 1,
+        billingUnit: 'point', limitAmount: '20.000000', committedAmount: '0.000000', reservedAmount: '0.000000',
+        remainingAmount: '20.000000', exceeded: false, unresolvedRequests: 0, updatedAt: Date.now() });
+      await restored.setPlatformBudget(initialBudgetId, blocked.run.planVersion,
+        { limitAmount: '20', billingUnit: 'point', expectedRevision: 0 });
+      const planned = (await restored.resume(initialBudgetId)).snapshot;
+      if (initialPlanningRequests !== 1 || planned.tasks[0].status !== 'completed'
+        || planned.run.goalSpec.platformBudget.revision !== 1) throw new Error('Budget repair failed to release first planning');
+      await createAgentTeamWorkflow(config, currentWorkflowScope).resume(initialBudgetId);
+      if (initialPlanningRequests !== 1) throw new Error('Budget recovery duplicated first planning');
+    } finally {
+      initialBudgetApi.configureWorkflowBudget = originalInitialBudgetSave;
+      window.fetch = originalFetch;
+    }
     let recursiveRun;
     window.fetch = async (input, init) => {
       if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);

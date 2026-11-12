@@ -9,6 +9,7 @@ export interface WorkflowGoalSpec {
   acceptance: string[];
   preferences?: string[];
   deadlineAt?: number;
+  requirePlatformBudget?: true;
   platformBudget?: { revision: number; billingUnit: string; limitAmount: string };
   allowedTools: WorkflowTool[];
   approvalTools?: WorkflowTool[];
@@ -35,6 +36,7 @@ export function parseWorkflowGoalSpec(raw: unknown): WorkflowGoalSpec {
   const constraints = stringList(value.constraints, '约束');
   const acceptance = stringList(value.acceptance, '验收条件');
   const preferences = value.preferences === undefined ? undefined : stringList(value.preferences, '偏好');
+  if (value.requirePlatformBudget !== undefined && value.requirePlatformBudget !== true) throw new Error('目标契约平台预算要求无效');
   let platformBudget: WorkflowGoalSpec['platformBudget'];
   if (value.platformBudget !== undefined) {
     const budget = value.platformBudget as Record<string, unknown> | null;
@@ -72,6 +74,7 @@ export function parseWorkflowGoalSpec(raw: unknown): WorkflowGoalSpec {
   return { schemaVersion: 1, objective: value.objective, constraints, acceptance, allowedTools: allowedTools as WorkflowTool[],
     ...(approvalTools === undefined ? {} : { approvalTools: approvalTools as WorkflowTool[] }),
     ...(preferences === undefined ? {} : { preferences }),
+    ...(value.requirePlatformBudget === true ? { requirePlatformBudget: true as const } : {}),
     ...(platformBudget ? { platformBudget } : {}),
     ...(value.deadlineAt === undefined ? {} : { deadlineAt: Number(value.deadlineAt) }),
     ...(sourceBranch ? { sourceBranch } : {}),
@@ -91,6 +94,11 @@ export function workflowGoalContext(spec?: WorkflowGoalSpec): string {
 
 export function workflowDeadlineBlockReason(spec: WorkflowGoalSpec | undefined, now = Date.now()) {
   return spec?.deadlineAt !== undefined && now >= spec.deadlineAt ? '已到截止时间，未开始的步骤已暂停。调整截止时间后可继续。' : undefined;
+}
+
+export function workflowGoalBlockReason(spec: WorkflowGoalSpec | undefined) {
+  return workflowDeadlineBlockReason(spec) || (spec?.requirePlatformBudget && !spec.platformBudget
+    ? '请先保存平台任务预算，再继续整个任务。' : undefined);
 }
 
 export function assertWorkflowToolAuthorized(spec: WorkflowGoalSpec | undefined, tool: WorkflowTool) {

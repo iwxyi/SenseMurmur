@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoalSpec, workflowDeadlineBlockReason, workflowGoalContext } from './workflowGoalSpec';
+import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoalSpec, workflowDeadlineBlockReason, workflowGoalBlockReason, workflowGoalContext } from './workflowGoalSpec';
 
 describe('workflow goal contract', () => {
+  it('requires a persisted platform budget before dispatch only when explicitly requested', () => {
+    const base = defaultWorkflowGoalSpec('目标');
+    expect(workflowGoalBlockReason(base)).toBeUndefined();
+    const required = parseWorkflowGoalSpec({ ...base, requirePlatformBudget: true });
+    expect(required.requirePlatformBudget).toBe(true);
+    expect(workflowGoalBlockReason(required)).toContain('先保存平台任务预算');
+    expect(workflowGoalBlockReason({ ...required, platformBudget: { revision: 1, billingUnit: 'point', limitAmount: '0.000000' } })).toBeUndefined();
+    for (const invalid of [false, null, 1, 'true']) expect(() => parseWorkflowGoalSpec({ ...base, requirePlatformBudget: invalid })).toThrow('平台预算要求');
+  });
   it('binds exact platform budget values without altering older contracts', () => {
     const base = defaultWorkflowGoalSpec('目标');
     expect(base).not.toHaveProperty('platformBudget');
