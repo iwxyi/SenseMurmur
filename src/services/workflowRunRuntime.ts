@@ -2,6 +2,7 @@ import { scopedStorageKey } from '../constants/brand';
 import { getLocalDataUserId } from './authStorageScope';
 import { claimedTaskAttempt, parseWorkflowTaskAttempt, settleTaskAttempt, type WorkflowTaskAttempt } from './workflowTaskAttempt';
 import { appliedWorkflowPlanRevision, parseWorkflowPlanRevision, type WorkflowPlanRevision } from './workflowPlanRevision';
+import { parseWorkflowGoalSpec, type WorkflowGoalSpec } from './workflowGoalSpec';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -23,6 +24,7 @@ export interface WorkflowRun {
   id: string;
   chatId: string;
   goal: string;
+  goalSpec?: WorkflowGoalSpec;
   retryOfRunId?: string;
   retryRootRunId?: string;
   status: 'active' | 'paused' | 'completed' | 'failed' | 'cancelled';
@@ -76,6 +78,7 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
   assertNonEmptyString(run.id, '运行 ID');
   assertNonEmptyString(run.chatId, '会话 ID');
   assertNonEmptyString(run.goal, '目标');
+  if (run.goalSpec !== undefined && parseWorkflowGoalSpec(run.goalSpec).objective !== run.goal) throw new Error('目标契约与运行目标不一致');
   if (!RUN_STATUSES.has(run.status as WorkflowRun['status'])) throw new Error('工作流运行状态无效');
   if (!Number.isSafeInteger(run.generation) || (run.generation as number) < 0) throw new Error('工作流运行代次无效');
   if (!Number.isSafeInteger(run.planVersion) || (run.planVersion as number) < 1) throw new Error('工作流计划版本无效');
@@ -469,8 +472,9 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
         try {
           const current: unknown = request.result;
           const migratedCurrent = current === undefined ? null : migrateWorkflowSnapshot(current);
-          const next = update(migratedCurrent);
+          const next = update(migratedCurrent === null ? null : structuredClone(migratedCurrent));
           const migratedNext = migrateWorkflowSnapshot(next.snapshot);
+          if (migratedCurrent && JSON.stringify(migratedCurrent.run.goalSpec) !== JSON.stringify(migratedNext.run.goalSpec)) throw new Error('目标契约不能在执行中替换，请新建任务以变更目标授权');
           const revision = appliedWorkflowPlanRevision(migratedCurrent, migratedNext);
           value = next.value;
           store.put(migratedNext, rowKey(scope, runId));
@@ -786,7 +790,6 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         }
       }
       const inspectedExternalIds = new Set<string>();
-      const concurrency = Math.max(1, Math.min(8, Math.floor(maxConcurrentTasks) || 1));
       const alreadyApplied = await mutate(storageScope, runId, (current) => {
         if (commandId && current.run.resumeCommandIds?.includes(commandId)) return { snapshot: current, value: true };
         if (current.run.status === 'completed' || current.run.status === 'cancelled') return { snapshot: current, value: true };
@@ -802,6 +805,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         if (scope() !== storageScope) break;
         const snapshot = await repository.read(storageScope, runId);
         if (!snapshot || snapshot.run.status !== 'active' || snapshot.run.pauseRequested) break;
+        const concurrency = Math.max(1, Math.min(8, Math.floor(maxConcurrentTasks) || 1, snapshot.run.goalSpec?.execution.maxConcurrentTasks ?? 8));
         const generation = snapshot.run.generation;
         const completed = new Set(snapshot.tasks.filter((task) => task.status === 'completed').map((task) => task.id));
         const ready = snapshot.tasks.filter((task) => (task.status === 'queued' || task.status === 'waiting_dependency') && task.dependsOn.every((id) => completed.has(id)));

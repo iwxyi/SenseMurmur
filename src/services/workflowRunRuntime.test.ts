@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowSnapshot } from './workflowRunRuntime';
+import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
 
 let testIndexedDb: IDBFactory | undefined;
 
@@ -41,6 +42,47 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it('persists immutable goal authorization and rejects mismatched or unsupported contracts', async () => {
+    const id = crypto.randomUUID();
+    const scope = `goal-${id}`;
+    const plan = snapshot(id);
+    plan.run.goalSpec = defaultWorkflowGoalSpec(plan.run.goal);
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => scope);
+    await runtime.create(plan);
+    expect((await runtime.read(id))?.run.goalSpec).toEqual(plan.run.goalSpec);
+    await expect(indexedDbWorkflowRepository.transact(scope, id, (current) => {
+      if (!current?.run.goalSpec) throw new Error('missing goal');
+      return { snapshot: { ...current, run: { ...current.run, goalSpec: { ...current.run.goalSpec, allowedTools: [] } } }, value: undefined };
+    })).rejects.toThrow('不能在执行中替换');
+    await expect(indexedDbWorkflowRepository.transact(scope, id, (current) => {
+      if (!current?.run.goalSpec) throw new Error('missing goal');
+      current.run.goalSpec.allowedTools = [];
+      return { snapshot: current, value: undefined };
+    })).rejects.toThrow('不能在执行中替换');
+    expect((await runtime.read(id))?.run.goalSpec).toEqual(plan.run.goalSpec);
+    await expect(runtime.create({ ...snapshot('invalid-goal'), run: { ...snapshot('invalid-goal').run, goalSpec: defaultWorkflowGoalSpec('不同目标') } })).rejects.toThrow('不一致');
+    expect((await indexedDbWorkflowRepository.read('legacy-scope', 'legacy-v1'))?.run.goalSpec).toBeUndefined();
+  });
+
+  it('uses the persisted goal concurrency limit after recreating the runtime', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.tasks[1] = { ...plan.tasks[1], dependsOn: [], status: 'queued' };
+    plan.run.goalSpec = { ...defaultWorkflowGoalSpec(plan.run.goal), execution: { ...defaultWorkflowGoalSpec(plan.run.goal).execution, maxConcurrentTasks: 1 } };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const execute = vi.fn(async () => { await gate; return { output: '完成' }; });
+    const first = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => `goal-limit-${id}`, 3);
+    await first.create(plan);
+    const restored = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => `goal-limit-${id}`, 3);
+    const pending = restored.resume(id);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    const running = await restored.read(id);
+    expect(running?.tasks.filter((task) => task.status === 'running')).toHaveLength(1);
+    release();
+    expect((await pending).run.status).toBe('completed');
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
   it('atomically journals plan edits, rejects version jumps and isolates accounts', async () => {
     const id = crypto.randomUUID();
     const scope = `revisions-${id}`;
@@ -60,6 +102,22 @@ describe('workflow run runtime', () => {
     expect(await indexedDbWorkflowRepository.listPlanRevisions(scope, id)).toEqual(revisions);
     await runtime.pause(id);
     expect(await indexedDbWorkflowRepository.listPlanRevisions(scope, id)).toEqual(revisions);
+  });
+
+  it('journals in-place task edits against the original transaction snapshot', async () => {
+    const id = crypto.randomUUID();
+    const scope = `mutable-edit-${id}`;
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => scope);
+    await runtime.create(snapshot(id));
+    await indexedDbWorkflowRepository.transact(scope, id, (current) => {
+      if (!current) throw new Error('missing');
+      current.run.planVersion += 1;
+      current.tasks[0].input = '修订脚本';
+      return { snapshot: current, value: undefined };
+    });
+    const revisions = await indexedDbWorkflowRepository.listPlanRevisions(scope, id);
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]).toMatchObject({ parentVersion: 1, version: 2, updatedTaskIds: ['script'] });
   });
 
   it('upgrades a version 1 database and preserves its legacy run snapshot', async () => {

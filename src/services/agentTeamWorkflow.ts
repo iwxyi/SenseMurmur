@@ -27,6 +27,7 @@ import { listAvailableModels } from './aiClient';
 import { canComposeTeamMedia, composeAgentTeamMedia, inspectAgentTeamComposition, teamMediaAttachment } from './agentTeamMediaComposition';
 import { hasRepeatedTeamReviewWithoutProgress } from './agentTeamProgress';
 import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
+import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoalSpec, workflowGoalContext, type WorkflowGoalSpec } from './workflowGoalSpec';
 
 const TOOL_TASK_KINDS = {
   text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio', speech_generation: 'agent_audio',
@@ -34,6 +35,13 @@ const TOOL_TASK_KINDS = {
 } as const;
 
 function teamTaskKind(task: AgentTeamTask) { return TOOL_TASK_KINDS[task.tool || 'text_generation']; }
+function assertGoalPlanAuthorized(snapshot: WorkflowSnapshot, plan: AgentTeamPlan) {
+  try {
+    for (const role of plan.roles) for (const tool of role.allowedTools) assertWorkflowToolAuthorized(snapshot.run.goalSpec, tool);
+  } catch (error) {
+    throw new WorkflowPreflightError(error instanceof Error ? error.message : '目标授权无效');
+  }
+}
 function isAgentTaskKind(kind: string) { return Object.values(TOOL_TASK_KINDS).some((value) => value === kind); }
 
 function requireActiveAssistantChat(chatId: string) {
@@ -243,8 +251,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
-        const plan = await planAgentTeam({ api, goal: task.input, chatId: snapshot.run.chatId, webSearch, ...capabilities, signal });
+        const plan = await planAgentTeam({ api, goal: task.input + workflowGoalContext(snapshot.run.goalSpec), chatId: snapshot.run.chatId, webSearch, ...capabilities, signal });
         validateAvailableTeamTools(plan, capabilities, webSearch);
+        assertGoalPlanAuthorized(snapshot, plan);
         return { output: plan };
       }
       if (task.kind === 'team_plan_revision') {
@@ -260,8 +269,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
-        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities, signal });
+        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities, signal });
         validateAvailableTeamTools(plan, capabilities, webSearch);
+        assertGoalPlanAuthorized(snapshot, plan);
         return { output: plan };
       }
       if (task.kind === 'team_review') {
@@ -273,6 +283,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         try { finalAcceptance = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === 'plan')?.output).finalAcceptance; }
         catch (error) { throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队验收标准无效'); }
         const { evidence, omitted } = selectReviewEvidence(snapshot, input.sourceTaskIds);
+        finalAcceptance += workflowGoalContext(snapshot.run.goalSpec);
         const raw = await generateResponse(api, '你是主 Agent 的交付验收员。根据原目标、最终验收标准和真实完成记录判断是否已达到可用交付。只能基于现有工具能力提出最多一步必要补做，不得重复已完成工作。图片、音乐和视频生成任务的文字记录只证明附件已保存；只有明确的图片检查或视频抽帧检查任务才提供实际画面观察，抽帧检查仅覆盖报告列出的采样时刻，不证明音轨、逐帧连续性或全部镜头合格。不能把未检查的媒体当作已验证。缺失的剪辑、混音、代码执行等能力不得伪装为已完成。仅输出 JSON：{"complete":true,"reason":"..."} 或 {"complete":false,"reason":"...","nextRequest":"需要补做的具体工作"}。', [{ role: 'user', content: `原目标：${snapshot.run.goal}\n最终验收标准：${finalAcceptance}\n已完成任务摘要（另有 ${omitted} 项已完成记录未列出）：${JSON.stringify(evidence)}` }], undefined, {
           responseFormat: 'json', maxTokens: 600, signal,
           aiUsage: { type: 'assistant_chat', label: '团队交付验收', scope: 'chat', resourceId: snapshot.run.chatId },
@@ -301,6 +312,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         throw new WorkflowPreflightError('团队任务与已保存计划不一致');
       }
       const selectedTool = input.task.tool || 'text_generation';
+      assertGoalPlanAuthorized(snapshot, plan);
       if (task.kind !== teamTaskKind(input.task)) throw new WorkflowPreflightError('团队任务工具与计划不一致');
       if (signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
       if (selectedTool === 'media_composition') {
@@ -326,7 +338,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return dependency.output.slice(0, 12_000);
         });
         return queueAgentTeamImage({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
-          prompt: [input.task.goal, ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), referenceImages, signal });
+          prompt: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), referenceImages, signal });
       }
       if (selectedTool === 'image_inspection') {
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'text');
@@ -339,7 +351,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (references.some((reference) => !reference)) throw new WorkflowPreflightError('图片检查的参考图片尚未就绪');
         const output = await inspectAgentTeamImages({
           api: { provider: profile.provider, apiKey: profile.apiKey, baseUrl: profile.baseUrl, model: profile.model, maxOutputTokens: profile.maxOutputTokens },
-          goal: [input.task.goal, input.userInstruction].filter(Boolean).join('\n'), acceptance: input.task.acceptance,
+          goal: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), input.userInstruction].filter(Boolean).join('\n'), acceptance: input.task.acceptance,
           chatId: snapshot.run.chatId,
           references: references.filter((reference): reference is NonNullable<typeof reference> => Boolean(reference)), signal,
         });
@@ -356,7 +368,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (!attachment?.url || attachment.kind !== 'video') throw new WorkflowPreflightError('待检查视频尚未保存在当前聊天，请先恢复视频文件');
         return { output: await inspectAgentTeamVideo({
           api: { provider: profile.provider, apiKey: profile.apiKey, baseUrl: profile.baseUrl, model: profile.model, maxOutputTokens: profile.maxOutputTokens },
-          chatId: snapshot.run.chatId, goal: [input.task.goal, input.userInstruction].filter(Boolean).join('\n'), acceptance: input.task.acceptance,
+          chatId: snapshot.run.chatId, goal: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), input.userInstruction].filter(Boolean).join('\n'), acceptance: input.task.acceptance,
           url: attachment.url, maxFrames: Math.min(6, capabilities.maxAttachments), signal,
         }) };
       }
@@ -384,7 +396,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return dependency.output.slice(0, 12_000);
         });
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
-          prompt: [input.task.goal, ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), signal });
+          prompt: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), signal });
       }
       if (selectedTool === 'video_generation') {
         const existingVideo = inspectAgentTeamVideoAttachment(task.runId, task.id);
@@ -422,7 +434,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
             ? dependency.output.slice(0, 12_000) : null;
         }).filter((content): content is string => content !== null);
         return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
-          prompt: [input.task.goal, ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), referenceImages, signal });
+          prompt: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), referenceImages, signal });
       }
       if (selectedTool === 'web_search') {
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId && item.type === 'assistant' && item.deletedAt == null);
@@ -450,6 +462,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         `方法：${role.method}`,
         `岗位验收：${role.acceptance}`,
         `本任务验收：${input.task.acceptance}`,
+        workflowGoalContext(snapshot.run.goalSpec),
         '只根据提供的目标与上游交付工作；不声称调用了未提供的工具。缺少事实依据时标明不确定性。',
       ].join('\n'), [{ role: 'user', content: `总目标：${input.goal}\n当前任务：${input.task.goal}\n${input.userInstruction ? `用户补充指示：${input.userInstruction}\n` : ''}上游交付：${JSON.stringify(upstream)}` }], undefined, {
         responseFormat: 'text', signal,
@@ -590,13 +603,15 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return runtime.retryFailedTeamPlan(runId, expectedPlanVersion, taskId);
       });
     },
-    async start(runId: string, chatId: string, goal: string, autoReview = false, signal = getWorkspaceSignal(), maxModelCalls?: number) {
+    async start(runId: string, chatId: string, goal: string, autoReview = false, signal = getWorkspaceSignal(), maxModelCalls?: number, goalSpec?: WorkflowGoalSpec) {
       if (maxModelCalls !== undefined && (!Number.isSafeInteger(maxModelCalls) || maxModelCalls < 1 || maxModelCalls > 1000)) {
         throw new WorkflowPreflightError('模型调用次数上限必须是 1 到 1000 的整数');
       }
       const now = Date.now();
+      const contract = goalSpec ? parseWorkflowGoalSpec(goalSpec) : defaultWorkflowGoalSpec(goal);
+      if (contract.objective !== goal) throw new WorkflowPreflightError('目标契约与运行目标不一致');
       const initial: WorkflowSnapshot = {
-        run: { id: runId, chatId, goal, status: 'active', generation: 0, planVersion: 1, planOpen: true, autoReview, maxModelCalls, updatedAt: now },
+        run: { id: runId, chatId, goal, goalSpec: contract, status: 'active', generation: 0, planVersion: 1, planOpen: true, autoReview, maxModelCalls, updatedAt: now },
         tasks: [{ id: 'plan', runId, kind: 'team_plan', input: goal, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
       };
       if (!await runtime.read(runId)) await runtime.create(initial);
@@ -668,7 +683,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (snapshot.run.status === 'active') snapshot = await runtime.resume(runId, signal);
       }
       if (snapshot.run.autoReview && snapshot.run.status === 'active') {
-        for (let round = 1; round <= 3; round += 1) {
+        const maxReviewRounds = snapshot.run.goalSpec?.execution.maxAutomaticReviewRounds ?? 3;
+        for (let round = 1; round <= maxReviewRounds; round += 1) {
           if (!snapshot.tasks.every((task) => task.status === 'completed' || task.status === 'abandoned')) break;
           const reviewId = `review_${round}`;
           const review = snapshot.tasks.find((task) => task.id === reviewId);
@@ -689,7 +705,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
             snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, '自动返工没有产生新的文本交付，验收再次提出相同要求。已暂停以避免重复执行，请补充约束、调整模型或指定下一步。'));
             break;
           }
-          if (round === 3) {
+          if (round === maxReviewRounds) {
             snapshot = await runtime.blockForUser(runId, snapshot.run.planVersion, reviewBlockTask(runId, reviewId, `自动验收仍未通过：${verdict.reason}。请检查目标或追加指示。`));
             break;
           }

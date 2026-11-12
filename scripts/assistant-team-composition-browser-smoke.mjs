@@ -83,11 +83,12 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   await evaluate(`window.__compositionSmoke = { done: false }; void (async () => {
-    const [{ useAuthStore }, { useChatStore }, { useMessageStore }, { useSettingsStore }, { createAgentTeamWorkflow }, runtime, composition, { validateAgentTeamPlan }] = await Promise.all([
+    const [{ useAuthStore }, { useChatStore }, { useMessageStore }, { useSettingsStore }, { createAgentTeamWorkflow }, runtime, composition, { validateAgentTeamPlan }, { defaultWorkflowGoalSpec }] = await Promise.all([
       import('/src/stores/useAuthStore.ts'), import('/src/stores/useChatStore.ts'), import('/src/stores/useMessageStore.ts'),
       import('/src/stores/useSettingsStore.ts'),
       import('/src/services/agentTeamWorkflow.ts'), import('/src/services/workflowRunRuntime.ts'),
       import('/src/services/agentTeamMediaComposition.ts'), import('/src/services/agentTeamPlan.ts'),
+      import('/src/services/workflowGoalSpec.ts'),
     ]);
     localStorage.setItem('pneumata-auth-mode', 'local');
     localStorage.setItem('pneumata-cloud-sync-enabled', '0');
@@ -113,7 +114,11 @@ try {
       composition: { clips: [{ taskId: 'shot_a', startSeconds: 0.1, durationSeconds: 0.4 }, { taskId: 'shot_b', durationSeconds: 0.4 }], audioTracks: [{ taskId: 'music', loop: true }, { taskId: 'narration', volume: 0.5, offsetSeconds: 0.4 }], aspectRatio: '16:9', originalAudioVolume: 0 } });
     tasks.push({ id: 'inspect', roleId: role.id, goal: '检查成片颜色顺序', dependsOn: ['film'], tool: 'video_inspection', acceptance: '红色在前蓝色在后' });
     const plan = validateAgentTeamPlan({ summary: '合成验证', roles: [role], tasks, finalAcceptance: '视频带配乐' });
-    const snapshot = { run: { id: runId, chatId, goal: '合成验证', status: 'paused', generation: 0, planVersion: 1, updatedAt: now, planOpen: true }, tasks: [
+    const goalSpec = defaultWorkflowGoalSpec('合成验证');
+    goalSpec.constraints = ['保留红蓝镜头顺序'];
+    goalSpec.acceptance = ['成片同时包含配乐和旁白'];
+    goalSpec.allowedTools = [...role.allowedTools];
+    const snapshot = { run: { id: runId, chatId, goal: '合成验证', goalSpec, status: 'paused', generation: 0, planVersion: 1, updatedAt: now, planOpen: true }, tasks: [
       { id: 'plan', runId, kind: 'team_plan', input: '合成验证', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
       ...plan.tasks.map((task) => ({ id: task.id, runId, kind: task.id === 'music' || task.id === 'narration' ? 'agent_audio' : task.id === 'script' ? 'agent_text' : task.id === 'film' ? 'agent_media_composition' : task.id === 'inspect' ? 'agent_video_inspection' : 'agent_video',
         input: { task, role: plan.roles[0], goal: '合成验证' }, output: ['film', 'narration', 'inspect'].includes(task.id) ? undefined : task.id === 'script' ? '森林深处，一场追逐开始了。' : '素材已保存', dependsOn: ['plan', ...task.dependsOn], status: task.id === 'film' ? 'running' : ['narration', 'inspect'].includes(task.id) ? 'waiting_dependency' : 'completed', attempt: ['narration', 'inspect'].includes(task.id) ? 0 : 1, updatedAt: now })),
@@ -178,13 +183,27 @@ try {
     const recoveredWorkflow = createAgentTeamWorkflow({ provider: 'openai', baseUrl: '', apiKey: '', model: 'not-called' }, runtime.currentWorkflowScope);
     await recoveredWorkflow.resume(runId);
     const after = await workflow.read(runId);
+    if (JSON.stringify(after.run.goalSpec) !== JSON.stringify(goalSpec)) throw new Error('Goal contract changed during recovery');
+    let rejectedGoalReplacement = false;
+    try {
+      await runtime.indexedDbWorkflowRepository.transact(runtime.currentWorkflowScope(), runId, (current) => {
+        current.run.goalSpec.allowedTools = [];
+        return { snapshot: current, value: undefined };
+      });
+    } catch (error) {
+      if (!String(error).includes('目标契约不能在执行中替换')) throw error;
+      rejectedGoalReplacement = true;
+    }
+    if (!rejectedGoalReplacement) throw new Error('Goal authorization replacement was accepted');
+    const persisted = await recoveredWorkflow.read(runId);
+    if (JSON.stringify(persisted.run.goalSpec) !== JSON.stringify(goalSpec)) throw new Error('Rejected goal mutation did not roll back');
     const state = useMessageStore.getState();
     const matches = new Set([...state.messages, ...Object.values(state.messageWindowsByChatId).flatMap((window) => window.messages)].filter((message) => message.id === 'team-composition-' + runId + '-film').map((message) => message.id));
     const narration = composition.teamMediaAttachment(runId, 'narration');
     if (!narration?.url?.startsWith('data:audio/') || narration.audioPurpose !== 'chat_voice') throw new Error('Narration not saved locally');
     const inspection = after.tasks.find((task) => task.id === 'inspect');
     if (inspection.status !== 'completed' || !inspection.output.includes('未检查音轨或逐帧连续性')) throw new Error('Missing persisted inspection scope');
-    window.__compositionSmoke = { done: true, result: { status: after.run.status, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, visionRequests, inspectionPixels, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
+    window.__compositionSmoke = { done: true, result: { status: after.run.status, rejectedGoalReplacement, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, visionRequests, inspectionPixels, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
     } finally { window.fetch = originalFetch; useSettingsStore.setState({ aiProfiles: originalProfiles }); }
   })().catch((error) => { window.__compositionSmoke = { done: true, error: String(error?.stack || error) }; });`);
   let result;
@@ -195,6 +214,7 @@ try {
   }
   assert.ok(result, 'Composition exceeded three minutes');
   assert.equal(result.status, 'completed');
+  assert.equal(result.rejectedGoalReplacement, true);
   assert.equal(result.width, 1280); assert.equal(result.height, 720);
   assert.ok(result.duration >= 0.75 && result.duration < 1.1);
   assert.ok(result.firstPixel[0] > 180 && result.firstPixel[2] < 40, 'First clip must remain red');

@@ -2,6 +2,7 @@ import type { APIConfig } from '../types/settings';
 import { generateResponse } from './aiClient';
 import { WorkflowPreflightError } from './workflowRunRuntime';
 import { validateMediaCompositionPlan, type MediaCompositionPlan } from './mediaCompositionPlan';
+import { WORKFLOW_TOOLS, type WorkflowTool } from './workflowGoalSpec';
 
 export interface AgentTeamRole {
   schemaVersion?: 1;
@@ -10,7 +11,7 @@ export interface AgentTeamRole {
   responsibility: string;
   method: string;
   acceptance: string;
-  allowedTools: Array<'text_generation' | 'web_search' | 'image_generation' | 'audio_generation' | 'speech_generation' | 'video_generation' | 'image_inspection' | 'video_inspection' | 'media_composition'>;
+  allowedTools: WorkflowTool[];
 }
 
 export interface AgentTeamTask {
@@ -38,7 +39,7 @@ export interface AgentTeamPlan {
 }
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,39}$/;
-const TOOLS = new Set(['text_generation', 'web_search', 'image_generation', 'audio_generation', 'speech_generation', 'video_generation', 'image_inspection', 'video_inspection', 'media_composition']);
+const TOOLS: ReadonlySet<string> = new Set(WORKFLOW_TOOLS);
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('团队计划格式无效');

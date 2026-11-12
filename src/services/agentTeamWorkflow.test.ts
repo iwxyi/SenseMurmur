@@ -15,6 +15,8 @@ import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTea
 import { conversationExecutionLockName } from './conversationExecutionLock';
 import { composeAgentTeamMedia, inspectAgentTeamComposition, teamMediaAttachment } from './agentTeamMediaComposition';
 import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
+import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
+import { countWorkflowModelCalls } from './workflowRunRuntime';
 
 vi.mock('./agentTeamMediaComposition', () => ({ canComposeTeamMedia: () => true, composeAgentTeamMedia: vi.fn(), inspectAgentTeamComposition: vi.fn(), teamMediaAttachment: vi.fn() }));
 vi.mock('./agentTeamVideoInspection', () => ({ inspectAgentTeamVideo: vi.fn() }));
@@ -104,6 +106,72 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it.each([0, 1])('persists goal constraints and enforces %s automatic review rounds after restart', async (rounds) => {
+    const runId = crypto.randomUUID();
+    const scope = `goal-contract-${runId}`;
+    const goal = '写报告';
+    const spec = defaultWorkflowGoalSpec(goal);
+    spec.constraints = ['仅使用提供的资料'];
+    spec.acceptance = ['列出未确定事项'];
+    spec.allowedTools = ['text_generation'];
+    spec.execution.maxAutomaticReviewRounds = rounds;
+    const plan = { summary: '报告', roles: [{ id: 'writer', name: '作者', responsibility: '撰写', method: '整理', acceptance: '可读', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'report', roleId: 'writer', goal, dependsOn: [], acceptance: '可读' }], finalAcceptance: '报告可读' };
+    generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('报告正文');
+    if (rounds) generate.mockResolvedValueOnce(JSON.stringify({ complete: false, reason: '缺少不确定事项', nextRequest: '补充不确定事项' }));
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const workflow = createAgentTeamWorkflow(config, () => scope);
+    const result = await workflow.start(runId, 'chat', goal, true, undefined, undefined, spec);
+    expect(result.snapshot.run.goalSpec).toEqual(spec);
+    expect(generate.mock.calls[0][2][0].content).toContain('仅使用提供的资料');
+    expect(generate.mock.calls[1][1]).toContain('列出未确定事项');
+    expect(result.snapshot.tasks.filter((task) => task.kind === 'team_review')).toHaveLength(rounds);
+    expect(result.snapshot.run.status).toBe(rounds ? 'paused' : 'completed');
+    if (rounds) {
+      expect(generate.mock.calls[2][2][0].content).toContain('列出未确定事项');
+      expect(result.snapshot.tasks.find((task) => task.id === 'review_needs_user')?.status).toBe('waiting_user');
+    }
+    const calls = generate.mock.calls.length;
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(generate).toHaveBeenCalledTimes(calls);
+  });
+
+  it('rejects unauthorized planned tools while retaining the consumed planning call', async () => {
+    const runId = crypto.randomUUID();
+    const spec = defaultWorkflowGoalSpec('写报告');
+    spec.allowedTools = [];
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '报告',
+      roles: [{ id: 'writer', name: '作者', responsibility: '撰写', method: '整理', acceptance: '可读', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'report', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '可读' }], finalAcceptance: '可读' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `goal-denied-${runId}`);
+    const result = await workflow.start(runId, 'chat', '写报告', false, undefined, undefined, spec);
+    expect(result.snapshot.tasks[0].error).toContain('未获得本次任务的目标授权');
+    expect(countWorkflowModelCalls(result.snapshot)).toBe(1);
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks unauthorized tools in a saved plan before calling a model', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `goal-saved-denied-${runId}`;
+    const spec = defaultWorkflowGoalSpec('写报告');
+    spec.allowedTools = [];
+    const now = Date.now();
+    const role = { id: 'writer', name: '作者', responsibility: '撰写', method: '整理', acceptance: '可读', allowedTools: ['text_generation'] };
+    const task = { id: 'report', roleId: role.id, goal: '写报告', dependsOn: [], acceptance: '可读' };
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
+      run: { id: runId, chatId: 'chat', goal: '写报告', goalSpec: spec, status: 'paused', generation: 1, planVersion: 1, planOpen: true, updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '写报告', output: { summary: '报告', roles: [role], tasks: [task], finalAcceptance: '可读' }, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        { id: task.id, runId, kind: 'agent_text', input: { task, role, goal: '写报告' }, dependsOn: ['plan'], status: 'queued', attempt: 0, updatedAt: now },
+      ],
+    }, value: undefined }));
+    const result = await createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope).resume(runId);
+    expect(result.snapshot.tasks.find((item) => item.id === task.id)?.error).toContain('未获得本次任务的目标授权');
+    // The current budget conservatively reserves every dispatch attempt, including preflight failures.
+    expect(countWorkflowModelCalls(result.snapshot)).toBe(2);
+    expect(generate).not.toHaveBeenCalled();
+  });
+
   it.each([true, false])('inspects only saved video files (file available: %s) and never regenerates them', async (available) => {
     const runId = crypto.randomUUID();
     const scope = `video-inspection-${runId}`;
