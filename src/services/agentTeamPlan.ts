@@ -156,6 +156,8 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
       if (rawDeliverable.schemaVersion !== undefined && rawDeliverable.schemaVersion !== 1) throw new Error('不支持的任务交付契约版本');
       const kind = rawDeliverable.kind;
       if (!['document', 'code', 'diagram', 'html', 'table', 'json', 'text'].includes(String(kind))) throw new Error('任务交付类型无效');
+      if ((kind === 'table' || kind === 'json') && selectedTool !== 'text_generation' && selectedTool !== 'delegate_task') throw new Error('结构化交付须由文本或委派任务生成');
+      if (kind === 'table' && rawDeliverable.language !== undefined && !['csv', 'tsv', 'markdown', 'md'].includes(String(rawDeliverable.language).trim().toLowerCase())) throw new Error('表格交付语言须为 csv、tsv 或 markdown');
       deliverable = {
         schemaVersion: 1,
         kind: kind as NonNullable<AgentTeamTask['deliverable']>['kind'],

@@ -130,6 +130,9 @@ describe('agent team plan', () => {
     expect(() => validateAgentTeamPlan({ ...plan, tasks: [{ ...plan.tasks[0], deliverable: { kind: 'audio', title: '无效类型' } }, plan.tasks[1]] })).toThrow('交付类型无效');
     expect(() => validateAgentTeamPlan({ ...plan, tasks: [{ ...plan.tasks[0], deliverable: { kind: 'table', title: '' } }, plan.tasks[1]] })).toThrow('交付标题无效');
     expect(() => validateAgentTeamPlan({ ...plan, tasks: [{ ...plan.tasks[0], deliverable: { schemaVersion: 2, kind: 'json', title: '结果' } }, plan.tasks[1]] })).toThrow('交付契约版本');
+    expect(() => validateAgentTeamPlan({ ...plan, tasks: [{ ...plan.tasks[0], deliverable: { kind: 'table', title: '数据', language: 'html' } }] })).toThrow('表格');
+    expect(() => validateAgentTeamPlan({ ...plan, roles: [{ ...plan.roles[0], allowedTools: ['image_generation'] }],
+      tasks: [{ ...plan.tasks[0], tool: 'image_generation' }] })).toThrow('交付');
   });
 
   it('rejects unknown tools and missing role references', () => {

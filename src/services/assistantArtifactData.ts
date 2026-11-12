@@ -1,4 +1,5 @@
 import type { AssistantArtifactDataOperation, AssistantArtifactDataResult, AssistantArtifactItem, AssistantArtifactVersion, AssistantDataFilter } from '../types/assistantArtifact';
+import { parseAssistantTable, stringifyAssistantTable } from './assistantArtifactTable';
 export type AssistantDataFormat = 'csv' | 'json';
 
 const MAX_RESULT_ROWS = 100;
@@ -10,46 +11,6 @@ export interface AssistantArtifactDataPreview {
   totalRows: number;
   truncated: boolean;
   omittedRows: number;
-}
-
-function parseCsvLine(line: string) {
-  const cells: string[] = [];
-  let cell = '';
-  let quoted = false;
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index];
-    if (character === '"') {
-      if (quoted && line[index + 1] === '"') {
-        cell += '"';
-        index += 1;
-      } else quoted = !quoted;
-    } else if (character === ',' && !quoted) {
-      cells.push(cell);
-      cell = '';
-    } else cell += character;
-  }
-  cells.push(cell);
-  return cells;
-}
-
-function csvEscape(value: unknown) {
-  const text = value == null ? '' : String(value);
-  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
-
-function parseCsv(content: string) {
-  const lines = content.replace(/^\uFEFF/, '').split(/\r?\n/).filter((line, index, all) => line.length || index < all.length - 1);
-  if (!lines.length || !lines[0]) return { columns: [] as string[], rows: [] as Array<Record<string, unknown>> };
-  const columns = parseCsvLine(lines[0]).map((column, index) => column.trim() || `column_${index + 1}`);
-  const rows = lines.slice(1).map((line) => {
-    const values = parseCsvLine(line);
-    return Object.fromEntries(columns.map((column, index) => [column, values[index] ?? '']));
-  });
-  return { columns, rows };
-}
-
-function stringifyCsv(columns: string[], rows: Array<Record<string, unknown>>) {
-  return [columns.map(csvEscape).join(','), ...rows.map((row) => columns.map((column) => csvEscape(row[column])).join(','))].join('\n');
 }
 
 function parseJsonRecords(content: string) {
@@ -122,7 +83,7 @@ export function summarizeAssistantArtifactData(item: AssistantArtifactItem) {
   try {
     const format: AssistantDataFormat = item.kind === 'json' || /\.json$/i.test(version.files?.[0]?.path || '') ? 'json' : 'csv';
     const source = resolveContent(version, version.files?.length === 1 ? version.files[0].path : null).content;
-    const parsed = format === 'csv' ? parseCsv(source) : parseJsonRecords(source);
+    const parsed = format === 'csv' ? parseAssistantTable(source, version.language ?? item.language) : parseJsonRecords(source);
     const rows = parsed.rows;
     const columns = format === 'csv' && 'columns' in parsed ? parsed.columns : Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
     return { format, rowCount: rows.length, columns: columns.slice(0, 80), sampleRows: rows.slice(0, 5), sizeBytes: source.length };
@@ -137,7 +98,7 @@ export function getAssistantArtifactDataPreview(item: AssistantArtifactItem, max
   try {
     const resolved = resolveContent(version, version.files?.length === 1 ? version.files[0].path : null);
     const format: AssistantDataFormat = item.kind === 'json' || /\.json$/i.test(resolved.filePath || '') ? 'json' : 'csv';
-    const parsed = format === 'csv' ? parseCsv(resolved.content) : parseJsonRecords(resolved.content);
+    const parsed = format === 'csv' ? parseAssistantTable(resolved.content, version.language ?? item.language) : parseJsonRecords(resolved.content);
     const rows = parsed.rows;
     const columns = format === 'csv' && 'columns' in parsed
       ? parsed.columns
@@ -169,7 +130,7 @@ export function applyAssistantArtifactDataOperation(item: AssistantArtifactItem,
   try {
     const resolved = resolveContent(version, operation.filePath);
     const format: AssistantDataFormat = item.kind === 'json' || /\.json$/i.test(resolved.filePath || '') ? 'json' : 'csv';
-    const parsed = format === 'csv' ? parseCsv(resolved.content) : parseJsonRecords(resolved.content);
+    const parsed = format === 'csv' ? parseAssistantTable(resolved.content, version.language ?? item.language) : parseJsonRecords(resolved.content);
     let rows = [...parsed.rows];
     const matched = rows.filter((row) => matches(row, operation.filter));
     let affectedRows = 0;
@@ -214,7 +175,7 @@ export function applyAssistantArtifactDataOperation(item: AssistantArtifactItem,
     }
     const columns = format === 'csv' && 'columns' in parsed ? Array.from(new Set([...parsed.columns, ...rows.flatMap((row) => Object.keys(row)), ...(operation.column ? [operation.column] : [])])) : [];
     const content = format === 'csv'
-      ? stringifyCsv(columns, rows)
+      ? stringifyAssistantTable(columns, rows, 'syntax' in parsed ? parsed.syntax : 'csv')
       : JSON.stringify('container' in parsed && parsed.container === 'array' ? rows : rows[0] || {}, null, 2);
     const nextVersion = { ...version, id: `${item.id}:data:${timestamp}:${Math.random().toString(36).slice(2, 7)}`, baseVersionId: version.id, content: resolved.filePath ? version.content : content, files: resolved.filePath ? version.files?.map((file) => file.path === resolved.filePath ? { ...file, content } : file) : version.files, changeSummary: `${operation.kind} ${affectedRows} 行`, updatedAt: timestamp, createdAt: timestamp, revision: 1 } satisfies AssistantArtifactVersion;
     const nextItem = { ...item, currentVersionId: nextVersion.id, versions: [...item.versions, nextVersion].slice(-12), updatedAt: timestamp };

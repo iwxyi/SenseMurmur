@@ -156,6 +156,14 @@ try {
         .filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index)
         .filter((item) => item.id === 'team-delivery-' + runId);
       const deliveryModelCalls = requests.length;
+      const { getAssistantArtifactDataPreview, applyAssistantArtifactDataOperation } = await import('/src/services/assistantArtifactData.ts');
+      const table = artifacts.find((item) => item.kind === 'table');
+      const preview = getAssistantArtifactDataPreview(table);
+      if (preview?.columns.join(',') !== '类别,数量' || preview.rows[0]?.['数量'] !== '3') throw new Error('真实交付的 Markdown 表格预览错误');
+      const edited = applyAssistantArtifactDataOperation(table, { kind: 'update', values: { '数量': '8' } }, Date.now());
+      if (edited.result.error || getAssistantArtifactDataPreview(edited.item)?.rows[0]?.['数量'] !== '8'
+        || table.versions.length !== 1 || edited.item.versions.length !== 2) throw new Error('表格修改未生成可读取的新版本');
+      useAssistantArtifactStore.setState((state) => ({ items: state.items.map((item) => item.id === table.id ? edited.item : item) }));
       const stalledPlan = { ...plan, tasks: [plan.tasks[0]] };
       const verdict = JSON.stringify({ complete: false, reason: '缺少公开来源', nextRequest: '补充公开来源' });
       responseSequence = [JSON.stringify(stalledPlan), '目前没有来源', verdict, JSON.stringify(stalledPlan), '目前没有来源', verdict];
@@ -174,7 +182,7 @@ try {
         || !review.sources.length || !/^[a-f0-9]{64}$/.test(review.evidenceSha256)
         || JSON.stringify(review).includes('目前没有来源'))) throw new Error('验收缺少依据摘要或复制了原文');
       const interruptedRunId = 'browser-team-delivery-' + crypto.randomUUID();
-      responseSequence = [JSON.stringify(plan), '中断后应恢复的报告', '| 类别 | 数量 |\\n| A | 3 |'];
+      responseSequence = [JSON.stringify(plan), '中断后应恢复的报告', '| 类别 | 数量 |\\n| --- | ---: |\\n| A | 3 |'];
       await workflow.start(interruptedRunId, chatId, '验证交付清单恢复');
       const applyDelivery = useAssistantArtifactStore.getState().applyWorkflowDelivery;
       useAssistantArtifactStore.setState({ applyWorkflowDelivery: () => { throw new Error('browser simulated shutdown after intent'); } });
@@ -323,13 +331,16 @@ try {
     const snapshot = await indexedDbWorkflowRepository.read(currentWorkflowScope(), runId);
     const messages = [...useMessageStore.getState().messages, ...(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages || [])];
     const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId).filter((item) => item.sourceMessageId.startsWith('team-delivery-' + runId));
+    const { getAssistantArtifactDataPreview } = await import('/src/services/assistantArtifactData.ts');
+    const table = artifacts.find((item) => item.kind === 'table');
+    if (getAssistantArtifactDataPreview(table)?.rows[0]?.['数量'] !== '8' || table.versions.length !== 2) throw new Error('刷新未保留表格修改和旧版本');
     const resumedArtifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId).filter((item) => item.sourceMessageId.startsWith('team-delivery-' + interruptedRunId));
     if (resumedArtifacts.length !== 2 || resumedArtifacts.some((item) => item.versions.length !== 1)) throw new Error('清单恢复重复或丢失产物');
     return { published: snapshot?.run.deliveryStatus === 'published',
       message: messages.some((item) => item.id === 'team-delivery-' + runId),
-      artifacts: artifacts.length, versions: artifacts.map((item) => item.versions.length) };
+      artifacts: artifacts.length, versions: artifacts.map((item) => item.versions.length).sort() };
   })()`);
-  assert.deepEqual(restored, { published: true, message: true, artifacts: 2, versions: [1, 1] });
+  assert.deepEqual(restored, { published: true, message: true, artifacts: 2, versions: [1, 2] });
   delete result.runId;
   delete result.chatId;
   delete result.interruptedRunId;

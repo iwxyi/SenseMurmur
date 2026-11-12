@@ -38,6 +38,7 @@ import type { LocalWorkspaceFileEntry } from '../../services/localWorkspaceServi
 import AssistantHtmlFrame, { type AssistantHtmlInteractionPayload, type AssistantHtmlRuntimeError } from '../../features/assistantHtml/AssistantHtmlFrame';
 import AssistantHtmlStaticFrame from '../../features/assistantHtml/AssistantHtmlStaticFrame';
 import { getAssistantArtifactDataPreview } from '../../services/assistantArtifactData';
+import { parseAssistantTable } from '../../services/assistantArtifactTable';
 import { CopyTextDialog } from '../common/CopyTextDialog';
 
 interface AssistantAgentPanelProps {
@@ -84,11 +85,14 @@ function sanitizeFileName(value: string) {
   return value.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || 'assistant-artifact';
 }
 
-function artifactFileExtension(item: AssistantArtifactItem) {
-  const language = (item.language || '').toLowerCase();
+function artifactFileExtension(item: AssistantArtifactItem, content: string, version?: AssistantArtifactVersion | null) {
+  const language = (version?.language ?? item.language ?? '').toLowerCase();
   if (item.kind === 'html') return 'html';
   if (item.kind === 'json') return 'json';
-  if (item.kind === 'table') return language === 'tsv' ? 'tsv' : 'csv';
+  if (item.kind === 'table') {
+    const { syntax } = parseAssistantTable(content, language);
+    return syntax === 'markdown' ? 'md' : syntax;
+  }
   if (item.kind === 'diagram') {
     if (language === 'plantuml') return 'puml';
     if (language === 'dot' || language === 'graphviz') return 'dot';
@@ -134,10 +138,13 @@ function LearningProgressSummary({ chat }: { chat: GroupChat }) {
   );
 }
 
-function artifactMimeType(item: AssistantArtifactItem) {
+function artifactMimeType(item: AssistantArtifactItem, content: string, version?: AssistantArtifactVersion | null) {
   if (item.kind === 'html') return 'text/html;charset=utf-8';
   if (item.kind === 'json') return 'application/json;charset=utf-8';
-  if (item.kind === 'table') return 'text/csv;charset=utf-8';
+  if (item.kind === 'table') {
+    const extension = artifactFileExtension(item, content, version);
+    return extension === 'md' ? 'text/markdown;charset=utf-8' : extension === 'tsv' ? 'text/tab-separated-values;charset=utf-8' : 'text/csv;charset=utf-8';
+  }
   if (item.kind === 'document') return 'text/markdown;charset=utf-8';
   return 'text/plain;charset=utf-8';
 }
@@ -154,7 +161,7 @@ async function downloadArtifact(item: AssistantArtifactItem, content: string, ve
       const extension = mimeType === 'image/jpeg' ? 'jpg' : mimeType === 'image/svg+xml' ? 'svg' : mimeType.split('/')[1] || 'png';
       return { blob, extension, suffix: media.length > 1 ? `-${index + 1}` : '' };
     }))
-    : [{ blob: new Blob([content], { type: artifactMimeType(item) }), extension: artifactFileExtension(item), suffix: '' }];
+    : [{ blob: new Blob([content], { type: artifactMimeType(item, content, version) }), extension: artifactFileExtension(item, content, version), suffix: '' }];
   for (const { blob, extension, suffix } of files) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');

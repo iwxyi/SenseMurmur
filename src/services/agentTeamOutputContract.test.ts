@@ -6,6 +6,15 @@ const task: AgentTeamTask = { id: 'data', roleId: 'writer', goal: '结果', acce
   deliverable: { schemaVersion: 1, kind: 'json', title: '结果' } };
 
 describe('team output contract', () => {
+  it('validates the same table syntax used by artifact previews', () => {
+    const tableTask: AgentTeamTask = { ...task, deliverable: { kind: 'table', title: '数据', language: 'csv' } };
+    expect(validateTeamOutput(tableTask, '```csv\na,b\n1,"two\nlines"\n```')).toBe('a,b\n1,"two\nlines"');
+    expect(() => validateTeamOutput(tableTask, 'a,b\n1,2,3')).toThrow('表格无法解析');
+    expect(() => validateTeamOutput(tableTask, 'a,a\n1,2')).toThrow('表格无法解析');
+    const markdown = '| a | b |\n| --- | --- |\n| 1 | 2 |';
+    expect(validateTeamOutput({ ...tableTask, deliverable: { kind: 'table', title: '数据' } }, markdown)).toBe(markdown);
+    expect(() => validateTeamOutput(tableTask, markdown)).toThrow('表格无法解析');
+  });
   it.each(['{"items":[1,2]}', '[true,null]', '0', 'false', 'null', '"文本"'])('accepts JSON without changing its value: %s', (value) => {
     expect(validateTeamOutput(task, ` ${value} `)).toBe(value);
   });

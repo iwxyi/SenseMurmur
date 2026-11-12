@@ -17,6 +17,29 @@ function table(content: string): AssistantArtifactItem {
 }
 
 describe('assistant artifact data operations', () => {
+  it('previews and edits Markdown tables while retaining their syntax and previous version', () => {
+    const original = table('| 名称 | 值 |\n| --- | --- |\n| A | 1 |');
+    const item = { ...original, language: 'markdown' };
+    expect(getAssistantArtifactDataPreview(item)).toMatchObject({ columns: ['名称', '值'], totalRows: 1, rows: [{ 名称: 'A', 值: '1' }] });
+    const updated = applyAssistantArtifactDataOperation(item, { kind: 'update', artifactId: item.id, values: { 值: '2|3' } }, 2);
+    expect(updated.result.error).toBeUndefined();
+    expect(updated.item.versions[0].content).toBe(original.versions[0].content);
+    expect(getAssistantArtifactDataPreview(updated.item)).toMatchObject({ rows: [{ 名称: 'A', 值: '2|3' }] });
+  });
+  it('keeps tab separators when updating a TSV artifact', () => {
+    const item = { ...table('name\tvalue\nA\t1'), language: 'tsv' };
+    const updated = applyAssistantArtifactDataOperation(item, { kind: 'update', artifactId: item.id, values: { value: 2 } }, 2);
+    expect(updated.item.versions.at(-1)?.content).toBe('name\tvalue\nA\t2');
+    expect(getAssistantArtifactDataPreview(updated.item)).toMatchObject({ columns: ['name', 'value'], rows: [{ name: 'A', value: '2' }] });
+  });
+  it('reports invalid CSV without silently discarding excess values', () => {
+    const item = table('name,value\nA,1,hidden');
+    expect(summarizeAssistantArtifactData(item)).toMatchObject({ parseError: true });
+    expect(getAssistantArtifactDataPreview(item)).toBeNull();
+    const result = applyAssistantArtifactDataOperation(item, { kind: 'update', artifactId: item.id, values: { value: 2 } }, 2);
+    expect(result.result.error).toContain('表格格式无效');
+    expect(result.item).toBe(item);
+  });
   it('summarizes CSV schema without returning the full file', () => {
     const summary = summarizeAssistantArtifactData(table('word,lastReviewed,reviewCount\nserendipity,2026-07-01,3\n'));
     expect(summary).toMatchObject({ format: 'csv', rowCount: 1, columns: ['word', 'lastReviewed', 'reviewCount'] });
