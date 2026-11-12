@@ -114,13 +114,13 @@ interface TeamTaskInput {
 interface TeamRevisionInput { request: string; sourceTaskIds: string[]; impact?: WorkflowRevisionImpact }
 interface TeamReviewInput { sourceTaskIds: string[] }
 
-function selectReviewEvidence(snapshot: WorkflowSnapshot, taskIds: string[]) {
+function selectReviewEvidence(snapshot: WorkflowSnapshot, taskIds: string[], excerptLimit = 1800) {
   const sources = taskIds.map((id) => {
     const source = snapshot.tasks.find((item) => item.id === id);
     if (!source || source.status !== 'completed' || typeof source.output !== 'string') throw new WorkflowPreflightError('验收证据尚未就绪');
     return source;
   });
-  const maxPerTask = sources.length <= 12 ? 1800 : Math.max(240, Math.floor(24_000 / sources.length));
+  const maxPerTask = Math.min(excerptLimit, sources.length <= 12 ? 1800 : Math.max(240, Math.floor(24_000 / sources.length)));
   return { omitted: 0,
     evidence: sources.map((source) => {
       const input = isTeamTaskInput(source.input) ? source.input : undefined;
@@ -408,8 +408,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const source = snapshot.tasks.find((item) => item.id === id);
           return source?.status === 'completed' && typeof source.output === 'string';
         });
-        const prior = selectReviewEvidence(snapshot, contextTaskIds).evidence.slice(-8)
-          .map((entry) => ({ ...entry, output: entry.output.slice(0, 600) }));
+        const prior = selectReviewEvidence(snapshot, contextTaskIds, 600).evidence.slice(-8);
         const delegated = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n只拆分当前子目标：${input.task.goal}\n用户补充指示：${input.userInstruction || '无'}\n验收：${input.task.acceptance}\n${input.task.mediaOutput ? `必须交付一份 ${input.task.mediaOutput} 媒体，计划根字段 resultTaskId 必须指定对应的最终媒体任务。` : ''}\n本岗位可用工具：${role.allowedTools.join('、')}\n已有交付：${JSON.stringify(prior)}\n已绑定的历史文字交付：${JSON.stringify(savedText)}`,
           chatId: snapshot.run.chatId, ...capabilities,
           savedMedia: listTeamSavedMedia(snapshot, contextTaskIds),

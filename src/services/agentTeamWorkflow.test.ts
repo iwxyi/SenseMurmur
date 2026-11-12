@@ -120,7 +120,7 @@ describe('agent team workflow', () => {
     const chatId = `saved-text-chat-${runId}`;
     useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
     const now = Date.now();
-    const original = `逐字保留原稿：${'故事内容。'.repeat(400)}最后一句必须保留。`;
+    const original = `逐字保留原稿：${'故事内容。'.repeat(tool === 'delegate_task' ? 200 : 400)}最后一句必须保留。`;
     const role = { id: 'writer', name: '作者', responsibility: '制作', method: '复用', acceptance: '准确', allowedTools: ['text_generation'] };
     const sourceTask = { id: 'source', roleId: role.id, goal: '写原稿', acceptance: '准确', dependsOn: [], tool: 'text_generation',
       ...(artifactVersion ? { deliverable: { kind: 'document', title: '原稿' } } : {}) };
@@ -165,6 +165,9 @@ describe('agent team workflow', () => {
     if (tool === 'delegate_task') {
       expect(JSON.stringify(generate.mock.calls[1])).toContain(expectedText);
       expect(JSON.stringify(generate.mock.calls[2][2])).toContain(expectedText);
+      const delegationGoal = generate.mock.calls[1][2][0].content;
+      const priorEvidence = JSON.parse(delegationGoal.split('已有交付：')[1].split('\n')[0]);
+      expect(priorEvidence[0]).toMatchObject({ output: original.slice(0, 600), outputCharacters: original.length, truncated: true });
     }
     if (tool === 'image_generation') expect(queueAgentTeamImage).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(expectedText) }));
     if (tool === 'video_generation') expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(expectedText) }));
