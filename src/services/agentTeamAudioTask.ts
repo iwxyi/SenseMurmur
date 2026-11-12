@@ -1,6 +1,6 @@
 import type { Message } from '../types/message';
 import type { WorkflowUsageReference } from '../types/workflowUsage';
-import { getUsablePreferredAIProfile } from '../types/settings';
+import { getUsablePreferredAIProfile, type AIModelProfile } from '../types/settings';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
@@ -53,7 +53,7 @@ function waitForMessage(runId: string, taskId: string, signal: AbortSignal) {
   });
 }
 
-export async function queueAgentTeamAudio(params: { runId: string; taskId: string; chatId: string; prompt: string; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; purpose?: 'music' | 'speech'; signal: AbortSignal }): Promise<WorkflowTaskResult> {
+export async function queueAgentTeamAudio(params: { runId: string; taskId: string; chatId: string; prompt: string; profile?: AIModelProfile; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; purpose?: 'music' | 'speech'; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -70,8 +70,8 @@ export async function queueAgentTeamAudio(params: { runId: string; taskId: strin
   const label = speech ? '旁白' : '音乐';
   if (existing && prior?.status !== 'queued' && prior?.status !== 'waiting_external') throw new Error(`${label}任务已开始提交，但结果尚未确认，请核对后继续`);
   const profileType = speech ? 'tts' : 'audio';
-  const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, profileType);
-  if (!profile) throw new WorkflowPreflightError(`${label}模型未配置`);
+  const profile = params.profile ?? getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, profileType);
+  if (!profile || profile.type !== profileType) throw new WorkflowPreflightError(`${label}模型未配置`);
   const now = Date.now();
   const state = useMessageStore.getState();
   const known = [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])];

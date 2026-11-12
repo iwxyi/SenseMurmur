@@ -29,6 +29,20 @@ beforeEach(() => {
 });
 
 describe('agent team image task', () => {
+  it('keeps the approved model configuration when the current default changes', async () => {
+    useSettingsStore.setState({ aiProfiles: [{ ...profile, model: 'different-model', defaultImageSize: '4K' }] });
+    const approvedProfile = { ...profile, defaultImageSize: '2K' as const };
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, aiProfiles, upsertMessage }) => {
+      expect(aiProfiles).toEqual([approvedProfile]);
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'ready', url: '/uploads/approved.png', updatedAt: Date.now() + 1,
+      })) } });
+    });
+    await queueAgentTeamImage({ runId: 'run', taskId: 'approved', chatId: 'team-image-chat', prompt: '森林',
+      profile: approvedProfile, signal: new AbortController().signal });
+    expect(processRichMessageMedia).toHaveBeenCalledTimes(1);
+  });
+
   it('uses one attachment and exposes the ready image as a video reference', async () => {
     vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
       upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({ ...item, status: 'ready', url: 'https://example.test/scene.png', updatedAt: Date.now() + 1 })) } });

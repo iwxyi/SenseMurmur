@@ -26,6 +26,20 @@ beforeEach(() => {
 });
 
 describe('agent team video task', () => {
+  it('keeps the approved video model and dimensions when defaults change', async () => {
+    useSettingsStore.setState({ aiProfiles: [{ ...videoProfile, model: 'different-model', videoDefaults: { aspectRatio: '9:16' } }] });
+    const approvedProfile = { ...videoProfile, videoDefaults: { aspectRatio: '16:9', resolution: '720p', duration: 6 } };
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, aiProfiles, upsertMessage }) => {
+      expect(aiProfiles).toEqual([approvedProfile]);
+      expect(message.metadata?.attachments?.[0]?.aspectRatio).toBe('16:9');
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'generating', mediaTaskId: 'approved-task', updatedAt: item.updatedAt + 1,
+      })) } });
+    });
+    expect(await queueAgentTeamVideo({ runId: 'approved-run', taskId: 'shot', chatId: 'team-video-chat', prompt: '森林',
+      profile: approvedProfile, signal: new AbortController().signal })).toEqual({ externalTaskId: 'approved-task' });
+  });
+
   it('submits one visible attachment and returns its persisted task ID', async () => {
     vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
       upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({

@@ -137,6 +137,15 @@ describe('agent team workflow', () => {
     const waiting = await restored.resume(runId);
     expect(queueAgentTeamImage).not.toHaveBeenCalled();
     await restored.decideApproval(runId, 'scene', waiting.snapshot.run.planVersion, 'approved');
+    const approvedDigest = waiting.snapshot.tasks.find((task) => task.id === 'scene')?.approvals?.at(-1)?.executionSha256;
+    useSettingsStore.setState((state) => ({ aiProfiles: state.aiProfiles.map((profile) => ({ ...profile, defaultImageSize: '2K' as const })) }));
+    const changed = await restored.resume(runId);
+    const changedTask = changed.snapshot.tasks.find((task) => task.id === 'scene');
+    expect(changedTask?.status).toBe('waiting_user');
+    expect(changedTask?.approvals).toHaveLength(2);
+    expect(changedTask?.approvals?.at(-1)?.executionSha256).not.toBe(approvedDigest);
+    expect(queueAgentTeamImage).not.toHaveBeenCalled();
+    await restored.decideApproval(runId, 'scene', changed.snapshot.run.planVersion, 'approved');
     const finished = await restored.resume(runId);
     expect(finished.snapshot.run.status).toBe('completed');
     expect(queueAgentTeamImage).toHaveBeenCalledTimes(1);

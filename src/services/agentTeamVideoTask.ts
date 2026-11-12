@@ -1,6 +1,6 @@
 import type { Message } from '../types/message';
 import type { WorkflowUsageReference } from '../types/workflowUsage';
-import { getUsablePreferredAIProfile } from '../types/settings';
+import { getUsablePreferredAIProfile, type AIModelProfile } from '../types/settings';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
@@ -64,7 +64,7 @@ function waitForVideoState(runId: string, taskId: string, signal: AbortSignal, p
   });
 }
 
-export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
+export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; profile?: AIModelProfile; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -81,7 +81,8 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
     if (result?.status === 'failed') throw new WorkflowPreflightError(result.error);
     if (result?.status !== 'queued') throw new Error('视频任务已开始提交，但结果尚未确认，请核对后继续');
   }
-  const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video');
+  const profile = params.profile ?? getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video');
+  if (profile && profile.type !== 'video') throw new WorkflowPreflightError('视频模型类型不符');
   if (!profile && !existing?.metadata?.attachments?.some((item) => item.kind === 'video' && (item.mediaTaskId || item.generationJobId))) {
     throw new WorkflowPreflightError('视频模型未配置');
   }
@@ -106,7 +107,7 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
   const synced = isLocalOnlyMediaMode() ? message : await waitForVideoState(params.runId, params.taskId, params.signal,
     (current) => Boolean(current.serverId), 60_000);
   if (params.signal.aborted) throw new Error('视频任务已中断，提交结果需要核对');
-  await processRichMessageMedia({ message: synced, aiProfiles: useSettingsStore.getState().aiProfiles,
+  await processRichMessageMedia({ message: synced, aiProfiles: profile ? [profile] : [],
     sharesConversationLease: true,
     executionSignal: params.signal,
     upsertMessage: (next) => useMessageStore.getState().upsertMessage(next) });

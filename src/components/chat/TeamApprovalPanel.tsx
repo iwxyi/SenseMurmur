@@ -21,7 +21,7 @@ export default function TeamApprovalPanel({ run, task, disabled, onDecide }: {
     }).finally(() => setSaving(false));
   }
   return <Box sx={{ display: 'grid', gap: 1, overflowWrap: 'anywhere' }}>
-    <Typography variant="subtitle2">等待你的确认</Typography>
+    <Typography variant="subtitle2">{task.approvals?.at(-2)?.invalidatedAt !== undefined ? '模型或生成设置已更改，请重新确认' : '等待你的确认'}</Typography>
     <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{approval.summary}</Typography>
     <Typography variant="body2" color="warning.main" sx={{ whiteSpace: 'pre-wrap' }}>{approval.consequences}</Typography>
     {task.dependsOn.map((id) => run.tasks.find((item) => item.id === id)).filter((item) => typeof item?.output === 'string').map((item) =>

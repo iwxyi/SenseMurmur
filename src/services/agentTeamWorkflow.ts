@@ -33,7 +33,7 @@ import { canComposeTeamMedia, composeAgentTeamMedia, inspectAgentTeamComposition
 import { hasRepeatedTeamReviewWithoutProgress, hasSemanticallyStalledTeamReview, parseTeamProgressAssessment, teamReviewProgressComparison } from './agentTeamProgress';
 import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
 import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoalSpec, workflowDeadlineBlockReason, workflowGoalContext, type WorkflowGoalSpec } from './workflowGoalSpec';
-import { describeWorkflowToolRequest } from './workflowToolRequest';
+import { describeWorkflowToolRequest, workflowJsonDigest } from './workflowToolRequest';
 import { parseWorkflowReviewVerdict, prepareWorkflowReviewRecord } from './workflowReviewRecord';
 import { analyzeWorkflowRevisionImpact, parseWorkflowRevisionImpact, type WorkflowRevisionImpact } from './workflowRevisionImpact';
 import { assertTeamSavedMedia, listTeamSavedMedia } from './agentTeamSavedMedia';
@@ -282,9 +282,21 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (!isTeamTaskInput(task.input)) return undefined;
       const input = task.input;
       const tool = input.task.tool || 'text_generation';
-      return input.task.approval || (snapshot.run.goalSpec?.approvalTools?.includes(tool)
+      const requirement = input.task.approval || (snapshot.run.goalSpec?.approvalTools?.includes(tool)
         ? { summary: input.task.goal, consequences: '执行本步骤可能产生模型或服务费用，实际金额以服务商结算为准。已提交的生成任务无法撤回已发生费用。' }
         : undefined);
+      if (!requirement) return undefined;
+      const profileType = tool === 'image_generation' ? 'image' : tool === 'video_generation' ? 'video'
+        : tool === 'audio_generation' ? 'audio' : tool === 'speech_generation' ? 'tts'
+          : tool === 'image_inspection' || tool === 'video_inspection' ? 'text' : undefined;
+      const profile = profileType ? getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, profileType) : undefined;
+      const config = profileType ? profile : tool === 'media_composition' || tool === 'user_input' ? undefined : api;
+      return { ...requirement, executionSha256: workflowJsonDigest({ tool, model: config ? {
+        provider: config.provider, baseUrl: config.baseUrl, model: config.model,
+        maxOutputTokens: config.maxOutputTokens, advancedOptions: config.advancedOptions,
+        ...(profile ? { defaultImageSize: profile.defaultImageSize, videoDefaults: profile.videoDefaults,
+          imageCapabilities: profile.imageCapabilities, inputCapabilities: profile.inputCapabilities } : {}),
+      } : null }) };
     },
     dispatchBlockReason(snapshot) {
       return teamConversationBlockReason(useChatStore.getState().chats.find((chat) => chat.id === snapshot.run.chatId), snapshot.run.goalSpec);
@@ -483,6 +495,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (selectedTool === 'image_generation') {
         const imageTaskIds = directImageDependencies(input.task, new Map(plan.tasks.map((item) => [item.id, item])));
         const imageProfile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image');
+        if (!imageProfile) throw new WorkflowPreflightError('图片模型未配置');
         const imageCapabilities = normalizeImageCapabilities(imageProfile?.imageCapabilities);
         if (imageTaskIds.length && (!imageProfile || !imageCapabilities.referenceImage)) throw new WorkflowPreflightError('当前图片模型不支持参考图片');
         if (imageTaskIds.length > 1 && !imageCapabilities.multiReferenceImage) throw new WorkflowPreflightError('当前图片模型只支持一张参考图片');
@@ -501,6 +514,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
         await context.beginToolInvocation(describeWorkflowToolRequest('image_generation', { prompt, referenceImages }));
         return queueAgentTeamImage({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          profile: imageProfile,
           usageReference: context.usageReference,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt, referenceImages, signal });
@@ -558,8 +572,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (!text?.trim() || text.length > 12_000) throw new WorkflowPreflightError('旁白正文必须为 1 到 12000 个字符');
         if (input.userInstruction) throw new WorkflowPreflightError('配音正文已确定，请通过追加任务修订正文后重新配音');
         const prompt = text.trim();
+        const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'tts');
+        if (!profile) throw new WorkflowPreflightError('旁白模型未配置');
         await context.beginToolInvocation(describeWorkflowToolRequest('speech_generation', { prompt }));
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          profile,
           usageReference: context.usageReference,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt, purpose: 'speech', signal });
@@ -573,8 +590,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return dependency.output.slice(0, 12_000);
         });
         const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
+        const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'audio');
+        if (!profile) throw new WorkflowPreflightError('音乐模型未配置');
         await context.beginToolInvocation(describeWorkflowToolRequest('audio_generation', { prompt }));
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          profile,
           usageReference: context.usageReference,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt, signal });
@@ -625,8 +645,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
             ? dependency.output.slice(0, 12_000) : null;
         }).filter((content): content is string => content !== null);
         const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
+        const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video');
+        if (!profile) throw new WorkflowPreflightError('视频模型未配置');
         await context.beginToolInvocation(describeWorkflowToolRequest('video_generation', { prompt, referenceImages }));
         return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          profile,
           usageReference: context.usageReference,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt, referenceImages, signal });

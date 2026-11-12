@@ -13,7 +13,7 @@ import { parseTeamReviewInput } from './agentTeamReviewEvidence';
 import { assertWorkflowDecisions, assertWorkflowDecisionTransition, deliveryCopyDecision, type WorkflowDecisionRecord } from './workflowDecision';
 import { assertWorkflowUserResponse, createWorkflowUserResponse, type WorkflowUserResponse } from './workflowUserResponse';
 import { parseWorkflowModelRequest, type WorkflowModelRequest } from './workflowModelRequest';
-import { assertWorkflowApprovals, assertWorkflowApprovalTransition, pendingWorkflowApproval, proposeWorkflowApproval,
+import { assertWorkflowApprovals, assertWorkflowApprovalTransition, pendingWorkflowApproval, proposeWorkflowApproval, workflowApprovalMatches,
   type WorkflowApproval, type WorkflowApprovalRequirement } from './workflowApproval';
 import type { WorkflowUsageReference } from '../types/workflowUsage';
 
@@ -1126,8 +1126,10 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         const generation = snapshot.run.generation;
         const completed = new Set(snapshot.tasks.filter((task) => task.status === 'completed').map((task) => task.id));
         const ready = snapshot.tasks.filter((task) => (task.status === 'queued' || task.status === 'waiting_dependency') && task.dependsOn.every((id) => completed.has(id)));
-        const requiresApproval = ready.filter((task) => executor.approvalRequirement?.(task, snapshot)
-          && !(task.approvals?.at(-1)?.attempt === task.attempt + 1 && task.approvals.at(-1)?.decision?.outcome === 'approved'));
+        const requiresApproval = ready.filter((task) => {
+          const requirement = executor.approvalRequirement?.(task, snapshot);
+          return requirement && !workflowApprovalMatches(task, requirement);
+        });
         if (requiresApproval.length) {
           await mutate(storageScope, runId, (current) => {
             if (scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' || current.run.pauseRequested) return { snapshot: current, value: undefined };
@@ -1135,8 +1137,13 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
               if (!requiresApproval.some((item) => item.id === task.id)) return task;
               const requirement = executor.approvalRequirement?.(task, current);
               if (!requirement) throw new Error('审批要求已改变');
+              const approvals = [...(task.approvals ?? [])];
+              const prior = approvals.at(-1);
+              if (prior?.attempt === task.attempt + 1 && prior.decision?.outcome === 'approved') {
+                approvals[approvals.length - 1] = { ...prior, invalidatedAt: Math.max(Date.now(), prior.decision.decidedAt) };
+              }
               return { ...task, status: 'waiting_user' as const, error: '等待你确认执行', updatedAt: Date.now(),
-                approvals: [...(task.approvals ?? []), proposeWorkflowApproval(current, task, requirement)] };
+                approvals: [...approvals, proposeWorkflowApproval(current, task, requirement)] };
             }) }, value: undefined };
           });
           continue;
@@ -1160,6 +1167,10 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
           }
           const reason = workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current);
           if (reason) return { snapshot: { ...current, run: { ...current.run, status: 'paused', pauseReason: reason, updatedAt: Date.now() } }, value: false };
+          for (const item of current.tasks.filter((task) => claimed.has(task.id))) {
+            const requirement = executor.approvalRequirement?.(item, current);
+            if (requirement && !workflowApprovalMatches(item, requirement)) return { snapshot: current, value: false };
+          }
           return { snapshot: {
             ...current,
             tasks: current.tasks.map((item) => claimed.has(item.id)
@@ -1194,6 +1205,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                 }
                 const reason = workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current);
                 if (reason) throw new WorkflowPreflightError(reason);
+                const requirement = executor.approvalRequirement?.(item, current);
+                if (requirement && !workflowApprovalMatches(item, requirement, item.attempt)) throw new WorkflowPreflightError('执行配置已改变，请重新确认审批');
                 const invocation = item.toolInvocation;
                 const now = Math.max(Date.now(), invocation.reservedAt);
                 return { snapshot: { ...current, run: { ...current.run, updatedAt: now }, tasks: current.tasks.map((candidate) => candidate.id === task.id
@@ -1214,6 +1227,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                 }
                 const reason = workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current);
                 if (reason) throw new WorkflowPreflightError(reason);
+                const requirement = executor.approvalRequirement?.(item, current);
+                if (requirement && !workflowApprovalMatches(item, requirement, item.attempt)) throw new WorkflowPreflightError('执行配置已改变，请重新确认审批');
                 const now = Math.max(Date.now(), item.modelInvocation.reservedAt);
                 return { snapshot: { ...current, run: { ...current.run, updatedAt: now }, tasks: current.tasks.map((candidate) => candidate.id === task.id
                   ? { ...candidate, updatedAt: now, modelInvocation: { ...item.modelInvocation!, state: 'started', startedAt: now,

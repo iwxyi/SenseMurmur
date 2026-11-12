@@ -20,6 +20,21 @@ beforeEach(() => {
 });
 
 describe('agent team audio task', () => {
+  it.each(['music', 'speech'] as const)('keeps the approved %s model when current settings change', async (purpose) => {
+    const profile = { id: 'approved', name: '已批准模型', type: purpose === 'speech' ? 'tts' as const : 'audio' as const,
+      provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'approved-model', isDefault: true };
+    useSettingsStore.setState({ aiProfiles: [{ ...profile, model: 'different-model' }] });
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, aiProfiles, upsertMessage }) => {
+      expect(aiProfiles).toEqual([profile]);
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'ready', url: '/uploads/approved.mp3', updatedAt: item.updatedAt + 1,
+      })) } });
+    });
+    await queueAgentTeamAudio({ runId: 'approved-run', taskId: purpose, chatId: 'team-audio-chat', prompt: '森林',
+      purpose, profile, signal: new AbortController().signal });
+    expect(processRichMessageMedia).toHaveBeenCalledTimes(1);
+  });
+
   it('queues narration with only the TTS profile and reuses the saved result', async () => {
     const tts = { id: 'tts', name: '旁白', type: 'tts' as const, provider: 'openai' as const, apiKey: 'test', baseUrl: 'https://example.test', model: 'tts-1', isDefault: true };
     useSettingsStore.setState((state) => ({ aiProfiles: [...state.aiProfiles, tts] }));

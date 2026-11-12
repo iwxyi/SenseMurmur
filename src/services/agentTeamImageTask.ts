@@ -1,6 +1,6 @@
 import type { Message } from '../types/message';
 import type { WorkflowUsageReference } from '../types/workflowUsage';
-import { getUsablePreferredAIProfile } from '../types/settings';
+import { getUsablePreferredAIProfile, type AIModelProfile } from '../types/settings';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
@@ -67,6 +67,7 @@ function waitForServerId(runId: string, taskId: string, signal: AbortSignal) {
 
 export async function queueAgentTeamImage(params: { runId: string; taskId: string; chatId: string; prompt: string; sourceBranch?: WorkflowGoalSpec['sourceBranch'];
   usageReference?: WorkflowUsageReference;
+  profile?: AIModelProfile;
   referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
@@ -81,7 +82,8 @@ export async function queueAgentTeamImage(params: { runId: string; taskId: strin
   if (prior?.status === 'completed') return { output: prior.output };
   if (prior?.status === 'failed') throw new WorkflowPreflightError(prior.error);
   if (existing && prior?.status !== 'queued') throw new Error('图片任务已开始提交，但结果尚未确认，请核对后继续');
-  if (!getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image')) throw new WorkflowPreflightError('图片模型未配置');
+  const profile = params.profile ?? getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image');
+  if (!profile || profile.type !== 'image') throw new WorkflowPreflightError('图片模型未配置');
   const now = Date.now();
   const state = useMessageStore.getState();
   const known = [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])];
@@ -101,7 +103,7 @@ export async function queueAgentTeamImage(params: { runId: string; taskId: strin
   }
   const synced = isLocalOnlyMediaMode() ? message : await waitForServerId(params.runId, params.taskId, params.signal);
   if (params.signal.aborted) throw new Error('图片任务已中断，提交结果需要核对');
-  await processRichMessageMedia({ message: synced, aiProfiles: useSettingsStore.getState().aiProfiles,
+  await processRichMessageMedia({ message: synced, aiProfiles: [profile],
     sharesConversationLease: true,
     upsertMessage: (next) => useMessageStore.getState().upsertMessage(next) });
   const result = inspectAgentTeamImageAttachment(params.runId, params.taskId);
