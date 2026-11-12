@@ -185,6 +185,50 @@ try {
       window.fetch = originalFetch;
       useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== reviewChatId) }));
     }
+    const batchRunId = 'browser-collab-batch-review-' + crypto.randomUUID();
+    const batchChatId = batchRunId + '-chat';
+    const batchSpecs = Array.from({ length: 40 }, (_, index) => ({ ...plan.tasks[0], id: 'note_' + index,
+      goal: '任务目标'.repeat(250), acceptance: '验收条件'.repeat(100) }));
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: batchChatId, type: 'assistant', name: '分批审核恢复验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));
+    await runtime.create({ run: { ...run.run, id: batchRunId, chatId: batchChatId, status: 'active', planOpen: true, autoReview: true, maxModelCalls: 43 }, tasks: [
+      { ...run.tasks[0], runId: batchRunId, output: { ...plan, tasks: batchSpecs } },
+      ...batchSpecs.map((task) => ({ id: task.id, runId: batchRunId, kind: 'agent_text', input: { task, role: plan.roles[0], goal: '完整报告' },
+        output: ('完整正文' + task.id).repeat(500), dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now })),
+    ] });
+    const batchSeen = new Set();
+    const batchRequests = new Set();
+    let batchCalls = 0;
+    const { TEAM_REVIEW_EVIDENCE_LIMIT, teamReviewLeafSources } = await import('/src/services/agentTeamReviewEvidence.ts');
+    window.fetch = async (input, init) => {
+      if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
+      const request = JSON.parse(init.body);
+      const evidence = JSON.parse(request.messages.at(-1).content.split('项已完成记录未列出）：')[1].split('\\n')[0]);
+      const key = evidence.map((entry) => entry.task).join(',');
+      if (batchRequests.has(key)) throw new Error('Completed batch reviewed twice');
+      batchRequests.add(key); batchCalls++;
+      if (JSON.stringify(evidence).length > TEAM_REVIEW_EVIDENCE_LIMIT) throw new Error('Review evidence exceeded context limit');
+      for (const entry of evidence) if (entry.kind === 'agent_text') batchSeen.add(entry.task);
+      return Response.json({ choices: [{ message: { role: 'assistant', content: JSON.stringify({ complete: true, reason: '确定性分批审核，仅验证链路' }) }, finish_reason: 'stop' }] });
+    };
+    try {
+      const paused = await createAgentTeamWorkflow(config, currentWorkflowScope).resume(batchRunId);
+      if (paused.snapshot.run.status !== 'paused' || batchCalls !== 2) throw new Error('Batch review failed to persist at budget boundary');
+      const doneBefore = paused.snapshot.tasks.filter((task) => task.kind === 'team_review' && task.status === 'completed');
+      const restored = createAgentTeamWorkflow(config, currentWorkflowScope);
+      const saved = await restored.read(batchRunId);
+      await restored.setModelCallLimit(batchRunId, saved.run.planVersion);
+      const finished = (await restored.resume(batchRunId)).snapshot;
+      const root = finished.tasks.find((task) => task.id === 'review_1');
+      if (finished.run.status !== 'completed' || !root.output.complete || batchSeen.size !== 40
+        || teamReviewLeafSources(finished, root).length !== 40
+        || doneBefore.some((task) => JSON.stringify(task.output) !== JSON.stringify(finished.tasks.find((item) => item.id === task.id).output))) throw new Error('Batch review recovery omitted or changed evidence');
+      const calls = batchCalls;
+      await createAgentTeamWorkflow(config, currentWorkflowScope).resume(batchRunId);
+      if (batchCalls !== calls) throw new Error('Completed review was repeated after restart');
+    } finally {
+      window.fetch = originalFetch;
+      useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== batchChatId) }));
+    }
     const textRunId = 'browser-collab-saved-text-' + crypto.randomUUID();
     const textChatId = textRunId + '-chat';
     const originalText = '逐字保留：' + '完整研究正文。'.repeat(400) + '末尾结论必须保留';

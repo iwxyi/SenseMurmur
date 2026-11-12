@@ -15,6 +15,24 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('keeps the user goal separate from long runtime planning context', async () => {
+    const goal = '愿'.repeat(12_000);
+    const context = '历史交付'.repeat(8_000);
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(valid()));
+    await planAgentTeam({ api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal, context });
+    expect(vi.mocked(generateResponse).mock.lastCall?.[2]).toEqual([{ role: 'user', content: `${goal}\n${context}` }]);
+  });
+
+  it('rejects oversized goals or context before starting a model invocation', async () => {
+    const beforeModelRequest = vi.fn();
+    const params = { api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '继续任务', beforeModelRequest };
+    const previousCalls = vi.mocked(generateResponse).mock.calls.length;
+    await expect(planAgentTeam({ ...params, goal: '愿'.repeat(12_001) })).rejects.toThrow('用户目标无效');
+    await expect(planAgentTeam({ ...params, context: '史'.repeat(128_001) })).rejects.toThrow('规划上下文无效');
+    expect(beforeModelRequest).not.toHaveBeenCalled();
+    expect(vi.mocked(generateResponse).mock.calls).toHaveLength(previousCalls);
+  });
+
   it('preserves artifact version references and rejects guessed artifact IDs even with the same text digest', async () => {
     const reference = { taskId: 'old', attempt: 1, outputSha256: 'a'.repeat(64), artifact: { id: 'artifact', versionId: 'edited' } };
     const candidate = { ...valid(), tasks: [{ ...valid().tasks[0], savedText: [{ ...reference, alias: 'edited' }] }] };

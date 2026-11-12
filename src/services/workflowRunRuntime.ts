@@ -9,6 +9,7 @@ import { isWorkflowToolTask, parseWorkflowToolInvocation, workflowToolInvocation
 import { parseWorkflowToolRequest, workflowToolRequestKind, type WorkflowToolRequest } from './workflowToolRequest';
 import { parseWorkflowReviewRecord } from './workflowReviewRecord';
 import { parseWorkflowRevisionImpact } from './workflowRevisionImpact';
+import { parseTeamReviewInput } from './agentTeamReviewEvidence';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -128,6 +129,7 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
     if (new Set(candidate.dependsOn).size !== candidate.dependsOn.length) throw new Error('工作流任务依赖重复');
     if (!TASK_STATUSES.has(candidate.status as WorkflowTaskStatus)) throw new Error('工作流任务状态无效');
     if (!Number.isSafeInteger(candidate.attempt) || (candidate.attempt as number) < 0) throw new Error('工作流任务尝试次数无效');
+    if (candidate.kind === 'team_review' && isRecord(candidate.input) && candidate.input.schemaVersion !== undefined) parseTeamReviewInput(candidate.input);
     if (candidate.kind === 'team_plan_revision' && isRecord(candidate.input) && candidate.input.impact !== undefined) {
       const impact = parseWorkflowRevisionImpact(candidate.input.impact);
       const sourceTaskIds = candidate.input.sourceTaskIds;
@@ -591,6 +593,9 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
               if (!nextTask || JSON.stringify(nextTask.input) !== JSON.stringify(task.input)) throw new Error('已保存的定向修订不可修改');
             }
             const nextTask = migratedNext.tasks.find((item) => item.id === task.id);
+            if (task.kind === 'team_review' && isRecord(task.input) && task.input.schemaVersion === 2
+              && (!nextTask || nextTask.kind !== task.kind || JSON.stringify(nextTask.input) !== JSON.stringify(task.input)
+                || JSON.stringify(nextTask.dependsOn) !== JSON.stringify(task.dependsOn))) throw new Error('已保存的分批审核范围不可修改');
             if (task.kind === 'team_review' && isRecord(task.output) && task.output.schemaVersion !== undefined
               && (!nextTask || nextTask.attempt !== task.attempt || JSON.stringify(nextTask.output) !== JSON.stringify(task.output))) throw new Error('已保存的验收记录不可修改');
             if (task.status === 'completed') {
@@ -839,10 +844,21 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
       const target = current.tasks.find((task) => task.id === reviewId && task.kind === 'team_review' && task.status === 'result_unknown');
       if (!target || current.tasks.some((task) => task.id === 'review_needs_user')) throw new Error('当前没有可放弃的待核对验收');
       const now = Date.now();
+      const reviews = new Map(current.tasks.filter((task) => task.kind === 'team_review').map((task) => [task.id, task]));
+      const neighbors = new Map<string, string[]>();
+      for (const task of reviews.values()) for (const id of task.dependsOn) {
+        if (!reviews.has(id)) continue;
+        neighbors.set(task.id, [...(neighbors.get(task.id) || []), id]);
+        neighbors.set(id, [...(neighbors.get(id) || []), task.id]);
+      }
+      // Abandon the unfinished review tree together, so aggregates cannot wait forever on an unknown batch.
+      const reviewIds = new Set([reviewId]);
+      for (const id of reviewIds) for (const neighbor of neighbors.get(id) || []) reviewIds.add(neighbor);
       const block: WorkflowTask = { id: 'review_needs_user', runId, kind: 'team_review_block', input: null,
         dependsOn: [], status: 'waiting_user', error: '上次主 Agent 验收结果无法核对。请追加明确指示或新建团队任务。', attempt: 0, updatedAt: now };
-      const tasks = [...current.tasks.map((task) => task.id === reviewId ? { ...task, status: 'abandoned' as const,
-        error: '用户已放弃核对本次验收，原结果仍未知', updatedAt: now } : task), block];
+      const tasks = [...current.tasks.map((task) => reviewIds.has(task.id) && task.status !== 'completed' && task.status !== 'abandoned'
+        ? { ...task, status: 'abandoned' as const,
+          error: task.status === 'result_unknown' ? '用户已放弃核对本轮验收，原结果仍未知' : '用户已放弃本轮未完成的验收', updatedAt: now } : task), block];
       assertTaskGraph(tasks);
       const snapshot: WorkflowSnapshot = { ...current, tasks,
         run: { ...current.run, autoReview: false, planVersion: current.run.planVersion + 1, updatedAt: now } };

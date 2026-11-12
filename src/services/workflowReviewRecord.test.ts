@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkflowSnapshot } from './workflowRunRuntime';
 import { parseWorkflowReviewRecord, parseWorkflowReviewVerdict, prepareWorkflowReviewRecord } from './workflowReviewRecord';
+import { workflowJsonDigest } from './workflowToolRequest';
 
 function fixture(): WorkflowSnapshot {
   return { run: { id: 'run', chatId: 'chat', goal: '报告', status: 'active', generation: 1, planVersion: 3, updatedAt: 1 }, tasks: [
@@ -12,6 +13,20 @@ const evidence = [{ task: 'write', output: '完整报告' }];
 const verdict = { complete: true, reason: '通过' };
 
 describe('versioned workflow reviews', () => {
+  it('binds an aggregate to the complete versioned child record and rejects foreign provenance', () => {
+    const snapshot = fixture();
+    const child = snapshot.tasks[1];
+    child.output = prepareWorkflowReviewRecord(snapshot, 'review', '可读', evidence)(verdict);
+    child.status = 'completed';
+    snapshot.tasks.push({ ...child, id: 'root', input: null, output: undefined, dependsOn: ['review'], status: 'running' });
+    const aggregate = [{ task: 'review', output: '审核通过' }];
+    expect(prepareWorkflowReviewRecord(snapshot, 'root', '可读', aggregate)(verdict).sources[0].outputSha256).toBe(workflowJsonDigest(child.output));
+    for (const change of [{ runId: 'other' }, { taskId: 'other' }, { attempt: 2 }]) {
+      const altered = structuredClone(snapshot);
+      altered.tasks[1].output = { ...child.output as object, ...change };
+      expect(() => prepareWorkflowReviewRecord(altered, 'root', '可读', aggregate)).toThrow('归属无效');
+    }
+  });
   it('binds the claimed attempt, full source output and actual truncated evidence without copying them', () => {
     const result = prepareWorkflowReviewRecord(fixture(), 'review', '可读', evidence)(verdict);
     expect(result).toMatchObject({ schemaVersion: 1, runId: 'run', taskId: 'review', attempt: 1, planVersion: 3,

@@ -16,6 +16,17 @@ function fixture(): WorkflowSnapshot {
 }
 
 describe('team progress detection', () => {
+  it('compares leaf deliveries across aggregate roots and skips intermediate reviews', () => {
+    const snapshot = fixture();
+    const root = snapshot.tasks[3];
+    const partial = { ...root, id: 'review_2_batch_1', input: { schemaVersion: 2, mode: 'batch', partial: true, sourceTaskIds: ['draft', 'revision'] } };
+    root.input = { schemaVersion: 2, mode: 'aggregate', sourceTaskIds: [partial.id] };
+    snapshot.tasks.splice(3, 0, partial);
+    expect(hasRepeatedTeamReviewWithoutProgress(snapshot, root.id)).toBe(true);
+    snapshot.tasks[2].output = '新增来源';
+    expect(hasRepeatedTeamReviewWithoutProgress(snapshot, root.id)).toBe(false);
+    expect(hasRepeatedTeamReviewWithoutProgress(snapshot, partial.id)).toBe(false);
+  });
   it('recognizes repeated requests with identical text evidence', () => {
     expect(hasRepeatedTeamReviewWithoutProgress(fixture(), 'review_2')).toBe(true);
   });

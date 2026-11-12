@@ -8,6 +8,7 @@ import TeamTaskExecutionHistory from './TeamTaskExecutionHistory';
 import { workflowDeliveryIssueLabel } from '../../services/workflowDelivery';
 import TeamDeliveryConflictPanel from './TeamDeliveryConflictPanel';
 import { analyzeWorkflowRevisionImpact } from '../../services/workflowRevisionImpact';
+import { isPartialTeamReview } from '../../services/agentTeamReviewEvidence';
 
 interface Props {
   runs: WorkflowSnapshot[];
@@ -81,7 +82,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const details = task ? taskDetails(task) : null;
   const plan = teamPlan(run);
   const summary = summarizeWorkflowRun(run);
-  const latestReview = run.tasks.filter((item) => item.kind === 'team_review' && item.status === 'completed').at(-1);
+  const latestReview = run.tasks.filter((item) => item.kind === 'team_review' && item.status === 'completed' && !isPartialTeamReview(item)).at(-1);
   const reviewResult = latestReview?.output && typeof latestReview.output === 'object' && !Array.isArray(latestReview.output)
     ? latestReview.output as { complete?: unknown; reason?: unknown } : null;
   const childTasks = run.tasks.filter((item) => item.kind === 'agent_delegation' || item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_image_inspection' || item.kind === 'agent_video_inspection' || item.kind === 'agent_audio' || item.kind === 'agent_video' || item.kind === 'agent_media_composition');
@@ -197,7 +198,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           {reviewResult && typeof reviewResult.reason === 'string' && <Typography variant="body2" color={reviewResult.complete === true ? 'text.secondary' : 'warning.main'}><strong>主 Agent 验收</strong> {reviewResult.reason}</Typography>}
           {summary.blocked.length > 0 && <Typography variant="body2" color="warning.main"><strong>需要处理</strong> {summary.blocked.map((item) => item.reason).join('；')}</Typography>}
           {unknownReview && canRun && run.run.status === 'paused' && <Box sx={{ display: 'grid', gap: 0.75 }}>
-            <Typography variant="body2" color="text.secondary">上次验收请求的结果无法核对。放弃本次验收后，仍需追加明确任务才能继续；原结果会保留为未知记录。</Typography>
+            <Typography variant="body2" color="text.secondary">上次验收请求的结果无法核对。放弃本轮未完成审核后，仍需追加明确任务才能继续；已完成审核会保留，原未知结果不会自动重试。</Typography>
             {reviewActionError && reviewActionRunId === run.run.id && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
             <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
               setSavingReviewAction(true);
@@ -206,7 +207,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
                 setReviewActionRunId(run.run.id);
                 setReviewActionError(error instanceof Error ? error.message : '处理验收失败');
               }).finally(() => setSavingReviewAction(false));
-            }}>放弃本次验收，改由我指定下一步</Button>
+            }}>放弃本轮验收，改由我指定下一步</Button>
           </Box>}
           {failedReview && canRun && run.run.status === 'failed' && <Box sx={{ display: 'grid', gap: 0.75 }}>
             <Typography variant="body2" color="text.secondary">本次验收已明确失败。修正模型或要求后，可以只重试主 Agent 验收；之前完成的任务会保留。</Typography>
@@ -242,7 +243,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
             }}>保存追加任务</Button>
           </Box>}
           {run.tasks.map((item, index) => <Box key={item.id}>
-            <Typography variant="body2" color="text.secondary">{index + 1}. {item.kind === 'team_plan' ? '规划团队' : item.kind === 'team_plan_revision' ? '规划追加任务' : item.kind === 'team_review' ? '主 Agent 验收交付' : item.kind === 'team_review_block' ? '等待用户决定' : taskDetails(item)?.goal || '执行任务'} · {taskStatus[item.status]}</Typography>
+            <Typography variant="body2" color="text.secondary">{index + 1}. {item.kind === 'team_plan' ? '规划团队' : item.kind === 'team_plan_revision' ? '规划追加任务' : item.kind === 'team_review' ? isPartialTeamReview(item) ? '分批审核交付' : '主 Agent 验收交付' : item.kind === 'team_review_block' ? '等待用户决定' : taskDetails(item)?.goal || '执行任务'} · {taskStatus[item.status]}</Typography>
             {['team_plan', 'team_plan_revision', 'team_review'].includes(item.kind) && <TeamTaskExecutionHistory runId={run.run.id} taskId={item.id} updatedAt={item.updatedAt} statusLabels={taskStatus} />}
           </Box>)}
         </Box>}

@@ -1,13 +1,8 @@
 import type { WorkflowSnapshot, WorkflowTask } from './workflowRunRuntime';
+import { isPartialTeamReview, teamReviewLeafSources } from './agentTeamReviewEvidence';
 
 function normalized(value: string) {
   return value.normalize('NFKC').replace(/\s+/g, ' ').trim();
-}
-
-function reviewSources(task: WorkflowTask): string[] | null {
-  if (!task.input || typeof task.input !== 'object' || !('sourceTaskIds' in task.input)) return null;
-  const ids: unknown = task.input.sourceTaskIds;
-  return Array.isArray(ids) && ids.every((id): id is string => typeof id === 'string') ? ids : null;
 }
 
 function nextRequest(task: WorkflowTask): string | null {
@@ -20,11 +15,11 @@ function nextRequest(task: WorkflowTask): string | null {
 export function hasRepeatedTeamReviewWithoutProgress(snapshot: WorkflowSnapshot, reviewId: string): boolean {
   const index = snapshot.tasks.findIndex((task) => task.id === reviewId);
   const current = snapshot.tasks[index];
-  if (!current || current.kind !== 'team_review' || current.status !== 'completed') return false;
-  const previous = snapshot.tasks.slice(0, index).filter((task) => task.kind === 'team_review' && task.status === 'completed').at(-1);
+  if (!current || current.kind !== 'team_review' || current.status !== 'completed' || isPartialTeamReview(current)) return false;
+  const previous = snapshot.tasks.slice(0, index).filter((task) => task.kind === 'team_review' && task.status === 'completed' && !isPartialTeamReview(task)).at(-1);
   if (!previous || !nextRequest(current) || nextRequest(current) !== nextRequest(previous)) return false;
-  const beforeIds = reviewSources(previous);
-  const afterIds = reviewSources(current);
+  const beforeIds = teamReviewLeafSources(snapshot, previous);
+  const afterIds = teamReviewLeafSources(snapshot, current);
   if (!beforeIds?.length || !afterIds?.length) return false;
   const beforeSet = new Set(beforeIds);
   const newTasks = afterIds.filter((id) => !beforeSet.has(id)).map((id) => snapshot.tasks.find((task) => task.id === id));

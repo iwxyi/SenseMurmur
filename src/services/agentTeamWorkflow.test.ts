@@ -22,6 +22,8 @@ import { countWorkflowModelCalls } from './workflowRunRuntime';
 import { listTeamSavedMedia } from './agentTeamSavedMedia';
 import { listTeamSavedText } from './agentTeamSavedText';
 import * as persistence from '../stores/storePersistenceScope';
+import { parseTeamReviewInput, teamReviewLeafSources, TEAM_REVIEW_EVIDENCE_LIMIT } from './agentTeamReviewEvidence';
+import { workflowJsonDigest } from './workflowToolRequest';
 
 vi.mock('./agentTeamMediaComposition', () => ({ canComposeTeamMedia: () => true, composeAgentTeamMedia: vi.fn(), inspectAgentTeamComposition: vi.fn(), teamMediaAttachment: vi.fn() }));
 vi.mock('./agentTeamVideoInspection', () => ({ inspectAgentTeamVideo: vi.fn() }));
@@ -113,6 +115,92 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it.each(['budget', 'reject', 'retry', 'abandon'] as const)('persists bounded review layers across %s recovery', async (scenario) => {
+    const runId = crypto.randomUUID();
+    const scope = `batch-review-${runId}`;
+    const now = Date.now();
+    const role = { id: 'writer', name: '作者', responsibility: '研究', method: '核查', acceptance: '完整', allowedTools: ['text_generation'] };
+    const taskSpecs = Array.from({ length: 40 }, (_, index) => ({ id: `note_${index}`, roleId: role.id,
+      goal: '任务目标'.repeat(250), acceptance: '验收条件'.repeat(100), dependsOn: [], tool: 'text_generation' }));
+    const spec = defaultWorkflowGoalSpec('完整报告');
+    spec.execution.maxAutomaticReviewRounds = 1;
+    const snapshot: WorkflowSnapshot = {
+      run: { id: runId, chatId: 'chat', goal: '完整报告', goalSpec: spec, status: 'paused', generation: 1,
+        planVersion: 2, planOpen: true, autoReview: true, ...(['budget', 'abandon'].includes(scenario) ? { maxModelCalls: 43 } : {}), updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '完整报告', output: { summary: '报告', roles: [role], tasks: taskSpecs, finalAcceptance: '全部完整' },
+          dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        ...taskSpecs.map((task) => ({ id: task.id, runId, kind: 'agent_text', input: { task, role, goal: '完整报告' },
+          output: `正文${task.id}`.repeat(500), dependsOn: ['plan'], status: 'completed' as const, attempt: 1, updatedAt: now })),
+      ],
+    };
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot, value: undefined }));
+    let requests = 0;
+    const seenLeaves = new Set<string>();
+    generate.mockImplementation(async (_config, _system, messages) => {
+      const evidence = JSON.parse(messages[0].content.split('项已完成记录未列出）：')[1]);
+      expect(JSON.stringify(evidence).length).toBeLessThanOrEqual(TEAM_REVIEW_EVIDENCE_LIMIT);
+      for (const entry of evidence) if (entry.kind === 'agent_text') seenLeaves.add(entry.task);
+      const index = requests++;
+      if (scenario === 'retry' && index === 0) return '{invalid';
+      return JSON.stringify(scenario === 'reject' && index === 0
+        ? { complete: false, reason: '第一批缺少来源', nextRequest: '核查第一批来源' }
+        : { complete: true, reason: '本次审核通过' });
+    });
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    let result = await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    const completedBefore = result.snapshot.tasks.filter((task) => task.kind === 'team_review' && task.status === 'completed');
+    if (scenario === 'abandon') {
+      expect(requests).toBe(2);
+      const pending = result.snapshot.tasks.filter((task) => task.kind === 'team_review' && task.status !== 'completed').slice(0, 2);
+      await indexedDbWorkflowRepository.transact(scope, runId, (current) => ({ snapshot: { ...current!,
+        tasks: current!.tasks.map((task) => pending.some((item) => item.id === task.id) ? { ...task, status: 'result_unknown', attempt: 1 } : task) }, value: undefined }));
+      const restarted = createAgentTeamWorkflow(config, () => scope);
+      const abandoned = await restarted.abandonUnknownReview(runId, pending[0].id, result.snapshot.run.planVersion);
+      expect(abandoned.tasks.filter((task) => task.kind === 'team_review' && task.status !== 'completed').every((task) => task.status === 'abandoned')).toBe(true);
+      for (const task of completedBefore) expect(abandoned.tasks.find((item) => item.id === task.id)?.output).toEqual(task.output);
+      const added = await restarted.addRevisionRequest(runId, abandoned.run.planVersion, '仅根据已有报告补充结论');
+      await restarted.setModelCallLimit(runId, added.run.planVersion);
+      generate.mockReset();
+      generate.mockResolvedValueOnce(JSON.stringify({ summary: '补充', roles: [role], tasks: [{ ...taskSpecs[0], id: 'followup', goal: '补充结论' }], finalAcceptance: '完成' }))
+        .mockResolvedValueOnce('补充结论');
+      const finished = await restarted.resume(runId);
+      expect(finished.snapshot.run.status, JSON.stringify(finished.snapshot.tasks.filter((task) => task.error).map((task) => ({ id: task.id, error: task.error })))).toBe('completed');
+      expect(generate).toHaveBeenCalledTimes(2);
+      return;
+    }
+    if (scenario === 'budget') {
+      expect(requests).toBe(2);
+      expect(result.snapshot.run.status).toBe('paused');
+      const pending = result.snapshot.tasks.find((task) => task.kind === 'team_review' && task.status !== 'completed')!;
+      await expect(indexedDbWorkflowRepository.transact(scope, runId, (current) => ({ snapshot: { ...current!,
+        tasks: current!.tasks.map((task) => task.id === pending.id ? { ...task, input: { ...parseTeamReviewInput(task.input), sourceTaskIds: ['note_0'] } } : task) }, value: undefined })))
+        .rejects.toThrow('分批审核范围不可修改');
+      const restarted = createAgentTeamWorkflow(config, () => scope);
+      await restarted.setModelCallLimit(runId, result.snapshot.run.planVersion);
+      result = await restarted.resume(runId);
+    } else if (scenario === 'retry') {
+      const failed = result.snapshot.tasks.find((task) => task.kind === 'team_review' && task.status === 'failed')!;
+      expect(failed.error).toContain('无效 JSON');
+      const restarted = createAgentTeamWorkflow(config, () => scope);
+      await restarted.retryFailedReview(runId, failed.id, result.snapshot.run.planVersion);
+      result = await restarted.resume(runId);
+      expect(result.snapshot.tasks.find((task) => task.id === failed.id)?.attempt).toBe(2);
+    }
+    const root = result.snapshot.tasks.find((task) => task.id === 'review_1')!;
+    expect(root.status).toBe('completed');
+    expect(root.output).toMatchObject({ complete: scenario !== 'reject' });
+    expect(result.snapshot.run.status).toBe(scenario === 'reject' ? 'paused' : 'completed');
+    expect(teamReviewLeafSources(result.snapshot, root)).toEqual(taskSpecs.map((task) => task.id));
+    expect([...seenLeaves].sort()).toEqual(taskSpecs.map((task) => task.id).sort());
+    for (const task of completedBefore) expect(result.snapshot.tasks.find((item) => item.id === task.id)?.output).toEqual(task.output);
+    const rootRecord = root.output as { sources: Array<{ taskId: string; outputSha256: string }> };
+    for (const source of rootRecord.sources) expect(source.outputSha256).toBe(workflowJsonDigest(result.snapshot.tasks.find((task) => task.id === source.taskId)!.output));
+    const count = requests;
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(requests).toBe(count);
+  });
+
   it.each((['text_generation', 'image_generation', 'video_generation', 'audio_generation', 'speech_generation', 'delegate_task'] as const)
     .flatMap((tool) => [false, true].map((artifactVersion) => ({ tool, artifactVersion }))))('restores exact historical text for $tool (artifact version: $artifactVersion) without rewriting the source', async ({ tool, artifactVersion }) => {
     const runId = crypto.randomUUID();

@@ -63,7 +63,12 @@ export function prepareWorkflowReviewRecord(snapshot: WorkflowSnapshot, taskId: 
   if (!task || task.kind !== 'team_review' || task.status !== 'running' || task.attempt < 1) throw new Error('验收任务尚未领取');
   const sources = evidence.map((entry) => {
     const source = snapshot.tasks.find((item) => item.id === entry.task);
-    if (!source || source.status !== 'completed' || typeof source.output !== 'string') throw new Error('验收证据尚未就绪');
+    if (!source || source.runId !== snapshot.run.id || source.status !== 'completed') throw new Error('验收证据尚未就绪');
+    if (typeof source.output !== 'string') {
+      if (source.kind !== 'team_review') throw new Error('验收证据尚未就绪');
+      const review = parseWorkflowReviewRecord(source.output);
+      if (review.runId !== snapshot.run.id || review.taskId !== source.id || review.attempt !== source.attempt) throw new Error('审核来源归属无效');
+    }
     return { taskId: source.id, kind: source.kind, attempt: source.attempt, outputSha256: workflowJsonDigest(source.output) };
   });
   const basis = { schemaVersion: 1, runId: snapshot.run.id, taskId, attempt: task.attempt, planVersion: snapshot.run.planVersion,
