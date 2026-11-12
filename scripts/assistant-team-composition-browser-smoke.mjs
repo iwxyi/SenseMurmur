@@ -235,8 +235,10 @@ try {
     const inspection = after.tasks.find((task) => task.id === 'inspect');
     if (inspection.status !== 'completed' || !inspection.output.includes('未检查音轨或逐帧连续性')) throw new Error('Missing persisted inspection scope');
     const inspectionAttempts = await runtime.indexedDbWorkflowRepository.listTaskAttempts(runtime.currentWorkflowScope(), runId, 'inspect');
+    const { workflowJsonDigest } = await import('/src/services/workflowToolRequest.ts');
     if (inspection.modelInvocation?.state !== 'succeeded' || inspectionAttempts.length !== 1
-      || JSON.stringify(inspectionAttempts[0].modelInvocation) !== JSON.stringify(inspection.modelInvocation)) throw new Error('Missing atomic model invocation journal');
+      || workflowJsonDigest(inspectionAttempts[0].modelInvocation) !== workflowJsonDigest(inspection.modelInvocation)
+      || !/^[a-f0-9]{64}$/.test(inspection.modelInvocation.request?.sha256 || '')) throw new Error('Missing atomic model invocation journal');
     const { listTeamSavedMedia } = await import('/src/services/agentTeamSavedMedia.ts');
     const savedMedia = listTeamSavedMedia(after, ['shot_a', 'shot_b', 'music', 'narration']).map((source) => ({ ...source, alias: 'old_' + source.taskId }));
     const savedFilm = listTeamSavedMedia(after, ['film']).map((source) => ({ ...source, alias: 'old_film' }));

@@ -5,6 +5,7 @@ import { workflowModelInvocationId } from './workflowModelInvocation';
 import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
 import { workflowToolInvocationId, workflowToolOperationKey } from './workflowToolInvocation';
 import { describeWorkflowToolRequest } from './workflowToolRequest';
+import { describeWorkflowModelRequest } from './workflowModelRequest';
 
 let testIndexedDb: IDBFactory | undefined;
 
@@ -435,15 +436,17 @@ describe('workflow run runtime', () => {
     const plan = snapshot(id);
     plan.run.maxModelCalls = 1;
     plan.tasks = [{ ...plan.tasks[0], kind: 'agent_text' }];
+    const request = describeWorkflowModelRequest({ provider: 'openai', model: 'test', apiKey: 'secret', baseUrl: '' }, 'private prompt', []);
     const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
       tracksModelInvocations: true,
       async execute(task, _signal, context) {
         const reserved = await indexedDbWorkflowRepository.read(scope, id);
         expect(reserved?.tasks[0].modelInvocation?.state).toBe('reserved');
         if (outcome === 'preflight') throw new WorkflowPreflightError('权限不足');
-        await context.beginModelInvocation();
+        await context.beginModelInvocation(request);
         const attempts = await indexedDbWorkflowRepository.listTaskAttempts(scope, id, task.id);
         expect(attempts[0].modelInvocation?.state).toBe('started');
+        expect(attempts[0].modelInvocation?.request).toEqual(request);
         if (outcome === 'duplicate') await expect(context.beginModelInvocation()).rejects.toThrow('已失效或已开始');
         if (outcome === 'unknown') throw new Error('连接中断');
         if (outcome === 'invalid-response') throw new WorkflowPreflightError('响应格式错误');
@@ -454,8 +457,30 @@ describe('workflow run runtime', () => {
     const result = await runtime.resume(id);
     const expected = outcome === 'preflight' ? 'not_started' : outcome === 'unknown' ? 'result_unknown' : outcome === 'invalid-response' ? 'failed' : 'succeeded';
     expect(result.tasks[0].modelInvocation?.state).toBe(expected);
+    expect(result.tasks[0].modelInvocation?.request).toEqual(outcome === 'preflight' ? undefined : request);
     expect(countWorkflowModelCalls(result)).toBe(outcome === 'preflight' ? 0 : 1);
     expect((await indexedDbWorkflowRepository.listTaskAttempts(scope, id, plan.tasks[0].id))[0].modelInvocation).toEqual(result.tasks[0].modelInvocation);
+  });
+
+  it.each(['change', 'remove', 'backfill'] as const)('atomically rejects %s of a started model request digest', async (action) => {
+    const id = crypto.randomUUID();
+    const scope = `request-${id}`;
+    const initial = snapshot(id);
+    initial.run.status = 'paused';
+    const request = describeWorkflowModelRequest({ provider: 'openai', model: 'test', apiKey: '', baseUrl: '' }, 'private', []);
+    initial.tasks = [{ ...initial.tasks[0], status: 'result_unknown', kind: 'agent_text', attempt: 1,
+      modelInvocation: { schemaVersion: 1, id: workflowModelInvocationId(id, 'script', 1), runId: id, taskId: 'script',
+        attempt: 1, state: 'result_unknown', reservedAt: 1, startedAt: 2, finishedAt: 3,
+        ...(action === 'backfill' ? {} : { request }) } }];
+    await indexedDbWorkflowRepository.transact(scope, id, () => ({ snapshot: initial, value: undefined }));
+    const before = await indexedDbWorkflowRepository.read(scope, id);
+    const events = await indexedDbWorkflowRepository.listEvents(scope, id);
+    await expect(indexedDbWorkflowRepository.transact(scope, id, (current) => {
+      current!.tasks[0].modelInvocation!.request = action === 'remove' ? undefined : action === 'backfill' ? request : { schemaVersion: 1, sha256: 'a'.repeat(64) };
+      return { snapshot: current!, value: undefined };
+    })).rejects.toThrow(action === 'backfill' ? '不能补造历史模型请求摘要' : '已开始的模型请求摘要不可修改');
+    expect(await indexedDbWorkflowRepository.read(scope, id)).toEqual(before);
+    expect(await indexedDbWorkflowRepository.listEvents(scope, id)).toEqual(events);
   });
 
   it.each(['reserved', 'started'] as const)('recovers %s model requests without duplicate paid calls', async (state) => {

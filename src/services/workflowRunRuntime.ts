@@ -12,6 +12,7 @@ import { parseWorkflowRevisionImpact } from './workflowRevisionImpact';
 import { parseTeamReviewInput } from './agentTeamReviewEvidence';
 import { assertWorkflowDecisions, assertWorkflowDecisionTransition, deliveryCopyDecision, type WorkflowDecisionRecord } from './workflowDecision';
 import { assertWorkflowUserResponse, createWorkflowUserResponse, type WorkflowUserResponse } from './workflowUserResponse';
+import { parseWorkflowModelRequest, type WorkflowModelRequest } from './workflowModelRequest';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -284,7 +285,7 @@ export interface WorkflowExecutor {
 }
 
 export interface WorkflowExecutionContext {
-  beginModelInvocation(): Promise<void>;
+  beginModelInvocation(request?: WorkflowModelRequest): Promise<void>;
   beginToolInvocation(request?: WorkflowToolRequest): Promise<void>;
 }
 
@@ -675,6 +676,10 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
           const attempts = tx.objectStore(ATTEMPT_STORE);
           for (const task of migratedNext.tasks) {
             const before = beforeTasks.get(task.id);
+            if (before?.attempt === task.attempt && before.modelInvocation?.request
+              && JSON.stringify(before.modelInvocation.request) !== JSON.stringify(task.modelInvocation?.request)) throw new Error('已开始的模型请求摘要不可修改');
+            if (before?.attempt === task.attempt && !before.modelInvocation?.request && task.modelInvocation?.request
+              && (before.modelInvocation?.state !== 'reserved' || task.modelInvocation.state !== 'started')) throw new Error('不能补造历史模型请求摘要');
             if (before?.attempt === task.attempt && before.toolInvocation?.request
               && JSON.stringify(before.toolInvocation.request) !== JSON.stringify(task.toolInvocation?.request)) throw new Error('已开始的工具请求摘要不可修改');
             if (before?.attempt === task.attempt && !before.toolInvocation?.request && task.toolInvocation?.request
@@ -1152,8 +1157,9 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
               });
               signal.throwIfAborted();
             },
-            async beginModelInvocation() {
+            async beginModelInvocation(request) {
               signal.throwIfAborted();
+              const description = request === undefined ? undefined : parseWorkflowModelRequest(request);
               await mutate(storageScope, runId, (current) => {
                 const item = current.tasks.find((candidate) => candidate.id === task.id);
                 if (!executor.tracksModelInvocations || !isReady || scope() !== storageScope
@@ -1165,7 +1171,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                 if (reason) throw new WorkflowPreflightError(reason);
                 const now = Math.max(Date.now(), item.modelInvocation.reservedAt);
                 return { snapshot: { ...current, run: { ...current.run, updatedAt: now }, tasks: current.tasks.map((candidate) => candidate.id === task.id
-                  ? { ...candidate, updatedAt: now, modelInvocation: { ...item.modelInvocation!, state: 'started', startedAt: now } } : candidate) }, value: undefined };
+                  ? { ...candidate, updatedAt: now, modelInvocation: { ...item.modelInvocation!, state: 'started', startedAt: now,
+                    ...(description ? { request: description } : {}) } } : candidate) }, value: undefined };
               });
               signal.throwIfAborted();
             },

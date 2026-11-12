@@ -335,6 +335,8 @@ try {
     for (const task of snapshot.tasks) {
       const attempts = await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), runId, task.id);
       if (attempts.length !== 1 || attempts[0].definitionSha256 !== workflowTaskDefinitionDigest(task)) throw new Error('刷新后执行记录未绑定真实任务定义');
+      if (!/^[a-f0-9]{64}$/.test(task.modelInvocation?.request?.sha256 || '') ||
+        JSON.stringify(attempts[0].modelInvocation?.request) !== JSON.stringify(task.modelInvocation.request)) throw new Error('刷新后模型请求摘要未随执行记录恢复');
       definitionDigests.push(attempts[0].definitionSha256);
     }
     const messages = [...useMessageStore.getState().messages, ...(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages || [])];

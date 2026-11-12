@@ -1,5 +1,5 @@
 import type { APIConfig } from '../types/settings';
-import { generateResponse } from './aiClient';
+import { generateWorkflowModelResponse as generateResponse, type WorkflowModelRequestHook } from './workflowModelResponse';
 import { api } from './api';
 import { backendUrl } from './backendUrl';
 import { workspaceFetch } from './workspaceLifecycle';
@@ -41,7 +41,7 @@ export async function inspectAgentTeamImages(params: {
   acceptance: string;
   references: Array<{ url: string; mimeType?: string; label?: string }>;
   signal: AbortSignal;
-  beforeModelRequest?: () => Promise<void>;
+  beforeModelRequest?: WorkflowModelRequestHook;
 }) {
   if (!params.references.length) throw new WorkflowPreflightError('图片检查缺少已生成的参考图片');
   const attachments = await Promise.all(params.references.map(async (reference) => ({
@@ -52,11 +52,10 @@ export async function inspectAgentTeamImages(params: {
     throw new WorkflowPreflightError('参考图片总大小超过视觉检查上限，请减少图片数量');
   }
   params.signal.throwIfAborted();
-  await params.beforeModelRequest?.();
   const result = await generateResponse(params.api,
     '你是图片检查员。只根据实际收到的图片判断画面内容和问题；不要把生成提示词当作已验证事实。给出可核对的观察、与目标的差距及不确定性。没有看到的细节必须明确说明。',
     [{ role: 'user', content: `检查目标：${params.goal}\n验收要求：${params.acceptance}`, attachments }], undefined,
-    { responseFormat: 'text', signal: params.signal, maxTokens: 1200,
+    { responseFormat: 'text', signal: params.signal, maxTokens: 1200, beforeModelRequest: params.beforeModelRequest,
       aiUsage: { type: 'assistant_chat', label: '团队图片检查', scope: 'chat', resourceId: params.chatId } });
   if (!result.trim()) throw new WorkflowPreflightError('图片检查没有返回有效结果');
   return result.trim();
