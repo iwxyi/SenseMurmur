@@ -15,6 +15,18 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('validates typed delegated exports and their use in composition and inspection', () => {
+    const role = { ...valid().roles[0], allowedTools: ['delegate_task', 'video_generation', 'audio_generation', 'media_composition', 'video_inspection', 'text_generation'] };
+    const video = { id: 'scene', roleId: role.id, goal: '制作镜头', acceptance: '视频', dependsOn: [], tool: 'delegate_task', mediaOutput: 'video' };
+    const audio = { ...video, id: 'music', mediaOutput: 'audio' };
+    const film = { ...video, id: 'film', tool: 'media_composition', mediaOutput: undefined, dependsOn: ['scene', 'music'], composition: { clips: [{ taskId: 'scene' }], audioTracks: [{ taskId: 'music' }] } };
+    const candidate = { ...valid(), roles: [role], tasks: [video, audio, film], resultTaskId: 'film' };
+    expect(validateAgentTeamPlan(candidate)).toMatchObject({ resultTaskId: 'film', tasks: [{ mediaOutput: 'video' }, { mediaOutput: 'audio' }, {}] });
+    expect(() => validateAgentTeamPlan({ ...candidate, resultTaskId: 'missing' })).toThrow('媒体交付');
+    expect(() => validateAgentTeamPlan({ ...candidate, tasks: [{ ...video, tool: 'video_generation' }] })).toThrow('只有委派任务');
+    expect(() => validateAgentTeamPlan({ ...candidate, tasks: [{ ...video, mediaOutput: 'image' }, audio, film] })).toThrow('合成片段');
+    expect(validateAgentTeamPlan({ ...candidate, tasks: [video, { ...film, id: 'inspect', tool: 'video_inspection', composition: undefined, dependsOn: ['scene'] }], resultTaskId: 'scene' }).resultTaskId).toBe('scene');
+  });
   it('requires video inspection to read one direct saved video source', async () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['video_generation', 'video_inspection'];

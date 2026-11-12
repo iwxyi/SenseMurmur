@@ -102,12 +102,12 @@ try {
     const fixtures = ${JSON.stringify(fixtures)};
     for (const [taskId, url] of Object.entries(fixtures)) useMessageStore.getState().upsertMessage({
       id: 'fixture-' + runId + taskId, chatId, type: 'ai', senderId: 'assistant', senderName: '助手', content: taskId,
-      emotion: 0, timestamp: now, isDeleted: false, metadata: { agentTeamMedia: { runId, taskId }, attachments: [{
+      emotion: 0, timestamp: now, isDeleted: false, metadata: { agentTeamMedia: { runId, taskId: taskId + '_source' }, attachments: [{
         id: 'fixture-' + taskId, kind: taskId === 'music' ? 'audio' : 'video', status: 'ready', altText: '测试素材', url, createdAt: now, updatedAt: now,
       }] },
     });
-    const role = { id: 'director', name: '导演', responsibility: '制作短片', method: '拼接配乐', acceptance: '成片可用', allowedTools: ['text_generation', 'speech_generation', 'video_generation', 'audio_generation', 'media_composition', 'video_inspection'] };
-    const tasks = ['shot_a', 'shot_b', 'music'].map((id) => ({ id, roleId: role.id, goal: id, dependsOn: [], acceptance: '素材已保存', tool: id === 'music' ? 'audio_generation' : 'video_generation' }));
+    const role = { id: 'director', name: '导演', responsibility: '制作短片', method: '拼接配乐', acceptance: '成片可用', allowedTools: ['delegate_task', 'text_generation', 'speech_generation', 'video_generation', 'audio_generation', 'media_composition', 'video_inspection'] };
+    const tasks = ['shot_a', 'shot_b', 'music'].map((id) => ({ id, roleId: role.id, goal: id, dependsOn: [], acceptance: '素材已保存', tool: 'delegate_task', mediaOutput: id === 'music' ? 'audio' : 'video' }));
     tasks.push({ id: 'script', roleId: role.id, goal: '只写旁白正文', dependsOn: [], acceptance: '有正文', tool: 'text_generation' });
     tasks.push({ id: 'narration', roleId: role.id, goal: '制作旁白，不朗读这条指令', dependsOn: ['script'], acceptance: '旁白可播放', tool: 'speech_generation', speech: { textTaskId: 'script' } });
     tasks.push({ id: 'film', roleId: role.id, goal: '合并两镜头并循环配乐，叠加旁白，关闭原声', dependsOn: ['shot_a', 'shot_b', 'music', 'narration'], tool: 'media_composition', acceptance: '视频带音乐与旁白',
@@ -120,9 +120,20 @@ try {
     goalSpec.allowedTools = [...role.allowedTools];
     const snapshot = { run: { id: runId, chatId, goal: '合成验证', goalSpec, status: 'paused', generation: 0, planVersion: 1, updatedAt: now, planOpen: true }, tasks: [
       { id: 'plan', runId, kind: 'team_plan', input: '合成验证', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
-      ...plan.tasks.map((task) => ({ id: task.id, runId, kind: task.id === 'music' || task.id === 'narration' ? 'agent_audio' : task.id === 'script' ? 'agent_text' : task.id === 'film' ? 'agent_media_composition' : task.id === 'inspect' ? 'agent_video_inspection' : 'agent_video',
+      ...plan.tasks.map((task) => ({ id: task.id, runId, kind: task.tool === 'delegate_task' ? 'agent_delegation' : task.id === 'narration' ? 'agent_audio' : task.id === 'script' ? 'agent_text' : task.id === 'film' ? 'agent_media_composition' : 'agent_video_inspection',
         input: { task, role: plan.roles[0], goal: '合成验证' }, output: ['film', 'narration', 'inspect'].includes(task.id) ? undefined : task.id === 'script' ? '森林深处，一场追逐开始了。' : '素材已保存', dependsOn: ['plan', ...task.dependsOn], status: task.id === 'film' ? 'running' : ['narration', 'inspect'].includes(task.id) ? 'waiting_dependency' : 'completed', attempt: ['narration', 'inspect'].includes(task.id) ? 0 : 1, updatedAt: now })),
     ] };
+    for (const parent of snapshot.tasks.filter((task) => task.kind === 'agent_delegation')) {
+      const tool = parent.input.task.mediaOutput === 'audio' ? 'audio_generation' : 'video_generation';
+      const childPlan = validateAgentTeamPlan({ summary: '下级素材交付', roles: [{ ...role, allowedTools: [tool] }],
+        tasks: [{ id: 'source', roleId: role.id, tool, goal: parent.id, dependsOn: [], acceptance: '素材已保存' }], resultTaskId: 'source', finalAcceptance: '素材可用' });
+      const childId = parent.id + '_source';
+      parent.expansion = { taskIds: [childId], context: childPlan };
+      parent.dependsOn.push(childId);
+      snapshot.tasks.push({ id: childId, runId, kind: tool === 'audio_generation' ? 'agent_audio' : 'agent_video',
+        input: { task: childPlan.tasks[0], role: childPlan.roles[0], goal: '合成验证', sourcePlanTaskId: parent.id },
+        output: '素材已保存', dependsOn: [], status: 'completed', attempt: 1, updatedAt: now });
+    }
     await runtime.indexedDbWorkflowRepository.transact(runtime.currentWorkflowScope(), runId, () => ({ snapshot, value: undefined }));
     const workflow = createAgentTeamWorkflow({ provider: 'openai', baseUrl: '', apiKey: '', model: 'not-called' }, runtime.currentWorkflowScope);
     const originalFetch = window.fetch;

@@ -1,6 +1,7 @@
 import { getUsablePreferredAIProfile, normalizeImageCapabilities, resolveAIModelInputCapabilities, type APIConfig } from '../types/settings';
 import { generateResponse } from './aiClient';
-import { planAgentTeam, validateAgentTeamPlan, type AgentTeamPlan, type AgentTeamTask } from './agentTeamPlan';
+import { planAgentTeam, teamTaskMediaKind, validateAgentTeamPlan, type AgentTeamPlan, type AgentTeamTask } from './agentTeamPlan';
+import { assertTeamMediaOutput, resolveTeamDelegationMedia, resolveTeamMediaTask } from './agentTeamMediaReference';
 import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
 import { ensureAssistantArtifactStoreHydrated, useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
 import { useChatStore } from '../stores/useChatStore';
@@ -120,14 +121,14 @@ function countImageUpstream(task: AgentTeamTask, byId: Map<string, AgentTeamTask
     if (visited.has(id)) return;
     visited.add(id);
     const upstream = byId.get(id);
-    if (upstream) visit(upstream);
+    if (upstream && upstream.tool !== 'delegate_task') visit(upstream);
   });
   visit(task);
-  return [...visited].filter((id) => byId.get(id)?.tool === 'image_generation').length;
+  return [...visited].filter((id) => teamTaskMediaKind(byId.get(id)) === 'image').length;
 }
 
 function directImageDependencies(task: AgentTeamTask, byId: Map<string, AgentTeamTask>) {
-  return task.dependsOn.filter((id) => byId.get(id)?.tool === 'image_generation');
+  return task.dependsOn.filter((id) => teamTaskMediaKind(byId.get(id)) === 'image');
 }
 
 function parseTeamReview(value: unknown): { complete: boolean; reason: string; nextRequest?: string } {
@@ -208,6 +209,7 @@ function sameAgentTeamTask(left: AgentTeamPlan['tasks'][number], right: AgentTea
     && left.goal === right.goal
     && left.acceptance === right.acceptance
     && (left.tool || 'text_generation') === (right.tool || 'text_generation')
+    && left.mediaOutput === right.mediaOutput
     && left.deliverable?.kind === right.deliverable?.kind
     && left.deliverable?.title === right.deliverable?.title
     && left.deliverable?.language === right.deliverable?.language
@@ -349,6 +351,12 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (ancestors.some((ancestor) => isTeamTaskInput(ancestor.input)
           && ancestor.input.task.goal.normalize('NFKC').replace(/\s+/g, ' ').trim() === input.task.goal.normalize('NFKC').replace(/\s+/g, ' ').trim())) throw new WorkflowPreflightError('下级委派重复祖先目标，已阻止循环拆分');
         if (task.expansion) {
+          if (input.task.mediaOutput) {
+            const sourceId = resolveTeamDelegationMedia(snapshot, task, input.task.mediaOutput);
+            const ready = input.task.mediaOutput === 'image' ? teamImageReference(task.runId, sourceId)
+              : teamMediaAttachment(task.runId, sourceId);
+            if (!ready) throw new WorkflowPreflightError('下级交付的媒体文件尚未保存在当前聊天，请先恢复文件');
+          }
           const evidence = selectReviewEvidence(snapshot, task.expansion.taskIds).evidence;
           await context.beginModelInvocation();
           const output = await generateResponse(api, `你负责汇总下级 Agent 的真实交付。按父任务验收给出可用结果；不得声称未执行的工作已完成，明确列出缺口。${workflowGoalContext(snapshot.run.goalSpec)}`,
@@ -366,7 +374,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         });
         const prior = selectReviewEvidence(snapshot, contextTaskIds).evidence.slice(-8)
           .map((entry) => ({ ...entry, output: entry.output.slice(0, 600) }));
-        const delegated = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n只拆分当前子目标：${input.task.goal}\n用户补充指示：${input.userInstruction || '无'}\n验收：${input.task.acceptance}\n本岗位可用工具：${role.allowedTools.join('、')}\n已有交付：${JSON.stringify(prior)}`,
+        const delegated = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n只拆分当前子目标：${input.task.goal}\n用户补充指示：${input.userInstruction || '无'}\n验收：${input.task.acceptance}\n${input.task.mediaOutput ? `必须交付一份 ${input.task.mediaOutput} 媒体，计划根字段 resultTaskId 必须指定对应的最终媒体任务。` : ''}\n本岗位可用工具：${role.allowedTools.join('、')}\n已有交付：${JSON.stringify(prior)}`,
           chatId: snapshot.run.chatId, ...capabilities,
           webSearch: can('web_search') && Boolean(chat.modeState && resolveChatAgentCapabilities(chat).webSearch),
           imageGeneration: can('image_generation') && capabilities.imageGeneration,
@@ -378,6 +386,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           mediaComposition: can('media_composition') && capabilities.mediaComposition,
           delegation: ancestors.length < 2, signal, beforeModelRequest: context.beginModelInvocation });
         assertInheritedPlanAuthorized(snapshot, task, delegated);
+        if (input.task.mediaOutput) assertTeamMediaOutput(delegated, input.task.mediaOutput);
         validateAvailableTeamTools(delegated, capabilities, Boolean(chat.modeState && resolveChatAgentCapabilities(chat).webSearch));
         const delegatedRoles = new Map(delegated.roles.map((item) => [item.id, item]));
         return { spawn: { context: delegated, tasks: delegated.tasks.map((child): WorkflowTask => ({
@@ -389,18 +398,20 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       }
       if (selectedTool === 'media_composition') {
         if (!input.task.composition) throw new WorkflowPreflightError('缺少音视频合成配置');
+        const clips = new Set(input.task.composition.clips.map((clip) => clip.taskId));
         return composeAgentTeamMedia({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
-          plan: input.task.composition, resolveTaskId: (id) => input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id, signal });
+          plan: input.task.composition, resolveTaskId: (id) => resolveTeamMediaTask(snapshot,
+            input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id, clips.has(id) ? 'video' : 'audio'), signal });
       }
       if (selectedTool === 'image_generation') {
-        const imageTaskIds = input.task.dependsOn.filter((id) => plan.tasks.find((item) => item.id === id)?.tool === 'image_generation');
+        const imageTaskIds = directImageDependencies(input.task, new Map(plan.tasks.map((item) => [item.id, item])));
         const imageProfile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image');
         const imageCapabilities = normalizeImageCapabilities(imageProfile?.imageCapabilities);
         if (imageTaskIds.length && (!imageProfile || !imageCapabilities.referenceImage)) throw new WorkflowPreflightError('当前图片模型不支持参考图片');
         if (imageTaskIds.length > 1 && !imageCapabilities.multiReferenceImage) throw new WorkflowPreflightError('当前图片模型只支持一张参考图片');
         const referenceImages = imageTaskIds.map((id) => {
           const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
-          const reference = teamImageReference(task.runId, dependencyId);
+          const reference = teamImageReference(task.runId, resolveTeamMediaTask(snapshot, dependencyId, 'image'));
           if (!reference) throw new WorkflowPreflightError('图片任务的参考图片文件尚未就绪');
           return reference;
         });
@@ -416,8 +427,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'text');
         const capabilities = resolveAIModelInputCapabilities(profile);
         if (!profile || !capabilities.imageInput) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
-        const imageTaskIds = input.task.dependsOn.map((id) => input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id)
-          .filter((id) => snapshot.tasks.find((item) => item.id === id)?.kind === 'agent_image');
+        const imageTaskIds = directImageDependencies(input.task, new Map(plan.tasks.map((item) => [item.id, item])))
+          .map((id) => resolveTeamMediaTask(snapshot, input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id, 'image'));
         if (!imageTaskIds.length || imageTaskIds.length > capabilities.maxAttachments) throw new WorkflowPreflightError('图片检查的参考图片数量不符合当前模型限制');
         const references = imageTaskIds.map((id) => teamImageReference(task.runId, id));
         if (references.some((reference) => !reference)) throw new WorkflowPreflightError('图片检查的参考图片尚未就绪');
@@ -434,8 +445,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'text');
         const capabilities = resolveAIModelInputCapabilities(profile);
         if (!profile || !capabilities.imageInput || capabilities.maxAttachments < 1) throw new WorkflowPreflightError('当前文字模型不支持视频抽帧检查');
-        const videoTaskIds = input.task.dependsOn.map((id) => input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id)
-          .filter((id) => ['agent_video', 'agent_media_composition'].includes(snapshot.tasks.find((item) => item.id === id)?.kind || ''));
+        const videoTaskIds = input.task.dependsOn.filter((id) => teamTaskMediaKind(plan.tasks.find((source) => source.id === id)) === 'video')
+          .map((id) => resolveTeamMediaTask(snapshot, input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id, 'video'));
         if (videoTaskIds.length !== 1) throw new WorkflowPreflightError('视频检查需要唯一的成片文件');
         const attachment = teamMediaAttachment(task.runId, videoTaskIds[0]);
         if (!attachment?.url || attachment.kind !== 'video') throw new WorkflowPreflightError('待检查视频尚未保存在当前聊天，请先恢复视频文件');
@@ -482,10 +493,13 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           if (!dependency) throw new WorkflowPreflightError('视频的上游素材尚未就绪');
           upstreamTaskIds.add(dependencyId);
           const dependencyInput = isTeamTaskInput(dependency.input) ? dependency.input : null;
-          dependencyInput?.task.dependsOn.forEach(collectUpstream);
+          if (dependency.kind !== 'agent_delegation') dependencyInput?.task.dependsOn.forEach(collectUpstream);
         };
         input.task.dependsOn.forEach(collectUpstream);
-        const imageTaskIds = [...upstreamTaskIds].filter((id) => snapshot.tasks.find((item) => item.id === id)?.kind === 'agent_image');
+        const imageTaskIds = [...new Set([...upstreamTaskIds].filter((id) => {
+          const source = snapshot.tasks.find((item) => item.id === id);
+          return source && isTeamTaskInput(source.input) && teamTaskMediaKind(source.input.task) === 'image';
+        }).map((id) => resolveTeamMediaTask(snapshot, id, 'image')))];
         const hasImageDependency = imageTaskIds.length > 0;
         if (!existingVideo || existingVideo.status === 'queued') {
           const capabilities = await teamMediaCapabilities();
@@ -504,7 +518,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const upstream = [...upstreamTaskIds].map((dependencyId) => {
           const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
           if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('视频的上游素材尚未就绪');
-          return dependency.kind === 'agent_text' || dependency.kind === 'agent_web_search' || dependency.kind === 'agent_image_inspection'
+          return dependency.kind === 'agent_text' || dependency.kind === 'agent_web_search' || dependency.kind === 'agent_image_inspection' || dependency.kind === 'agent_delegation'
             ? dependency.output.slice(0, 12_000) : null;
         }).filter((content): content is string => content !== null);
         return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,

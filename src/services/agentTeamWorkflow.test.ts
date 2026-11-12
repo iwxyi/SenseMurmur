@@ -106,6 +106,55 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('passes a delegated image export to video generation after restoring its pending child', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `export-${runId}`;
+    const role = { id: 'artist', name: '创作者', responsibility: '制作', method: '先图后视频', acceptance: '可播放', allowedTools: ['delegate_task', 'image_generation', 'video_generation'] };
+    const image = { id: 'art', roleId: role.id, goal: '制作角色素材', tool: 'delegate_task', mediaOutput: 'image', dependsOn: [], acceptance: '图片' };
+    const shot = { id: 'shot', roleId: role.id, goal: '让角色奔跑', tool: 'video_generation', dependsOn: ['art'], acceptance: '视频' };
+    const frame = { ...image, id: 'frame', tool: 'image_generation', mediaOutput: undefined };
+    const makePlan = (tasks: unknown[], extra = {}) => JSON.stringify({ summary: '制作', roles: [role], tasks, finalAcceptance: '可播放', ...extra });
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true },
+      { id: 'video', name: '视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true },
+    ] });
+    generate.mockResolvedValueOnce(makePlan([image, shot]))
+      .mockResolvedValueOnce(makePlan([frame], { resultTaskId: 'frame' }))
+      .mockResolvedValueOnce('角色参考图已经完成');
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ externalTaskId: 'image-job' });
+    vi.mocked(inspectAgentTeamImageAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'image-job' });
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const pending = await createAgentTeamWorkflow(config, () => scope).start(runId, 'chat', '制作角色短片', false);
+    expect(pending.snapshot.tasks.find((task) => task.id === 'art_frame')?.status).toBe('waiting_external');
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+    vi.mocked(inspectAgentTeamImageAttachment).mockReturnValue({ status: 'completed', output: '角色图已保存' });
+    const reference = { url: '/uploads/media/character.png', mimeType: 'image/png', label: '角色' };
+    vi.mocked(teamImageReference).mockImplementation((_runId, taskId) => taskId === 'art_frame' ? reference : null);
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'video-job' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'video-job' });
+    const resumed = await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(resumed.snapshot.tasks.find((task) => task.id === 'art')?.status).toBe('completed');
+    expect(resumed.snapshot.tasks.find((task) => task.id === 'shot')?.status).toBe('waiting_external');
+    expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ referenceImages: [reference], prompt: expect.stringContaining('角色参考图已经完成') }));
+    expect(queueAgentTeamImage).toHaveBeenCalledTimes(1);
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(queueAgentTeamVideo).toHaveBeenCalledTimes(1);
+    expect(generate).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects a missing declared child media delivery before spawning paid work', async () => {
+    const role = { id: 'artist', name: '创作者', responsibility: '制作', method: '先图后视频', acceptance: '图片', allowedTools: ['delegate_task', 'image_generation'] };
+    const task = { id: 'art', roleId: role.id, goal: '素材', tool: 'delegate_task', mediaOutput: 'image', dependsOn: [], acceptance: '图片' };
+    const plan = { summary: '制作', roles: [role], tasks: [task], finalAcceptance: '图片' };
+    useSettingsStore.setState({ aiProfiles: [{ id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true }] });
+    generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce(JSON.stringify({ ...plan, tasks: [{ ...task, id: 'frame', tool: 'image_generation', mediaOutput: undefined }] }));
+    const runId = crypto.randomUUID();
+    const result = await createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `missing-export-${runId}`).start(runId, 'chat', '制作素材', false);
+    expect(result.snapshot.tasks.find((item) => item.id === 'art')?.error).toContain('符合父任务要求');
+    expect(result.snapshot.tasks.some((item) => item.id === 'art_frame')).toBe(false);
+    expect(queueAgentTeamImage).not.toHaveBeenCalled();
+  });
+
   it('recursively delegates, waits for children, aggregates and restores without duplicate calls', async () => {
     const runId = crypto.randomUUID();
     const scope = `recursive-${runId}`;

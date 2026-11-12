@@ -21,6 +21,7 @@ export interface AgentTeamTask {
   dependsOn: string[];
   acceptance: string;
   tool?: AgentTeamRole['allowedTools'][number];
+  mediaOutput?: 'image' | 'video' | 'audio';
   composition?: MediaCompositionPlan;
   speech?: { text?: string; textTaskId?: string };
   deliverable?: {
@@ -36,6 +37,16 @@ export interface AgentTeamPlan {
   roles: AgentTeamRole[];
   tasks: AgentTeamTask[];
   finalAcceptance: string;
+  resultTaskId?: string;
+}
+
+export function teamTaskMediaKind(task: AgentTeamTask | undefined): AgentTeamTask['mediaOutput'] {
+  if (!task) return undefined;
+  if (task.tool === 'delegate_task') return task.mediaOutput;
+  if (task.tool === 'image_generation') return 'image';
+  if (task.tool === 'video_generation' || task.tool === 'media_composition') return 'video';
+  if (task.tool === 'audio_generation' || task.tool === 'speech_generation') return 'audio';
+  return undefined;
 }
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,39}$/;
@@ -86,6 +97,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     const tool = value.tool === undefined ? 'text_generation' : value.tool;
     if (typeof tool !== 'string' || !TOOLS.has(tool)) throw new Error('任务申请了不可用工具');
     const selectedTool = tool as AgentTeamRole['allowedTools'][number];
+    if (value.mediaOutput !== undefined && (tool !== 'delegate_task' || !['image', 'video', 'audio'].includes(String(value.mediaOutput)))) throw new Error('只有委派任务可以声明有效的媒体交付类型');
     if (!rolesById.get(roleId)?.allowedTools.includes(selectedTool)) throw new Error('任务使用了岗位未获授权的工具');
     if (!Array.isArray(value.dependsOn) || value.dependsOn.length > (tool === 'media_composition' ? 48 : 8)
       || new Set(value.dependsOn).size !== value.dependsOn.length) throw new Error('任务依赖无效');
@@ -118,6 +130,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
       dependsOn: value.dependsOn.map((dependency) => identifier(dependency, '依赖任务 ID')),
       acceptance: requiredText(value.acceptance, '任务验收', 800),
       ...(value.tool === undefined ? {} : { tool: selectedTool }),
+      ...(value.mediaOutput === undefined ? {} : { mediaOutput: value.mediaOutput as AgentTeamTask['mediaOutput'] }),
       ...(composition ? { composition } : {}),
       ...(speech ? { speech } : {}),
       ...(deliverable ? { deliverable } : {}),
@@ -143,11 +156,11 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   };
   tasks.forEach((task) => visit(task.id));
   if (tasks.some((task) => task.tool === 'image_inspection'
-    && !task.dependsOn.some((id) => tasksById.get(id)?.tool === 'image_generation'))) {
+    && !task.dependsOn.some((id) => teamTaskMediaKind(tasksById.get(id)) === 'image'))) {
     throw new Error('图片检查必须直接依赖图片生成任务');
   }
   if (tasks.some((task) => task.tool === 'video_inspection'
-    && task.dependsOn.filter((id) => ['video_generation', 'media_composition'].includes(tasksById.get(id)?.tool || '')).length !== 1)) {
+    && task.dependsOn.filter((id) => teamTaskMediaKind(tasksById.get(id)) === 'video').length !== 1)) {
     throw new Error('视频检查必须直接依赖唯一的视频生成或合成任务');
   }
   if (tasks.some((task) => task.tool === 'audio_generation'
@@ -162,15 +175,20 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     }
   }
   if (tasks.some((task) => task.tool === 'image_generation'
-    && task.dependsOn.some((id) => !['text_generation', 'web_search', 'image_inspection', 'image_generation'].includes(tasksById.get(id)?.tool || 'text_generation')))) {
+    && task.dependsOn.some((id) => {
+      const source = tasksById.get(id)!;
+      return source.tool === 'delegate_task'
+        ? Boolean(source.mediaOutput && source.mediaOutput !== 'image')
+        : !['text_generation', 'web_search', 'image_inspection', 'image_generation'].includes(source.tool || 'text_generation');
+    }))) {
     throw new Error('图片任务只能依赖文字或已生成图片，不能读取音频与视频附件');
   }
   const hasUnsupportedVideoAncestor = (task: AgentTeamTask, visited = new Set<string>()): boolean => task.dependsOn.some((id) => {
     if (visited.has(id)) return false;
     visited.add(id);
     const source = tasksById.get(id);
-    return Boolean(source && (source.tool === 'audio_generation' || source.tool === 'speech_generation' || source.tool === 'video_generation' || source.tool === 'media_composition'
-      || hasUnsupportedVideoAncestor(source, visited)));
+    return Boolean(source && (teamTaskMediaKind(source) === 'audio' || teamTaskMediaKind(source) === 'video'
+      || (source.tool !== 'delegate_task' && hasUnsupportedVideoAncestor(source, visited))));
   });
   if (tasks.some((task) => task.tool === 'video_generation' && hasUnsupportedVideoAncestor(task))) {
     throw new Error('视频任务目前不能接收已生成的音乐或视频片段；需要配乐或拼接时须使用音视频合成工具');
@@ -178,18 +196,21 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   for (const task of tasks.filter((item) => item.tool === 'media_composition')) {
     const composition = task.composition!;
     for (const clip of composition.clips) {
-      if (!task.dependsOn.includes(clip.taskId) || !['video_generation', 'media_composition'].includes(tasksById.get(clip.taskId)?.tool || '')) throw new Error('合成片段必须直接依赖视频生成或合成任务');
+      if (!task.dependsOn.includes(clip.taskId) || teamTaskMediaKind(tasksById.get(clip.taskId)) !== 'video') throw new Error('合成片段必须直接依赖视频生成或合成任务');
     }
     for (const track of composition.audioTracks || []) {
-      if (!task.dependsOn.includes(track.taskId) || !['audio_generation', 'speech_generation'].includes(tasksById.get(track.taskId)?.tool || '')) throw new Error('合成音轨必须直接依赖音乐生成或配音任务');
+      if (!task.dependsOn.includes(track.taskId) || teamTaskMediaKind(tasksById.get(track.taskId)) !== 'audio') throw new Error('合成音轨必须直接依赖音乐生成或配音任务');
     }
   }
+  const resultTaskId = source.resultTaskId === undefined ? undefined : identifier(source.resultTaskId, '媒体交付任务 ID');
+  if (resultTaskId && !teamTaskMediaKind(tasksById.get(resultTaskId))) throw new Error('媒体交付必须指定计划内的媒体任务');
   return {
     schemaVersion: 1,
     summary: requiredText(source.summary, '计划摘要', 800),
     roles,
     tasks,
     finalAcceptance: requiredText(source.finalAcceptance, '最终验收', 800),
+    ...(resultTaskId ? { resultTaskId } : {}),
   };
 }
 
@@ -200,7 +221,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; chat
     '你是通用任务的主 Agent。根据用户目标设计最小可行的团队与无环任务图。简单任务只用一个岗位。',
     `当前开放工具：text_generation${params.webSearch ? '、web_search' : ''}${params.imageGeneration ? '、image_generation' : ''}${params.audioGeneration ? '、audio_generation' : ''}${params.imageInspection ? '、image_inspection' : ''}${params.videoGeneration ? '、video_generation' : ''}${params.mediaComposition ? '、media_composition' : ''}。${params.videoUnavailableReason ? `视频生成当前不可用：${params.videoUnavailableReason}。` : ''}网页搜索任务的 goal 是搜索词；图片任务的 goal 是可生成的画面提示词，可依赖文字脚本、搜索摘要或图片检查文字${params.imageReferenceImages ? `，也可直接依赖已生成图片并作为参考图${params.maxImageReferenceImages ? `（最多 ${params.maxImageReferenceImages} 张）` : ''}` : '；当前图片模型不支持参考图，不要让图片任务直接依赖图片任务'}；音乐任务的 goal 是包含风格、情绪、乐器与可选歌词要求的音乐提示词，系统异步生成完整音频。用户要求明确歌词时，先用 text_generation 写歌词，再让 audio_generation 依赖歌词任务；系统会把歌词交付作为音乐提示词的一部分。图片检查必须直接依赖已生成图片，模型会收到真实画面；视频任务的 goal 是精炼成片提示词，可以依赖脚本${params.videoReferenceImages ? '和图片' : ''}任务。video_generation 不能依赖音乐或其他视频片段。${params.videoRequiresReferenceImage ? '当前视频模型必须先有参考图片。' : ''}${params.videoReferenceImages ? `依赖图片时系统把图片作为参考素材${params.maxVideoReferenceImages ? `，当前模型最多 ${params.maxVideoReferenceImages} 张` : ''}。` : '当前视频模型不能接收参考图片，不要规划图片到视频的依赖。'}视频由系统异步生成，不能声称立即成片。只安排确实必要的图像、音乐与视频生成，避免为验证或补充说明而反复生成同一媒体。不得承诺任意文件写入或代码执行；能力不足时在摘要说明。`,
     '岗位必须有具体职责、方法和可检查的验收标准；任务必须有唯一 ID、岗位归属、明确目标和依赖。不要用岗位名称冒充专业能力。',
-    params.delegation ? '另开放 delegate_task 委派工具。仅对确实需要执行时再拆分的复杂子目标使用，不要用它替代普通写作。执行该任务的岗位必须同时获准 delegate_task 和下级工作需要的工具。系统会规划下级任务、等待它们完成，再由父 Agent 汇总交付；下级权限只能缩小，共用总调用预算与并发。委派最多3层，不要重复祖先目标。委派返回文字汇总，不能将下级媒体伪装成委派任务本身的图片或视频附件；需要后续精确引用素材时，应在同一计划中显式安排生成和合成依赖。' : '本层不开放 delegate_task，直接安排具体工作，不得创建下级委派。',
+    params.delegation ? '另开放 delegate_task 委派工具。仅对确实需要执行时再拆分的复杂子目标使用，不要用它替代普通写作。执行该任务的岗位必须同时获准 delegate_task 和下级工作需要的工具。系统会规划下级任务、等待它们完成，再由父 Agent 汇总交付；下级权限只能缩小，共用总调用预算与并发。委派最多3层，不要重复祖先目标。需要向后续任务交付素材时，在委派任务声明 mediaOutput:"image"、"video" 或 "audio"，下级计划必须以根字段 resultTaskId 指定同类型的最终媒体任务，可继续指向同类型的委派任务。每次委派只交付一份主要媒体；需要多份素材时分别安排任务。后续图片/视频生成、图片/视频检查和合成按委派任务 ID 引用对应类型素材，系统解析实际已保存文件，不读取摘要中的 URL。未声明 mediaOutput 的委派只交付文字汇总。' : '本层不开放 delegate_task，直接安排具体工作，不得创建下级委派；若父任务要求媒体交付，仍须在计划根字段 resultTaskId 指定具体媒体任务。',
     params.videoInspection ? '另开放 video_inspection 视频抽帧检查工具。必须直接依赖唯一的 video_generation 或 media_composition 任务；系统读取该任务已保存的视频并按时间均匀抽取最多6帧，使用当前视觉模型检查实际画面。它只能判断抽样内容，不能检查音轨、逐帧流畅度或保证全部镜头正确。需要检查成片时在合成之后安排此任务；不能为了检查而重新生成视频。' : '当前设备或模型不支持视频抽帧检查，不得安排 video_inspection。',
     params.speechGeneration ? '另开放 speech_generation 旁白配音工具，使用用户配置的 TTS 模型及默认音色。必须声明 speech:{"text":"需要逐字朗读的正文"} 且 dependsOn:[]，或先安排 text_generation 只撰写旁白正文，再声明 speech:{"textTaskId":"narration_script"} 且 dependsOn:["narration_script"]。二者只能选一。goal 描述制作目的，不能混入配音正文；系统只朗读 speech 指定内容，不朗读岗位说明或验收要求。请控制正文长度以适配视频时长，配音不能直接作为 video_generation 的输入，应交给 media_composition 叠加。' : '当前未配置 TTS 模型，不得安排 speech_generation 配音。',
     params.mediaComposition ? '另开放 media_composition 本地音视频合成工具，可按顺序拼接、裁剪视频并叠加最多4条音乐或旁白音轨。它不是视频生成工具，不调用付费模型。合成任务必须声明 composition:{"clips":[{"taskId":"shot_a","startSeconds":0,"durationSeconds":5},{"taskId":"shot_b"}],"audioTracks":[{"taskId":"music","volume":0.7,"offsetSeconds":0,"loop":true}],"aspectRatio":"16:9","originalAudioVolume":0.3}。clips 必填且按播放顺序排列，引用的任务必须直接在 dependsOn 中，视频来源须为 video_generation 或 media_composition，音轨来源须为 audio_generation 或 speech_generation。其余参数均可省略，画面比例可选16:9、9:16、1:1，不裁切主体而用留边统一画幅；最长10分钟，素材合计不超过256MiB，输出720p级MP4。多个镜头先各自生成再交给合成任务；不要让 video_generation 直接依赖音视频。不得声称已视觉检查成片。' : '当前设备不支持本地音视频合成，不得安排 media_composition。',
@@ -222,11 +243,11 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; chat
   if (!params.webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索');
   if (!params.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');
   if (!params.imageReferenceImages && plan.tasks.some((task) => task.tool === 'image_generation'
-    && task.dependsOn.some((id) => plan.tasks.find((source) => source.id === id)?.tool === 'image_generation'))) {
+    && task.dependsOn.some((id) => teamTaskMediaKind(plan.tasks.find((source) => source.id === id)) === 'image'))) {
     throw new WorkflowPreflightError('当前图片模型不支持参考图片');
   }
   if (params.maxImageReferenceImages && plan.tasks.some((task) => task.tool === 'image_generation'
-    && task.dependsOn.filter((id) => plan.tasks.find((source) => source.id === id)?.tool === 'image_generation').length > params.maxImageReferenceImages!)) {
+    && task.dependsOn.filter((id) => teamTaskMediaKind(plan.tasks.find((source) => source.id === id)) === 'image').length > params.maxImageReferenceImages!)) {
     throw new WorkflowPreflightError(`当前图片模型最多支持 ${params.maxImageReferenceImages} 张参考图片`);
   }
   if (!params.audioGeneration && plan.tasks.some((task) => task.tool === 'audio_generation')) throw new WorkflowPreflightError('当前未配置音乐生成模型');
@@ -240,7 +261,8 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; chat
     if (visited.has(dependency)) return false;
     const upstream = tasksById.get(dependency);
     if (!upstream) return false;
-    if (upstream.tool === 'image_generation') return true;
+    if (teamTaskMediaKind(upstream) === 'image') return true;
+    if (upstream.tool === 'delegate_task') return false;
     visited.add(dependency);
     return dependsOnImage(upstream, visited);
   });
