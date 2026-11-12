@@ -931,6 +931,15 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
       const pending = task && pendingWorkflowApproval(task);
       if (!task || task.status !== 'waiting_user' || !pending) throw new Error('该步骤没有等待审批');
       const now = Math.max(Date.now(), pending.proposedAt);
+      const requirement = outcome === 'approved' ? executor.approvalRequirement?.(task, current) : undefined;
+      if (requirement && requirement.executionSha256 !== pending.executionSha256) {
+        const next: WorkflowSnapshot = { ...current,
+          run: { ...current.run, planVersion: current.run.planVersion + 1, updatedAt: now },
+          tasks: current.tasks.map((item) => item.id !== taskId ? item : { ...item, updatedAt: now,
+            approvals: [...item.approvals!.slice(0, -1), { ...pending, invalidatedAt: now },
+              proposeWorkflowApproval(current, task, requirement)] }) };
+        return { snapshot: next, value: next };
+      }
       const next: WorkflowSnapshot = { ...current,
         run: { ...current.run, planVersion: current.run.planVersion + 1,
           ...(outcome === 'rejected' ? { status: 'cancelled' as const, generation: current.run.generation + 1, pauseReason: '你已拒绝执行，任务组已停止' } : {}), updatedAt: now },

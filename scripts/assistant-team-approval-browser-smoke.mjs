@@ -142,7 +142,28 @@ try {
   await evaluate(`Array.from(document.querySelectorAll('button')).find((button) => button.textContent === '拒绝并停止任务组').click()`);
   await waitFor(`Boolean(window.__approvalResult || window.__approvalError)`);
   assert.deepEqual(await evaluate(`({ status: window.__approvalResult.run.status, calls: window.__approvalCalls })`), { status: 'cancelled', calls: 2 });
-  console.log(JSON.stringify({ ok: true, refreshedWaiting: true, approvedOnce: true, configurationReapproval: true, rejectedWithoutDispatch: true, mobileWidth: 390 }));
+  await evaluate(`(async () => {
+    const snapshot = await window.__approvalRuntime.read('${runId}');
+    const id = '${runId}-pending-config';
+    await window.__approvalRuntime.create({ run: { ...snapshot.run, id, status: 'active', planVersion: 1 },
+      tasks: [{ id: 'work', runId: id, kind: 'agent_text', input: '待确认方案', dependsOn: [], status: 'queued', attempt: 0, updatedAt: Date.now() }] });
+    window.__approvalResult = null;
+    window.__mountApproval(await window.__approvalRuntime.resume(id));
+    window.__approvalConfig = 'c'.repeat(64);
+  })()`);
+  await waitFor(`Array.from(document.querySelectorAll('button')).some((button) => button.textContent === '批准本次执行' && !button.disabled)`);
+  await evaluate(`Array.from(document.querySelectorAll('button')).find((button) => button.textContent === '批准本次执行').click()`);
+  await waitFor(`Boolean(window.__approvalResult || window.__approvalError)`);
+  assert.deepEqual(await evaluate(`({ status: window.__approvalResult.tasks[0].status, calls: window.__approvalCalls,
+    approvals: window.__approvalResult.tasks[0].approvals.length,
+    consent: window.__approvalResult.tasks[0].approvals.some((item) => Boolean(item.decision)) })`),
+  { status: 'waiting_user', calls: 2, approvals: 2, consent: false });
+  await evaluate(`window.__mountApproval(window.__approvalResult); window.__approvalResult = null;`);
+  await waitFor(`document.body.textContent.includes('模型、生成设置或预算已更改，请重新确认')`);
+  await evaluate(`Array.from(document.querySelectorAll('button')).find((button) => button.textContent === '批准本次执行').click()`);
+  await waitFor(`Boolean(window.__approvalResult || window.__approvalError)`);
+  assert.deepEqual(await evaluate(`({ status: window.__approvalResult.run.status, calls: window.__approvalCalls })`), { status: 'completed', calls: 3 });
+  console.log(JSON.stringify({ ok: true, refreshedWaiting: true, approvedOnce: true, configurationReapproval: true, pendingConfigurationReapproval: true, rejectedWithoutDispatch: true, mobileWidth: 390 }));
 } finally {
   await evaluate(`(async () => {
     window.__approvalRoot?.unmount();

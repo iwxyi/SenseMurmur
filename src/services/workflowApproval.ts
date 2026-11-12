@@ -69,14 +69,14 @@ export function assertWorkflowApprovals(snapshot: WorkflowSnapshot, task: Workfl
       || !Number.isSafeInteger(item.proposedAt) || item.proposedAt < 0 || !/^[a-f0-9]{64}$/.test(item.scopeSha256)) throw new Error('审批版本或范围无效');
     previousAttempt = item.attempt;
     if (item.invalidatedAt !== undefined && (!Number.isSafeInteger(item.invalidatedAt) || item.invalidatedAt < (item.decision?.decidedAt ?? item.proposedAt)
-      || item.decision?.outcome !== 'approved' || index === task.approvals.length - 1)) throw new Error('审批失效记录无效');
+      || item.decision?.outcome === 'rejected' || index === task.approvals.length - 1)) throw new Error('审批失效记录无效');
     if (item.decision) {
       const decision = item.decision;
       if (decision.actor !== 'local_user' || !['approved', 'rejected'].includes(decision.outcome)
         || !Number.isSafeInteger(decision.planVersion) || decision.planVersion < item.planVersion || decision.planVersion >= snapshot.run.planVersion
         || !Number.isSafeInteger(decision.decidedAt) || decision.decidedAt < item.proposedAt
         || (decision.outcome === 'rejected' && snapshot.run.status !== 'cancelled')) throw new Error('审批决定无效');
-    } else if (index !== task.approvals.length - 1 || task.status !== 'waiting_user' && snapshot.run.status !== 'cancelled') {
+    } else if (item.invalidatedAt === undefined && (index !== task.approvals.length - 1 || task.status !== 'waiting_user' && snapshot.run.status !== 'cancelled')) {
       throw new Error('未确认的审批不能执行');
     }
     if (item.invalidatedAt === undefined && item.attempt > task.attempt && item.scopeSha256 !== approvalScope(snapshot, task)) throw new Error('审批方案或素材已改变');
@@ -94,8 +94,11 @@ export function assertWorkflowApprovalTransition(before: WorkflowSnapshot | null
         || (record.decision && workflowJsonDigest(record.decision) !== workflowJsonDigest(changed.decision))
         || (record.invalidatedAt !== undefined && record.invalidatedAt !== changed.invalidatedAt)) throw new Error('已保存的审批不可修改');
       if (record.invalidatedAt === undefined && changed.invalidatedAt !== undefined
-        && (index !== task.approvals.length - 1 || record.attempt !== task.attempt + 1 || record.decision?.outcome !== 'approved'
+        && (index !== task.approvals.length - 1 || record.attempt !== task.attempt + 1 || record.decision?.outcome === 'rejected'
           || next.attempt !== task.attempt || next.approvals.length !== task.approvals.length + 1
+          || (!record.decision && (task.status !== 'waiting_user' || next.status !== 'waiting_user'
+            || before!.tasks.some((item) => item.status === 'running') || !['active', 'paused'].includes(before!.run.status)
+            || after.run.status !== before!.run.status || after.run.planVersion !== before!.run.planVersion + 1 || changed.decision !== undefined))
           || next.approvals.at(-1)?.executionSha256 === record.executionSha256)) throw new Error('只有执行配置变化才能使审批失效');
       if (record.invalidatedAt === undefined && record.attempt > task.attempt && next.attempt >= record.attempt
         && (record.decision?.outcome !== 'approved' || record.scopeSha256 !== approvalScope(after, next))) throw new Error('执行范围未获当前审批');
@@ -110,8 +113,10 @@ export function assertWorkflowApprovalTransition(before: WorkflowSnapshot | null
     const count = previous?.approvals?.length ?? 0;
     if ((task.approvals?.length ?? 0) > count) {
       const added = task.approvals!.at(-1)!;
-      if (!before || !previous || task.approvals!.length !== count + 1 || !['queued', 'waiting_dependency'].includes(previous.status)
-        || before.run.status !== 'active' || added.decision || added.attempt !== previous.attempt + 1
+      const replacesPending = previous?.status === 'waiting_user' && pendingWorkflowApproval(previous)
+        && task.approvals![count - 1]?.invalidatedAt !== undefined;
+      if (!before || !previous || task.approvals!.length !== count + 1 || (!replacesPending && !['queued', 'waiting_dependency'].includes(previous.status))
+        || (replacesPending ? !['active', 'paused'].includes(before.run.status) : before.run.status !== 'active') || added.decision || added.attempt !== previous.attempt + 1
         || task.attempt !== previous.attempt || task.status !== 'waiting_user' || added.planVersion !== before.run.planVersion
         || added.scopeSha256 !== approvalScope(before, previous)) throw new Error('审批必须在实际执行前提出');
     }

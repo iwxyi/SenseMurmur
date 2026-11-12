@@ -1,7 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { createWorkflowRunRuntime, indexedDbWorkflowRepository, type WorkflowSnapshot } from './workflowRunRuntime';
-import { pendingWorkflowApproval } from './workflowApproval';
+import { pendingWorkflowApproval, proposeWorkflowApproval } from './workflowApproval';
 
 beforeAll(() => {
   vi.stubGlobal('indexedDB', new IDBFactory());
@@ -29,6 +29,61 @@ function setup() {
 }
 
 describe('persistent workflow approval', () => {
+  it('replaces a stale pending approval without recording consent or claiming an attempt', async () => {
+    const { runId, initial, execute, makeRuntime, setExecution, scope } = setup();
+    setExecution('a'.repeat(64));
+    const runtime = makeRuntime();
+    await runtime.create(initial);
+    await runtime.resume(runId);
+    setExecution('b'.repeat(64));
+    const changed = await runtime.decideApproval(runId, 'video', 1, 'approved');
+    expect(changed.run.planVersion).toBe(2);
+    expect(changed.tasks[1]).toMatchObject({ status: 'waiting_user', attempt: 0 });
+    expect(changed.tasks[1].approvals).toHaveLength(2);
+    expect(changed.tasks[1].approvals?.[0]).toMatchObject({ invalidatedAt: expect.any(Number) });
+    expect(changed.tasks[1].approvals?.every((item) => item.decision === undefined)).toBe(true);
+    expect(pendingWorkflowApproval(changed.tasks[1])?.executionSha256).toBe('b'.repeat(64));
+    expect(await indexedDbWorkflowRepository.listTaskAttempts(scope, runId, 'video')).toEqual([]);
+    const restored = makeRuntime();
+    expect((await restored.resume(runId)).tasks[1].approvals).toEqual(changed.tasks[1].approvals);
+    await restored.decideApproval(runId, 'video', 2, 'approved');
+    expect((await restored.resume(runId)).run.status).toBe('completed');
+    expect(execute).toHaveBeenCalledTimes(3);
+  });
+
+  it('allows rejecting a stale pending proposal without confirming the new configuration', async () => {
+    const { runId, initial, execute, makeRuntime, setExecution } = setup();
+    setExecution('a'.repeat(64));
+    const runtime = makeRuntime();
+    await runtime.create(initial);
+    await runtime.resume(runId);
+    setExecution('b'.repeat(64));
+    const rejected = await runtime.decideApproval(runId, 'video', 1, 'rejected');
+    expect(rejected.run.status).toBe('cancelled');
+    expect(rejected.tasks[1].approvals).toHaveLength(1);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['unchanged-config', 'no-version-change', 'invent-consent', 'claim-attempt'] as const)('rejects unsafe pending replacement: %s', async (change) => {
+    const { runId, initial, makeRuntime, scope, setExecution } = setup();
+    setExecution('a'.repeat(64));
+    const runtime = makeRuntime();
+    await runtime.create(initial);
+    await runtime.resume(runId);
+    const before = await runtime.read(runId);
+    await expect(indexedDbWorkflowRepository.transact(scope, runId, (current) => {
+      const task = current!.tasks[1];
+      const replacement = proposeWorkflowApproval(current!, task, { summary: '新方案', consequences: '有费用',
+        executionSha256: (change === 'unchanged-config' ? 'a' : 'b').repeat(64) });
+      task.approvals![0] = { ...task.approvals![0], invalidatedAt: Date.now() };
+      task.approvals!.push(replacement);
+      if (change !== 'no-version-change') current!.run.planVersion += 1;
+      if (change === 'invent-consent') task.approvals![0].decision = { actor: 'local_user', outcome: 'approved', planVersion: 1, decidedAt: Date.now() };
+      if (change === 'claim-attempt') { task.status = 'running'; task.attempt += 1; }
+      return { snapshot: current!, value: undefined };
+    })).rejects.toThrow();
+    expect(await runtime.read(runId)).toEqual(before);
+  });
   it.each(['model', 'tool'] as const)('blocks a late configuration change at the %s request boundary', async (kind) => {
     const { runId, initial, scope } = setup();
     let executionSha256 = 'a'.repeat(64);
