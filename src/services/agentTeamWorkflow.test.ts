@@ -1995,7 +1995,7 @@ describe('agent team workflow', () => {
     expect(queueAgentTeamVideo).not.toHaveBeenCalled();
   });
 
-  it('publishes a completed run after restart when the client stopped before delivery', async () => {
+  it.each(['normal', 'completed-after-scan', 'receipt-failed'] as const)('publishes a completed run after restart (%s)', async (scenario) => {
     const runId = `team-${crypto.randomUUID()}`;
     const chatId = `recovered-delivery-${runId}`;
     const scope = currentWorkflowScope();
@@ -2011,8 +2011,40 @@ describe('agent team workflow', () => {
     expect(finished.snapshot.run.status).toBe('completed');
     expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)).toHaveLength(0);
 
-    expect(await recoverAgentTeamRuns()).toBe(true);
-    expect(await indexedDbWorkflowRepository.listOutboxEvents(scope, runId, 'team-delivery')).toHaveLength(0);
+    if (scenario === 'completed-after-scan') {
+      await indexedDbWorkflowRepository.transact(scope, runId, (current) => ({
+        snapshot: { ...current!, run: { ...current!.run, status: 'paused' } }, value: undefined,
+      }));
+    }
+    const originalList = indexedDbWorkflowRepository.listOutboxEvents.bind(indexedDbWorkflowRepository);
+    const list = vi.spyOn(indexedDbWorkflowRepository, 'listOutboxEvents').mockImplementation(async (...args) => {
+      const events = await originalList(...args);
+      if (scenario === 'completed-after-scan' && args[1] === runId) {
+        await indexedDbWorkflowRepository.transact(scope, runId, (current) => ({
+          snapshot: { ...current!, run: { ...current!.run, status: 'completed' } }, value: undefined,
+        }));
+        list.mockRestore();
+      }
+      return events;
+    });
+    const originalAcknowledge = indexedDbWorkflowRepository.acknowledgeOutboxEvents.bind(indexedDbWorkflowRepository);
+    let failedReceipt = false;
+    const acknowledge = vi.spyOn(indexedDbWorkflowRepository, 'acknowledgeOutboxEvents').mockImplementation(async (...args) => {
+      if (scenario === 'receipt-failed' && args[1] === runId && !failedReceipt) {
+        failedReceipt = true;
+        throw new Error('回执保存中断');
+      }
+      return originalAcknowledge(...args);
+    });
+    try {
+      expect(await recoverAgentTeamRuns()).toBe(true);
+      const pending = await originalList(scope, runId, 'team-delivery');
+      if (scenario === 'receipt-failed') expect(pending.length).toBeGreaterThan(0);
+      else expect(pending).toHaveLength(0);
+    } finally {
+      list.mockRestore();
+      acknowledge.mockRestore();
+    }
     expect(await recoverAgentTeamRuns()).toBe(false);
     const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId);
     expect(artifacts).toHaveLength(1);

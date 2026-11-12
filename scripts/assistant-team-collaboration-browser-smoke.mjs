@@ -113,6 +113,53 @@ try {
       } finally { database.close(); }
     };
     await window.__cleanupCollaborationFixture();
+    const { recoverAgentTeamRuns } = await import('/src/services/agentTeamWorkflow.ts');
+    const { useChatStore: outboxChats } = await import('/src/stores/useChatStore.ts');
+    const { useAssistantArtifactStore: outboxArtifacts } = await import('/src/stores/useAssistantArtifactStore.ts');
+    const { useMessageStore: outboxMessages } = await import('/src/stores/useMessageStore.ts');
+    if (!outboxChats.persist.hasHydrated()) await outboxChats.persist.rehydrate();
+    const outboxRunId = 'browser-collab-outbox-' + crypto.randomUUID();
+    const outboxChatId = outboxRunId + '-chat';
+    const outboxScope = currentWorkflowScope();
+    outboxChats.setState((state) => ({ chats: [...state.chats, { id: outboxChatId, type: 'assistant',
+      name: '交付回执恢复验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));
+    await indexedDbWorkflowRepository.transact(outboxScope, outboxRunId, () => ({ snapshot: {
+      ...run, run: { ...run.run, id: outboxRunId, chatId: outboxChatId, status: 'paused' },
+      tasks: run.tasks.map((task) => ({ ...task, runId: outboxRunId })),
+    }, value: undefined }));
+    const originalOutboxList = indexedDbWorkflowRepository.listOutboxEvents;
+    const originalOutboxAck = indexedDbWorkflowRepository.acknowledgeOutboxEvents;
+    let completedAfterScan = false;
+    let receiptInterrupted = false;
+    indexedDbWorkflowRepository.listOutboxEvents = async (...args) => {
+      const events = await originalOutboxList(...args);
+      if (args[1] === outboxRunId && !completedAfterScan) {
+        completedAfterScan = true;
+        await indexedDbWorkflowRepository.transact(outboxScope, outboxRunId, (current) => ({
+          snapshot: { ...current, run: { ...current.run, status: 'completed' } }, value: undefined,
+        }));
+      }
+      return events;
+    };
+    indexedDbWorkflowRepository.acknowledgeOutboxEvents = async (...args) => {
+      if (args[1] === outboxRunId && !receiptInterrupted) {
+        receiptInterrupted = true;
+        throw new Error('确定性交付回执中断');
+      }
+      return originalOutboxAck(...args);
+    };
+    try {
+      await recoverAgentTeamRuns();
+      if (!receiptInterrupted || (await indexedDbWorkflowRepository.read(outboxScope, outboxRunId)).run.deliveryStatus !== 'published'
+        || !(await originalOutboxList(outboxScope, outboxRunId, 'team-delivery')).length) throw new Error('Delivery was skipped or receipt acknowledged before publication');
+    } finally {
+      indexedDbWorkflowRepository.listOutboxEvents = originalOutboxList;
+      indexedDbWorkflowRepository.acknowledgeOutboxEvents = originalOutboxAck;
+    }
+    await recoverAgentTeamRuns();
+    if ((await originalOutboxList(outboxScope, outboxRunId, 'team-delivery')).length
+      || outboxArtifacts.getState().getArtifactsForChat(outboxChatId).length !== 1
+      || outboxMessages.getState().messageWindowsByChatId[outboxChatId]?.messages.filter((message) => message.id === 'team-delivery-' + outboxRunId).length !== 1) throw new Error('Outbox replay duplicated delivery or lost receipt');
     const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
       execute: async () => ({ output: '主要竞争者采用订阅模式' }),
     }, currentWorkflowScope);

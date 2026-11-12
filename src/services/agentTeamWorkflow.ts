@@ -1482,13 +1482,22 @@ export async function recoverAgentTeamRuns() {
     if (currentWorkflowScope() !== storageScope) break;
     await indexedDbWorkflowRepository.registerOutboxConsumer(storageScope, run.run.id, 'team-delivery');
     try {
-      if (run.run.status === 'completed' && run.run.deliveryStatus !== 'published') {
-        await currentTeamWorkflow().publish(run.run.id);
-        changed = true;
-      }
       while (currentWorkflowScope() === storageScope) {
         const events = await indexedDbWorkflowRepository.listOutboxEvents(storageScope, run.run.id, 'team-delivery', 1000);
-        if (!events.length) break;
+        // Capture the batch before reading state so a concurrent completion cannot be acknowledged unseen.
+        const latest = await indexedDbWorkflowRepository.read(storageScope, run.run.id);
+        if (currentWorkflowScope() !== storageScope) break;
+        let published = false;
+        if (latest?.run.status === 'completed' && latest.run.deliveryStatus !== 'published') {
+          await currentTeamWorkflow().publish(run.run.id);
+          changed = true;
+          published = true;
+        }
+        if (currentWorkflowScope() !== storageScope) break;
+        if (!events.length) {
+          if (published) continue;
+          break;
+        }
         await indexedDbWorkflowRepository.acknowledgeOutboxEvents(storageScope, run.run.id, 'team-delivery', events.at(-1)!.sequence);
       }
     } catch (error) {
