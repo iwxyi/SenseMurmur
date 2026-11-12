@@ -8,6 +8,7 @@ import { copyWorkflowDelivery, parseWorkflowDelivery, type WorkflowDelivery, typ
 import { isWorkflowToolTask, parseWorkflowToolInvocation, workflowToolInvocationId, workflowToolOperationKey, type WorkflowToolInvocation } from './workflowToolInvocation';
 import { parseWorkflowToolRequest, workflowToolRequestKind, type WorkflowToolRequest } from './workflowToolRequest';
 import { parseWorkflowReviewRecord } from './workflowReviewRecord';
+import { parseWorkflowRevisionImpact } from './workflowRevisionImpact';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -88,6 +89,7 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
   if (!isRecord(value) || !isRecord(value.run) || !Array.isArray(value.tasks)) throw new Error('工作流快照结构无效');
   if (value.schemaVersion !== undefined && value.schemaVersion !== 1) throw new Error('工作流快照版本不受支持');
   const run = value.run;
+  const tasks = value.tasks;
   assertNonEmptyString(run.id, '运行 ID');
   assertNonEmptyString(run.chatId, '会话 ID');
   assertNonEmptyString(run.goal, '目标');
@@ -126,6 +128,13 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
     if (new Set(candidate.dependsOn).size !== candidate.dependsOn.length) throw new Error('工作流任务依赖重复');
     if (!TASK_STATUSES.has(candidate.status as WorkflowTaskStatus)) throw new Error('工作流任务状态无效');
     if (!Number.isSafeInteger(candidate.attempt) || (candidate.attempt as number) < 0) throw new Error('工作流任务尝试次数无效');
+    if (candidate.kind === 'team_plan_revision' && isRecord(candidate.input) && candidate.input.impact !== undefined) {
+      const impact = parseWorkflowRevisionImpact(candidate.input.impact);
+      const sourceTaskIds = candidate.input.sourceTaskIds;
+      if (impact.basePlanVersion >= Number(run.planVersion) || !Array.isArray(sourceTaskIds)
+        || !sourceTaskIds.includes(impact.targetTaskId)
+        || impact.affectedTaskIds.some((id) => !tasks.some((task) => isRecord(task) && task.id === id && task.runId === run.id))) throw new Error('修订影响范围归属无效');
+    }
     if (candidate.kind === 'team_review' && isRecord(candidate.output) && candidate.output.schemaVersion !== undefined) {
       const review = parseWorkflowReviewRecord(candidate.output);
       if (review.runId !== run.id || review.taskId !== candidate.id || review.attempt !== candidate.attempt
@@ -572,6 +581,10 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
           const next = update(migratedCurrent === null ? null : structuredClone(migratedCurrent));
           const migratedNext = migrateWorkflowSnapshot(next.snapshot);
           for (const task of migratedCurrent?.tasks ?? []) {
+            if (task.kind === 'team_plan_revision' && isRecord(task.input) && task.input.impact !== undefined) {
+              const nextTask = migratedNext.tasks.find((item) => item.id === task.id);
+              if (!nextTask || JSON.stringify(nextTask.input) !== JSON.stringify(task.input)) throw new Error('已保存的定向修订不可修改');
+            }
             if (task.kind !== 'team_review' || !isRecord(task.output) || task.output.schemaVersion === undefined) continue;
             const nextTask = migratedNext.tasks.find((item) => item.id === task.id);
             if (!nextTask || nextTask.attempt !== task.attempt || JSON.stringify(nextTask.output) !== JSON.stringify(task.output)) throw new Error('已保存的验收记录不可修改');

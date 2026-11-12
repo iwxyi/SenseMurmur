@@ -35,6 +35,7 @@ import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
 import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoalSpec, workflowDeadlineBlockReason, workflowGoalContext, type WorkflowGoalSpec } from './workflowGoalSpec';
 import { describeWorkflowToolRequest } from './workflowToolRequest';
 import { parseWorkflowReviewVerdict, prepareWorkflowReviewRecord } from './workflowReviewRecord';
+import { analyzeWorkflowRevisionImpact, parseWorkflowRevisionImpact, type WorkflowRevisionImpact } from './workflowRevisionImpact';
 
 const TOOL_TASK_KINDS = {
   text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio', speech_generation: 'agent_audio',
@@ -107,7 +108,7 @@ interface TeamTaskInput {
   contextTaskIds?: string[];
 }
 
-interface TeamRevisionInput { request: string; sourceTaskIds: string[] }
+interface TeamRevisionInput { request: string; sourceTaskIds: string[]; impact?: WorkflowRevisionImpact }
 interface TeamReviewInput { sourceTaskIds: string[] }
 
 function selectReviewEvidence(snapshot: WorkflowSnapshot, taskIds: string[]) {
@@ -300,10 +301,15 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return { task: id, output: source.output.slice(0, 1500) };
         });
         const recentPrior = prior.slice(-8);
+        const impact = task.input.impact === undefined ? undefined : parseWorkflowRevisionImpact(task.input.impact);
+        if (impact && (impact.basePlanVersion >= snapshot.run.planVersion
+          || impact.affectedTaskIds.some((id) => !snapshot.tasks.some((item) => item.id === id)))) throw new WorkflowPreflightError('定向修订影响范围已失效');
+        const affectedPrior = impact ? prior.filter((item) => impact.affectedTaskIds.includes(item.task)) : [];
+        const revisionContext = impact ? `\n定向修订目标：${impact.targetTaskId}\n可能受影响的下游任务：${JSON.stringify(impact.affectedTaskIds)}\n受影响交付摘要：${JSON.stringify(affectedPrior)}\n仅为新指示所需的受影响部分规划新工作。保留历史结果，不重做无关任务。已有媒体只有在新要求确实需要时才重新生成；不要假称已修改历史媒体。` : '';
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
-        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities, delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
+        const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}${revisionContext}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities, delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         assertGoalPlanAuthorized(snapshot, plan);
         return { output: plan };
@@ -640,7 +646,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return runtime.setModelCallLimit(runId, expectedPlanVersion, maxModelCalls);
       });
     },
-    async addRevisionRequest(runId: string, expectedPlanVersion: number, request: string) {
+    async addRevisionRequest(runId: string, expectedPlanVersion: number, request: string, targetTaskId?: string) {
       const trimmed = request.trim();
       if (!trimmed || trimmed.length > 4000) throw new Error('追加要求应为 1 到 4000 个字符');
       if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务修改');
@@ -656,11 +662,14 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown' || task.status === 'failed')) throw new Error('请先处理未完成或待核对的步骤');
         if (current.tasks.some((task) => task.kind === 'team_plan_revision' && task.status !== 'completed')) throw new Error('请先完成已追加的团队任务');
         const sourceTaskIds = current.tasks.filter((task) => isAgentTaskKind(task.kind)).map((task) => task.id);
+        const target = targetTaskId === undefined ? undefined : current.tasks.find((task) => task.id === targetTaskId);
+        if (targetTaskId !== undefined && (!target || !isAgentTaskKind(target.kind) || target.status !== 'completed')) throw new Error('定向修订只能选择已完成的子任务');
+        const impact = target ? analyzeWorkflowRevisionImpact(current, target.id) : undefined;
         if (!sourceTaskIds.length) throw new Error('团队规划尚未完成');
         const revisionCount = current.tasks.filter((task) => task.kind === 'team_plan_revision').length;
         const task: WorkflowTask = {
           id: revisionCount === 0 ? 'delegate' : `delegate_${revisionCount + 1}`, runId, kind: 'team_plan_revision',
-          input: { request: trimmed, sourceTaskIds } satisfies TeamRevisionInput,
+          input: { request: trimmed, sourceTaskIds, ...(impact ? { impact } : {}) } satisfies TeamRevisionInput,
           dependsOn: sourceTaskIds, status: 'waiting_dependency', attempt: 0, updatedAt: Date.now(),
         };
         return hasReviewBlock
@@ -1204,10 +1213,10 @@ export async function instructAgentTeamTask(params: { runId: string; taskId: str
   return result;
 }
 
-export async function delegateAgentTeamTask(params: { runId: string; expectedPlanVersion: number; request: string }) {
+export async function delegateAgentTeamTask(params: { runId: string; expectedPlanVersion: number; request: string; targetTaskId?: string }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  const result = await currentTeamWorkflow().addRevisionRequest(params.runId, params.expectedPlanVersion, params.request);
+  const result = await currentTeamWorkflow().addRevisionRequest(params.runId, params.expectedPlanVersion, params.request, params.targetTaskId);
   notifyTeam();
   return result;
 }

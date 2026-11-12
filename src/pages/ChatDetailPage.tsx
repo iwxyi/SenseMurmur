@@ -4636,7 +4636,7 @@ export default function ChatDetailPage() {
           onUpdateModelCallLimit={async (selected, maxModelCalls) => { await updateAgentTeamModelCallLimit({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, maxModelCalls }); }}
           onUpdateDeadline={async (selected, deadlineAt) => { await updateAgentTeamDeadline({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, deadlineAt }); }}
           onSaveDeliveryCopy={async (selected) => { await saveAgentTeamDeliveryCopy({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion }); }}
-          onDelegate={async (selected, request) => { await delegateAgentTeamTask({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, request }); }}
+          onDelegate={async (selected, request, targetTaskId) => { await delegateAgentTeamTask({ runId: selected.run.id, expectedPlanVersion: selected.run.planVersion, request, targetTaskId }); }}
           onAbandonReview={async (selected, task) => { await abandonAgentTeamReview({ runId: selected.run.id, reviewId: task.id, expectedPlanVersion: selected.run.planVersion }); }}
           onResumeAfterReviewRetry={async (selected, task) => {
             await retryAgentTeamReview({ runId: selected.run.id, reviewId: task.id, expectedPlanVersion: selected.run.planVersion });

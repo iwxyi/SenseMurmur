@@ -7,6 +7,7 @@ import { buildAgentTeamTaskRevisionRequest, isRecoverableAgentTeamRun } from '..
 import TeamTaskExecutionHistory from './TeamTaskExecutionHistory';
 import { workflowDeliveryIssueLabel } from '../../services/workflowDelivery';
 import TeamDeliveryConflictPanel from './TeamDeliveryConflictPanel';
+import { analyzeWorkflowRevisionImpact } from '../../services/workflowRevisionImpact';
 
 interface Props {
   runs: WorkflowSnapshot[];
@@ -20,7 +21,7 @@ interface Props {
   onUpdateModelCallLimit: (run: WorkflowSnapshot, limit?: number) => Promise<void>;
   onUpdateDeadline: (run: WorkflowSnapshot, deadlineAt?: number) => Promise<void>;
   onSaveDeliveryCopy: (run: WorkflowSnapshot) => Promise<void>;
-  onDelegate: (run: WorkflowSnapshot, request: string) => Promise<void>;
+  onDelegate: (run: WorkflowSnapshot, request: string, targetTaskId?: string) => Promise<void>;
   onAbandonReview: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
   onResumeAfterReviewRetry: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
   onResumeAfterPlanRetry: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
@@ -100,6 +101,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const canReviseSelectedTask = Boolean(canAddRevision && task && details && childTasks.includes(task)
     && task.status === 'completed' && task.attempt > 0);
   const canInstructSelectedTask = editable || canReviseSelectedTask;
+  const revisionImpact = canReviseSelectedTask && task ? analyzeWorkflowRevisionImpact(run, task.id) : null;
   const resumableRuns = runs.filter(isRecoverableAgentTeamRun);
 
   return <>
@@ -161,13 +163,16 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           {typeof (task.input as { userInstruction?: unknown })?.userInstruction === 'string' && <Typography variant="body2"><strong>用户指示</strong> {String((task.input as { userInstruction: string }).userInstruction)}</Typography>}
           {canInstructSelectedTask && <Box sx={{ display: 'grid', gap: 1 }}>
             <TextField multiline minRows={2} fullWidth size="small" label={editable ? '补充该子任务的指示' : '与该子 Agent 继续协作'} value={instruction} onChange={(event) => { setInstruction(event.target.value); setInstructionError(null); }} slotProps={{ htmlInput: { maxLength: 4000 } }} disabled={savingInstruction} />
-            {canReviseSelectedTask && <Typography variant="caption" color="text.secondary">主 Agent 会根据已有交付为该角色规划后续工作。</Typography>}
+            {revisionImpact && <Box sx={{ display: 'grid', gap: 0.5 }}>
+              <Typography variant="caption" color="text.secondary">可能影响 {revisionImpact.affectedTaskIds.length} 个步骤：{run.tasks.filter((item) => revisionImpact.affectedTaskIds.includes(item.id)).map((item) => taskDetails(item)?.goal || (item.kind === 'team_review' ? '交付验收' : '主 Agent 规划')).join('、')}</Typography>
+              {revisionImpact.generatedMediaTaskIds.length > 0 && <Typography variant="caption" color="warning.main">其中 {revisionImpact.generatedMediaTaskIds.length} 个媒体步骤已执行。若新要求需要重新生成，可能产生新的费用。</Typography>}
+            </Box>}
             {instructionError && <Typography variant="caption" color="error.main">{instructionError}</Typography>}
             <Button size="small" variant="outlined" disabled={!instruction.trim() || savingInstruction} onClick={() => {
               setSavingInstruction(true);
               const operation = editable
                 ? onInstruct(run, task, instruction)
-                : onDelegate(run, buildAgentTeamTaskRevisionRequest(task, instruction));
+                : onDelegate(run, buildAgentTeamTaskRevisionRequest(task, instruction), task.id);
               void operation.then(() => { setInstruction(''); setInstructionError(null); }).catch((error: unknown) => {
                 setInstructionError(error instanceof Error ? error.message : '保存指示失败');
               }).finally(() => setSavingInstruction(false));

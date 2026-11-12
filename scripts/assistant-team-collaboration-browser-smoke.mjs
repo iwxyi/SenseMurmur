@@ -262,7 +262,17 @@ try {
           || copy.message.metadata.branching.nodeId !== copy.message.id) throw new Error('Copy publication lost content or duplicated delivery');
         window.__assistantTeamSmoke.deliveryCopy = { artifacts: artifacts.length, messages: messages.length, published: true, sourcePreserved: true };
       },
-      onDelegate: async (...args) => { window.__assistantTeamSmoke.calls.push(args); },
+      onDelegate: async (...args) => {
+        const [selected, request, targetTaskId] = args;
+        const workflow = createAgentTeamWorkflow(config, currentWorkflowScope);
+        const updated = await workflow.addRevisionRequest(selected.run.id, selected.run.planVersion, request, targetTaskId);
+        const restored = await createAgentTeamWorkflow(config, currentWorkflowScope).read(selected.run.id);
+        const impact = restored.tasks.find((task) => task.kind === 'team_plan_revision').input.impact;
+        if (updated.run.planVersion !== selected.run.planVersion + 1 || impact.targetTaskId !== targetTaskId
+          || !impact.affectedTaskIds.includes(targetTaskId)) throw new Error('Targeted revision was not persisted');
+        window.__assistantTeamSmoke.revisionImpact = impact;
+        window.__assistantTeamSmoke.calls.push(args);
+      },
       onAbandonReview: async () => {}, onResumeAfterReviewRetry: async () => {}, onResumeAfterPlanRetry: async () => {},
     }));
     return true;
@@ -279,6 +289,7 @@ try {
   assert.deepEqual(resumedIds, ['browser-resume-run', 'browser-resume-run-2']);
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent?.includes('市场分析师')).click()`);
   await waitFor(() => cdp.evaluate(`Boolean(Array.from(document.querySelectorAll('[role="dialog"] label')).find((label) => label.textContent?.includes('与该子 Agent 继续协作')))`), 'child instruction input');
+  assert.match(await cdp.evaluate(`document.querySelector('[role="dialog"]').textContent`), /可能影响 1 个步骤：研究市场竞争/);
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '查看执行记录').click()`);
   await waitFor(() => cdp.evaluate(`document.querySelector('[aria-label="任务执行记录"]')?.textContent.includes('第 1 次执行 · 已完成 · 计划 2')`), 'persisted execution history visible');
   assert.doesNotMatch(await cdp.evaluate(`document.querySelector('[aria-label="任务执行记录"]').textContent`), /browser-collab-|research|agent_text/);
@@ -291,6 +302,8 @@ try {
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent?.includes('发送给主 Agent')).click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke?.calls.length === 1`), 'revision request submitted');
   const request = await cdp.evaluate(`window.__assistantTeamSmoke.calls[0][1]`);
+  assert.equal(await cdp.evaluate(`window.__assistantTeamSmoke.calls[0][2]`), 'research');
+  assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.revisionImpact.affectedTaskIds`), ['research']);
   assert.match(request, /市场分析师/);
   assert.match(request, /原任务：研究市场竞争/);
   assert.match(request, /补充日本市场，并标注数据年份/);

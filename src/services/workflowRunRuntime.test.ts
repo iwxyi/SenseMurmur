@@ -45,6 +45,29 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it('validates targeted revision ownership and preserves its input across transactions', async () => {
+    const id = crypto.randomUUID();
+    const scope = `revision-${id}`;
+    const initial = snapshot(id);
+    initial.run.planVersion = 2;
+    initial.tasks.push({ id: 'revision', runId: id, kind: 'team_plan_revision', input: {
+      request: '修改脚本', sourceTaskIds: ['script'], impact: { schemaVersion: 1, basePlanVersion: 1,
+        targetTaskId: 'script', affectedTaskIds: ['script', 'video'], generatedMediaTaskIds: [] },
+    }, dependsOn: ['script'], status: 'waiting_dependency', attempt: 0, updatedAt: 1 });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: async () => ({ output: '完成' }) }, () => scope);
+    await runtime.create(initial);
+    await expect(indexedDbWorkflowRepository.transact(scope, id, (current) => {
+      current!.tasks[2].input = { request: '覆盖原要求' };
+      return { snapshot: current!, result: undefined };
+    })).rejects.toThrow('定向修订不可修改');
+    expect((await runtime.read(id))?.tasks[2].input).toEqual(initial.tasks[2].input);
+    const invalid = structuredClone(initial);
+    invalid.run.id = `${id}-invalid`;
+    invalid.tasks.forEach((task) => { task.runId = invalid.run.id; });
+    invalid.tasks.splice(1, 1);
+    await expect(runtime.create(invalid)).rejects.toThrow('修订影响范围归属无效');
+  });
+
   it.each(['success', 'pending', 'preflight', 'unknown', 'invalid', 'missing-boundary'] as const)('journals tool execution boundaries: %s', async (outcome) => {
     const id = crypto.randomUUID();
     const scope = `tool-${id}`;

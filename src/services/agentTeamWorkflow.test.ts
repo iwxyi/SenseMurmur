@@ -430,11 +430,13 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks.filter((task) => task.kind === 'agent_text' && task.status === 'completed')).toHaveLength(40);
     expect((await workflow.read(runId))?.tasks.find((task) => task.id === 'shot_40')?.output).toBe('镜头 40 内容');
     expect(generate).toHaveBeenCalledTimes(41);
-    await workflow.addRevisionRequest(runId, result.snapshot.run.planVersion, '为四十个镜头补充运镜说明');
+    await workflow.addRevisionRequest(runId, result.snapshot.run.planVersion, '为四十个镜头补充运镜说明', 'shot_1');
     generate.mockResolvedValueOnce(JSON.stringify(plan));
     for (let index = 1; index <= 40; index += 1) generate.mockResolvedValueOnce(`补充镜头 ${index} 内容`);
     const extended = await workflow.resume(runId);
     expect(extended.snapshot.run.status).toBe('completed');
+    expect(generate.mock.calls[41][2][0].content).toContain('镜头 1 内容');
+    expect(generate.mock.calls[41][2][0].content).toContain('定向修订目标：shot_1');
     expect(extended.snapshot.tasks).toHaveLength(82);
     expect(extended.snapshot.tasks.find((task) => task.id === 'delegated_shot_40')?.output).toBe('补充镜头 40 内容');
     await workflow.resume(runId);
@@ -1588,13 +1590,24 @@ describe('agent team workflow', () => {
     expect(completed.snapshot.run.status).toBe('completed');
     const first = await scoped.publish(runId);
     const firstVersionId = first.currentVersionId;
-    const reopened = await scoped.addRevisionRequest(runId, completed.snapshot.run.planVersion, '补一份报告');
+    await expect(scoped.addRevisionRequest(runId, completed.snapshot.run.planVersion, '补一份报告', 'missing')).rejects.toThrow('已完成的子任务');
+    expect((await scoped.read(runId))?.run.planVersion).toBe(completed.snapshot.run.planVersion);
+    const reopened = await scoped.addRevisionRequest(runId, completed.snapshot.run.planVersion, '补一份报告', 'research');
     expect(reopened.run.status).toBe('paused');
     expect(reopened.run.planOpen).toBe(true);
+    const revisionInput = { request: '补一份报告', sourceTaskIds: ['research'], impact: {
+      schemaVersion: 1, basePlanVersion: completed.snapshot.run.planVersion, targetTaskId: 'research',
+      affectedTaskIds: ['research'], generatedMediaTaskIds: [],
+    } };
+    expect(reopened.tasks.find((task) => task.id === 'delegate')?.input).toEqual(revisionInput);
+    const restored = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-reopen-test');
+    expect((await restored.read(runId))?.tasks.find((task) => task.id === 'delegate')?.input).toEqual(revisionInput);
     await expect(scoped.addRevisionRequest(runId, completed.snapshot.run.planVersion, '重复追加')).rejects.toThrow('计划已更新');
     generate.mockResolvedValueOnce(JSON.stringify(extraPlan)).mockResolvedValueOnce('第二阶段报告');
-    const finished = await scoped.resume(runId);
+    const finished = await restored.resume(runId);
     expect(finished.snapshot.run.status).toBe('completed');
+    expect(generate.mock.calls[2][2][0].content).toContain('定向修订目标：research');
+    expect(generate.mock.calls[2][2][0].content).toContain('第一阶段结论');
     const second = await scoped.publish(runId);
     expect(second.id).toBe(first.id);
     expect(second.currentVersionId).not.toBe(firstVersionId);
