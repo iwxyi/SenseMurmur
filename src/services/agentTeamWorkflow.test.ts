@@ -13,6 +13,7 @@ import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTea
 import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReference } from './agentTeamImageTask';
 import { inspectAgentTeamImages } from './agentTeamImageInspection';
 import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
+import { describeWorkflowToolRequest } from './workflowToolRequest';
 import { conversationExecutionLockName } from './conversationExecutionLock';
 import { composeAgentTeamMedia, inspectAgentTeamComposition, teamMediaAttachment } from './agentTeamMediaComposition';
 import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
@@ -1093,7 +1094,8 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks.map((task) => task.kind)).toEqual(['team_plan', 'agent_web_search', 'agent_text']);
     expect(search).toHaveBeenCalledWith('MirageTea 最新资料', expect.objectContaining({ source: 'assistant_agent', resourceId: chatId }));
     expect(generate.mock.calls[1][2][0].content).toContain('https://example.test/source');
-    expect(result.snapshot.tasks[1].toolInvocation).toMatchObject({ kind: 'agent_web_search', state: 'succeeded' });
+    expect(result.snapshot.tasks[1].toolInvocation).toMatchObject({ kind: 'agent_web_search', state: 'succeeded',
+      request: describeWorkflowToolRequest('web_search', { query: 'MirageTea 最新资料', count: 8 }) });
     expect((await indexedDbWorkflowRepository.listTaskAttempts('team-search-test', runId, 'lookup'))[0].toolInvocation).toEqual(result.snapshot.tasks[1].toolInvocation);
   });
 

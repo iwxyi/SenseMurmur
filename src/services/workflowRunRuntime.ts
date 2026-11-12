@@ -6,6 +6,7 @@ import { parseWorkflowGoalSpec, workflowDeadlineBlockReason, type WorkflowGoalSp
 import { isWorkflowModelTask, parseWorkflowModelInvocation, workflowModelInvocationId, type WorkflowModelInvocation } from './workflowModelInvocation';
 import { copyWorkflowDelivery, parseWorkflowDelivery, type WorkflowDelivery, type WorkflowDeliveryBranch, type WorkflowDeliveryIssue } from './workflowDelivery';
 import { isWorkflowToolTask, parseWorkflowToolInvocation, workflowToolInvocationId, workflowToolOperationKey, type WorkflowToolInvocation } from './workflowToolInvocation';
+import { parseWorkflowToolRequest, workflowToolRequestKind, type WorkflowToolRequest } from './workflowToolRequest';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -249,7 +250,7 @@ export interface WorkflowExecutor {
 
 export interface WorkflowExecutionContext {
   beginModelInvocation(): Promise<void>;
-  beginToolInvocation(): Promise<void>;
+  beginToolInvocation(request?: WorkflowToolRequest): Promise<void>;
 }
 
 export class WorkflowPreflightError extends Error {
@@ -602,6 +603,10 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
           const attempts = tx.objectStore(ATTEMPT_STORE);
           for (const task of migratedNext.tasks) {
             const before = beforeTasks.get(task.id);
+            if (before?.attempt === task.attempt && before.toolInvocation?.request
+              && JSON.stringify(before.toolInvocation.request) !== JSON.stringify(task.toolInvocation?.request)) throw new Error('已开始的工具请求摘要不可修改');
+            if (before?.attempt === task.attempt && !before.toolInvocation?.request && task.toolInvocation?.request
+              && (before.toolInvocation?.state !== 'reserved' || task.toolInvocation.state !== 'started')) throw new Error('不能补造历史工具请求摘要');
             if (!task.attempt || !before) continue;
             const key = `${rowKey(scope, runId)}\n${JSON.stringify(task.id)}\n${String(task.attempt).padStart(16, '0')}`;
             if (task.status === 'running' && task.attempt === before.attempt + 1) {
@@ -1023,8 +1028,10 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         await Promise.all(batch.map(async (task) => {
           const isReady = claimed.has(task.id);
           const context: WorkflowExecutionContext = {
-            async beginToolInvocation() {
+            async beginToolInvocation(request) {
               signal.throwIfAborted();
+              const description = request === undefined ? undefined : parseWorkflowToolRequest(request);
+              if (description && workflowToolRequestKind(description) !== task.kind) throw new WorkflowPreflightError('工具请求类型与任务不一致');
               await mutate(storageScope, runId, (current) => {
                 const item = current.tasks.find((candidate) => candidate.id === task.id);
                 if (!executor.tracksToolInvocations || !isReady || scope() !== storageScope
@@ -1037,7 +1044,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                 const invocation = item.toolInvocation;
                 const now = Math.max(Date.now(), invocation.reservedAt);
                 return { snapshot: { ...current, run: { ...current.run, updatedAt: now }, tasks: current.tasks.map((candidate) => candidate.id === task.id
-                  ? { ...candidate, updatedAt: now, toolInvocation: { ...invocation, state: 'started', startedAt: now } } : candidate) }, value: undefined };
+                  ? { ...candidate, updatedAt: now, toolInvocation: { ...invocation, state: 'started', startedAt: now,
+                    ...(description ? { request: description } : {}) } } : candidate) }, value: undefined };
               });
               signal.throwIfAborted();
             },

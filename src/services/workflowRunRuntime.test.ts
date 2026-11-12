@@ -4,6 +4,7 @@ import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRep
 import { workflowModelInvocationId } from './workflowModelInvocation';
 import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
 import { workflowToolInvocationId, workflowToolOperationKey } from './workflowToolInvocation';
+import { describeWorkflowToolRequest } from './workflowToolRequest';
 
 let testIndexedDb: IDBFactory | undefined;
 
@@ -49,11 +50,12 @@ describe('workflow run runtime', () => {
     const scope = `tool-${id}`;
     const initial = snapshot(id);
     initial.tasks = [{ ...initial.tasks[0], kind: 'agent_video' }];
+    const request = describeWorkflowToolRequest('video_generation', { prompt: '森林追逐', references: [] });
     const execute = vi.fn(async (task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => {
       expect((await indexedDbWorkflowRepository.read(scope, id))?.tasks[0].toolInvocation?.state).toBe('reserved');
       if (outcome === 'preflight') throw new WorkflowPreflightError('无权限');
       if (outcome === 'missing-boundary') return { output: '不可信结果' };
-      await context.beginToolInvocation();
+      await context.beginToolInvocation(request);
       expect((await indexedDbWorkflowRepository.listTaskAttempts(scope, id, task.id))[0].toolInvocation?.state).toBe('started');
       await expect(context.beginToolInvocation()).rejects.toThrow('已失效或已开始');
       if (outcome === 'unknown') throw new Error('连接中断');
@@ -73,6 +75,7 @@ describe('workflow run runtime', () => {
       : outcome === 'pending' ? 'waiting_external' : outcome === 'unknown' ? 'result_unknown' : outcome === 'invalid' ? 'failed' : 'succeeded';
     expect(result.tasks[0].toolInvocation).toMatchObject({ state, operationKey: workflowToolOperationKey(id, 'script'), planVersion: 1 });
     expect((await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script'))[0].toolInvocation).toEqual(result.tasks[0].toolInvocation);
+    expect(result.tasks[0].toolInvocation?.request).toEqual(outcome === 'preflight' || outcome === 'missing-boundary' ? undefined : request);
     expect(countWorkflowModelCalls(result)).toBe(0);
     if (outcome === 'pending') {
       expect(result.tasks[0]).toMatchObject({ status: 'waiting_external', externalTaskId: 'provider-task', error: '查询超时' });
@@ -81,11 +84,38 @@ describe('workflow run runtime', () => {
       expect(result.tasks[0]).toMatchObject({ status: 'completed', output: '视频已保存', toolInvocation: { state: 'succeeded', externalTaskId: 'provider-task', finishedAt: expect.any(Number) } });
       expect(execute).toHaveBeenCalledTimes(1);
       expect((await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script'))[0].toolInvocation).toEqual(result.tasks[0].toolInvocation);
+      expect(result.tasks[0].toolInvocation?.request).toEqual(request);
     }
     if (outcome === 'unknown') {
       await create().resume(id);
       expect(execute).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it('rejects a mismatched tool request before effects and atomically prevents rewriting a started request', async () => {
+    const id = crypto.randomUUID();
+    const scope = `request-identity-${id}`;
+    const initial = snapshot(id);
+    initial.tasks = [{ ...initial.tasks[0], kind: 'agent_video' }];
+    const request = describeWorkflowToolRequest('video_generation', { prompt: '森林追逐' });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksToolInvocations: true,
+      async execute(_task, _signal, context) {
+        await expect(context.beginToolInvocation(describeWorkflowToolRequest('web_search', { query: 'search' }))).rejects.toThrow('类型与任务不一致');
+        expect((await indexedDbWorkflowRepository.read(scope, id))?.tasks[0].toolInvocation?.state).toBe('reserved');
+        await context.beginToolInvocation(request);
+        const before = await indexedDbWorkflowRepository.read(scope, id);
+        const attempts = await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script');
+        await expect(indexedDbWorkflowRepository.transact(scope, id, (current) => ({ snapshot: { ...current!, tasks: current!.tasks.map((task) => ({
+          ...task, toolInvocation: { ...task.toolInvocation!, request: describeWorkflowToolRequest('video_generation', { prompt: '偷偷改写' }) },
+        })) }, value: undefined }))).rejects.toThrow('摘要不可修改');
+        expect(await indexedDbWorkflowRepository.read(scope, id)).toEqual(before);
+        expect(await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script')).toEqual(attempts);
+        return { output: '视频已保存' };
+      },
+    }, () => scope);
+    await runtime.create(initial);
+    const result = await runtime.resume(id);
+    expect(result.tasks[0]).toMatchObject({ status: 'completed', toolInvocation: { request } });
   });
 
   it.each(['reserved', 'started', 'accepted'] as const)('recovers a %s tool execution without resubmitting accepted media', async (state) => {

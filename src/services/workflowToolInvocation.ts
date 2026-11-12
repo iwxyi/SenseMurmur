@@ -1,3 +1,5 @@
+import { parseWorkflowToolRequest, workflowToolRequestKind, type WorkflowToolRequest } from './workflowToolRequest';
+
 export const WORKFLOW_TOOL_TASK_KINDS = ['agent_web_search', 'agent_image', 'agent_audio', 'agent_video', 'agent_media_composition'] as const;
 
 export interface WorkflowToolInvocation {
@@ -14,6 +16,7 @@ export interface WorkflowToolInvocation {
   startedAt?: number;
   finishedAt?: number;
   externalTaskId?: string;
+  request?: WorkflowToolRequest;
 }
 
 export function isWorkflowToolTask(kind: string): kind is WorkflowToolInvocation['kind'] {
@@ -40,6 +43,8 @@ export function parseWorkflowToolInvocation(raw: unknown): WorkflowToolInvocatio
     || value.id !== workflowToolInvocationId(value.runId, value.taskId, Number(value.attempt))) throw new Error('工具调用关联无效');
   if (!['reserved', 'started', 'waiting_external', 'succeeded', 'failed', 'result_unknown', 'not_started'].includes(String(value.state))) throw new Error('工具调用状态无效');
   const unstarted = value.state === 'reserved' || value.state === 'not_started';
+  const request = value.request === undefined ? undefined : parseWorkflowToolRequest(value.request);
+  if (request && (unstarted || workflowToolRequestKind(request) !== value.kind)) throw new Error('工具请求摘要与调用不一致');
   const terminal = !['reserved', 'started', 'waiting_external'].includes(String(value.state));
   if (unstarted !== (value.startedAt === undefined) || terminal !== (value.finishedAt !== undefined)
     || !Number.isFinite(value.reservedAt)
@@ -52,5 +57,6 @@ export function parseWorkflowToolInvocation(raw: unknown): WorkflowToolInvocatio
     planVersion: Number(value.planVersion), state: value.state as WorkflowToolInvocation['state'], reservedAt: Number(value.reservedAt),
     ...(value.startedAt === undefined ? {} : { startedAt: Number(value.startedAt) }),
     ...(value.finishedAt === undefined ? {} : { finishedAt: Number(value.finishedAt) }),
-    ...(value.externalTaskId === undefined ? {} : { externalTaskId: value.externalTaskId as string }) };
+    ...(value.externalTaskId === undefined ? {} : { externalTaskId: value.externalTaskId as string }),
+    ...(request ? { request } : {}) };
 }

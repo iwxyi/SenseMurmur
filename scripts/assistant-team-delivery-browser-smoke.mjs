@@ -182,6 +182,7 @@ try {
       const intent = (await workflow.read(interruptedRunId)).run.delivery;
       if (!intent || useAssistantArtifactStore.getState().items.some((item) => intent.artifacts.some((entry) => entry.after.id === item.id))) throw new Error('清单中断边界错误');
       const { workflowToolInvocationId, workflowToolOperationKey } = await import('/src/services/workflowToolInvocation.ts');
+      const { describeWorkflowToolRequest } = await import('/src/services/workflowToolRequest.ts');
       const toolRunId = runId + '-tools';
       await indexedDbWorkflowRepository.transact(currentWorkflowScope(), toolRunId, () => ({ snapshot: {
         run: { id: toolRunId, chatId, goal: '工具重载恢复', status: 'paused', generation: 1, planVersion: 1, updatedAt: now },
@@ -189,7 +190,9 @@ try {
           input: {}, dependsOn: [], status: 'running', attempt: 1, updatedAt: now,
           toolInvocation: { schemaVersion: 1, id: workflowToolInvocationId(toolRunId, state, 1), operationKey: workflowToolOperationKey(toolRunId, state),
             runId: toolRunId, taskId: state, kind: 'agent_video', attempt: 1, planVersion: 1,
-            state: state === 'reserved' ? 'reserved' : 'started', reservedAt: now, ...(state === 'reserved' ? {} : { startedAt: now }) } })),
+            state: state === 'reserved' ? 'reserved' : 'started', reservedAt: now, ...(state === 'reserved' ? {} : {
+              startedAt: now, request: describeWorkflowToolRequest('video_generation', { prompt: state + ' private input' }),
+            }) } })),
       }, value: undefined }));
       window.fetch = originalFetch;
       return {
@@ -252,9 +255,13 @@ try {
     const runId = ${JSON.stringify(result.runId)};
     const toolRunId = runId + '-tools';
     const toolCalls = [];
+    const { describeWorkflowToolRequest } = await import('/src/services/workflowToolRequest.ts');
     const toolRuntime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
       tracksToolInvocations: true,
-      execute: async (task, signal, context) => { await context.beginToolInvocation(); toolCalls.push(task.id); return { output: '完成' }; },
+      execute: async (task, signal, context) => {
+        await context.beginToolInvocation(describeWorkflowToolRequest('video_generation', { prompt: task.id + ' private input' }));
+        toolCalls.push(task.id); return { output: '完成' };
+      },
       reconcileInterrupted: async (task) => task.id === 'accepted' ? { status: 'waiting_external', externalTaskId: 'saved-provider-task' } : null,
       inspectExternal: async () => ({ status: 'completed', output: '已领取视频' }),
     }, currentWorkflowScope);
@@ -264,6 +271,12 @@ try {
       || tools.tasks.map((task) => task.toolInvocation.state).join(',') !== 'succeeded,result_unknown,succeeded') throw new Error('工具重载恢复重复提交或丢失调用记录');
     const toolAttempts = await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), toolRunId, 'reserved');
     if (toolAttempts.length !== 1 || toolAttempts[0].toolInvocation.state !== 'succeeded') throw new Error('工具恢复未保存执行历史');
+    for (const task of tools.tasks) {
+      const expected = describeWorkflowToolRequest('video_generation', { prompt: task.id + ' private input' });
+      if (JSON.stringify(task.toolInvocation.request) !== JSON.stringify(expected)
+        || JSON.stringify(task.toolInvocation).includes('private input')) throw new Error('工具请求摘要在刷新后丢失或泄露原文');
+    }
+    if (JSON.stringify(toolAttempts[0].toolInvocation.request) !== JSON.stringify(tools.tasks[0].toolInvocation.request)) throw new Error('任务历史与快照的请求摘要不一致');
     const interruptedRunId = ${JSON.stringify(result.interruptedRunId)};
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'browser-smoke', baseUrl: 'https://mock-llm.invalid/v1', model: 'smoke-model' }, currentWorkflowScope);
     await workflow.publish(interruptedRunId);
