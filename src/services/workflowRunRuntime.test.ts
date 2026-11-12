@@ -99,16 +99,17 @@ describe('workflow run runtime', () => {
     await expect(restored.bindPlatformBudget(id, 3, { ...budget, revision: 3 })).rejects.toThrow('暂停');
   });
 
-  it('pauses stale-budget admission instead of treating it as an unknown result', async () => {
+  it.each(['WORKFLOW_BUDGET_REVISION_CONFLICT', 'WORKFLOW_BUDGET_CHANNEL_UNSUPPORTED'])('pauses %s admission instead of treating it as an unknown result', async (code) => {
     const id = crypto.randomUUID();
     const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksModelInvocations: true,
       execute: async (_task, _signal, context) => {
         await context.beginModelInvocation();
-        throw Object.assign(new Error('private details'), { code: 'WORKFLOW_BUDGET_REVISION_CONFLICT', status: 409 });
+        throw Object.assign(new Error('private details'), { code, status: 409 });
       } }, () => `stale-budget-${id}`);
     await runtime.create({ run: snapshot(id).run, tasks: [{ ...snapshot(id).tasks[0], kind: 'agent_text' }] });
     const result = await runtime.resume(id);
-    expect(result.run).toMatchObject({ status: 'paused', pauseReason: '任务预算已更改，请刷新并确认预算后继续。' });
+    expect(result.run.status).toBe('paused');
+    expect(result.run.pauseReason).toContain(code === 'WORKFLOW_BUDGET_REVISION_CONFLICT' ? '任务预算已更改' : '第三方直连费用无法纳入预算');
     expect(result.tasks[0]).toMatchObject({ status: 'queued', modelInvocation: { state: 'rejected' } });
   });
   it.each(['model', 'tool'] as const)('pauses a rejected %s admission and resumes the whole run without losing its attempt', async (kind) => {

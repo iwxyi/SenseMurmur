@@ -7,7 +7,7 @@ import { generateAudioWithAdapter, generateImageWithAdapter, generateVideoWithAd
 import { waitForAiMediaTask } from './aiClient';
 import { readAuthSnapshot } from './authSnapshot';
 import { logRecoverableError, reportRecoverableError } from './diagnostics';
-import { workflowAdmissionRejection } from './workflowAdmission';
+import { assertWorkflowBudgetChannel, workflowAdmissionRejection } from './workflowAdmission';
 import { redactAiDiagnosticValue } from './aiDiagnosticText';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
 import { synthesizeSpeech, usesManagedSpeechProfile } from './speech';
@@ -862,6 +862,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
     const voiceStyle = [entry.character?.voiceConfig?.style, entry.character?.voiceConfig?.instructions].filter(Boolean).join('；') || undefined;
     const voiceEmotion = deriveActiveVoiceEmotion(entry.character, speechText, entry.messages || [], workingMessage.id);
     const usesManagedSpeech = usesManagedSpeechProfile(profile);
+    assertWorkflowBudgetChannel(workingMessage.metadata?.workflowUsage, !localOnly && usesManagedSpeech);
     const speechResult = !localOnly && usesManagedSpeech
       ? await synthesizeSpeech({
           providerCode: profile.provider.startsWith('managed:') ? profile.provider.slice('managed:'.length) : undefined,

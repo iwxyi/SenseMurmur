@@ -6,6 +6,7 @@ import { redactAiDiagnosticText, redactAiDiagnosticValue } from './aiDiagnosticT
 import { assertWorkspaceActive, getResponseWorkspaceSignal, getWorkspaceSignal, workspaceFetch as fetch } from './workspaceLifecycle';
 import { assertChatExecutionLease } from './chatExecutionLease';
 import { getChatExecutionFence } from './chatExecutionFence';
+import { assertWorkflowBudgetChannel } from './workflowAdmission';
 
 type ChatRole = 'user' | 'assistant' | 'system';
 export interface ChatMessageImageAttachment {
@@ -1476,6 +1477,7 @@ async function generateGeminiImage(config: APIConfig, options: ImageGenerationOp
 }
 
 export async function generateImage(config: APIConfig, options: ImageGenerationOptions): Promise<GeneratedImage[]> {
+  assertWorkflowBudgetChannel(options.aiUsage?.workflow, usesOfficialProxy(config));
   if (options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId) assertChatExecutionLease(options.aiUsage.resourceId);
   if (usesOfficialProxy(config) && (config.provider === 'official-ace-nanobanana' || isNanoBananaImageModel(config.model))) {
     return generateGeminiImage(config, options);
@@ -1673,6 +1675,7 @@ export const generateResponse = async (
   onChunk?: (chunk: string) => void,
   options: GenerateResponseOptions = {},
 ): Promise<string> => {
+  assertWorkflowBudgetChannel(options.aiUsage?.workflow, usesOfficialProxy(config));
   if (options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId) assertChatExecutionLease(options.aiUsage.resourceId);
   const effectiveOptions = { ...options, maxTokens: options.maxTokens === undefined ? normalizeMaxOutputTokens(config.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS) : Math.min(options.maxTokens, normalizeMaxOutputTokens(config.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS)) };
   const effectiveSystemPrompt = effectiveOptions.responseFormat === 'json'
@@ -1697,6 +1700,7 @@ export const generateJsonResponse = async (
   messages: ChatMessage[],
   options: GenerateResponseOptions = {},
 ): Promise<string> => {
+  assertWorkflowBudgetChannel(options.aiUsage?.workflow, usesOfficialProxy(config));
   if (options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId) assertChatExecutionLease(options.aiUsage.resourceId);
   return withTextRequestDeadline(config, options, (timedOptions) =>
     generateJsonResponseWithinDeadline(config, systemPrompt, messages, timedOptions));

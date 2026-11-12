@@ -80,6 +80,25 @@ try {
     ] };
     const { createWorkflowRunRuntime, indexedDbWorkflowRepository, currentWorkflowScope, WorkflowPreflightError } = await import('/src/services/workflowRunRuntime.ts');
     const { defaultWorkflowGoalSpec } = await import('/src/services/workflowGoalSpec.ts');
+    const { generateResponse, generateJsonResponse, generateImage } = await import('/src/services/aiClient.ts');
+    const originalBudgetBoundaryFetch = window.fetch;
+    let directBudgetRequests = 0;
+    window.fetch = async () => { directBudgetRequests++; throw new Error('Budgeted direct request escaped'); };
+    try {
+      const directConfig = { provider: 'openai', apiKey: '', baseUrl: 'https://example.test/v1', model: 'fixture' };
+      const aiUsage = { type: 'assistant_chat', workflow: { schemaVersion: 1, runId: 'budget-boundary',
+        taskId: 'direct', attempt: 1, kind: 'model', budgetRevision: 1 } };
+      for (const call of [() => generateResponse(directConfig, 'test', [], undefined, { aiUsage }),
+        () => generateJsonResponse(directConfig, 'test', [], { aiUsage }),
+        () => generateImage(directConfig, { prompt: 'test', aiUsage })]) {
+        let rejected = false;
+        try { await call(); } catch (error) {
+          rejected = error.code === 'WORKFLOW_BUDGET_CHANNEL_UNSUPPORTED' && error.status === 409;
+        }
+        if (!rejected) throw new Error('Budgeted direct request did not preserve a repairable rejection');
+      }
+      if (directBudgetRequests !== 0) throw new Error('Budgeted direct request accessed the network');
+    } finally { window.fetch = originalBudgetBoundaryFetch; }
     window.__cleanupCollaborationFixture = async () => {
       const database = await new Promise((resolve, reject) => {
         const request = indexedDB.open('pneumata-workflow-runs', 5);
@@ -189,6 +208,7 @@ try {
     const replies = [recursivePlan('research', '研究机会', 'delegate_task'), recursivePlan('market', '分析市场', 'delegate_task'),
       recursivePlan('evidence', '整理资料', 'text_generation'), '证据：离线使用需求', '市场交付：优先离线', '研究交付：离线方案'];
     const config = { provider: 'openai', baseUrl: 'https://delegation-smoke.invalid/v1', apiKey: 'test-fixture', model: 'fixture' };
+    const initialBudgetConfig = { ...config, provider: 'official-ace', baseUrl: '/api/ai', apiKey: '' };
     const { api: initialBudgetApi } = await import('/src/services/api.ts');
     const originalInitialBudgetSave = initialBudgetApi.configureWorkflowBudget;
     const initialBudgetId = 'browser-collab-initial-budget-' + crypto.randomUUID();
@@ -200,12 +220,12 @@ try {
       return new Promise((_resolve, reject) => { rejectInitialSave = reject; });
     };
     window.fetch = async (input, init) => {
-      if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
+      if (new URL(String(input), location.origin).pathname !== '/api/ai/v1/chat/completions') return originalFetch(input, init);
       initialPlanningRequests++;
       return Response.json({ choices: [{ message: { role: 'assistant', content: recursivePlan('report', '研究市场', 'text_generation') }, finish_reason: 'stop' }] });
     };
     try {
-      const initialWorkflow = createAgentTeamWorkflow(config, currentWorkflowScope);
+      const initialWorkflow = createAgentTeamWorkflow(initialBudgetConfig, currentWorkflowScope);
       const starting = initialWorkflow.start(initialBudgetId, recursiveChatId, '研究市场', false,
         new AbortController().signal, 1, undefined, { limitAmount: '20', billingUnit: 'point' });
       const settled = starting.then(() => false, () => true);
@@ -216,7 +236,7 @@ try {
         || pending.tasks[0].attempt !== 0 || initialPlanningRequests !== 0) throw new Error('Planning bypassed the initial budget save');
       rejectInitialSave(new Error('预算保存失败'));
       if (!await settled) throw new Error('Initial budget save failure was hidden');
-      const restored = createAgentTeamWorkflow(config, currentWorkflowScope);
+      const restored = createAgentTeamWorkflow(initialBudgetConfig, currentWorkflowScope);
       const blocked = (await restored.resume(initialBudgetId)).snapshot;
       if (blocked.run.status !== 'paused' || !blocked.run.pauseReason.includes('先保存平台任务预算')
         || blocked.tasks[0].attempt !== 0 || initialPlanningRequests !== 0) throw new Error('Restored planning bypassed missing budget');
@@ -228,7 +248,7 @@ try {
       const planned = (await restored.resume(initialBudgetId)).snapshot;
       if (initialPlanningRequests !== 1 || planned.tasks[0].status !== 'completed'
         || planned.run.goalSpec.platformBudget.revision !== 1) throw new Error('Budget repair failed to release first planning');
-      await createAgentTeamWorkflow(config, currentWorkflowScope).resume(initialBudgetId);
+      await createAgentTeamWorkflow(initialBudgetConfig, currentWorkflowScope).resume(initialBudgetId);
       if (initialPlanningRequests !== 1) throw new Error('Budget recovery duplicated first planning');
     } finally {
       initialBudgetApi.configureWorkflowBudget = originalInitialBudgetSave;

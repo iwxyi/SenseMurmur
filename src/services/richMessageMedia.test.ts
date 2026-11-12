@@ -3,7 +3,7 @@ import type { AICharacter } from '../types/character';
 import type { Message } from '../types/message';
 import type { AIModelProfile } from '../types/settings';
 import { getRecentRichMediaGenerationErrors, getRichMediaQueueSnapshot, processRichMessageMedia, resetRichMediaQueueForTests, retryRichMessageMedia, scrubLocalMediaUrlsForCloud, subscribeRichMediaQueue } from './richMessageMedia';
-import { generateAudioWithAdapter, generateImageWithAdapter, generateVideoWithAdapter } from './aiGenerationAdapter';
+import { generateAudioWithAdapter, generateImageWithAdapter, generateVideoWithAdapter, synthesizeSpeechWithAdapter } from './aiGenerationAdapter';
 import { waitForAiMediaTask } from './aiClient';
 import { api, ApiError } from './api';
 import { runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
@@ -523,6 +523,22 @@ describe('processRichMessageMedia', () => {
       upsertMessage: (next) => upserts.push(next) })).rejects.toBe(rejection);
     expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'failed',
       admissionRejection: { code: 'WORKFLOW_BUDGET_EXHAUSTED', status: 402 } });
+  });
+
+  it('rejects unaccounted direct narration before synthesis and preserves its budget rejection', async () => {
+    const message = buildQueuedImageMessage({ metadata: {
+      agentTeamMedia: { runId: 'budget', taskId: 'narration' },
+      workflowUsage: { schemaVersion: 1, runId: 'budget', taskId: 'narration', attempt: 1, kind: 'tool', budgetRevision: 1 },
+      attachments: [{ id: 'voice', kind: 'audio', audioPurpose: 'chat_voice', status: 'queued',
+        altText: '旁白', promptText: '旁白正文', createdAt: 123, updatedAt: 123 }],
+    } });
+    const upserts: Message[] = [];
+    await expect(processRichMessageMedia({ message, aiProfiles: [{ ...imageProfile, type: 'tts' }],
+      upsertMessage: (next) => upserts.push(next) })).rejects.toMatchObject({ code: 'WORKFLOW_BUDGET_CHANNEL_UNSUPPORTED', status: 409 });
+    expect(synthesizeSpeechWithAdapter).not.toHaveBeenCalled();
+    expect(api.synthesizeSpeech).not.toHaveBeenCalled();
+    expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'failed',
+      admissionRejection: { code: 'WORKFLOW_BUDGET_CHANNEL_UNSUPPORTED', status: 409 } });
   });
 
   it('recovers a submitted video by request key without submitting or charging again', async () => {
