@@ -3,7 +3,7 @@ import { Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, D
 import type { WorkflowSnapshot, WorkflowTask } from '../../services/workflowRunRuntime';
 import { summarizeWorkflowRun } from '../../services/workflowRunRuntime';
 import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
-import { buildAgentTeamTaskRevisionRequest, isRecoverableAgentTeamRun } from '../../services/agentTeamWorkflow';
+import { buildAgentTeamTaskRevisionRequest, isRecoverableAgentTeamRun, MAX_TEAM_RUN_TASKS } from '../../services/agentTeamWorkflow';
 
 interface Props {
   runs: WorkflowSnapshot[];
@@ -79,7 +79,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const failedReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'failed');
   const failedPlan = run.tasks.find((item) => (item.kind === 'team_plan' || item.kind === 'team_plan_revision') && item.status === 'failed');
   const canAddRevision = canRun && (run.run.status === 'paused' || run.run.status === 'completed')
-    && run.tasks.length < 24
+    && run.tasks.length < MAX_TEAM_RUN_TASKS
     && !run.tasks.some((item) => item.status === 'running' || item.status === 'result_unknown' || item.status === 'failed'
       || (item.kind === 'team_plan_revision' && item.status !== 'completed'));
   const canReviseSelectedTask = Boolean(canAddRevision && task && details && childTasks.includes(task)

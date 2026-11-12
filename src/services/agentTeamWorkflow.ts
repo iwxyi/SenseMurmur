@@ -29,7 +29,7 @@ const TOOL_TASK_KINDS = {
   text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio',
   image_inspection: 'agent_image_inspection', video_generation: 'agent_video',
 } as const;
-const MAX_TEAM_RUN_TASKS = 64;
+export const MAX_TEAM_RUN_TASKS = 64;
 
 function teamTaskKind(task: AgentTeamTask) { return TOOL_TASK_KINDS[task.tool || 'text_generation']; }
 function isAgentTaskKind(kind: string) { return Object.values(TOOL_TASK_KINDS).some((value) => value === kind); }
