@@ -997,7 +997,7 @@ class ApiClient {
     return this.request<AiMediaTask>('GET', `/ai/media/tasks/${encodeURIComponent(taskId)}`);
   }
 
-  async downloadAiMediaTaskContent(taskId: string, kind: 'audio' | 'video' = 'video') {
+  async downloadAiMediaTaskContent(taskId: string, kind: 'image' | 'audio' | 'video' = 'video') {
     const response = await this.fetchWithAuth(backendUrl(`${API_BASE}/media-assets/from-ai-task/${encodeURIComponent(taskId)}/content?kind=${kind}`), { method: 'GET' });
     if (!response.ok) {
       const failure = await this.parseJsonResponse<{ error?: string; code?: string }>(response).catch((): { error?: string; code?: string } => ({}));
@@ -1006,7 +1006,7 @@ class ApiClient {
     return response.blob();
   }
 
-  async createMediaAssetFromAiTask(input: { chatId: string; messageId: string; attachmentId: string; taskId: string; kind?: 'audio' | 'video'; description?: string; promptText?: string }, options: { signal?: AbortSignal } = {}) {
+  async createMediaAssetFromAiTask(input: { chatId: string; messageId: string; attachmentId: string; taskId: string; kind?: 'image' | 'audio' | 'video'; description?: string; promptText?: string }, options: { signal?: AbortSignal } = {}) {
     const fence = getChatExecutionFence(input.chatId);
     return this.request<{ id: string; url: string; mimeType: string; sizeBytes: number; checksum?: string }>('POST', '/media-assets/from-ai-task', {
       ...input,
