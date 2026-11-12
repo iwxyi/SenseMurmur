@@ -15,12 +15,14 @@ import { createSyncScopeMetadata } from './syncScopeMetadata';
 import { useChatStore } from './useChatStore';
 import { useLocalWorkspaceStore } from './useLocalWorkspaceStore';
 import { removeAssistantArtifactFromLocalWorkspace } from '../services/localWorkspaceService';
+import { projectWorkflowArtifacts, type WorkflowArtifactProjection } from '../services/workflowDelivery';
 
 interface AssistantArtifactSnapshot {
   items: AssistantArtifactItem[];
 }
 
 interface AssistantArtifactStore extends AssistantArtifactSnapshot {
+  applyWorkflowDelivery: (projections: WorkflowArtifactProjection[]) => AssistantArtifactItem[];
   upsertArtifactsFromMessage: (params: {
     chatId: string;
     messageId: string;
@@ -327,6 +329,17 @@ export const useAssistantArtifactStore = create<AssistantArtifactStore>()(
   persist(
     (set, get) => ({
       items: [],
+
+      applyWorkflowDelivery: (projections) => {
+        set((state) => ({ items: projectWorkflowArtifacts(state.items, projections) }));
+        const items = projections.map(({ after }) => after);
+        for (const chatId of new Set(items.map((item) => item.chatId))) {
+          const changed = items.filter((item) => item.chatId === chatId);
+          scheduleArtifactCloudPush(chatId, changed.map((item) => item.id));
+          scheduleArtifactLocalWorkspaceWrite(chatId, changed);
+        }
+        return items;
+      },
 
       upsertArtifactsFromMessage: ({ chatId, messageId, drafts, timestamp }) => {
         if (!drafts.length) return [];

@@ -9,6 +9,7 @@ import { useMessageStore } from '../stores/useMessageStore';
 import { commitBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { scopedStorageKey } from '../constants/brand';
 import { getLocalDataUserId } from './authStorageScope';
+import { WorkflowDeliveryConflictError, workflowDeliveryMessageIdentity, type WorkflowArtifactProjection } from './workflowDelivery';
 import { currentWorkflowScope, workflowRunLockName } from './workflowRunRuntime';
 import { attachMessageToActiveBranch } from './messageBranching';
 import { advanceTeamConversation, captureTeamSourceBranch, teamConversationBlockReason, teamConversationContext } from './agentTeamConversation';
@@ -860,6 +861,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const snapshot = await runtime.read(runId);
       if (!snapshot || snapshot.run.status !== 'completed') throw new Error('团队任务尚未完成');
       if (snapshot.run.chatId !== chatId) throw new Error('团队交付会话已变化');
+      try {
       await Promise.all([
         ensureAssistantArtifactStoreHydrated(),
         useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
@@ -870,6 +872,15 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId && item.deletedAt == null);
       if (!chat || chat.type !== 'assistant') throw new Error('交付会话不可用');
       const sourceId = `team-delivery-${runId}`;
+      let delivery = snapshot.run.delivery?.planVersion === snapshot.run.planVersion ? snapshot.run.delivery : undefined;
+      if (delivery && snapshot.run.deliveryStatus === 'published') {
+        const artifactId = delivery.artifacts[0].after.id;
+        const existing = useAssistantArtifactStore.getState().items.find((item) => item.id === artifactId && item.deletedAt == null);
+        if (!existing) throw new Error('已交付产物已删除，不会自动重新创建');
+        return existing;
+      }
+      if (!delivery) {
+      const preparedAt = Date.now();
       const chatArtifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chat.id);
       const plan = validateAgentTeamPlan(snapshot.tasks.find((task) => task.id === 'plan')?.output);
       const delegatedPlans = snapshot.tasks.filter((task) => (task.kind === 'team_plan_revision' || task.kind === 'agent_delegation') && task.status === 'completed'
@@ -886,48 +897,80 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       });
       const declared = completed.filter((item) => item.task.deliverable);
       const untyped = completed.filter((item) => !item.task.deliverable);
-      const artifacts: Array<AssistantArtifactItem | null> = [];
-      const store = useAssistantArtifactStore.getState();
-      const upsert = (artifactSourceId: string, kind: 'document' | 'code' | 'diagram' | 'html' | 'table' | 'json' | 'text', title: string, content: string, summary: string, language?: string) => {
+      const artifacts: AssistantArtifactItem[] = [];
+      const projections: WorkflowArtifactProjection[] = [];
+      const prepareArtifact = (artifactSourceId: string, kind: 'document' | 'code' | 'diagram' | 'html' | 'table' | 'json' | 'text', title: string, content: string, summary: string, language?: string) => {
         const existing = chatArtifacts.find((item) => item.sourceMessageId === artifactSourceId);
         const current = existing?.versions.find((item) => item.id === existing.currentVersionId);
-        if (current?.content.trim() === content.trim()) return existing!;
-        return store.upsertArtifactsFromMessage({ chatId: chat.id, messageId: artifactSourceId, drafts: [{
-          kind, title, content, summary, language,
-          ...(existing ? { action: 'update' as const, targetArtifactId: existing.id, baseVersionId: existing.currentVersionId } : {}),
-        }] })[0] || null;
+        const id = existing?.id || `team-artifact-${artifactSourceId}`;
+        const versionId = `${id}:plan:${snapshot.run.planVersion}`;
+        const after: AssistantArtifactItem = current?.content.trim() === content.trim() ? existing! : {
+          ...existing, id, chatId: chat.id, kind, title, summary, language: language || null,
+          sourceMessageId: artifactSourceId, currentVersionId: versionId,
+          versions: [...(existing?.versions || []), {
+            id: versionId, artifactId: id, content, language: language || null, sourceMessageId: artifactSourceId,
+            baseVersionId: existing?.currentVersionId || null, createdAt: preparedAt, updatedAt: preparedAt,
+            revision: (existing?.revision || 0) + 1,
+            stage: kind === 'html' ? existing ? 'ai_result' as const : 'generated' as const : undefined,
+          }].slice(-12),
+          revision: (existing?.revision || 0) + 1, createdAt: existing?.createdAt || preparedAt,
+          updatedAt: preparedAt, deletedAt: null, sortOrder: existing?.sortOrder ?? preparedAt,
+        };
+        projections.push({ before: existing || null, after });
+        return after;
       };
       assertDeliveryOwnership();
       for (const { task, id, output } of declared) {
         const spec = task.deliverable!;
-        artifacts.push(upsert(`${sourceId}:${id}`, spec.kind, spec.title, output, task.acceptance, spec.language));
+        artifacts.push(prepareArtifact(`${sourceId}:${id}`, spec.kind, spec.title, output, task.acceptance, spec.language));
       }
       const summaryContent = declared.length
         ? [`# ${plan.summary}`, ...untyped.map(({ task, output }) => `## ${task.goal}\n\n${output}`)].join('\n\n')
         : [`# ${plan.summary}`, ...completed.map(({ task, output }) => `## ${task.goal}\n\n${output}`)].join('\n\n');
       if (!declared.length || untyped.length) {
-        artifacts.push(upsert(sourceId, 'document', plan.summary.slice(0, 60), summaryContent,
+        artifacts.push(prepareArtifact(sourceId, 'document', plan.summary.slice(0, 60), summaryContent,
           delegatedPlans.at(-1)?.plan.finalAcceptance || plan.finalAcceptance));
       }
-      const savedArtifacts = artifacts.filter((item): item is AssistantArtifactItem => Boolean(item));
-      if (!savedArtifacts.length || savedArtifacts.length !== artifacts.length) throw new Error('团队交付产物保存失败');
+      if (!artifacts.length) throw new Error('团队任务没有可交付产物');
       if (signal?.aborted) throw signal.reason || new Error('团队交付已暂停');
       assertDeliveryOwnership();
       const messageStore = useMessageStore.getState();
       const known = [...messageStore.messages, ...(messageStore.messageWindowsByChatId[chat.id]?.messages || [])];
       const previousDelivery = known.find((item) => item.id === sourceId || item.clientKey === sourceId);
-      const artifactRefs = savedArtifacts.map((item) => ({ id: item.id, kind: item.kind, title: item.title, versionId: item.currentVersionId }));
-      const refsChanged = JSON.stringify(previousDelivery?.metadata?.assistant?.artifacts || []) !== JSON.stringify(artifactRefs);
-      if (!previousDelivery || refsChanged) {
+      const artifactRefs = artifacts.map((item) => ({ id: item.id, kind: item.kind, title: item.title, versionId: item.currentVersionId }));
         const draft = attachMessageToActiveBranch(teamConversationContext(chat, snapshot.run.goalSpec), known, {
           id: sourceId, clientKey: sourceId, chatId: chat.id, type: 'ai' as const,
           senderId: 'assistant', senderName: '助手', content: `${previousDelivery ? '团队任务已更新' : '团队任务已完成'}：${plan.summary}`,
-          emotion: 0, timestamp: previousDelivery?.timestamp || Date.now(), isDeleted: false,
+          emotion: 0, timestamp: previousDelivery?.timestamp || preparedAt, isDeleted: false,
           metadata: { format: 'markdown' as const, assistant: { mode: 'general' as const, artifacts: artifactRefs } },
         }) as Message;
+      delivery = await runtime.prepareDelivery(runId, snapshot.run.planVersion, {
+        schemaVersion: 1, runId, chatId: chat.id, planVersion: snapshot.run.planVersion, preparedAt,
+        artifacts: projections, message: draft, previousMessageIdentity: workflowDeliveryMessageIdentity(previousDelivery),
+      });
+      }
+      assertDeliveryOwnership();
+      const messageStore = useMessageStore.getState();
+      const previous = [...messageStore.messages, ...(messageStore.messageWindowsByChatId[chat.id]?.messages || [])]
+        .find((item) => item.id === sourceId || item.clientKey === sourceId);
+      const previousIdentity = workflowDeliveryMessageIdentity(previous);
+      const nextIdentity = workflowDeliveryMessageIdentity(delivery.message);
+      if (previousIdentity !== delivery.previousMessageIdentity && previousIdentity !== nextIdentity) throw new WorkflowDeliveryConflictError('message_conflict', '交付消息已被修改，请先处理冲突后重试');
+      const savedArtifacts = useAssistantArtifactStore.getState().applyWorkflowDelivery(delivery.artifacts);
+      const draft = delivery.message;
+      if (previousIdentity !== nextIdentity) {
         useMessageStore.getState().upsertMessage(draft);
         useMessageStore.getState().queueMessageSync(draft);
-        await advanceTeamConversation(draft, snapshot.run.goalSpec?.sourceBranch);
+      }
+      const latestChat = useChatStore.getState().chats.find((item) => item.id === chat.id)!;
+      const source = snapshot.run.goalSpec?.sourceBranch;
+      const branchHead = source ? latestChat.messageBranchState?.refs?.[source.name]?.headNodeId
+        ?? latestChat.messageBranchState?.activeLeafNodeId ?? null : null;
+      const deliveryParent = draft.metadata?.branching?.parentNodeId ?? source?.headNodeId ?? null;
+      if (!source?.enabled || branchHead === deliveryParent || branchHead === sourceId) {
+        await advanceTeamConversation(draft, source);
+      }
+      if (!latestChat.latestMessage || latestChat.lastMessageAt <= draft.timestamp || latestChat.latestMessage.id === sourceId) {
         await useChatStore.getState().updateChat(chat.id, { lastMessageAt: draft.timestamp, latestMessage: draft });
       }
       await commitBufferedPersistenceWrites(deliveryStorageKeys);
@@ -935,6 +978,13 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       assertDeliveryOwnership();
       await runtime.markDeliveryPublished(runId, snapshot.run.planVersion);
       return savedArtifacts[0];
+      } catch (error) {
+        if (scope() === deliveryScope) {
+          try { await runtime.recordDeliveryIssue(runId, snapshot.run.planVersion, error instanceof WorkflowDeliveryConflictError ? error.issue : 'save_failed'); }
+          catch (saveError) { console.warn('[agent-team:delivery-issue-save-failed]', { error: saveError }); }
+        }
+        throw error;
+      }
       });
       if (getChatExecutionFence(chatId)) {
         assertDeliveryOwnership();

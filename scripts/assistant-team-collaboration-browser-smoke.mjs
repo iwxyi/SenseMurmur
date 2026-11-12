@@ -179,7 +179,7 @@ try {
     const root = createRoot(container);
     window.__assistantTeamSmoke.root = root;
     root.render(React.createElement(Workbench, {
-      runs: [persistedRun, resumableRun, secondResumableRun, uncertainRun, recursiveRun], canRun: true, isRunActive: () => false, onResume: () => {},
+      runs: [{ ...persistedRun, run: { ...persistedRun.run, deliveryStatus: 'pending', deliveryIssue: 'save_failed' } }, resumableRun, secondResumableRun, uncertainRun, recursiveRun], canRun: true, isRunActive: () => false, onResume: () => {},
       onResumeAll: async (items) => { window.__assistantTeamSmoke.resumed = items.map((item) => item.run.id); }, onCreate: () => {},
       onInstruct: async () => {}, onPause: async () => {},
       onUpdateModelCallLimit: async (item, limit) => { window.__assistantTeamSmoke.limits.push({ runId: item.run.id, limit }); },
@@ -191,6 +191,8 @@ try {
   await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('#assistant-team-smoke-root button')).some((button) => button.textContent?.includes('工作台'))`), 'workbench mounted');
   await cdp.evaluate(`Array.from(document.querySelectorAll('#assistant-team-smoke-root button')).find((button) => button.textContent?.includes('工作台')).click()`);
   await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).some((button) => button.textContent?.includes('市场分析师'))`), 'child agent selector');
+  await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"] [role="alert"]')?.textContent.includes('交付尚未保存完成') && document.querySelector('[role="dialog"]').textContent.includes('交付需处理')`), 'pending delivery error visible');
+  assert.equal(await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).some((button) => button.textContent === '检查交付')`), true);
   await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).some((button) => button.textContent?.includes('恢复所有可恢复任务 (2)'))`), 'bulk resume action');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent?.includes('恢复所有可恢复任务')).click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke?.resumed.length === 2`), 'recoverable runs resumed');

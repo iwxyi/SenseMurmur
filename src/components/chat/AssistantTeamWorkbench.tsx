@@ -5,6 +5,7 @@ import { countWorkflowModelCalls, summarizeWorkflowRun } from '../../services/wo
 import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
 import { buildAgentTeamTaskRevisionRequest, isRecoverableAgentTeamRun } from '../../services/agentTeamWorkflow';
 import TeamTaskExecutionHistory from './TeamTaskExecutionHistory';
+import { workflowDeliveryIssueLabel } from '../../services/workflowDelivery';
 
 interface Props {
   runs: WorkflowSnapshot[];
@@ -78,6 +79,8 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
     ? latestReview.output as { complete?: unknown; reason?: unknown } : null;
   const childTasks = run.tasks.filter((item) => item.kind === 'agent_delegation' || item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_image_inspection' || item.kind === 'agent_video_inspection' || item.kind === 'agent_audio' || item.kind === 'agent_video' || item.kind === 'agent_media_composition');
   const blocked = summary.blocked.length > 0;
+  const deliveryPending = run.run.status === 'completed' && run.run.deliveryStatus !== 'published';
+  const deliveryNeedsAttention = deliveryPending && Boolean(run.run.deliveryIssue);
   const running = isRunActive(run.run.id);
   const modelCallLimitReached = run.run.maxModelCalls !== undefined && countWorkflowModelCalls(run) >= run.run.maxModelCalls;
   const editable = Boolean(canRun && task && run.run.status === 'paused' && childTasks.includes(task) && task.kind !== 'agent_media_composition' && details?.tool !== 'speech_generation' && task.attempt === 0
@@ -96,7 +99,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   return <>
     <Box role="status" sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, left: 12, right: 12, zIndex: 5, display: 'flex', alignItems: 'center', gap: 1, px: 1.25, py: 0.5, borderRadius: 1.5, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider', boxShadow: 1, minWidth: 0 }}>
       <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>{run.run.goal}</Typography>
-      <Chip size="small" color={blocked ? 'warning' : running ? 'primary' : 'default'} label={blocked ? '需处理' : running ? '运行中' : `${summary.completed.length}/${run.tasks.length} 步`} />
+      <Chip size="small" color={blocked || deliveryNeedsAttention ? 'warning' : running ? 'primary' : 'default'} label={blocked || deliveryNeedsAttention ? '需处理' : running ? '运行中' : deliveryPending ? '待交付' : `${summary.completed.length}/${run.tasks.length} 步`} />
       <Button size="small" onClick={() => setOpen(true)}>工作台</Button>
     </Box>
     <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="md" aria-labelledby="team-workbench-title">
@@ -107,8 +110,9 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
         </Stack>}
         <Box>
           <Typography variant="subtitle1" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{plan?.summary || run.run.goal}</Typography>
-          <Typography variant="body2" color="text.secondary">{run.run.pauseRequested ? '当前步骤完成后暂停' : running ? '运行中' : run.run.status === 'completed' ? '已完成' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '失败' : '等待执行'} · 已完成 {summary.completed.length}/{run.tasks.length} 步{run.run.maxModelCalls ? ` · 模型调用 ${countWorkflowModelCalls(run)}/${run.run.maxModelCalls}` : ''}</Typography>
+          <Typography variant="body2" color="text.secondary">{run.run.pauseRequested ? '当前步骤完成后暂停' : running ? '运行中' : deliveryNeedsAttention ? '交付需处理' : deliveryPending ? '待交付' : run.run.status === 'completed' ? '已完成' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '失败' : '等待执行'} · 已完成 {summary.completed.length}/{run.tasks.length} 步{run.run.maxModelCalls ? ` · 模型调用 ${countWorkflowModelCalls(run)}/${run.run.maxModelCalls}` : ''}</Typography>
           {run.run.pauseReason && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">{run.run.pauseReason}</Typography>}
+          {run.run.deliveryIssue && run.run.status === 'completed' && <Typography role="alert" variant="body2" color="error.main">{workflowDeliveryIssueLabel(run.run.deliveryIssue)}</Typography>}
           {modelCallLimitReached && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">已达到模型调用上限。调整上限后可继续，已有结果会保留。</Typography>}
         </Box>
         {canRun && !running && run.run.status === 'paused' && <Box sx={{ display: 'grid', gap: 1 }}>

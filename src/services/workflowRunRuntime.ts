@@ -4,6 +4,7 @@ import { claimedTaskAttempt, parseWorkflowTaskAttempt, settleTaskAttempt, type W
 import { appliedWorkflowPlanRevision, parseWorkflowPlanRevision, type WorkflowPlanRevision } from './workflowPlanRevision';
 import { parseWorkflowGoalSpec, type WorkflowGoalSpec } from './workflowGoalSpec';
 import { isWorkflowModelTask, parseWorkflowModelInvocation, workflowModelInvocationId, type WorkflowModelInvocation } from './workflowModelInvocation';
+import { parseWorkflowDelivery, type WorkflowDelivery, type WorkflowDeliveryIssue } from './workflowDelivery';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -40,6 +41,8 @@ export interface WorkflowRun {
   pauseRequested?: boolean;
   pauseReason?: string;
   deliveryStatus?: 'pending' | 'published';
+  delivery?: WorkflowDelivery;
+  deliveryIssue?: WorkflowDeliveryIssue;
   maxModelCalls?: number;
   updatedAt: number;
 }
@@ -93,6 +96,11 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
     throw new Error('工作流恢复命令记录无效');
   }
   if (run.deliveryStatus !== undefined && run.deliveryStatus !== 'pending' && run.deliveryStatus !== 'published') throw new Error('工作流交付状态无效');
+  if (run.deliveryIssue !== undefined && !['artifact_conflict', 'message_conflict', 'save_failed'].includes(String(run.deliveryIssue))) throw new Error('工作流交付问题无效');
+  if (run.delivery !== undefined) {
+    const delivery = parseWorkflowDelivery(run.delivery);
+    if (delivery.runId !== run.id || delivery.chatId !== run.chatId || delivery.planVersion > Number(run.planVersion)) throw new Error('工作流交付清单归属无效');
+  }
   if (run.maxModelCalls !== undefined && (!Number.isSafeInteger(run.maxModelCalls) || (run.maxModelCalls as number) < 1 || (run.maxModelCalls as number) > 1000)) throw new Error('工作流模型调用上限无效');
 
   const taskIds = new Set<string>();
@@ -298,6 +306,8 @@ function hasWorkflowStateChange(current: WorkflowSnapshot | null, next: Workflow
     || current.run.generation !== next.run.generation
     || current.run.planVersion !== next.run.planVersion
     || current.run.deliveryStatus !== next.run.deliveryStatus
+    || current.run.deliveryIssue !== next.run.deliveryIssue
+    || JSON.stringify(current.run.delivery) !== JSON.stringify(next.run.delivery)
     || current.run.pauseRequested !== next.run.pauseRequested
     || current.run.pauseReason !== next.run.pauseReason
     || current.run.planOpen !== next.run.planOpen;
@@ -513,6 +523,12 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
           const next = update(migratedCurrent === null ? null : structuredClone(migratedCurrent));
           const migratedNext = migrateWorkflowSnapshot(next.snapshot);
           if (migratedCurrent && JSON.stringify(migratedCurrent.run.goalSpec) !== JSON.stringify(migratedNext.run.goalSpec)) throw new Error('目标契约不能在执行中替换，请新建任务以变更目标授权');
+          const previousDelivery = migratedCurrent?.run.delivery;
+          if (JSON.stringify(previousDelivery) !== JSON.stringify(migratedNext.run.delivery) && migratedNext.run.delivery
+            && (migratedNext.run.status !== 'completed' || migratedNext.run.delivery.planVersion !== migratedNext.run.planVersion)) throw new Error('只能为当前已完成计划准备交付清单');
+          if (previousDelivery && (!migratedNext.run.delivery || migratedNext.run.delivery.planVersion < previousDelivery.planVersion
+            || (migratedNext.run.delivery.planVersion === previousDelivery.planVersion
+              && JSON.stringify(previousDelivery) !== JSON.stringify(migratedNext.run.delivery)))) throw new Error('已准备的交付清单不可修改');
           const revision = appliedWorkflowPlanRevision(migratedCurrent, migratedNext);
           value = next.value;
           store.put(migratedNext, rowKey(scope, runId));
@@ -788,12 +804,33 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
+  async function prepareDelivery(runId: string, expectedPlanVersion: number, value: WorkflowDelivery) {
+    const delivery = parseWorkflowDelivery(value);
+    return mutate(scope(), runId, (current) => {
+      if (current.run.status !== 'completed' || current.run.planVersion !== expectedPlanVersion
+        || delivery.runId !== runId || delivery.chatId !== current.run.chatId || delivery.planVersion !== expectedPlanVersion) throw new Error('工作流交付版本冲突');
+      if (current.run.delivery?.planVersion === expectedPlanVersion) {
+        if (JSON.stringify(current.run.delivery) !== JSON.stringify(delivery)) throw new Error('已准备的交付清单不可修改');
+        return { snapshot: current, value: current.run.delivery };
+      }
+      return { snapshot: { ...current, run: { ...current.run, delivery, deliveryStatus: 'pending' as const, updatedAt: Date.now() } }, value: delivery };
+    });
+  }
+
   async function markDeliveryPublished(runId: string, expectedPlanVersion: number) {
     return mutate(scope(), runId, (current) => {
       if (current.run.status !== 'completed') throw new Error('只能确认已完成的工作流交付');
       if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流交付版本冲突');
       if (current.run.deliveryStatus === 'published') return { snapshot: current, value: current };
-      const snapshot = { ...current, run: { ...current.run, deliveryStatus: 'published' as const, updatedAt: Date.now() } };
+      const snapshot = { ...current, run: { ...current.run, deliveryStatus: 'published' as const, deliveryIssue: undefined, updatedAt: Date.now() } };
+      return { snapshot, value: snapshot };
+    });
+  }
+
+  async function recordDeliveryIssue(runId: string, expectedPlanVersion: number, issue: WorkflowDeliveryIssue) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.status !== 'completed' || current.run.planVersion !== expectedPlanVersion || current.run.deliveryStatus === 'published') return { snapshot: current, value: current };
+      const snapshot = { ...current, run: { ...current.run, deliveryIssue: issue, updatedAt: Date.now() } };
       return { snapshot, value: snapshot };
     });
   }
@@ -994,5 +1031,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, setModelCallLimit, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamPlan, addTasksOnce, expandPlanOnce, closePlan, markDeliveryPublished, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, setModelCallLimit, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamPlan, addTasksOnce, expandPlanOnce, closePlan, prepareDelivery, markDeliveryPublished, recordDeliveryIssue, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }

@@ -168,9 +168,22 @@ try {
       const restarted = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'browser-smoke', baseUrl: 'https://mock-llm.invalid/v1', model: 'smoke-model' }, currentWorkflowScope);
       await restarted.resume(stalledRunId);
       if (requests.length !== deliveryModelCalls + 6) throw new Error('重新打开后重复了无进展请求');
+      const stalledModelCalls = requests.length - deliveryModelCalls;
+      const interruptedRunId = 'browser-team-delivery-' + crypto.randomUUID();
+      responseSequence = [JSON.stringify(plan), '中断后应恢复的报告', '| 类别 | 数量 |\\n| A | 3 |'];
+      await workflow.start(interruptedRunId, chatId, '验证交付清单恢复');
+      const applyDelivery = useAssistantArtifactStore.getState().applyWorkflowDelivery;
+      useAssistantArtifactStore.setState({ applyWorkflowDelivery: () => { throw new Error('browser simulated shutdown after intent'); } });
+      let interrupted = false;
+      try { await workflow.publish(interruptedRunId); }
+      catch (error) { if (!error.message.includes('simulated shutdown')) throw error; interrupted = true; }
+      finally { useAssistantArtifactStore.setState({ applyWorkflowDelivery: applyDelivery }); }
+      if (!interrupted) throw new Error('没有模拟到清单保存后的中断');
+      const intent = (await workflow.read(interruptedRunId)).run.delivery;
+      if (!intent || useAssistantArtifactStore.getState().items.some((item) => intent.artifacts.some((entry) => entry.after.id === item.id))) throw new Error('清单中断边界错误');
       window.fetch = originalFetch;
       return {
-        runId, chatId,
+        runId, chatId, interruptedRunId, interruptedVersions: intent.artifacts.map((entry) => entry.after.currentVersionId),
         status: afterFirstDelivery?.run.status,
         deliveryStatus: afterFirstDelivery?.run.deliveryStatus,
         taskStatuses: afterFirstDelivery?.tasks.map((task) => task.status),
@@ -183,7 +196,7 @@ try {
         branchRecovery: branchPaused.snapshot.run.status === 'paused' && !completed.snapshot.run.pauseReason
           && messages[0]?.metadata?.branching?.parentNodeId === 'source-node',
         stalledStatus: stalled.snapshot.run.status,
-        stalledModelCalls: requests.length - deliveryModelCalls,
+        stalledModelCalls,
       };
     } finally { window.fetch = originalFetch; }
   })()`);
@@ -208,17 +221,37 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.equal(reloaded, true, 'Browser did not reload');
+  let automaticallyPublished = false;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    automaticallyPublished = await cdp.evaluate(`(async () => {
+      const { currentWorkflowScope, indexedDbWorkflowRepository } = await import('/src/services/workflowRunRuntime.ts');
+      return (await indexedDbWorkflowRepository.read(currentWorkflowScope(), ${JSON.stringify(result.interruptedRunId)}))?.run.deliveryStatus === 'published';
+    })()`);
+    if (automaticallyPublished) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(automaticallyPublished, true, 'Application startup did not restore pending delivery');
   const restored = await cdp.evaluate(`(async () => {
-    const [{ useMessageStore }, { useAssistantArtifactStore }, { currentWorkflowScope, indexedDbWorkflowRepository }] = await Promise.all([
+    const [{ useMessageStore }, { useAssistantArtifactStore }, { currentWorkflowScope, indexedDbWorkflowRepository }, { createAgentTeamWorkflow }] = await Promise.all([
       import('/src/stores/useMessageStore.ts'), import('/src/stores/useAssistantArtifactStore.ts'), import('/src/services/workflowRunRuntime.ts'),
+      import('/src/services/agentTeamWorkflow.ts'),
     ]);
     window.__cleanupDeliveryFixture = (${cleanupSource});
     await Promise.all([useMessageStore.persist.rehydrate(), useAssistantArtifactStore.persist.rehydrate()]);
     const chatId = ${JSON.stringify(result.chatId)};
     const runId = ${JSON.stringify(result.runId)};
+    const interruptedRunId = ${JSON.stringify(result.interruptedRunId)};
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'browser-smoke', baseUrl: 'https://mock-llm.invalid/v1', model: 'smoke-model' }, currentWorkflowScope);
+    await workflow.publish(interruptedRunId);
+    await workflow.publish(interruptedRunId);
+    const restoredIntent = (await workflow.read(interruptedRunId)).run.delivery;
+    const interruptedVersions = restoredIntent.artifacts.map((entry) => entry.after.currentVersionId);
+    if (JSON.stringify(interruptedVersions) !== JSON.stringify(${JSON.stringify(result.interruptedVersions)})) throw new Error('恢复替换了原清单版本');
     const snapshot = await indexedDbWorkflowRepository.read(currentWorkflowScope(), runId);
     const messages = [...useMessageStore.getState().messages, ...(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages || [])];
-    const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId);
+    const artifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId).filter((item) => item.sourceMessageId.startsWith('team-delivery-' + runId));
+    const resumedArtifacts = useAssistantArtifactStore.getState().getArtifactsForChat(chatId).filter((item) => item.sourceMessageId.startsWith('team-delivery-' + interruptedRunId));
+    if (resumedArtifacts.length !== 2 || resumedArtifacts.some((item) => item.versions.length !== 1)) throw new Error('清单恢复重复或丢失产物');
     return { published: snapshot?.run.deliveryStatus === 'published',
       message: messages.some((item) => item.id === 'team-delivery-' + runId),
       artifacts: artifacts.length, versions: artifacts.map((item) => item.versions.length) };
@@ -226,7 +259,10 @@ try {
   assert.deepEqual(restored, { published: true, message: true, artifacts: 2, versions: [1, 1] });
   delete result.runId;
   delete result.chatId;
+  delete result.interruptedRunId;
+  delete result.interruptedVersions;
   result.reloadRecovery = true;
+  result.intentRecovery = true;
   console.log(JSON.stringify({ ok: true, ...result }));
 } finally {
   await cdp.evaluate('window.__cleanupDeliveryFixture?.()').catch((error) => console.error('Fixture cleanup failed:', error));

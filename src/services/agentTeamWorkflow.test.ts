@@ -1289,7 +1289,7 @@ describe('agent team workflow', () => {
     expect(await indexedDbWorkflowRepository.listOutboxEvents(scope, runId, 'team-delivery')).toHaveLength(0);
   });
 
-  it.each(['message', 'transaction'])('retries delivery without duplicate versions after a %s failure', async (failure) => {
+  it.each(['artifact', 'message', 'transaction', 'edited-artifact', 'edited-message', 'later-message'])('recovers or blocks the immutable delivery after a %s failure', async (failure) => {
     const runId = `team-${crypto.randomUUID()}`;
     const chatId = `partial-delivery-${runId}`;
     const scope = currentWorkflowScope();
@@ -1303,22 +1303,67 @@ describe('agent team workflow', () => {
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
     await workflow.start(runId, chatId, '写报告');
     const messageStore = useMessageStore.getState();
-    const interrupted = failure === 'message'
+    const interrupted = failure === 'artifact'
+      ? vi.spyOn(useAssistantArtifactStore.getState(), 'applyWorkflowDelivery').mockImplementationOnce(() => { throw new Error('模拟交付写入失败'); })
+      : failure === 'message' || failure === 'edited-artifact'
       ? vi.spyOn(messageStore, 'upsertMessage').mockImplementationOnce(() => { throw new Error('模拟交付写入失败'); })
       : vi.spyOn(persistence, 'commitBufferedPersistenceWrites').mockRejectedValueOnce(new Error('模拟交付写入失败'));
     await expect(workflow.publish(runId)).rejects.toThrow('模拟交付写入失败');
     interrupted.mockRestore();
-    expect((await indexedDbWorkflowRepository.read(scope, runId))?.run.deliveryStatus).toBeUndefined();
-    expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)).toHaveLength(1);
-    const versionId = useAssistantArtifactStore.getState().getArtifactsForChat(chatId)[0].currentVersionId;
+    const prepared = await indexedDbWorkflowRepository.read(scope, runId);
+    expect(prepared?.run.deliveryStatus).toBe('pending');
+    expect(prepared?.run.deliveryIssue).toBe('save_failed');
+    await indexedDbWorkflowRepository.registerOutboxConsumer(scope, runId, 'team-delivery');
+    expect((await indexedDbWorkflowRepository.listOutboxEvents(scope, runId, 'team-delivery')).length).toBeGreaterThan(0);
+    expect(prepared?.run.delivery?.message.id).toBe(`team-delivery-${runId}`);
+    await expect(indexedDbWorkflowRepository.transact(scope, runId, (current) => {
+      if (!current?.run.delivery) throw new Error('缺少交付清单');
+      current.run.delivery.message.content = '篡改交付清单';
+      return { snapshot: current, value: undefined };
+    })).rejects.toThrow('交付清单不可修改');
+    expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)).toHaveLength(failure === 'artifact' ? 0 : 1);
+    const versionId = prepared!.run.delivery!.artifacts[0].after.currentVersionId;
+    if (failure === 'later-message') {
+      const newerMessage = { ...prepared!.run.delivery!.message, id: `newer-${runId}`, clientKey: `newer-${runId}`,
+        content: '之后的新消息', timestamp: prepared!.run.delivery!.message.timestamp + 1000 };
+      useMessageStore.getState().upsertMessage(newerMessage);
+      await useChatStore.getState().updateChat(chatId, { latestMessage: newerMessage, lastMessageAt: newerMessage.timestamp });
+    }
+    if (failure === 'edited-artifact') {
+      useAssistantArtifactStore.setState((state) => ({ items: state.items.map((item) => item.chatId !== chatId ? item : {
+        ...item, versions: item.versions.map((version) => ({ ...version, content: '用户亲自修改的内容' })),
+      }) }));
+      await expect(workflow.publish(runId)).rejects.toThrow('产物已被修改');
+      expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)[0].versions[0].content).toBe('用户亲自修改的内容');
+      expect((await workflow.read(runId))?.run.deliveryStatus).toBe('pending');
+      expect((await workflow.read(runId))?.run.deliveryIssue).toBe('artifact_conflict');
+      expect(generate).toHaveBeenCalledTimes(2);
+      await indexedDbWorkflowRepository.transact(scope, runId, (current) => ({ snapshot: { ...current!, run: { ...current!.run, status: 'cancelled' } }, value: undefined }));
+      return;
+    }
+    if (failure === 'edited-message') {
+      const message = useMessageStore.getState().messageWindowsByChatId[chatId]!.messages.find((item) => item.id === `team-delivery-${runId}`)!;
+      useMessageStore.getState().upsertMessage({ ...message, content: '用户修改了交付消息' });
+      await expect(workflow.publish(runId)).rejects.toThrow('交付消息已被修改');
+      expect((await workflow.read(runId))?.run.deliveryStatus).toBe('pending');
+      expect((await workflow.read(runId))?.run.deliveryIssue).toBe('message_conflict');
+      expect(generate).toHaveBeenCalledTimes(2);
+      await indexedDbWorkflowRepository.transact(scope, runId, (current) => ({ snapshot: { ...current!, run: { ...current!.run, status: 'cancelled' } }, value: undefined }));
+      return;
+    }
 
     expect(await recoverAgentTeamRuns()).toBe(true);
     expect((await indexedDbWorkflowRepository.read(scope, runId))?.run.deliveryStatus).toBe('published');
+    expect((await workflow.read(runId))?.run.deliveryIssue).toBeUndefined();
+    expect(await indexedDbWorkflowRepository.listOutboxEvents(scope, runId, 'team-delivery')).toHaveLength(0);
     expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)).toHaveLength(1);
     expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)[0].currentVersionId).toBe(versionId);
     expect(useAssistantArtifactStore.getState().getArtifactsForChat(chatId)[0].versions).toHaveLength(1);
     expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.filter((message) => message.id === `team-delivery-${runId}`)).toHaveLength(1);
     expect(generate).toHaveBeenCalledTimes(2);
+    if (failure === 'later-message') {
+      expect(useChatStore.getState().chats.find((chat) => chat.id === chatId)?.latestMessage?.id).toBe(`newer-${runId}`);
+    }
   });
 
   it('preserves an interrupted review as unknown instead of evaluating or publishing it again', async () => {
