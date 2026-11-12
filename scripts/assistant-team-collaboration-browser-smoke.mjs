@@ -151,6 +151,42 @@ try {
       window.fetch = originalFetch;
       useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== recursiveChatId) }));
     }
+    const textRunId = 'browser-collab-saved-text-' + crypto.randomUUID();
+    const textChatId = textRunId + '-chat';
+    const originalText = '逐字保留：' + '完整研究正文。'.repeat(400) + '末尾结论必须保留';
+    const textSnapshot = { ...run, run: { ...run.run, id: textRunId, chatId: textChatId, autoReview: false },
+      tasks: run.tasks.map((task) => ({ ...task, runId: textRunId, ...(task.id === 'research' ? { output: originalText } : {}) })) };
+    await runtime.create(textSnapshot);
+    const { listTeamSavedText } = await import('/src/services/agentTeamSavedText.ts');
+    const savedText = listTeamSavedText(textSnapshot, ['research']).map((entry) => ({ ...entry, alias: 'original_report' }));
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: textChatId, type: 'assistant', name: '历史正文验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));
+    let savedTextRequests = 0;
+    window.fetch = async (input, init) => {
+      if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
+      const request = JSON.parse(init.body);
+      let content;
+      if (savedTextRequests === 0) {
+        if (!JSON.stringify(request.messages).includes(savedText[0].outputSha256)) throw new Error('Missing exact text version catalog');
+        content = JSON.stringify({ ...plan, tasks: [{ ...plan.tasks[0], id: 'followup', dependsOn: [], savedText }] });
+      } else if (savedTextRequests === 1) {
+        if (!JSON.stringify(request.messages).includes(originalText)) throw new Error('Saved text was truncated to a summary');
+        content = '已根据完整研究正文完成后续交付';
+      } else throw new Error('Saved text recovery repeated a model request');
+      savedTextRequests++;
+      return Response.json({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
+    };
+    try {
+      await createAgentTeamWorkflow(config, currentWorkflowScope).addRevisionRequest(textRunId, 2, '使用原报告全文继续分析');
+      const restoredText = createAgentTeamWorkflow(config, currentWorkflowScope);
+      const done = (await restoredText.resume(textRunId)).snapshot;
+      await createAgentTeamWorkflow(config, currentWorkflowScope).resume(textRunId);
+      if (done.run.status !== 'completed' || savedTextRequests !== 2
+        || done.tasks.find((task) => task.id === 'research').attempt !== 1
+        || done.tasks.find((task) => task.id === 'research').output !== originalText) throw new Error('Exact saved text recovery failed');
+    } finally {
+      window.fetch = originalFetch;
+      useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== textChatId) }));
+    }
     const journalRunId = 'browser-collab-journal-' + crypto.randomUUID();
     await runtime.create({ ...run, run: { ...run.run, id: journalRunId, status: 'paused' },
       tasks: run.tasks.map((task) => ({ ...task, runId: journalRunId })) });
@@ -334,7 +370,7 @@ try {
   await cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root button').click()`);
   await waitFor(() => cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root')?.textContent.includes('工具执行已完成')`), 'persisted tool history visible');
   assert.doesNotMatch(await cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root').textContent`), /browser-collab-|agent_web_search|research/);
-  console.log(JSON.stringify({ ok: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
+  console.log(JSON.stringify({ ok: true, exactSavedTextRecovery: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } catch (error) {
   console.error(JSON.stringify({ browserErrors: cdp.errors }));
   throw error;

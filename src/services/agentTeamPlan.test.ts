@@ -275,4 +275,15 @@ describe('agent team plan', () => {
     oversized.roles = Array.from({ length: 9 }, (_, index) => ({ ...oversized.roles[0], id: `role_${index}` }));
     expect(() => validateAgentTeamPlan(oversized)).toThrow('规模超出限制');
   });
+
+  it('accepts only exact saved text versions supplied by the authorized planning catalog', async () => {
+    const original = valid();
+    const reference = { alias: 'original', taskId: 'older_report', attempt: 2, outputSha256: 'a'.repeat(64) };
+    const plan = { ...original, tasks: [{ ...original.tasks[0], dependsOn: [], savedText: [reference] }] };
+    const api = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    vi.mocked(generateResponse).mockResolvedValue(JSON.stringify(plan));
+    await expect(planAgentTeam({ api, goal: '复用原报告' })).rejects.toThrow('未授权或版本不符的历史文字');
+    await expect(planAgentTeam({ api, goal: '复用原报告', savedText: [{ ...reference, attempt: 3 }] })).rejects.toThrow('未授权或版本不符的历史文字');
+    await expect(planAgentTeam({ api, goal: '复用原报告', savedText: [reference] })).resolves.toMatchObject({ tasks: [{ savedText: [reference] }] });
+  });
 });

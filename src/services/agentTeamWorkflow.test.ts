@@ -20,6 +20,7 @@ import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
 import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
 import { countWorkflowModelCalls } from './workflowRunRuntime';
 import { listTeamSavedMedia } from './agentTeamSavedMedia';
+import { listTeamSavedText } from './agentTeamSavedText';
 import * as persistence from '../stores/storePersistenceScope';
 
 vi.mock('./agentTeamMediaComposition', () => ({ canComposeTeamMedia: () => true, composeAgentTeamMedia: vi.fn(), inspectAgentTeamComposition: vi.fn(), teamMediaAttachment: vi.fn() }));
@@ -112,6 +113,55 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it.each(['text_generation', 'image_generation', 'video_generation', 'audio_generation', 'speech_generation', 'delegate_task'] as const)('restores exact historical text for %s without rewriting the source', async (tool) => {
+    const runId = crypto.randomUUID();
+    const scope = `saved-text-${runId}`;
+    const now = Date.now();
+    const original = `逐字保留原稿：${'故事内容。'.repeat(400)}最后一句必须保留。`;
+    const role = { id: 'writer', name: '作者', responsibility: '制作', method: '复用', acceptance: '准确', allowedTools: ['text_generation'] };
+    const sourceTask = { id: 'source', roleId: role.id, goal: '写原稿', acceptance: '准确', dependsOn: [], tool: 'text_generation' };
+    const snapshot: WorkflowSnapshot = { run: { id: runId, chatId: 'chat', goal: '制作', status: 'completed', generation: 1, planVersion: 2, planOpen: false, updatedAt: now }, tasks: [
+      { id: 'plan', runId, kind: 'team_plan', input: '制作', output: { summary: '制作', roles: [role], tasks: [sourceTask], finalAcceptance: '准确' }, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+      { id: 'source', runId, kind: 'agent_text', input: { task: sourceTask, role, goal: '制作' }, output: original, dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
+    ] };
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot, value: undefined }));
+    const savedText = listTeamSavedText(snapshot, ['source']).map((entry) => ({ ...entry, alias: 'original' }));
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '复用正文', finalAcceptance: '准确', roles: [{ ...role, allowedTools: tool === 'delegate_task' ? [tool, 'text_generation'] : [tool] }],
+      tasks: [{ id: 'reuse', roleId: role.id, goal: '按原稿制作', tool, acceptance: '准确', dependsOn: [],
+        savedText,
+        ...(tool === 'speech_generation' ? { speech: { textTaskId: 'original' } } : {}) }] }));
+    if (tool === 'delegate_task') generate.mockResolvedValueOnce(JSON.stringify({ summary: '下级复用', finalAcceptance: '准确', roles: [role],
+      tasks: [{ id: 'child', roleId: role.id, tool: 'text_generation', goal: '按原稿制作', acceptance: '准确', dependsOn: [], savedText }] }));
+    generate.mockResolvedValueOnce('已复用完整原稿');
+    if (tool === 'delegate_task') generate.mockResolvedValueOnce('下级已完成');
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'audio', name: '音乐', type: 'audio', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'music-model', isDefault: true },
+      { id: 'tts', name: '配音', type: 'tts', provider: 'openai', apiKey: 'test', baseUrl: '', model: 'tts-1', isDefault: true },
+      { id: 'video', name: '视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true },
+      { id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true },
+    ] });
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已保存' });
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'submitted-video' });
+    vi.mocked(queueAgentTeamAudio).mockResolvedValue({ output: '音频已保存' });
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    await createAgentTeamWorkflow(config, () => scope).addRevisionRequest(runId, 2, '使用完整原稿继续制作');
+    const result = await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(result.snapshot.run.status, JSON.stringify(result.snapshot.tasks)).toBe(tool === 'video_generation' ? 'active' : 'completed');
+    if (tool === 'text_generation') expect(JSON.stringify(generate.mock.calls[1][2])).toContain(original);
+    if (tool === 'delegate_task') {
+      expect(JSON.stringify(generate.mock.calls[1])).toContain(original);
+      expect(JSON.stringify(generate.mock.calls[2][2])).toContain(original);
+    }
+    if (tool === 'image_generation') expect(queueAgentTeamImage).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(original) }));
+    if (tool === 'video_generation') expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(original) }));
+    if (tool === 'audio_generation') expect(queueAgentTeamAudio).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(original) }));
+    if (tool === 'speech_generation') expect(queueAgentTeamAudio).toHaveBeenCalledWith(expect.objectContaining({ prompt: original, purpose: 'speech' }));
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect((await indexedDbWorkflowRepository.read(scope, runId))?.tasks.find((task) => task.id === 'source')).toMatchObject({ attempt: 1, output: original });
+    expect(generate).toHaveBeenCalledTimes(tool === 'delegate_task' ? 4 : tool === 'text_generation' ? 2 : 1);
+    expect(queueAgentTeamAudio).toHaveBeenCalledTimes(['audio_generation', 'speech_generation'].includes(tool) ? 1 : 0);
+  });
+
   it.each(['image_generation', 'video_generation', 'image_inspection', 'video_inspection'] as const)('reuses historical media for %s after restoring the run', async (tool) => {
     if (tool === 'video_inspection') vi.stubGlobal('document', {});
     const runId = crypto.randomUUID();
@@ -163,6 +213,37 @@ describe('agent team workflow', () => {
     expect(queueAgentTeamVideo).toHaveBeenCalledTimes(tool === 'video_generation' ? 1 : 0);
     expect(inspectAgentTeamImages).toHaveBeenCalledTimes(tool === 'image_inspection' ? 1 : 0);
     expect(inspectAgentTeamVideo).toHaveBeenCalledTimes(video ? 1 : 0);
+  });
+
+  it('rejects a historical text version changed after planning before submitting paid generation', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `stale-text-${runId}`;
+    const now = Date.now();
+    const role = { id: 'writer', name: '作者', responsibility: '写作', method: '创作', acceptance: '正文可用', allowedTools: ['text_generation'] };
+    const sourceTask = { id: 'source', roleId: role.id, tool: 'text_generation', goal: '原稿', acceptance: '准确', dependsOn: [] };
+    const snapshot: WorkflowSnapshot = { run: { id: runId, chatId: 'chat', goal: '制作', status: 'completed', generation: 1, planVersion: 2, planOpen: false, updatedAt: now }, tasks: [
+      { id: 'plan', runId, kind: 'team_plan', input: '制作', output: { summary: '制作', roles: [role], tasks: [sourceTask], finalAcceptance: '准确' }, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+      { id: 'source', runId, kind: 'agent_text', input: { task: sourceTask, role, goal: '制作' }, output: '原稿', dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
+    ] };
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot, value: undefined }));
+    const savedText = listTeamSavedText(snapshot, ['source']).map((entry) => ({ ...entry, alias: 'original' }));
+    generate.mockImplementationOnce(async () => {
+      await indexedDbWorkflowRepository.transact(scope, runId, (current) => ({ snapshot: { ...current!,
+        tasks: current!.tasks.map((task) => task.id === 'source' ? { ...task, output: '已经变化的正文' } : task) }, value: undefined }));
+      return JSON.stringify({ summary: '原稿配音', finalAcceptance: '准确', roles: [{ ...role, allowedTools: ['speech_generation'] }],
+        tasks: [{ id: 'voice', roleId: role.id, goal: '配音', tool: 'speech_generation', acceptance: '准确', dependsOn: [], savedText, speech: { textTaskId: 'original' } }] });
+    });
+    useSettingsStore.setState({ aiProfiles: [{ id: 'tts', name: '配音', type: 'tts', provider: 'openai', apiKey: 'test', baseUrl: '', model: 'tts-1', isDefault: true }] });
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const workflow = createAgentTeamWorkflow(config, () => scope);
+    await workflow.addRevisionRequest(runId, 2, '用原稿配音');
+    const result = await workflow.resume(runId);
+    expect(result.snapshot.run.status).toBe('failed');
+    expect(result.snapshot.tasks.find((task) => task.kind === 'agent_audio')).toMatchObject({ status: 'failed', error: expect.stringContaining('版本已变化') });
+    expect(queueAgentTeamAudio).not.toHaveBeenCalled();
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(queueAgentTeamAudio).not.toHaveBeenCalled();
+    expect(generate).toHaveBeenCalledTimes(1);
   });
 
   it('recomposes saved media in a later plan without submitting another paid media task', async () => {
