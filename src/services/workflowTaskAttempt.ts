@@ -1,5 +1,6 @@
 import type { WorkflowSnapshot, WorkflowTask, WorkflowTaskStatus } from './workflowRunRuntime';
 import { parseWorkflowModelInvocation, type WorkflowModelInvocation } from './workflowModelInvocation';
+import { parseWorkflowToolInvocation, type WorkflowToolInvocation } from './workflowToolInvocation';
 
 export interface WorkflowTaskAttempt {
   schemaVersion: 1;
@@ -15,6 +16,7 @@ export interface WorkflowTaskAttempt {
   status: WorkflowTaskStatus;
   externalTaskId?: string;
   modelInvocation?: WorkflowModelInvocation;
+  toolInvocation?: WorkflowToolInvocation;
 }
 
 export function parseWorkflowTaskAttempt(raw: unknown): WorkflowTaskAttempt {
@@ -35,6 +37,9 @@ export function parseWorkflowTaskAttempt(raw: unknown): WorkflowTaskAttempt {
   if (value.externalTaskId !== undefined && typeof value.externalTaskId !== 'string') throw new Error('任务执行记录外部关联无效');
   const modelInvocation = value.modelInvocation === undefined ? undefined : parseWorkflowModelInvocation(value.modelInvocation);
   if (modelInvocation && (modelInvocation.runId !== value.runId || modelInvocation.taskId !== value.taskId || modelInvocation.attempt !== value.attempt)) throw new Error('任务执行记录调用关联无效');
+  const toolInvocation = value.toolInvocation === undefined ? undefined : parseWorkflowToolInvocation(value.toolInvocation);
+  if (toolInvocation && (toolInvocation.runId !== value.runId || toolInvocation.taskId !== value.taskId
+    || toolInvocation.attempt !== value.attempt || toolInvocation.kind !== value.kind || toolInvocation.planVersion !== value.planVersion)) throw new Error('任务执行记录工具关联无效');
   return {
     schemaVersion: 1, runId: value.runId as string, taskId: value.taskId as string, kind: value.kind as string,
     attempt: value.attempt as number, generation: value.generation as number, planVersion: value.planVersion as number,
@@ -42,13 +47,15 @@ export function parseWorkflowTaskAttempt(raw: unknown): WorkflowTaskAttempt {
     ...(value.finishedAt === undefined ? {} : { finishedAt: value.finishedAt as number }),
     ...(value.externalTaskId === undefined ? {} : { externalTaskId: value.externalTaskId as string }),
     ...(modelInvocation ? { modelInvocation } : {}),
+    ...(toolInvocation ? { toolInvocation } : {}),
   };
 }
 
 export function claimedTaskAttempt(snapshot: WorkflowSnapshot, task: WorkflowTask): WorkflowTaskAttempt {
   return { schemaVersion: 1, runId: task.runId, taskId: task.id, kind: task.kind, attempt: task.attempt,
     generation: snapshot.run.generation, planVersion: snapshot.run.planVersion, status: 'running', startedAt: task.updatedAt, updatedAt: task.updatedAt,
-    ...(task.modelInvocation ? { modelInvocation: task.modelInvocation } : {}) };
+    ...(task.modelInvocation ? { modelInvocation: task.modelInvocation } : {}),
+    ...(task.toolInvocation ? { toolInvocation: task.toolInvocation } : {}) };
 }
 
 export function settleTaskAttempt(attempt: WorkflowTaskAttempt, task: WorkflowTask): WorkflowTaskAttempt {
@@ -58,6 +65,10 @@ export function settleTaskAttempt(attempt: WorkflowTaskAttempt, task: WorkflowTa
       return { ...attempt, status: 'completed', updatedAt: Math.max(task.updatedAt, attempt.updatedAt),
         finishedAt: task.updatedAt, modelInvocation: task.modelInvocation };
     }
+    if (task.toolInvocation?.state === 'result_unknown') return { ...attempt, status: 'result_unknown',
+      updatedAt: Math.max(task.updatedAt, attempt.updatedAt), toolInvocation: task.toolInvocation };
+    if (task.toolInvocation?.state === 'not_started') return { ...attempt, status: 'cancelled',
+      updatedAt: Math.max(task.updatedAt, attempt.updatedAt), finishedAt: task.toolInvocation.finishedAt, toolInvocation: task.toolInvocation };
     if (task.modelInvocation?.state !== 'not_started') return attempt;
     return { ...attempt, status: 'cancelled', updatedAt: Math.max(task.updatedAt, attempt.updatedAt),
       finishedAt: task.modelInvocation.finishedAt, modelInvocation: task.modelInvocation };
@@ -69,5 +80,6 @@ export function settleTaskAttempt(attempt: WorkflowTaskAttempt, task: WorkflowTa
   return { ...activeAttempt, status: task.status, updatedAt,
     ...(terminal ? { finishedAt: updatedAt } : {}),
     ...(task.externalTaskId ? { externalTaskId: task.externalTaskId } : {}),
-    ...(task.modelInvocation ? { modelInvocation: task.modelInvocation } : {}) };
+    ...(task.modelInvocation ? { modelInvocation: task.modelInvocation } : {}),
+    ...(task.toolInvocation ? { toolInvocation: task.toolInvocation } : {}) };
 }

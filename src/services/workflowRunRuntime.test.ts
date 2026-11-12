@@ -3,6 +3,7 @@ import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowExecutionContext, type WorkflowSnapshot, type WorkflowTask } from './workflowRunRuntime';
 import { workflowModelInvocationId } from './workflowModelInvocation';
 import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
+import { workflowToolInvocationId, workflowToolOperationKey } from './workflowToolInvocation';
 
 let testIndexedDb: IDBFactory | undefined;
 
@@ -43,6 +44,76 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it.each(['success', 'pending', 'preflight', 'unknown', 'invalid', 'missing-boundary'] as const)('journals tool execution boundaries: %s', async (outcome) => {
+    const id = crypto.randomUUID();
+    const scope = `tool-${id}`;
+    const initial = snapshot(id);
+    initial.tasks = [{ ...initial.tasks[0], kind: 'agent_video' }];
+    const execute = vi.fn(async (task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => {
+      expect((await indexedDbWorkflowRepository.read(scope, id))?.tasks[0].toolInvocation?.state).toBe('reserved');
+      if (outcome === 'preflight') throw new WorkflowPreflightError('无权限');
+      if (outcome === 'missing-boundary') return { output: '不可信结果' };
+      await context.beginToolInvocation();
+      expect((await indexedDbWorkflowRepository.listTaskAttempts(scope, id, task.id))[0].toolInvocation?.state).toBe('started');
+      await expect(context.beginToolInvocation()).rejects.toThrow('已失效或已开始');
+      if (outcome === 'unknown') throw new Error('连接中断');
+      if (outcome === 'invalid') throw new WorkflowPreflightError('供应商拒绝');
+      return outcome === 'pending' ? { externalTaskId: 'provider-task' } : { output: '结果' };
+    });
+    let pollingFails = true;
+    const inspectExternal = vi.fn(async () => {
+      if (pollingFails) throw new Error('查询超时');
+      return { status: 'completed' as const, output: '视频已保存' };
+    });
+    const create = () => createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksToolInvocations: true, execute, inspectExternal }, () => scope);
+    const runtime = create();
+    await runtime.create(initial);
+    let result = await runtime.resume(id);
+    const state = outcome === 'preflight' || outcome === 'missing-boundary' ? 'not_started'
+      : outcome === 'pending' ? 'waiting_external' : outcome === 'unknown' ? 'result_unknown' : outcome === 'invalid' ? 'failed' : 'succeeded';
+    expect(result.tasks[0].toolInvocation).toMatchObject({ state, operationKey: workflowToolOperationKey(id, 'script'), planVersion: 1 });
+    expect((await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script'))[0].toolInvocation).toEqual(result.tasks[0].toolInvocation);
+    expect(countWorkflowModelCalls(result)).toBe(0);
+    if (outcome === 'pending') {
+      expect(result.tasks[0]).toMatchObject({ status: 'waiting_external', externalTaskId: 'provider-task', error: '查询超时' });
+      pollingFails = false;
+      result = await create().resume(id);
+      expect(result.tasks[0]).toMatchObject({ status: 'completed', output: '视频已保存', toolInvocation: { state: 'succeeded', externalTaskId: 'provider-task', finishedAt: expect.any(Number) } });
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect((await indexedDbWorkflowRepository.listTaskAttempts(scope, id, 'script'))[0].toolInvocation).toEqual(result.tasks[0].toolInvocation);
+    }
+    if (outcome === 'unknown') {
+      await create().resume(id);
+      expect(execute).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it.each(['reserved', 'started', 'accepted'] as const)('recovers a %s tool execution without resubmitting accepted media', async (state) => {
+    const id = crypto.randomUUID();
+    const scope = `recover-tool-${id}`;
+    const initial = snapshot(id);
+    initial.run.status = 'paused';
+    initial.tasks = [{ ...initial.tasks[0], kind: 'agent_video', status: 'running', attempt: 1,
+      toolInvocation: { schemaVersion: 1, id: workflowToolInvocationId(id, 'script', 1), operationKey: workflowToolOperationKey(id, 'script'),
+        runId: id, taskId: 'script', kind: 'agent_video', planVersion: 1, attempt: 1, state: state === 'reserved' ? 'reserved' : 'started', reservedAt: 1,
+        ...(state === 'reserved' ? {} : { startedAt: 1 }) } }];
+    const execute = vi.fn(async (_task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => {
+      await context.beginToolInvocation();
+      return { output: '已完成' };
+    });
+    const reconcileInterrupted = vi.fn(async () => state === 'accepted' ? { status: 'waiting_external' as const, externalTaskId: 'saved-task' } : null);
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksToolInvocations: true, execute, reconcileInterrupted,
+      inspectExternal: async () => ({ status: 'completed', output: '已领取文件' }) }, () => scope);
+    await runtime.create(initial);
+    const result = await runtime.resume(id);
+    expect(result.tasks[0].status).toBe(state === 'started' ? 'result_unknown' : 'completed');
+    expect(result.tasks[0].toolInvocation?.state).toBe(state === 'started' ? 'result_unknown' : 'succeeded');
+    expect(execute).toHaveBeenCalledTimes(state === 'reserved' ? 1 : 0);
+    expect(reconcileInterrupted).toHaveBeenCalledTimes(state === 'reserved' ? 0 : 1);
+    await runtime.resume(id);
+    expect(execute).toHaveBeenCalledTimes(state === 'reserved' ? 1 : 0);
+  });
+
   it('pauses at the deadline, preserves finished work and resumes after a versioned deadline change', async () => {
     const id = crypto.randomUUID();
     const scope = `deadline-${id}`;

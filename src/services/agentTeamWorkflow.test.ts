@@ -3,6 +3,7 @@ import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { generateResponse, listAvailableModels } from './aiClient';
 import { buildAgentTeamTaskRevisionRequest, createAgentTeamWorkflow, isRecoverableAgentTeamRun, recoverAgentTeamRuns } from './agentTeamWorkflow';
 import { currentWorkflowScope, indexedDbWorkflowRepository, type WorkflowSnapshot } from './workflowRunRuntime';
+import { workflowToolInvocationId, workflowToolOperationKey } from './workflowToolInvocation';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
@@ -1092,6 +1093,8 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks.map((task) => task.kind)).toEqual(['team_plan', 'agent_web_search', 'agent_text']);
     expect(search).toHaveBeenCalledWith('MirageTea 最新资料', expect.objectContaining({ source: 'assistant_agent', resourceId: chatId }));
     expect(generate.mock.calls[1][2][0].content).toContain('https://example.test/source');
+    expect(result.snapshot.tasks[1].toolInvocation).toMatchObject({ kind: 'agent_web_search', state: 'succeeded' });
+    expect((await indexedDbWorkflowRepository.listTaskAttempts('team-search-test', runId, 'lookup'))[0].toolInvocation).toEqual(result.snapshot.tasks[1].toolInvocation);
   });
 
   it('refuses a planned search when the chat search capability was revoked', async () => {
@@ -1259,6 +1262,29 @@ describe('agent team workflow', () => {
     expect(saved?.run.status).toBe('paused');
     expect(saved?.tasks.map((task) => task.status)).toEqual(['result_unknown', 'waiting_dependency']);
     expect(generate).not.toHaveBeenCalled();
+  });
+
+  it.each(['reserved', 'started', 'accepted'] as const)('recovers the %s tool journal at application startup', async (state) => {
+    const runId = `team-${crypto.randomUUID()}`;
+    const scope = currentWorkflowScope();
+    const now = Date.now();
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue(state === 'accepted'
+      ? { status: 'waiting_external', externalTaskId: 'accepted-job' } : null);
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
+      run: { id: runId, chatId: 'chat', goal: '制作视频', status: 'active', generation: 1, planVersion: 1, planOpen: true, updatedAt: now },
+      tasks: [{ id: 'plan', runId, kind: 'team_plan', input: '制作视频', dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        { id: 'video', runId, kind: 'agent_video', input: {}, dependsOn: ['plan'], status: 'running', attempt: 1, updatedAt: now,
+        toolInvocation: { schemaVersion: 1, id: workflowToolInvocationId(runId, 'video', 1), operationKey: workflowToolOperationKey(runId, 'video'),
+          runId, taskId: 'video', kind: 'agent_video', attempt: 1, planVersion: 1, state: state === 'reserved' ? 'reserved' : 'started', reservedAt: now,
+          ...(state === 'reserved' ? {} : { startedAt: now }) } }],
+    }, value: undefined }));
+    expect(await recoverAgentTeamRuns()).toBe(true);
+    const saved = await indexedDbWorkflowRepository.read(scope, runId);
+    expect(saved?.tasks[1]).toMatchObject({
+      status: state === 'reserved' ? 'queued' : state === 'accepted' ? 'waiting_external' : 'result_unknown',
+      toolInvocation: { state: state === 'reserved' ? 'not_started' : state === 'accepted' ? 'waiting_external' : 'result_unknown' },
+    });
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
   });
 
   it('publishes a completed run after restart when the client stopped before delivery', async () => {

@@ -181,6 +181,16 @@ try {
       if (!interrupted) throw new Error('没有模拟到清单保存后的中断');
       const intent = (await workflow.read(interruptedRunId)).run.delivery;
       if (!intent || useAssistantArtifactStore.getState().items.some((item) => intent.artifacts.some((entry) => entry.after.id === item.id))) throw new Error('清单中断边界错误');
+      const { workflowToolInvocationId, workflowToolOperationKey } = await import('/src/services/workflowToolInvocation.ts');
+      const toolRunId = runId + '-tools';
+      await indexedDbWorkflowRepository.transact(currentWorkflowScope(), toolRunId, () => ({ snapshot: {
+        run: { id: toolRunId, chatId, goal: '工具重载恢复', status: 'paused', generation: 1, planVersion: 1, updatedAt: now },
+        tasks: ['reserved', 'started', 'accepted'].map((state) => ({ id: state, runId: toolRunId, kind: 'agent_video',
+          input: {}, dependsOn: [], status: 'running', attempt: 1, updatedAt: now,
+          toolInvocation: { schemaVersion: 1, id: workflowToolInvocationId(toolRunId, state, 1), operationKey: workflowToolOperationKey(toolRunId, state),
+            runId: toolRunId, taskId: state, kind: 'agent_video', attempt: 1, planVersion: 1,
+            state: state === 'reserved' ? 'reserved' : 'started', reservedAt: now, ...(state === 'reserved' ? {} : { startedAt: now }) } })),
+      }, value: undefined }));
       window.fetch = originalFetch;
       return {
         runId, chatId, interruptedRunId, interruptedVersions: intent.artifacts.map((entry) => entry.after.currentVersionId),
@@ -232,7 +242,7 @@ try {
   }
   assert.equal(automaticallyPublished, true, 'Application startup did not restore pending delivery');
   const restored = await cdp.evaluate(`(async () => {
-    const [{ useMessageStore }, { useAssistantArtifactStore }, { currentWorkflowScope, indexedDbWorkflowRepository }, { createAgentTeamWorkflow }] = await Promise.all([
+    const [{ useMessageStore }, { useAssistantArtifactStore }, { currentWorkflowScope, indexedDbWorkflowRepository, createWorkflowRunRuntime }, { createAgentTeamWorkflow }] = await Promise.all([
       import('/src/stores/useMessageStore.ts'), import('/src/stores/useAssistantArtifactStore.ts'), import('/src/services/workflowRunRuntime.ts'),
       import('/src/services/agentTeamWorkflow.ts'),
     ]);
@@ -240,6 +250,20 @@ try {
     await Promise.all([useMessageStore.persist.rehydrate(), useAssistantArtifactStore.persist.rehydrate()]);
     const chatId = ${JSON.stringify(result.chatId)};
     const runId = ${JSON.stringify(result.runId)};
+    const toolRunId = runId + '-tools';
+    const toolCalls = [];
+    const toolRuntime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+      tracksToolInvocations: true,
+      execute: async (task, signal, context) => { await context.beginToolInvocation(); toolCalls.push(task.id); return { output: '完成' }; },
+      reconcileInterrupted: async (task) => task.id === 'accepted' ? { status: 'waiting_external', externalTaskId: 'saved-provider-task' } : null,
+      inspectExternal: async () => ({ status: 'completed', output: '已领取视频' }),
+    }, currentWorkflowScope);
+    const tools = await toolRuntime.resume(toolRunId);
+    await toolRuntime.resume(toolRunId);
+    if (toolCalls.join(',') !== 'reserved' || tools.tasks.map((task) => task.status).join(',') !== 'completed,result_unknown,completed'
+      || tools.tasks.map((task) => task.toolInvocation.state).join(',') !== 'succeeded,result_unknown,succeeded') throw new Error('工具重载恢复重复提交或丢失调用记录');
+    const toolAttempts = await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), toolRunId, 'reserved');
+    if (toolAttempts.length !== 1 || toolAttempts[0].toolInvocation.state !== 'succeeded') throw new Error('工具恢复未保存执行历史');
     const interruptedRunId = ${JSON.stringify(result.interruptedRunId)};
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'browser-smoke', baseUrl: 'https://mock-llm.invalid/v1', model: 'smoke-model' }, currentWorkflowScope);
     await workflow.publish(interruptedRunId);
@@ -263,6 +287,7 @@ try {
   delete result.interruptedVersions;
   result.reloadRecovery = true;
   result.intentRecovery = true;
+  result.toolReloadRecovery = true;
   console.log(JSON.stringify({ ok: true, ...result }));
 } finally {
   await cdp.evaluate('window.__cleanupDeliveryFixture?.()').catch((error) => console.error('Fixture cleanup failed:', error));

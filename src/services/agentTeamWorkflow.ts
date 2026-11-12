@@ -2,7 +2,7 @@ import { getUsablePreferredAIProfile, normalizeImageCapabilities, resolveAIModel
 import { generateResponse } from './aiClient';
 import { planAgentTeam, teamTaskMediaKind, validateAgentTeamPlan, type AgentTeamPlan, type AgentTeamTask } from './agentTeamPlan';
 import { assertTeamMediaOutput, resolveTeamDelegationMedia, resolveTeamMediaTask } from './agentTeamMediaReference';
-import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
+import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, invocationUnstarted, reconcileWorkflowTaskInvocation, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
 import { ensureAssistantArtifactStoreHydrated, useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
@@ -274,6 +274,7 @@ function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<R
 export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
   const runtime: ReturnType<typeof createWorkflowRunRuntime> = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
     tracksModelInvocations: true,
+    tracksToolInvocations: true,
     dispatchBlockReason(snapshot) {
       return teamConversationBlockReason(useChatStore.getState().chats.find((chat) => chat.id === snapshot.run.chatId), snapshot.run.goalSpec);
     },
@@ -406,6 +407,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (selectedTool === 'media_composition') {
         if (!input.task.composition) throw new WorkflowPreflightError('缺少音视频合成配置');
         const clips = new Set(input.task.composition.clips.map((clip) => clip.taskId));
+        await context.beginToolInvocation();
         return composeAgentTeamMedia({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           plan: input.task.composition, resolveTaskId: (id) => resolveTeamMediaTask(snapshot,
@@ -428,6 +430,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('图片的上游脚本尚未就绪');
           return dependency.output.slice(0, 12_000);
         });
+        await context.beginToolInvocation();
         return queueAgentTeamImage({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), referenceImages, signal });
@@ -478,6 +481,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         }
         if (!text?.trim() || text.length > 12_000) throw new WorkflowPreflightError('旁白正文必须为 1 到 12000 个字符');
         if (input.userInstruction) throw new WorkflowPreflightError('配音正文已确定，请通过追加任务修订正文后重新配音');
+        await context.beginToolInvocation();
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt: text.trim(), purpose: 'speech', signal });
@@ -490,6 +494,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           if (dependency.kind !== 'agent_text' && dependency.kind !== 'agent_web_search') throw new WorkflowPreflightError('音乐任务目前只能读取文字歌词或说明');
           return dependency.output.slice(0, 12_000);
         });
+        await context.beginToolInvocation();
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), signal });
@@ -532,6 +537,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return dependency.kind === 'agent_text' || dependency.kind === 'agent_web_search' || dependency.kind === 'agent_image_inspection' || dependency.kind === 'agent_delegation'
             ? dependency.output.slice(0, 12_000) : null;
         }).filter((content): content is string => content !== null);
+        await context.beginToolInvocation();
         return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), referenceImages, signal });
@@ -539,6 +545,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (selectedTool === 'web_search') {
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId && item.type === 'assistant' && item.deletedAt == null);
         if (!chat?.modeState || !resolveChatAgentCapabilities(chat).webSearch) throw new WorkflowPreflightError('当前会话未开启网页搜索');
+        await context.beginToolInvocation();
         const response = await appApi.searchWeb(input.task.goal, { source: 'assistant_agent', resourceId: snapshot.run.chatId, count: 8 });
         if (signal.aborted) throw signal.reason || new Error('团队任务已中断');
         const results = response.results.slice(0, 8).filter((result) => result.title.trim() && /^https?:\/\//i.test(result.url));
@@ -750,7 +757,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
             return { snapshot: { ...current, tasks: current.tasks.map((task) => {
               if (task.kind !== 'agent_media_composition' || (task.status !== 'failed' && task.status !== 'result_unknown')) return task;
               const result = inspectAgentTeamComposition(runId, task.id);
-              return { ...task, status: result ? 'completed' as const : 'queued' as const, output: result?.output, error: undefined, updatedAt: Date.now() };
+              return reconcileWorkflowTaskInvocation({ ...task, status: result ? 'completed' : 'queued', output: result?.output, error: undefined, updatedAt: Date.now() });
             }) }, value: undefined };
           });
         });
@@ -762,7 +769,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const tasks = current.tasks.map((task) => {
             if ((task.kind !== 'agent_video' && task.kind !== 'agent_image' && task.kind !== 'agent_audio') || (task.status !== 'failed' && task.status !== 'result_unknown')) return task;
             const result = task.kind === 'agent_video' ? inspectAgentTeamVideoAttachment(runId, task.id) : task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(runId, task.id) : inspectAgentTeamAudioAttachment(runId, task.id);
-            return result?.status === 'completed' ? { ...task, status: 'completed' as const, output: result.output, error: undefined, updatedAt: Date.now() } : task;
+            return result?.status === 'completed' ? reconcileWorkflowTaskInvocation({ ...task, status: 'completed', output: result.output, error: undefined, updatedAt: Date.now() }) : task;
           });
           return { snapshot: { ...current, tasks, run: { ...current.run, status: tasks.some((task) => task.status === 'failed') ? 'failed' : 'paused', updatedAt: Date.now() } }, value: undefined };
         });
@@ -1235,8 +1242,9 @@ export async function recoverAgentTeamRuns() {
         const snapshot: WorkflowSnapshot = {
           ...current,
           run: { ...current.run, status: 'paused', generation: current.run.generation + 1, updatedAt: Date.now() },
-          tasks: current.tasks.map((task) => {
+          tasks: current.tasks.map((task): WorkflowTask => {
             if (task.status !== 'running') return task;
+            if (invocationUnstarted(task)) return reconcileWorkflowTaskInvocation({ ...task, status: 'queued', updatedAt: Date.now() });
             if (task.kind === 'agent_media_composition') {
               const result = inspectAgentTeamComposition(task.runId, task.id);
               return { ...task, status: result ? 'completed' : 'queued', output: result?.output, error: undefined, updatedAt: Date.now() };
@@ -1256,7 +1264,7 @@ export async function recoverAgentTeamRuns() {
             if (video?.status === 'completed') return { ...task, status: 'completed', output: video.output, updatedAt: Date.now() };
             if (video?.status === 'failed') return { ...task, status: 'failed', error: video.error, updatedAt: Date.now() };
             return { ...task, status: 'result_unknown', error: '程序关闭前的请求结果无法确认', updatedAt: Date.now() };
-          }),
+          }).map(reconcileWorkflowTaskInvocation),
         };
         return { snapshot, value: true };
       });

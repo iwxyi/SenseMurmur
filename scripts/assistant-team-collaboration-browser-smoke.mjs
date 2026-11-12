@@ -99,6 +99,15 @@ try {
     }, currentWorkflowScope);
     await runtime.create({ ...run, run: { ...run.run, status: 'active' }, tasks: run.tasks.map((task) => task.id === 'research' ? { ...task, status: 'queued', attempt: 0, output: undefined } : task) });
     const persistedRun = await runtime.resume(runId);
+    const toolRunId = 'browser-collab-tool-' + crypto.randomUUID();
+    const toolRuntime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+      tracksToolInvocations: true,
+      execute: async (_task, _signal, context) => { await context.beginToolInvocation(); return { output: '来源已查找' }; },
+    }, currentWorkflowScope);
+    await toolRuntime.create({ run: { ...run.run, id: toolRunId, status: 'active' }, tasks: [
+      { ...run.tasks[1], runId: toolRunId, kind: 'agent_web_search', status: 'queued', attempt: 0, dependsOn: [] },
+    ] });
+    const toolRun = await toolRuntime.resume(toolRunId);
     const [{ createAgentTeamWorkflow }, { useChatStore }] = await Promise.all([
       import('/src/services/agentTeamWorkflow.ts'), import('/src/stores/useChatStore.ts'),
     ]);
@@ -222,6 +231,14 @@ try {
     container.id = 'assistant-team-smoke-root';
     document.body.append(container);
     window.__assistantTeamSmoke = { calls: [], resumed: [], limits: [], deadlines: [] };
+    const { default: ToolHistory } = await import('/src/components/chat/TeamTaskExecutionHistory.tsx');
+    const historyContainer = document.createElement('div');
+    historyContainer.id = 'assistant-tool-history-smoke-root';
+    document.body.append(historyContainer);
+    const historyRoot = createRoot(historyContainer);
+    window.__assistantTeamSmoke.historyRoot = historyRoot;
+    historyRoot.render(React.createElement(ToolHistory, { runId: toolRunId, taskId: 'research', updatedAt: toolRun.tasks[0].updatedAt,
+      statusLabels: { completed: '已完成' } }));
     const root = createRoot(container);
     window.__assistantTeamSmoke.root = root;
     root.render(React.createElement(Workbench, {
@@ -301,11 +318,14 @@ try {
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '保留现有内容，另存交付').click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy?.published`), 'copy saved through workbench without overwriting original');
   assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), { artifacts: 2, messages: 1, published: true, sourcePreserved: true });
-  console.log(JSON.stringify({ ok: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
+  await cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root button').click()`);
+  await waitFor(() => cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root')?.textContent.includes('工具执行已完成')`), 'persisted tool history visible');
+  assert.doesNotMatch(await cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root').textContent`), /browser-collab-|agent_web_search|research/);
+  console.log(JSON.stringify({ ok: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } catch (error) {
   console.error(JSON.stringify({ browserErrors: cdp.errors }));
   throw error;
 } finally {
-  await cdp.evaluate(`(async () => { window.__assistantTeamSmoke?.root?.unmount(); document.querySelector('#assistant-team-smoke-root')?.remove(); await window.__cleanupCollaborationFixture?.(); })()`).catch((error) => console.error('Fixture cleanup failed:', error));
+  await cdp.evaluate(`(async () => { window.__assistantTeamSmoke?.root?.unmount(); window.__assistantTeamSmoke?.historyRoot?.unmount(); document.querySelector('#assistant-team-smoke-root')?.remove(); document.querySelector('#assistant-tool-history-smoke-root')?.remove(); await window.__cleanupCollaborationFixture?.(); })()`).catch((error) => console.error('Fixture cleanup failed:', error));
   cdp.close();
 }
