@@ -79,6 +79,7 @@ try {
       { id: 'research', runId, kind: 'agent_text', input: { task: plan.tasks[0], role: plan.roles[0], goal: '研究市场机会' }, output: '主要竞争者采用订阅模式', dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
     ] };
     const { createWorkflowRunRuntime, indexedDbWorkflowRepository, currentWorkflowScope } = await import('/src/services/workflowRunRuntime.ts');
+    const { defaultWorkflowGoalSpec } = await import('/src/services/workflowGoalSpec.ts');
     window.__cleanupCollaborationFixture = async () => {
       const database = await new Promise((resolve, reject) => {
         const request = indexedDB.open('pneumata-workflow-runs', 5);
@@ -160,7 +161,19 @@ try {
       || (await indexedDbWorkflowRepository.listPlanRevisions(currentWorkflowScope(), journalRunId)).length !== 1) {
       throw new Error('Invalid plan revision did not roll back atomically');
     }
-    const resumableRun = { run: { ...run.run, id: 'browser-resume-run', status: 'paused' }, tasks: [
+    const deadlineId = 'browser-collab-deadline-' + crypto.randomUUID();
+    let deadlineCalls = 0;
+    const deadlineRuntime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: async () => { deadlineCalls += 1; return { output: '已完成' }; } }, currentWorkflowScope);
+    await deadlineRuntime.create({ run: { ...run.run, id: deadlineId, status: 'active', planVersion: 1,
+      goalSpec: { ...defaultWorkflowGoalSpec(run.run.goal), preferences: ['优先已有素材'], deadlineAt: now - 1 } },
+      tasks: [{ ...run.tasks[1], runId: deadlineId, dependsOn: [], status: 'queued', attempt: 0, output: undefined }] });
+    const deadlinePaused = await deadlineRuntime.resume(deadlineId);
+    if (deadlinePaused.run.status !== 'paused' || deadlineCalls !== 0) throw new Error('Expired deadline dispatched work');
+    await deadlineRuntime.setDeadline(deadlineId, 1);
+    const deadlineDone = await deadlineRuntime.resume(deadlineId);
+    if (deadlineDone.run.status !== 'completed' || deadlineCalls !== 1
+      || deadlineDone.run.goalSpec.preferences[0] !== '优先已有素材') throw new Error('Deadline recovery lost work or preferences');
+    const resumableRun = { run: { ...run.run, id: 'browser-resume-run', status: 'paused', goalSpec: defaultWorkflowGoalSpec(run.run.goal) }, tasks: [
       { id: 'plan', runId: 'browser-resume-run', kind: 'team_plan', input: '研究市场机会', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
       { id: 'research', runId: 'browser-resume-run', kind: 'agent_text', input: { task: plan.tasks[0], role: plan.roles[0], goal: '研究市场机会' }, dependsOn: ['plan'], status: 'queued', attempt: 0, updatedAt: now },
     ] };
@@ -175,7 +188,7 @@ try {
     const container = document.createElement('div');
     container.id = 'assistant-team-smoke-root';
     document.body.append(container);
-    window.__assistantTeamSmoke = { calls: [], resumed: [], limits: [] };
+    window.__assistantTeamSmoke = { calls: [], resumed: [], limits: [], deadlines: [] };
     const root = createRoot(container);
     window.__assistantTeamSmoke.root = root;
     root.render(React.createElement(Workbench, {
@@ -183,6 +196,7 @@ try {
       onResumeAll: async (items) => { window.__assistantTeamSmoke.resumed = items.map((item) => item.run.id); }, onCreate: () => {},
       onInstruct: async () => {}, onPause: async () => {},
       onUpdateModelCallLimit: async (item, limit) => { window.__assistantTeamSmoke.limits.push({ runId: item.run.id, limit }); },
+      onUpdateDeadline: async (item, deadlineAt) => { window.__assistantTeamSmoke.deadlines.push({ runId: item.run.id, deadlineAt }); },
       onDelegate: async (...args) => { window.__assistantTeamSmoke.calls.push(args); },
       onAbandonReview: async () => {}, onResumeAfterReviewRetry: async () => {}, onResumeAfterPlanRetry: async () => {},
     }));
@@ -225,6 +239,9 @@ try {
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '保存调用上限').click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.limits.length === 1`), 'model call limit saved');
   assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.limits[0]`), { runId: 'browser-resume-run', limit: 12 });
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '保存截止时间').click()`);
+  await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.deadlines.length === 1`), 'deadline cleared through workbench');
+  assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.deadlines[0]`), { runId: 'browser-resume-run' });
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent === '研究机会').click()`);
   await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).filter((button) => button.textContent.includes('研究负责人')).length === 3`), 'recursive child tasks visible');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).filter((button) => button.textContent.includes('研究负责人')).at(-1).click()`);

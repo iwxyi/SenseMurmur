@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoalSpec, workflowGoalContext } from './workflowGoalSpec';
+import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoalSpec, workflowDeadlineBlockReason, workflowGoalContext } from './workflowGoalSpec';
 
 describe('workflow goal contract', () => {
+  it('preserves optional preferences and deadline without changing legacy contracts', () => {
+    const legacy = defaultWorkflowGoalSpec('目标');
+    expect(parseWorkflowGoalSpec(legacy)).not.toHaveProperty('preferences');
+    const spec = parseWorkflowGoalSpec({ ...legacy, preferences: ['优先复用已有素材'], deadlineAt: 2000 });
+    expect(workflowGoalContext(spec)).toContain('优先复用已有素材');
+    expect(workflowGoalContext(spec)).toContain(new Date(2000).toISOString());
+    expect(workflowDeadlineBlockReason(spec, 1999)).toBeUndefined();
+    expect(workflowDeadlineBlockReason(spec, 2000)).toContain('截止时间');
+    expect(() => parseWorkflowGoalSpec({ ...legacy, deadlineAt: NaN })).toThrow('截止时间');
+    expect(() => parseWorkflowGoalSpec({ ...legacy, preferences: ['重复', '重复'] })).toThrow('偏好');
+  });
   it('keeps the user objective and applies the approved client execution defaults', () => {
     const spec = defaultWorkflowGoalSpec('制作森林短片');
     expect(spec).toMatchObject({ schemaVersion: 1, objective: '制作森林短片', constraints: [], acceptance: [],

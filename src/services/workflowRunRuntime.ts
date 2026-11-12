@@ -2,7 +2,7 @@ import { scopedStorageKey } from '../constants/brand';
 import { getLocalDataUserId } from './authStorageScope';
 import { claimedTaskAttempt, parseWorkflowTaskAttempt, settleTaskAttempt, type WorkflowTaskAttempt } from './workflowTaskAttempt';
 import { appliedWorkflowPlanRevision, parseWorkflowPlanRevision, type WorkflowPlanRevision } from './workflowPlanRevision';
-import { parseWorkflowGoalSpec, type WorkflowGoalSpec } from './workflowGoalSpec';
+import { parseWorkflowGoalSpec, workflowDeadlineBlockReason, type WorkflowGoalSpec } from './workflowGoalSpec';
 import { isWorkflowModelTask, parseWorkflowModelInvocation, workflowModelInvocationId, type WorkflowModelInvocation } from './workflowModelInvocation';
 import { parseWorkflowDelivery, type WorkflowDelivery, type WorkflowDeliveryIssue } from './workflowDelivery';
 
@@ -522,7 +522,17 @@ export const indexedDbWorkflowRepository: WorkflowRepository = {
           const migratedCurrent = current === undefined ? null : migrateWorkflowSnapshot(current);
           const next = update(migratedCurrent === null ? null : structuredClone(migratedCurrent));
           const migratedNext = migrateWorkflowSnapshot(next.snapshot);
-          if (migratedCurrent && JSON.stringify(migratedCurrent.run.goalSpec) !== JSON.stringify(migratedNext.run.goalSpec)) throw new Error('目标契约不能在执行中替换，请新建任务以变更目标授权');
+          if (migratedCurrent && JSON.stringify(migratedCurrent.run.goalSpec) !== JSON.stringify(migratedNext.run.goalSpec)) {
+            const before = migratedCurrent.run;
+            const after = migratedNext.run;
+            const deadlineOnly = before.goalSpec && after.goalSpec
+              && JSON.stringify(parseWorkflowGoalSpec({ ...before.goalSpec, deadlineAt: undefined }))
+                === JSON.stringify(parseWorkflowGoalSpec({ ...after.goalSpec, deadlineAt: undefined }));
+            if (!deadlineOnly || before.status !== 'paused' || after.status !== 'paused'
+              || after.planVersion !== before.planVersion + 1 || migratedCurrent.tasks.some((task) => task.status === 'running')) {
+              throw new Error('目标契约不能在执行中替换，请新建任务以变更目标授权');
+            }
+          }
           const previousDelivery = migratedCurrent?.run.delivery;
           if (JSON.stringify(previousDelivery) !== JSON.stringify(migratedNext.run.delivery) && migratedNext.run.delivery
             && (migratedNext.run.status !== 'completed' || migratedNext.run.delivery.planVersion !== migratedNext.run.planVersion)) throw new Error('只能为当前已完成计划准备交付清单');
@@ -652,6 +662,19 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
       if (maxModelCalls !== undefined && maxModelCalls <= countWorkflowModelCalls(current)) throw new Error('新上限必须大于已使用的模型调用次数');
       const snapshot: WorkflowSnapshot = { ...current, run: { ...current.run, maxModelCalls, planVersion: current.run.planVersion + 1, updatedAt: Date.now() } };
       return { snapshot, value: snapshot };
+    });
+  }
+
+  async function setDeadline(runId: string, expectedPlanVersion: number, deadlineAt?: number) {
+    return mutate(scope(), runId, (current) => {
+      if (current.run.status !== 'paused' || current.tasks.some((task) => task.status === 'running')) throw new Error('请先暂停整个任务');
+      if (current.run.planVersion !== expectedPlanVersion) throw new Error('工作流计划版本冲突');
+      if (!current.run.goalSpec) throw new Error('旧任务没有目标契约，请新建任务设置截止时间');
+      const goalSpec = parseWorkflowGoalSpec({ ...current.run.goalSpec, deadlineAt });
+      if (workflowDeadlineBlockReason(goalSpec)) throw new Error('新的截止时间必须晚于当前时间');
+      const next: WorkflowSnapshot = { ...current, run: { ...current.run, goalSpec,
+        planVersion: current.run.planVersion + 1, updatedAt: Date.now() } };
+      return { snapshot: next, value: next };
     });
   }
 
@@ -885,7 +908,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         if (scope() !== storageScope) break;
         const snapshot = await repository.read(storageScope, runId);
         if (!snapshot || snapshot.run.status !== 'active' || snapshot.run.pauseRequested) break;
-        const pauseReason = executor.dispatchBlockReason?.(snapshot);
+        const pauseReason = workflowDeadlineBlockReason(snapshot.run.goalSpec) || executor.dispatchBlockReason?.(snapshot);
         if (pauseReason) {
           await mutate(storageScope, runId, (current) => ({ snapshot: { ...current,
             run: { ...current.run, status: 'paused', pauseReason, updatedAt: Date.now() } }, value: undefined }));
@@ -912,7 +935,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
           if (scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' || current.run.pauseRequested) {
             return { snapshot: current, value: false };
           }
-          const reason = executor.dispatchBlockReason?.(current);
+          const reason = workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current);
           if (reason) return { snapshot: { ...current, run: { ...current.run, status: 'paused', pauseReason: reason, updatedAt: Date.now() } }, value: false };
           return { snapshot: {
             ...current,
@@ -937,6 +960,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                   || item?.status !== 'running' || item.attempt !== task.attempt + 1 || item.modelInvocation?.state !== 'reserved') {
                   throw new WorkflowPreflightError('模型调用的运行权已失效或已开始');
                 }
+                const deadlineReason = workflowDeadlineBlockReason(current.run.goalSpec);
+                if (deadlineReason) throw new WorkflowPreflightError(deadlineReason);
                 const now = Math.max(Date.now(), item.modelInvocation.reservedAt);
                 return { snapshot: { ...current, run: { ...current.run, updatedAt: now }, tasks: current.tasks.map((candidate) => candidate.id === task.id
                   ? { ...candidate, updatedAt: now, modelInvocation: { ...item.modelInvocation!, state: 'started', startedAt: now } } : candidate) }, value: undefined };
@@ -983,9 +1008,10 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
             await mutate(storageScope, runId, (current) => ({ snapshot: scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' ? current : { ...current, tasks: current.tasks.map((item) => {
               if (item.id !== task.id) return item;
               const definiteFailure = error instanceof WorkflowPreflightError || item.modelInvocation?.state === 'reserved';
+              const deadlineBeforeRequest = item.modelInvocation?.state === 'reserved' && workflowDeadlineBlockReason(current.run.goalSpec);
               return { ...finishModelInvocation(item, definiteFailure ? 'failed' : 'result_unknown', Date.now()),
-                status: !isReady ? 'waiting_external' : definiteFailure ? 'failed' : 'result_unknown',
-                error: error instanceof Error ? error.message : '任务状态查询失败', updatedAt: Date.now() };
+                status: deadlineBeforeRequest ? 'queued' : !isReady ? 'waiting_external' : definiteFailure ? 'failed' : 'result_unknown',
+                error: deadlineBeforeRequest ? undefined : error instanceof Error ? error.message : '任务状态查询失败', updatedAt: Date.now() };
             }) }, value: undefined }));
             if (!isReady) inspectedExternalIds.add(task.id);
           }
@@ -1031,5 +1057,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, setModelCallLimit, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamPlan, addTasksOnce, expandPlanOnce, closePlan, prepareDelivery, markDeliveryPublished, recordDeliveryIssue, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, setModelCallLimit, setDeadline, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamPlan, addTasksOnce, expandPlanOnce, closePlan, prepareDelivery, markDeliveryPublished, recordDeliveryIssue, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }

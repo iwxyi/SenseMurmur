@@ -7,6 +7,8 @@ export interface WorkflowGoalSpec {
   objective: string;
   constraints: string[];
   acceptance: string[];
+  preferences?: string[];
+  deadlineAt?: number;
   allowedTools: WorkflowTool[];
   sourceBranch?: { enabled: boolean; name: string; headNodeId: string | null };
   execution: {
@@ -30,6 +32,9 @@ export function parseWorkflowGoalSpec(raw: unknown): WorkflowGoalSpec {
   if (typeof value.objective !== 'string' || !value.objective.trim() || value.objective.length > 20_000) throw new Error('目标契约目标无效');
   const constraints = stringList(value.constraints, '约束');
   const acceptance = stringList(value.acceptance, '验收条件');
+  const preferences = value.preferences === undefined ? undefined : stringList(value.preferences, '偏好');
+  if (value.deadlineAt !== undefined && (!Number.isSafeInteger(value.deadlineAt) || Number(value.deadlineAt) <= 0
+    || Number(value.deadlineAt) > 8_640_000_000_000_000)) throw new Error('目标契约截止时间无效');
   const allowedTools = stringList(value.allowedTools, '工具授权');
   if (allowedTools.some((tool) => !WORKFLOW_TOOLS.some((known) => known === tool))) throw new Error('目标契约包含未知工具');
   let sourceBranch: WorkflowGoalSpec['sourceBranch'];
@@ -50,6 +55,8 @@ export function parseWorkflowGoalSpec(raw: unknown): WorkflowGoalSpec {
     || !Number.isSafeInteger(execution.maxAutomaticReviewRounds) || Number(execution.maxAutomaticReviewRounds) < 0
     || Number(execution.maxAutomaticReviewRounds) > 3) throw new Error('目标契约执行上限无效');
   return { schemaVersion: 1, objective: value.objective, constraints, acceptance, allowedTools: allowedTools as WorkflowTool[],
+    ...(preferences === undefined ? {} : { preferences }),
+    ...(value.deadlineAt === undefined ? {} : { deadlineAt: Number(value.deadlineAt) }),
     ...(sourceBranch ? { sourceBranch } : {}),
     execution: { location: 'client', recovery: 'safe_steps_only', maxConcurrentTasks: execution.maxConcurrentTasks as number,
       maxAutomaticReviewRounds: execution.maxAutomaticReviewRounds as number } };
@@ -62,7 +69,11 @@ export function defaultWorkflowGoalSpec(objective: string): WorkflowGoalSpec {
 
 export function workflowGoalContext(spec?: WorkflowGoalSpec): string {
   if (!spec) return '';
-  return `\n用户明确约束：${spec.constraints.length ? spec.constraints.join('；') : '未另行指定'}\n用户验收条件：${spec.acceptance.length ? spec.acceptance.join('；') : '按原始目标交付'}\n本次任务授权工具：${spec.allowedTools.join('、') || '无'}。岗位授权及当前模型能力仍须分别满足；不得自行扩权。`;
+  return `\n用户明确约束：${spec.constraints.length ? spec.constraints.join('；') : '未另行指定'}\n用户验收条件：${spec.acceptance.length ? spec.acceptance.join('；') : '按原始目标交付'}\n用户偏好（须服从明确约束）：${spec.preferences?.join('；') || '未另行指定'}${spec.deadlineAt ? `\n截止时间：${new Date(spec.deadlineAt).toISOString()}` : ''}\n本次任务授权工具：${spec.allowedTools.join('、') || '无'}。岗位授权及当前模型能力仍须分别满足；不得自行扩权。`;
+}
+
+export function workflowDeadlineBlockReason(spec: WorkflowGoalSpec | undefined, now = Date.now()) {
+  return spec?.deadlineAt !== undefined && now >= spec.deadlineAt ? '已到截止时间，未开始的步骤已暂停。调整截止时间后可继续。' : undefined;
 }
 
 export function assertWorkflowToolAuthorized(spec: WorkflowGoalSpec | undefined, tool: WorkflowTool) {

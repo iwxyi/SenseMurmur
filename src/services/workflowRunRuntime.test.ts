@@ -43,6 +43,60 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it('pauses at the deadline, preserves finished work and resumes after a versioned deadline change', async () => {
+    const id = crypto.randomUUID();
+    const scope = `deadline-${id}`;
+    const deadlineAt = Date.now() + 60_000;
+    const execute = vi.fn(async (task: WorkflowTask) => {
+      if (task.id === 'script') vi.spyOn(Date, 'now').mockReturnValue(deadlineAt);
+      return { output: task.id };
+    });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => scope);
+    const initial = snapshot(id);
+    initial.run.goalSpec = { ...defaultWorkflowGoalSpec(initial.run.goal), preferences: ['优先已有素材'], deadlineAt };
+    try {
+      await runtime.create(initial);
+      const paused = await runtime.resume(id);
+      expect(paused.run).toMatchObject({ status: 'paused', pauseReason: expect.stringContaining('截止时间') });
+      expect(paused.tasks.map((task) => task.attempt)).toEqual([1, 0]);
+      const restored = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => scope);
+      await restored.resume(id);
+      expect(execute).toHaveBeenCalledTimes(1);
+      await expect(restored.setDeadline(id, 1, deadlineAt)).rejects.toThrow('晚于当前时间');
+      await expect(restored.setDeadline(id, 2)).rejects.toThrow('版本冲突');
+      const updated = await restored.setDeadline(id, 1);
+      expect(updated.run.goalSpec?.preferences).toEqual(['优先已有素材']);
+      expect((await indexedDbWorkflowRepository.listPlanRevisions(scope, id)).at(-1)?.changedRunFields).toEqual(['goalSpec']);
+      const completed = await restored.resume(id);
+      expect(completed.run.status).toBe('completed');
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(completed.tasks.map((task) => task.attempt)).toEqual([1, 1]);
+    } finally { vi.restoreAllMocks(); }
+  });
+
+  it('returns an unstarted model reservation to the queue if the deadline expires during preflight', async () => {
+    const id = crypto.randomUUID();
+    const scope = `deadline-preflight-${id}`;
+    const deadlineAt = Date.now() + 60_000;
+    let sent = 0;
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksModelInvocations: true,
+      execute: async (_task, _signal, context) => {
+        vi.spyOn(Date, 'now').mockReturnValue(deadlineAt);
+        await context.beginModelInvocation();
+        sent += 1;
+        return { output: '不应发送' };
+      },
+    }, () => scope);
+    try {
+      await runtime.create({ run: { ...snapshot(id).run, goalSpec: { ...defaultWorkflowGoalSpec('制作短片'), deadlineAt } },
+        tasks: [{ ...snapshot(id).tasks[0], kind: 'agent_text' }] });
+      const paused = await runtime.resume(id);
+      expect(sent).toBe(0);
+      expect(paused.run.status).toBe('paused');
+      expect(paused.tasks[0]).toMatchObject({ status: 'queued', modelInvocation: { state: 'not_started' } });
+      expect(countWorkflowModelCalls(paused)).toBe(0);
+    } finally { vi.restoreAllMocks(); }
+  });
   it('persists a dispatch pause and resumes only unfinished tasks after the guard clears', async () => {
     const id = crypto.randomUUID();
     const scope = `dispatch-guard-${id}`;

@@ -12,7 +12,7 @@ export interface WorkflowPlanRevision {
   changedRunFields: string[];
 }
 
-const PLAN_RUN_FIELDS = ['goal', 'maxModelCalls', 'autoReview', 'planOpen'] as const;
+const PLAN_RUN_FIELDS = ['goal', 'goalSpec', 'maxModelCalls', 'autoReview', 'planOpen'] as const;
 
 export function parseWorkflowPlanRevision(raw: unknown): WorkflowPlanRevision {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('计划修订记录无效');
@@ -59,6 +59,6 @@ export function appliedWorkflowPlanRevision(before: WorkflowSnapshot | null, aft
         || JSON.stringify(task.input) !== JSON.stringify(prior.input)
         || JSON.stringify(task.dependsOn) !== JSON.stringify(prior.dependsOn));
     }).map((task) => task.id),
-    changedRunFields: PLAN_RUN_FIELDS.filter((field) => before.run[field] !== after.run[field]),
+    changedRunFields: PLAN_RUN_FIELDS.filter((field) => JSON.stringify(before.run[field]) !== JSON.stringify(after.run[field])),
   });
 }

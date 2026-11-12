@@ -17,6 +17,7 @@ interface Props {
   onInstruct: (run: WorkflowSnapshot, task: WorkflowTask, instruction: string) => Promise<void>;
   onPause: (run: WorkflowSnapshot) => Promise<void>;
   onUpdateModelCallLimit: (run: WorkflowSnapshot, limit?: number) => Promise<void>;
+  onUpdateDeadline: (run: WorkflowSnapshot, deadlineAt?: number) => Promise<void>;
   onDelegate: (run: WorkflowSnapshot, request: string) => Promise<void>;
   onAbandonReview: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
   onResumeAfterReviewRetry: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
@@ -49,7 +50,7 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onResumeAll, onCreate, onInstruct, onPause, onUpdateModelCallLimit, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterPlanRetry }: Props) {
+export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onResumeAll, onCreate, onInstruct, onPause, onUpdateModelCallLimit, onUpdateDeadline, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterPlanRetry }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -68,6 +69,9 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const [modelCallLimit, setModelCallLimit] = useState('');
   const [savingLimit, setSavingLimit] = useState(false);
   const [limitError, setLimitError] = useState<string | null>(null);
+  const [deadline, setDeadline] = useState('');
+  const [savingDeadline, setSavingDeadline] = useState(false);
+  const [deadlineError, setDeadlineError] = useState<string | null>(null);
   if (!runs.length) return null;
   const run = runs.find((item) => item.run.id === selectedRunId) || runs[0];
   const task = run.tasks.find((item) => item.id === selectedTaskId) || null;
@@ -112,9 +116,21 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           <Typography variant="subtitle1" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{plan?.summary || run.run.goal}</Typography>
           <Typography variant="body2" color="text.secondary">{run.run.pauseRequested ? '当前步骤完成后暂停' : running ? '运行中' : deliveryNeedsAttention ? '交付需处理' : deliveryPending ? '待交付' : run.run.status === 'completed' ? '已完成' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '失败' : '等待执行'} · 已完成 {summary.completed.length}/{run.tasks.length} 步{run.run.maxModelCalls ? ` · 模型调用 ${countWorkflowModelCalls(run)}/${run.run.maxModelCalls}` : ''}</Typography>
           {run.run.pauseReason && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">{run.run.pauseReason}</Typography>}
+          {run.run.goalSpec?.deadlineAt && <Typography variant="caption" color="text.secondary">截止时间：{new Date(run.run.goalSpec.deadlineAt).toLocaleString()}</Typography>}
           {run.run.deliveryIssue && run.run.status === 'completed' && <Typography role="alert" variant="body2" color="error.main">{workflowDeliveryIssueLabel(run.run.deliveryIssue)}</Typography>}
           {modelCallLimitReached && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">已达到模型调用上限。调整上限后可继续，已有结果会保留。</Typography>}
         </Box>
+        {canRun && !running && run.run.status === 'paused' && run.run.goalSpec && <Box sx={{ display: 'grid', gap: 1 }}>
+          <TextField size="small" type="datetime-local" label="新的截止时间" value={deadline} onChange={(event) => { setDeadline(event.target.value); setDeadlineError(null); }} disabled={savingDeadline} slotProps={{ inputLabel: { shrink: true } }} helperText="留空并保存可取消截止时间。" />
+          {deadlineError && <Typography role="alert" variant="caption" color="error.main">{deadlineError}</Typography>}
+          <Button size="small" disabled={savingDeadline || Boolean(deadline && !Number.isFinite(new Date(deadline).getTime()))} onClick={() => {
+            setSavingDeadline(true);
+            setDeadlineError(null);
+            void onUpdateDeadline(run, deadline ? new Date(deadline).getTime() : undefined)
+              .catch((error: unknown) => setDeadlineError(error instanceof Error ? error.message : '保存截止时间失败'))
+              .finally(() => setSavingDeadline(false));
+          }}>保存截止时间</Button>
+        </Box>}
         {canRun && !running && run.run.status === 'paused' && <Box sx={{ display: 'grid', gap: 1 }}>
           <TextField size="small" type="number" label="新的模型调用总上限" value={modelCallLimit} onChange={(event) => { setModelCallLimit(event.target.value); setLimitError(null); }} disabled={savingLimit} helperText="留空表示不限制，保存后点击继续整个任务。" slotProps={{ htmlInput: { min: countWorkflowModelCalls(run) + 1, max: 1000, step: 1 } }} />
           {limitError && <Typography variant="caption" color="error.main">{limitError}</Typography>}
