@@ -243,6 +243,7 @@ try {
     useChatStore.setState((state) => ({ chats: [...state.chats, { id: textChatId, type: 'assistant', name: '历史正文验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));
     let savedTextRequests = 0;
     let artifactReference;
+    let projectReferences;
     const editedText = '用户修订：' + originalText;
     window.fetch = async (input, init) => {
       if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
@@ -261,6 +262,13 @@ try {
         const messages = JSON.stringify(request.messages);
         if (!messages.includes(editedText) || messages.includes('不应自动切换的新版本')) throw new Error('Pinned artifact version was replaced or truncated');
         content = '已根据指定用户版本继续分析';
+      } else if (savedTextRequests === 4) {
+        if (!projectReferences.every((entry) => JSON.stringify(request.messages).includes(entry.artifact.filePath))) throw new Error('Project file catalog missing');
+        content = JSON.stringify({ ...plan, tasks: [{ ...plan.tasks[0], id: 'project_followup', dependsOn: [], savedText: projectReferences }] });
+      } else if (savedTextRequests === 5) {
+        const messages = JSON.stringify(request.messages);
+        if (!messages.includes('PINNED_MAIN_FILE') || !messages.includes('PINNED_STYLE_FILE') || messages.includes('NEW_PROJECT_FILE')) throw new Error('Project file version was changed or omitted');
+        content = '已读取两个指定版本文件';
       } else throw new Error('Saved text recovery repeated a model request');
       savedTextRequests++;
       return Response.json({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
@@ -318,6 +326,32 @@ try {
         || useAssistantArtifactStore.getState().items.find((item) => item.id === artifact.id)?.currentVersionId !== newer.currentVersionId) {
         throw new Error('Artifact version recovery changed source evidence, user edits or request count');
       }
+      const projectId = artifact.id + '-project';
+      const projectVersion = { id: projectId + '-v1', artifactId: projectId, content: '',
+        sourceMessageId: artifact.sourceMessageId, createdAt: now, files: [
+          { id: 'main', path: 'src/main.ts', content: 'PINNED_MAIN_FILE' },
+          { id: 'style', path: 'src/style.css', content: 'PINNED_STYLE_FILE' },
+        ] };
+      useAssistantArtifactStore.setState((state) => ({ items: [...state.items, { ...artifact, id: projectId,
+        currentVersionId: projectVersion.id, versions: [projectVersion] }] }));
+      projectReferences = listTeamSavedText(final, ['research'], useAssistantArtifactStore.getState().items)
+        .filter((entry) => entry.artifact?.id === projectId).map((entry, index) => ({ ...entry, alias: 'file_' + index }));
+      if (projectReferences.length !== 2) throw new Error('Project files were not separately cataloged');
+      const projectRevision = await restoredArtifact.addRevisionRequest(textRunId, final.run.planVersion, '使用两个项目文件继续工作');
+      await restoredArtifact.setModelCallLimit(textRunId, projectRevision.run.planVersion, 7);
+      const projectPaused = (await restoredArtifact.resume(textRunId)).snapshot;
+      if (projectPaused.run.status !== 'paused' || savedTextRequests !== 5) throw new Error('Project file plan did not pause');
+      useAssistantArtifactStore.setState((state) => ({ items: state.items.map((item) => item.id !== projectId ? item : {
+        ...item, currentVersionId: projectId + '-v2', versions: [...item.versions, { ...projectVersion, id: projectId + '-v2',
+          files: [{ id: 'main', path: 'src/main.ts', content: 'NEW_PROJECT_FILE' }] }],
+      }) }));
+      await commitBufferedPersistenceWrites();
+      await useAssistantArtifactStore.persist.rehydrate();
+      const projectRestored = createAgentTeamWorkflow(config, currentWorkflowScope);
+      await projectRestored.setModelCallLimit(textRunId, projectPaused.run.planVersion);
+      const projectDone = (await projectRestored.resume(textRunId)).snapshot;
+      await createAgentTeamWorkflow(config, currentWorkflowScope).resume(textRunId);
+      if (projectDone.run.status !== 'completed' || savedTextRequests !== 6) throw new Error('Project file recovery failed or repeated requests');
     } finally {
       window.fetch = originalFetch;
       useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== textChatId) }));

@@ -137,12 +137,14 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
         if (!Number.isSafeInteger(reference.attempt) || Number(reference.attempt) < 1
           || typeof reference.outputSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(reference.outputSha256)) throw new Error('历史文字交付版本无效');
         const artifact = reference.artifact === undefined ? undefined : record(reference.artifact);
+        if (artifact?.filePath !== undefined) requiredText(artifact.filePath, '产物文件路径', 1024);
         return { alias: identifier(reference.alias, '历史文字别名'), taskId: requiredText(reference.taskId, '历史文字任务', 256),
           attempt: Number(reference.attempt), outputSha256: reference.outputSha256,
-          ...(artifact ? { artifact: { id: requiredText(artifact.id, '文字产物标识', 512), versionId: requiredText(artifact.versionId, '文字产物版本', 768) } } : {}) };
+          ...(artifact ? { artifact: { id: requiredText(artifact.id, '文字产物标识', 512), versionId: requiredText(artifact.versionId, '文字产物版本', 768),
+            ...(artifact.filePath !== undefined ? { filePath: artifact.filePath as string } : {}) } } : {}) };
       });
       if (new Set(savedText.map((entry) => entry.alias)).size !== savedText.length
-        || new Set(savedText.map((entry) => entry.taskId)).size !== savedText.length) throw new Error('历史文字交付重复');
+        || new Set(savedText.map((entry) => JSON.stringify([entry.taskId, entry.artifact?.filePath ?? null]))).size !== savedText.length) throw new Error('历史文字交付重复');
       if (savedText.some((entry) => savedMedia?.some((media) => media.alias === entry.alias))) throw new Error('历史文字与素材别名冲突');
     }
     if (tool !== 'speech_generation' && value.speech !== undefined) throw new Error('只有配音任务可以声明配音正文');
@@ -287,7 +289,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     params.mediaComposition ? '另开放 media_composition 本地音视频合成工具，可按顺序拼接、裁剪视频并叠加最多4条音乐或旁白音轨。它不是视频生成工具，不调用付费模型。合成任务必须声明 composition:{"clips":[{"taskId":"shot_a","startSeconds":0,"durationSeconds":5},{"taskId":"shot_b"}],"audioTracks":[{"taskId":"music","volume":0.7,"offsetSeconds":0,"loop":true}],"aspectRatio":"16:9","originalAudioVolume":0.3}。clips 必填且按播放顺序排列，引用的任务必须直接在 dependsOn 中，视频来源须为 video_generation 或 media_composition，音轨来源须为 audio_generation 或 speech_generation。其余参数均可省略，画面比例可选16:9、9:16、1:1，不裁切主体而用留边统一画幅；最长10分钟，素材合计不超过256MiB，输出720p级MP4。多个镜头先各自生成再交给合成任务；不要让 video_generation 直接依赖音视频。不得声称已视觉检查成片。' : '当前设备不支持本地音视频合成，不得安排 media_composition。',
     params.savedMedia?.length ? `可复用历史素材目录：${JSON.stringify(params.savedMedia)}。优先复用符合要求的素材，不重新生成。任务可增加 savedMedia:[{"alias":"old_clip","taskId":"目录中的原任务标识","kind":"video","attempt":1,"outputSha256":"目录中的完整摘要"}]，除 alias 外必须逐字复制目录字段。dependsOn 只列本次新计划任务，不列历史素材别名。media_composition 接收历史视频/音频，在 composition.clips/audioTracks 中使用 alias；image_generation、image_inspection、video_generation 仅接收历史图片，自动将全部 savedMedia 图片作为参考或检查输入；video_inspection 接收唯一历史视频。检查任务允许使用历史素材替代新计划内的媒体依赖。参考图仍受当前模型能力和数量限制，不支持参考图时不得使用历史图片生成。历史素材可与本次新生成素材混用。不能使用目录外素材、猜测任务标识或将摘要当文件地址。` : '本次没有授权复用的历史素材目录，不得声明 savedMedia。',
     params.savedText?.length ? `可复用历史文字交付目录：${JSON.stringify(params.savedText)}。text_generation、image_generation、video_generation、audio_generation、delegate_task 可声明 savedText:[{"alias":"original_script","taskId":"目录中的原任务标识","attempt":1,"outputSha256":"目录中的完整摘要"}]，除 alias 外逐字复制目录字段，最多8份；系统会按版本提供完整正文（每份最多12000字符），不要为读取原稿而重新创作。dependsOn 只列新计划任务，不列历史别名。speech_generation 可仅指定一份 savedText，并声明 speech:{"textTaskId":"original_script"} 与 dependsOn:[]，逐字朗读该正文；不得同时指定 literal text 或其他历史正文。别名不能与本计划任务或历史素材别名重名。目录摘要仅绑定当时文字记录，不保证其中事实已核实。` : '本次没有授权复用的历史文字目录，不得声明 savedText。',
-    params.savedText?.some((entry) => entry.artifact) ? '历史文字目录中带 artifact:{id,versionId} 的条目对应用户当前选中的文字产物版本；不带 artifact 的条目对应任务原始交付。用户要求使用修改后的稿件时，优先选择相应 artifact 条目，完整复制 artifact 和摘要。它们是同一来源的不同版本，每个任务只能选其中一份。系统固定读取所选版本，不会随产物后续编辑而自动切换；缺失或正文变化会明确报错。此入口只读取单正文，不包含项目多文件、图片、音视频或 HTML 交互状态。' : '',
+    params.savedText?.some((entry) => entry.artifact) ? '历史文字目录中带 artifact:{id,versionId,filePath?} 的条目对应用户当前选中的产物版本；filePath 表示该版本中的指定文本文件，不带 filePath 表示单正文。不带 artifact 的条目对应任务原始交付。用户要求使用修改后的稿件或项目文件时，优先选择相应 artifact 条目，完整复制 artifact 和摘要。同一来源每个文件最多选一份版本，可用不同 alias 引用多个文件；仍最多8份。系统固定读取所选版本，不会随产物后续编辑而自动切换；缺失或正文变化会明确报错。此入口不读取图片、音视频或 HTML 交互状态。' : '',
     '只为需要用户单独打开、复用或编辑的任务声明 deliverable；可选类型 document、table、code、diagram、html、json、text。交付契约 schemaVersion 为 1，格式为 {"schemaVersion":1,"kind":"table","title":"市场比较表","language":"csv"}。json 交付必须是可解析的纯 JSON；字段要求写入任务验收标准。未声明时仍会纳入团队总结，不要给搜索、图片/音频/视频生成等每个步骤机械创建文字产物。只输出 JSON：{"schemaVersion":1,"summary":"...","roles":[{"schemaVersion":1,"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"...","deliverable":{"schemaVersion":1,"kind":"table","title":"比较表","language":"csv"}}],"finalAcceptance":"..."}',
   ].join('\n'), [{ role: 'user', content: goal + (context ? `\n${context}` : '') }], undefined, {
     responseFormat: 'json', maxTokens: 10_000, signal: params.signal,

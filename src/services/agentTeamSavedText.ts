@@ -8,7 +8,7 @@ export interface AgentTeamSavedText {
   taskId: string;
   attempt: number;
   outputSha256: string;
-  artifact?: { id: string; versionId: string };
+  artifact?: { id: string; versionId: string; filePath?: string };
 }
 
 const TEXT_KINDS = new Set(['agent_text', 'agent_web_search', 'agent_image_inspection', 'agent_video_inspection', 'agent_delegation']);
@@ -20,7 +20,8 @@ function sourceArtifacts(snapshot: WorkflowSnapshot, taskId: string, artifacts: 
 
 export function sameTeamSavedTextVersion(left: Omit<AgentTeamSavedText, 'alias'>, right: Omit<AgentTeamSavedText, 'alias'>) {
   return left.taskId === right.taskId && left.attempt === right.attempt && left.outputSha256 === right.outputSha256
-    && left.artifact?.id === right.artifact?.id && left.artifact?.versionId === right.artifact?.versionId;
+    && left.artifact?.id === right.artifact?.id && left.artifact?.versionId === right.artifact?.versionId
+    && left.artifact?.filePath === right.artifact?.filePath;
 }
 
 function authorizedTextTasks(snapshot: WorkflowSnapshot, sourceTaskIds: string[]) {
@@ -41,7 +42,14 @@ export function listTeamSavedText(snapshot: WorkflowSnapshot, sourceTaskIds: str
   return authorizedTextTasks(snapshot, sourceTaskIds).flatMap((task) => {
     const versions = sourceArtifacts(snapshot, task.id, artifacts).flatMap((artifact) => {
       const current = artifact.versions.find((version) => version.id === artifact.currentVersionId && version.artifactId === artifact.id);
-      if (!current || current.files?.length || current.media?.length || !current.content.trim() || current.content.length > 12_000) return [];
+      if (!current || current.media?.length) return [];
+      if (current.files?.length) return current.files.flatMap((file) => {
+        if (!file.path.trim() || file.path.length > 1024 || current.files!.filter((entry) => entry.path === file.path).length !== 1
+          || !file.content.trim() || file.content.length > 12_000) return [];
+        return [{ taskId: task.id, attempt: task.attempt, outputSha256: workflowJsonDigest(file.content),
+          artifact: { id: artifact.id, versionId: current.id, filePath: file.path } }];
+      });
+      if (!current.content.trim() || current.content.length > 12_000) return [];
       return [{ taskId: task.id, attempt: task.attempt, outputSha256: workflowJsonDigest(current.content),
         artifact: { id: artifact.id, versionId: current.id } }];
     });
@@ -57,9 +65,13 @@ export function resolveTeamSavedText(task: AgentTeamTask, snapshot: WorkflowSnap
       const source = authorizedTextTasks(snapshot, sourceTaskIds).find((item) => item.id === reference.taskId && item.attempt === reference.attempt);
       const artifact = sourceArtifacts(snapshot, reference.taskId, artifacts).find((item) => item.id === reference.artifact!.id);
       const version = artifact?.versions.find((item) => item.id === reference.artifact!.versionId && item.artifactId === artifact.id);
-      if (!source || !version || version.files?.length || version.media?.length || !version.content.trim() || version.content.length > 12_000
-        || workflowJsonDigest(version.content) !== reference.outputSha256) throw new WorkflowPreflightError('引用的文字产物不属于本次规划范围、指定版本不可用或正文已变化');
-      return { alias: reference.alias, taskId: reference.taskId, content: version.content };
+      const files = version?.files?.filter((file) => file.path === reference.artifact!.filePath);
+      const content = reference.artifact.filePath !== undefined
+        ? (files?.length === 1 ? files[0].content : undefined)
+        : (version?.files?.length ? undefined : version?.content);
+      if (!source || !version || version.media?.length || !content?.trim() || content.length > 12_000
+        || workflowJsonDigest(content) !== reference.outputSha256) throw new WorkflowPreflightError('引用的文字产物不属于本次规划范围、指定版本不可用或正文已变化');
+      return { alias: reference.alias, taskId: reference.taskId, content };
     }
     if (!available.some((source) => source.taskId === reference.taskId && source.attempt === reference.attempt
       && source.outputSha256 === reference.outputSha256)) throw new WorkflowPreflightError('历史文字交付不属于本次规划范围、正文过长或版本已变化');

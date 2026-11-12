@@ -42,6 +42,44 @@ describe('saved text in later plans', () => {
     expect(JSON.stringify(catalog)).not.toContain('修改后的稿件');
   });
 
+  it('pins multiple project files independently and rejects missing or mutated pinned files', () => {
+    const snapshot = fixture();
+    const artifact = editedArtifact();
+    artifact.versions[1].files = [
+      { id: 'main', path: 'src/main.ts', content: 'export const title = "原版本";' },
+      { id: 'style', path: 'src/style.css', content: 'body { color: red; }' },
+    ];
+    const catalog = listTeamSavedText(snapshot, ['script'], [artifact]).filter((entry) => entry.artifact);
+    expect(catalog).toHaveLength(2);
+    const candidate = plan();
+    const task = validateAgentTeamPlan({ ...candidate, tasks: [{ ...candidate.tasks[0],
+      savedText: catalog.map((entry, index) => ({ ...entry, alias: `file_${index}` })) }] }).tasks[0];
+    artifact.versions.push({ ...artifact.versions[1], id: 'later', files: [] });
+    artifact.currentVersionId = 'later';
+    expect(resolveTeamSavedText(task, snapshot, ['script'], [artifact]).map((entry) => entry.content))
+      .toEqual(['export const title = "原版本";', 'body { color: red; }']);
+    const pinned = artifact.versions[1].files!;
+    pinned[0].content = 'changed';
+    expect(() => resolveTeamSavedText(task, snapshot, ['script'], [artifact])).toThrow('正文已变化');
+    pinned.splice(0, 1);
+    expect(() => resolveTeamSavedText(task, snapshot, ['script'], [artifact])).toThrow('指定版本不可用');
+  });
+
+  it('excludes ambiguous or oversized files and never authorizes a different file with identical content', () => {
+    const snapshot = fixture();
+    const artifact = editedArtifact();
+    artifact.versions[1].files = [
+      { id: 'a', path: 'a.ts', content: 'same' }, { id: 'b', path: 'b.ts', content: 'same' },
+      { id: 'duplicate', path: 'a.ts', content: 'other' },
+      { id: 'long', path: 'long.ts', content: 'x'.repeat(12_001) },
+    ];
+    const catalog = listTeamSavedText(snapshot, ['script'], [artifact]).filter((entry) => entry.artifact);
+    expect(catalog.map((entry) => entry.artifact?.filePath)).toEqual(['b.ts']);
+    const task = { ...validateAgentTeamPlan(plan()).tasks[0], savedText: [{ ...catalog[0], alias: 'file' }] };
+    task.savedText[0].artifact = { ...catalog[0].artifact!, filePath: 'a.ts' };
+    expect(() => resolveTeamSavedText(task, snapshot, ['script'], [artifact])).toThrow('文字产物');
+  });
+
   it('rejects deleted, foreign, mutated or missing artifact versions and multi-file inputs', () => {
     const snapshot = fixture();
     const catalog = listTeamSavedText(snapshot, ['script'], [editedArtifact()]);

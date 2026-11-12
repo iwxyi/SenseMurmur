@@ -202,7 +202,8 @@ describe('agent team workflow', () => {
   });
 
   it.each((['text_generation', 'image_generation', 'video_generation', 'audio_generation', 'speech_generation', 'delegate_task'] as const)
-    .flatMap((tool) => [false, true].map((artifactVersion) => ({ tool, artifactVersion }))))('restores exact historical text for $tool (artifact version: $artifactVersion) without rewriting the source', async ({ tool, artifactVersion }) => {
+    .flatMap((tool) => [{ artifactVersion: false, fileVersion: false }, { artifactVersion: true, fileVersion: false }, { artifactVersion: true, fileVersion: true }]
+      .map((variant) => ({ tool, ...variant }))))('restores exact historical text for $tool (artifact version: $artifactVersion, project file: $fileVersion) without rewriting the source', async ({ tool, artifactVersion, fileVersion }) => {
     const runId = crypto.randomUUID();
     const scope = `saved-text-${runId}`;
     const chatId = `saved-text-chat-${runId}`;
@@ -225,6 +226,11 @@ describe('agent team workflow', () => {
         artifactId: artifact.id, baseVersionId: artifact.currentVersionId, search: original, replacement: expectedText,
       }] });
       expect(edited.results[0].error).toBeUndefined();
+      if (fileVersion) useAssistantArtifactStore.setState((state) => ({ items: state.items.map((item) => item.id !== artifact.id ? item : {
+        ...item, versions: item.versions.map((version) => version.id !== item.currentVersionId ? version : {
+          ...version, content: '项目说明不应当作为所选文件正文', files: [{ id: 'script', path: 'scripts/story.txt', content: expectedText }],
+        }),
+      }) }));
     }
     const savedText = listTeamSavedText(snapshot, ['source'], useAssistantArtifactStore.getState().items)
       .filter((entry) => Boolean(entry.artifact) === artifactVersion).map((entry) => ({ ...entry, alias: 'original' }));

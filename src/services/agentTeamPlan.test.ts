@@ -15,6 +15,16 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('requires exact authorization for a pinned project file even if another file has the same digest', async () => {
+    const source = { taskId: 'old', attempt: 1, outputSha256: 'a'.repeat(64), artifact: { id: 'project', versionId: 'v1', filePath: 'src/main.ts' } };
+    const candidate = { ...valid(), tasks: [{ ...valid().tasks[0], savedText: [{ ...source, alias: 'main' }] }] };
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+    await expect(planAgentTeam({ api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '修改代码',
+      savedText: [{ ...source, artifact: { ...source.artifact, filePath: 'src/other.ts' } }] })).rejects.toThrow('未授权或版本不符');
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+    expect((await planAgentTeam({ api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '修改代码', savedText: [source] }))
+      .tasks[0].savedText?.[0].artifact?.filePath).toBe('src/main.ts');
+  });
   it('keeps the user goal separate from long runtime planning context', async () => {
     const goal = '愿'.repeat(12_000);
     const context = '历史交付'.repeat(8_000);
