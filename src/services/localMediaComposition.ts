@@ -96,23 +96,32 @@ export async function composeLocalMedia(params: {
       const ratio = params.plan.aspectRatio || (first.width === first.height ? '1:1' : first.width && first.height && first.width < first.height ? '9:16' : '16:9');
       const [width, height] = ratio === '9:16' ? [720, 1280] : ratio === '1:1' ? [720, 720] : [1280, 720];
       let totalDuration = 0;
+      let requestedDuration = 0;
+      let totalFrames = 0;
+      const clipDurations: number[] = [];
       for (const [index, clip] of params.plan.clips.entries()) {
         const source = files.get(clip.taskId)!;
         if (!source.probe.width || !source.probe.height) throw new Error('视频片段中没有画面轨道');
         const start = clip.startSeconds || 0;
         if (start >= source.probe.duration) throw new Error('片段裁剪起点超出了实际视频时长');
-        const duration = Math.min(clip.durationSeconds ?? source.probe.duration - start, source.probe.duration - start);
-        totalDuration += duration;
-        if (totalDuration > 600) throw new Error('当前设备单次本地合成最多支持 10 分钟，请拆分任务');
+        requestedDuration += Math.min(clip.durationSeconds ?? source.probe.duration - start, source.probe.duration - start);
+        // Quantize cumulative boundaries so per-clip rounding cannot accumulate across a long edit.
+        const frames = Math.max(1, Math.round(requestedDuration * 24) - totalFrames);
+        const duration = frames / 24;
+        totalFrames += frames;
+        totalDuration = totalFrames / 24;
+        clipDurations.push(duration);
+        if (requestedDuration > 600 || totalDuration > 600) throw new Error('当前设备单次本地合成最多支持 10 分钟，请拆分任务');
         params.onProgress?.(`正在处理片段 ${index + 1}/${params.plan.clips.length}`);
         await exec(['-ss', String(start), '-i', source.file, '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
           '-map', '0:v:0', '-map', source.probe.hasAudio ? '0:a:0' : '1:a:0', '-t', String(duration),
           '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24,setpts=PTS-STARTPTS`,
           '-af', 'aresample=48000,asetpts=PTS-STARTPTS', '-ac', '2', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-y', `clip_${index}.mp4`]);
       }
-      await ffmpeg.writeFile('clips.txt', new TextEncoder().encode(params.plan.clips.map((_, index) => `file 'clip_${index}.mp4'`).join('\n')));
+      // AAC padding changes container duration; explicit visual durations preserve the edit boundaries.
+      await ffmpeg.writeFile('clips.txt', new TextEncoder().encode(clipDurations.map((duration, index) => `file 'clip_${index}.mp4'\nduration ${duration}`).join('\n')));
       params.onProgress?.('正在合并视频片段');
-      await exec(['-f', 'concat', '-safe', '0', '-i', 'clips.txt', '-c', 'copy', '-movflags', '+faststart', '-y', 'joined.mp4']);
+      await exec(['-f', 'concat', '-safe', '0', '-i', 'clips.txt', '-c', 'copy', '-t', String(totalDuration), '-movflags', '+faststart', '-y', 'joined.mp4']);
       for (const index of params.plan.clips.keys()) await ffmpeg.deleteFile(`clip_${index}.mp4`);
       const tracks = params.plan.audioTracks || [];
       let output = 'joined.mp4';

@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 
 const clientUrl = process.env.PNEUMATA_CLIENT_URL || 'http://127.0.0.1:5173';
 const cdpUrl = process.env.PNEUMATA_CDP_URL || 'http://127.0.0.1:9222';
+const stressComposition = process.env.PNEUMATA_COMPOSITION_STRESS === '1';
 const fixtureDir = await mkdtemp(join(tmpdir(), 'pneumata-composition-'));
 let socket;
 try {
@@ -240,9 +241,11 @@ try {
     const savedMedia = listTeamSavedMedia(after, ['shot_a', 'shot_b', 'music', 'narration']).map((source) => ({ ...source, alias: 'old_' + source.taskId }));
     const savedFilm = listTeamSavedMedia(after, ['film']).map((source) => ({ ...source, alias: 'old_film' }));
     const savedFrame = listTeamSavedMedia(after, ['frame']).map((source) => ({ ...source, alias: 'old_frame' }));
+    const revisedClips = ${stressComposition} ? Array.from({ length: 40 }, (_, index) => ({ taskId: index % 2 ? 'old_shot_b' : 'old_shot_a', durationSeconds: 0.4 }))
+      : [{ taskId: 'old_shot_a', startSeconds: 0.1, durationSeconds: 0.4 }, { taskId: 'old_shot_b', durationSeconds: 0.4 }];
     revisionPlan = { summary: '复用已有素材制作竖屏版并复查原片', roles: [{ ...role, allowedTools: ['media_composition', 'video_inspection', 'image_inspection'] }], finalAcceptance: '竖屏版有配乐和旁白',
       tasks: [{ id: 'portrait', roleId: role.id, goal: '复用已有素材制作竖屏版本', acceptance: '顺序不变且有伴奏旁白', dependsOn: [], tool: 'media_composition', savedMedia,
-        composition: { clips: [{ taskId: 'old_shot_a', startSeconds: 0.1, durationSeconds: 0.4 }, { taskId: 'old_shot_b', durationSeconds: 0.4 }],
+        composition: { clips: revisedClips,
           audioTracks: [{ taskId: 'old_music', loop: true }, { taskId: 'old_narration', volume: 0.5, offsetSeconds: 0.4 }], aspectRatio: '9:16', originalAudioVolume: 0 } },
         { id: 'reinspect', roleId: role.id, goal: '复查历史成片的镜头顺序', acceptance: '先红后蓝', dependsOn: [], tool: 'video_inspection', savedMedia: savedFilm },
         { id: 'check_frame', roleId: role.id, goal: '检查历史场景图', acceptance: '绿色场景', dependsOn: [], tool: 'image_inspection', savedMedia: savedFrame }] };
@@ -257,11 +260,22 @@ try {
     if (!portrait?.url) throw new Error('Revised composition missing');
     const portraitVideo = document.createElement('video'); portraitVideo.muted = true; portraitVideo.src = portrait.url;
     await new Promise((resolve, reject) => { portraitVideo.onloadedmetadata = resolve; portraitVideo.onerror = () => reject(new Error('Revised video cannot decode')); });
+    const revisedPixels = [];
+    if (${stressComposition}) {
+      for (let index = 0; index < 40; index++) {
+        await new Promise((resolve) => { portraitVideo.onseeked = resolve; portraitVideo.currentTime = index * 0.4 + 0.2; });
+        const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+        const context = canvas.getContext('2d'); context.drawImage(portraitVideo, portraitVideo.videoWidth / 2, portraitVideo.videoHeight / 2, 1, 1, 0, 0, 1, 1);
+        const pixel = Array.from(context.getImageData(0, 0, 1, 1).data).slice(0, 3);
+        revisedPixels.push(pixel);
+        if (!(index % 2 ? pixel[2] > 180 && pixel[0] < 40 : pixel[0] > 180 && pixel[2] < 40)) throw new Error('Forty-clip timeline drift at clip ' + index + ': ' + JSON.stringify({ pixel, duration: portraitVideo.duration }));
+      }
+    }
     await createAgentTeamWorkflow(revisionConfig, runtime.currentWorkflowScope).resume(runId);
     const portraitAttempts = await runtime.indexedDbWorkflowRepository.listTaskAttempts(runtime.currentWorkflowScope(), runId, 'delegated_portrait');
     const portraitMessages = useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.filter((message) => message.id === 'team-composition-' + runId + '-delegated_portrait') || [];
     if (portraitAttempts.length !== 1 || portraitMessages.length !== 1 || revisionRequests !== 1 || speechRequests !== 1 || visionRequests !== 2 || imageChecks !== 1) throw new Error('Saved media revision duplicated work');
-    window.__compositionSmoke = { done: true, result: { status: after.run.status, savedMediaRevision: { width: portraitVideo.videoWidth, height: portraitVideo.videoHeight, revisionRequests, attempts: portraitAttempts.length, messageCount: portraitMessages.length }, rejectedGoalReplacement, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, visionRequests, imageChecks, inspectionPixels, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
+    window.__compositionSmoke = { done: true, result: { status: after.run.status, stressClipsChecked: revisedPixels.length, savedMediaRevision: { width: portraitVideo.videoWidth, height: portraitVideo.videoHeight, revisionRequests, attempts: portraitAttempts.length, messageCount: portraitMessages.length }, rejectedGoalReplacement, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, visionRequests, imageChecks, inspectionPixels, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
     } finally { window.fetch = originalFetch; useSettingsStore.setState({ aiProfiles: originalProfiles }); }
   })().catch((error) => { window.__compositionSmoke = { done: true, error: String(error?.stack || error) }; });`);
   let result;
@@ -272,6 +286,7 @@ try {
   }
   assert.ok(result, 'Composition exceeded three minutes');
   assert.equal(result.status, 'completed');
+  assert.equal(result.stressClipsChecked, stressComposition ? 40 : 0);
   assert.deepEqual(result.savedMediaRevision, { width: 720, height: 1280, revisionRequests: 1, attempts: 1, messageCount: 1 });
   assert.equal(result.rejectedGoalReplacement, true);
   assert.equal(result.width, 1280); assert.equal(result.height, 720);
