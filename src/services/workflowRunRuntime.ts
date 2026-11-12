@@ -38,6 +38,7 @@ export interface WorkflowRun {
   planOpen?: boolean;
   autoReview?: boolean;
   pauseRequested?: boolean;
+  pauseReason?: string;
   deliveryStatus?: 'pending' | 'published';
   maxModelCalls?: number;
   updatedAt: number;
@@ -87,6 +88,7 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
   if (!Number.isSafeInteger(run.generation) || (run.generation as number) < 0) throw new Error('工作流运行代次无效');
   if (!Number.isSafeInteger(run.planVersion) || (run.planVersion as number) < 1) throw new Error('工作流计划版本无效');
   if (!Number.isFinite(run.updatedAt)) throw new Error('工作流更新时间无效');
+  if (run.pauseReason !== undefined && (typeof run.pauseReason !== 'string' || !run.pauseReason.trim() || run.pauseReason.length > 1000)) throw new Error('工作流暂停原因无效');
   if (run.resumeCommandIds !== undefined && (!Array.isArray(run.resumeCommandIds) || run.resumeCommandIds.some((id) => typeof id !== 'string' || !id))) {
     throw new Error('工作流恢复命令记录无效');
   }
@@ -192,6 +194,7 @@ export interface WorkflowTaskResult {
 
 export interface WorkflowExecutor {
   tracksModelInvocations?: boolean;
+  dispatchBlockReason?(snapshot: WorkflowSnapshot): string | undefined;
   execute(task: WorkflowTask, signal: AbortSignal, context: WorkflowExecutionContext): Promise<WorkflowTaskResult>;
   inspectExternal?(task: WorkflowTask, signal: AbortSignal): Promise<{ status: 'pending' | 'completed' | 'failed'; output?: unknown; error?: string }>;
   reconcileInterrupted?(task: WorkflowTask): Promise<{ status: 'queued' | 'waiting_external' | 'completed' | 'failed'; externalTaskId?: string; output?: unknown; error?: string } | null>;
@@ -296,6 +299,7 @@ function hasWorkflowStateChange(current: WorkflowSnapshot | null, next: Workflow
     || current.run.planVersion !== next.run.planVersion
     || current.run.deliveryStatus !== next.run.deliveryStatus
     || current.run.pauseRequested !== next.run.pauseRequested
+    || current.run.pauseReason !== next.run.pauseReason
     || current.run.planOpen !== next.run.planOpen;
 }
 
@@ -830,7 +834,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         if (commandId && current.run.resumeCommandIds?.includes(commandId)) return { snapshot: current, value: true };
         if (current.run.status === 'completed' || current.run.status === 'cancelled') return { snapshot: current, value: true };
         if (current.run.pauseRequested) return { snapshot: { ...current, run: { ...current.run, status: 'paused', pauseRequested: false, updatedAt: Date.now() } }, value: true };
-        return { snapshot: { ...current, run: { ...current.run, status: 'active', pauseRequested: false, generation: current.run.generation + 1, resumeCommandIds: commandId ? [...(current.run.resumeCommandIds || []).slice(-99), commandId] : current.run.resumeCommandIds, updatedAt: Date.now() }, tasks: current.tasks.map((task) => task.status === 'running'
+        return { snapshot: { ...current, run: { ...current.run, status: 'active', pauseRequested: false, pauseReason: undefined, generation: current.run.generation + 1, resumeCommandIds: commandId ? [...(current.run.resumeCommandIds || []).slice(-99), commandId] : current.run.resumeCommandIds, updatedAt: Date.now() }, tasks: current.tasks.map((task) => task.status === 'running'
           ? { ...finishModelInvocation(task, 'result_unknown', Date.now()),
             status: task.modelInvocation?.state === 'reserved' ? 'queued' : 'result_unknown',
             error: task.modelInvocation?.state === 'reserved' ? undefined : '上次执行中断，需核对结果', updatedAt: Date.now() } : task) }, value: false };
@@ -844,6 +848,12 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         if (scope() !== storageScope) break;
         const snapshot = await repository.read(storageScope, runId);
         if (!snapshot || snapshot.run.status !== 'active' || snapshot.run.pauseRequested) break;
+        const pauseReason = executor.dispatchBlockReason?.(snapshot);
+        if (pauseReason) {
+          await mutate(storageScope, runId, (current) => ({ snapshot: { ...current,
+            run: { ...current.run, status: 'paused', pauseReason, updatedAt: Date.now() } }, value: undefined }));
+          break;
+        }
         const concurrency = Math.max(1, Math.min(8, Math.floor(maxConcurrentTasks) || 1, snapshot.run.goalSpec?.execution.maxConcurrentTasks ?? 8));
         const generation = snapshot.run.generation;
         const completed = new Set(snapshot.tasks.filter((task) => task.status === 'completed').map((task) => task.id));
@@ -865,6 +875,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
           if (scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' || current.run.pauseRequested) {
             return { snapshot: current, value: false };
           }
+          const reason = executor.dispatchBlockReason?.(current);
+          if (reason) return { snapshot: { ...current, run: { ...current.run, status: 'paused', pauseReason: reason, updatedAt: Date.now() } }, value: false };
           return { snapshot: {
             ...current,
             tasks: current.tasks.map((item) => claimed.has(item.id)

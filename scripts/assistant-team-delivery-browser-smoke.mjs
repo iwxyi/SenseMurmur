@@ -90,6 +90,10 @@ try {
     useChatStore.setState((state) => ({ chats: [...state.chats, {
       id: chatId, type: 'assistant', name: '浏览器闭环测试', memberIds: [], deletedAt: null,
       createdAt: now, updatedAt: now, lastMessageAt: now,
+      messageBranchState: { enabled: true, activeBranchName: 'main', activeLeafNodeId: 'source-node', refs: {
+        main: { name: 'main', headNodeId: 'source-node', createdAt: now, updatedAt: now, version: 0 },
+        alternate: { name: 'alternate', headNodeId: 'alternate-node', createdAt: now, updatedAt: now, version: 0 },
+      } },
     }] }));
     const plan = {
       summary: '市场机会分析',
@@ -123,9 +127,21 @@ try {
       const persisted = await recoveredWorkflow.read(runId);
       if (persisted.run.maxModelCalls !== 2) throw new Error('调用额度未持久化');
       await recoveredWorkflow.setModelCallLimit(runId, persisted.run.planVersion, 3);
+      const selectBranch = (name) => useChatStore.setState((state) => ({ chats: state.chats.map((chat) => chat.id === chatId
+        ? { ...chat, messageBranchState: { ...chat.messageBranchState, activeBranchName: name,
+          activeLeafNodeId: chat.messageBranchState.refs[name].headNodeId } } : chat) }));
+      selectBranch('alternate');
+      const branchPaused = await recoveredWorkflow.resume(runId);
+      if (branchPaused.snapshot.run.status !== 'paused' || !branchPaused.snapshot.run.pauseReason?.includes('分支已切换') || requests.length !== 2) {
+        throw new Error('切换分支后仍提交了模型请求');
+      }
+      selectBranch('main');
       const completed = await recoveredWorkflow.resume(runId);
       if (completed.snapshot.run.status !== 'completed') throw new Error('真实 WorkflowRun 未完成：' + JSON.stringify(completed.snapshot));
       await workflow.publish(runId);
+      const deliveredChat = useChatStore.getState().chats.find((chat) => chat.id === chatId);
+      if (deliveredChat.messageBranchState.refs.main.headNodeId !== 'team-delivery-' + runId
+        || deliveredChat.messageBranchState.refs.alternate.headNodeId !== 'alternate-node') throw new Error('交付没有正确推进来源分支');
       const afterFirstDelivery = await indexedDbWorkflowRepository.read(currentWorkflowScope(), runId);
       const artifactStore = useAssistantArtifactStore.getState();
       const messageStore = useMessageStore.getState();
@@ -162,6 +178,8 @@ try {
         messagesAfterRepeat: messagesAfterRepeat.length,
         modelCalls: deliveryModelCalls,
         budgetRecovery: paused.snapshot.run.status === 'paused' && completed.snapshot.run.maxModelCalls === 3,
+        branchRecovery: branchPaused.snapshot.run.status === 'paused' && !completed.snapshot.run.pauseReason
+          && messages[0]?.metadata?.branching?.parentNodeId === 'source-node',
         stalledStatus: stalled.snapshot.run.status,
         stalledModelCalls: requests.length - deliveryModelCalls,
       };
@@ -176,6 +194,7 @@ try {
   assert.equal(result.messagesAfterRepeat, 1);
   assert.equal(result.modelCalls, 3);
   assert.equal(result.budgetRecovery, true);
+  assert.equal(result.branchRecovery, true);
   assert.equal(result.stalledStatus, 'paused');
   assert.equal(result.stalledModelCalls, 6);
   console.log(JSON.stringify({ ok: true, ...result }));

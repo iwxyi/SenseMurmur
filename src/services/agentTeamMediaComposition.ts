@@ -3,6 +3,8 @@ import type { MediaCompositionPlan } from './mediaCompositionPlan';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useChatStore } from '../stores/useChatStore';
 import { attachMessageToActiveBranch } from './messageBranching';
+import { advanceTeamConversation, teamConversationContext } from './agentTeamConversation';
+import type { WorkflowGoalSpec } from './workflowGoalSpec';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { WorkflowPreflightError } from './workflowRunRuntime';
 import { assertChatExecutionLease } from './chatExecutionLease';
@@ -26,7 +28,7 @@ export function inspectAgentTeamComposition(runId: string, taskId: string) {
 }
 
 export async function composeAgentTeamMedia(params: {
-  runId: string; taskId: string; chatId: string; plan: MediaCompositionPlan;
+  runId: string; taskId: string; chatId: string; plan: MediaCompositionPlan; sourceBranch?: WorkflowGoalSpec['sourceBranch'];
   resolveTaskId: (id: string) => string; signal: AbortSignal;
 }) {
   const existing = inspectAgentTeamComposition(params.runId, params.taskId);
@@ -54,7 +56,9 @@ export async function composeAgentTeamMedia(params: {
   const now = Date.now();
   const state = useMessageStore.getState();
   const semanticSummary = `按顺序合并 ${params.plan.clips.length} 个片段，叠加 ${params.plan.audioTracks?.length || 0} 条音轨，时长约 ${(result.durationMs / 1000).toFixed(1)} 秒。未进行成片画面检查。`;
-  const message = attachMessageToActiveBranch(chat, [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])], {
+  const latestChat = useChatStore.getState().chats.find((item) => item.id === chat.id && item.deletedAt == null);
+  if (!latestChat) throw new WorkflowPreflightError('助手会话已删除，合成结果未写入');
+  const message = attachMessageToActiveBranch(teamConversationContext(latestChat, params), [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])], {
     id: `team-composition-${params.runId}-${params.taskId}`, clientKey: `team-composition-${params.runId}-${params.taskId}`,
     chatId: chat.id, type: 'ai', senderId: 'assistant', senderName: '助手', content: '合成视频',
     emotion: 0, timestamp: now, isDeleted: false,
@@ -67,6 +71,7 @@ export async function composeAgentTeamMedia(params: {
   }) as Message;
   state.upsertMessage(message);
   state.queueMessageSync(message);
+  await advanceTeamConversation(message, params.sourceBranch);
   flushBufferedPersistenceWrites();
   return { output: `视频已在本机完成合成并保存在当前聊天附件。${semanticSummary}` };
 }

@@ -9,6 +9,7 @@ import { useMessageStore } from '../stores/useMessageStore';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { currentWorkflowScope, workflowRunLockName } from './workflowRunRuntime';
 import { attachMessageToActiveBranch } from './messageBranching';
+import { advanceTeamConversation, captureTeamSourceBranch, teamConversationBlockReason, teamConversationContext } from './agentTeamConversation';
 import type { Message } from '../types/message';
 import type { AssistantArtifactItem } from '../types/assistantArtifact';
 import { useSettingsStore } from '../stores/useSettingsStore';
@@ -270,6 +271,9 @@ function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<R
 export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
   const runtime: ReturnType<typeof createWorkflowRunRuntime> = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
     tracksModelInvocations: true,
+    dispatchBlockReason(snapshot) {
+      return teamConversationBlockReason(useChatStore.getState().chats.find((chat) => chat.id === snapshot.run.chatId), snapshot.run.goalSpec);
+    },
     async execute(task: WorkflowTask, signal, context) {
       if (task.kind === 'team_plan') {
         if (typeof task.input !== 'string') throw new WorkflowPreflightError('团队目标无效');
@@ -400,6 +404,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (!input.task.composition) throw new WorkflowPreflightError('缺少音视频合成配置');
         const clips = new Set(input.task.composition.clips.map((clip) => clip.taskId));
         return composeAgentTeamMedia({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           plan: input.task.composition, resolveTaskId: (id) => resolveTeamMediaTask(snapshot,
             input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id, clips.has(id) ? 'video' : 'audio'), signal });
       }
@@ -421,6 +426,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return dependency.output.slice(0, 12_000);
         });
         return queueAgentTeamImage({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), referenceImages, signal });
       }
       if (selectedTool === 'image_inspection') {
@@ -470,6 +476,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (!text?.trim() || text.length > 12_000) throw new WorkflowPreflightError('旁白正文必须为 1 到 12000 个字符');
         if (input.userInstruction) throw new WorkflowPreflightError('配音正文已确定，请通过追加任务修订正文后重新配音');
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt: text.trim(), purpose: 'speech', signal });
       }
       if (selectedTool === 'audio_generation') {
@@ -481,6 +488,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           return dependency.output.slice(0, 12_000);
         });
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), signal });
       }
       if (selectedTool === 'video_generation') {
@@ -522,6 +530,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
             ? dependency.output.slice(0, 12_000) : null;
         }).filter((content): content is string => content !== null);
         return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, input.userInstruction].filter(Boolean).join('\n\n'), referenceImages, signal });
       }
       if (selectedTool === 'web_search') {
@@ -699,6 +708,10 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const now = Date.now();
       const contract = goalSpec ? parseWorkflowGoalSpec(goalSpec) : defaultWorkflowGoalSpec(goal);
       if (contract.objective !== goal) throw new WorkflowPreflightError('目标契约与运行目标不一致');
+      const chat = requireActiveAssistantChat(chatId);
+      const branchError = teamConversationBlockReason(chat, contract);
+      if (branchError) throw new WorkflowPreflightError(branchError);
+      contract.sourceBranch ??= captureTeamSourceBranch(chat);
       const initial: WorkflowSnapshot = {
         run: { id: runId, chatId, goal, goalSpec: contract, status: 'active', generation: 0, planVersion: 1, planOpen: true, autoReview, maxModelCalls, updatedAt: now },
         tasks: [{ id: 'plan', runId, kind: 'team_plan', input: goal, dependsOn: [], status: 'queued', attempt: 0, updatedAt: now }],
@@ -835,6 +848,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const assertDeliveryOwnership = () => {
         if (scope() !== deliveryScope) throw new Error('账号已切换，团队交付已暂停');
         assertChatExecutionLease(chatId);
+        const reason = teamConversationBlockReason(useChatStore.getState().chats.find((chat) => chat.id === chatId), initial.run.goalSpec);
+        if (reason) throw new Error(reason);
       };
       const publishWithinRunLock = (signal?: AbortSignal) => navigator.locks.request(workflowRunLockName(deliveryScope, runId), async () => {
       if (signal?.aborted) throw signal.reason || new Error('团队交付已暂停');
@@ -901,7 +916,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const artifactRefs = savedArtifacts.map((item) => ({ id: item.id, kind: item.kind, title: item.title, versionId: item.currentVersionId }));
       const refsChanged = JSON.stringify(previousDelivery?.metadata?.assistant?.artifacts || []) !== JSON.stringify(artifactRefs);
       if (!previousDelivery || refsChanged) {
-        const draft = attachMessageToActiveBranch(chat, known, {
+        const draft = attachMessageToActiveBranch(teamConversationContext(chat, snapshot.run.goalSpec), known, {
           id: sourceId, clientKey: sourceId, chatId: chat.id, type: 'ai' as const,
           senderId: 'assistant', senderName: '助手', content: `${previousDelivery ? '团队任务已更新' : '团队任务已完成'}：${plan.summary}`,
           emotion: 0, timestamp: previousDelivery?.timestamp || Date.now(), isDeleted: false,
@@ -909,6 +924,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         }) as Message;
         useMessageStore.getState().upsertMessage(draft);
         useMessageStore.getState().queueMessageSync(draft);
+        await advanceTeamConversation(draft, snapshot.run.goalSpec?.sourceBranch);
         void useChatStore.getState().updateChat(chat.id, { lastMessageAt: draft.timestamp, latestMessage: draft });
       }
       flushBufferedPersistenceWrites();

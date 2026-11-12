@@ -8,6 +8,7 @@ export interface WorkflowGoalSpec {
   constraints: string[];
   acceptance: string[];
   allowedTools: WorkflowTool[];
+  sourceBranch?: { enabled: boolean; name: string; headNodeId: string | null };
   execution: {
     location: 'client';
     recovery: 'safe_steps_only';
@@ -31,6 +32,17 @@ export function parseWorkflowGoalSpec(raw: unknown): WorkflowGoalSpec {
   const acceptance = stringList(value.acceptance, '验收条件');
   const allowedTools = stringList(value.allowedTools, '工具授权');
   if (allowedTools.some((tool) => !WORKFLOW_TOOLS.some((known) => known === tool))) throw new Error('目标契约包含未知工具');
+  let sourceBranch: WorkflowGoalSpec['sourceBranch'];
+  if (value.sourceBranch !== undefined) {
+    const branch = value.sourceBranch;
+    if (!branch || typeof branch !== 'object' || Array.isArray(branch)
+      || !('enabled' in branch) || typeof branch.enabled !== 'boolean'
+      || !('name' in branch) || typeof branch.name !== 'string' || !branch.name.trim() || branch.name.length > 200
+      || !('headNodeId' in branch) || (branch.headNodeId !== null && (typeof branch.headNodeId !== 'string' || !branch.headNodeId || branch.headNodeId.length > 1000))) {
+      throw new Error('目标契约来源分支无效');
+    }
+    sourceBranch = { enabled: branch.enabled, name: branch.name, headNodeId: branch.headNodeId };
+  }
   if (!value.execution || typeof value.execution !== 'object' || Array.isArray(value.execution)) throw new Error('目标契约执行策略无效');
   const execution = value.execution as Record<string, unknown>;
   if (execution.location !== 'client' || execution.recovery !== 'safe_steps_only') throw new Error('目标契约仅支持客户端执行与安全步骤恢复');
@@ -38,6 +50,7 @@ export function parseWorkflowGoalSpec(raw: unknown): WorkflowGoalSpec {
     || !Number.isSafeInteger(execution.maxAutomaticReviewRounds) || Number(execution.maxAutomaticReviewRounds) < 0
     || Number(execution.maxAutomaticReviewRounds) > 3) throw new Error('目标契约执行上限无效');
   return { schemaVersion: 1, objective: value.objective, constraints, acceptance, allowedTools: allowedTools as WorkflowTool[],
+    ...(sourceBranch ? { sourceBranch } : {}),
     execution: { location: 'client', recovery: 'safe_steps_only', maxConcurrentTasks: execution.maxConcurrentTasks as number,
       maxAutomaticReviewRounds: execution.maxAutomaticReviewRounds as number } };
 }

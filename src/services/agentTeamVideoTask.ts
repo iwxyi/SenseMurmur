@@ -4,6 +4,8 @@ import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { attachMessageToActiveBranch } from './messageBranching';
+import { advanceTeamConversation, teamConversationContext } from './agentTeamConversation';
+import type { WorkflowGoalSpec } from './workflowGoalSpec';
 import { processRichMessageMedia } from './richMessageMedia';
 import { WorkflowPreflightError } from './workflowRunRuntime';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
@@ -61,7 +63,7 @@ function waitForVideoState(runId: string, taskId: string, signal: AbortSignal, p
   });
 }
 
-export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
+export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; sourceBranch?: WorkflowGoalSpec['sourceBranch']; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -85,7 +87,7 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
   const now = Date.now();
   const state = useMessageStore.getState();
   const known = [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])];
-  const message = existing || attachMessageToActiveBranch(chat, known, {
+  const message = existing || attachMessageToActiveBranch(teamConversationContext(chat, params), known, {
     id: `team-video-${params.runId}-${params.taskId}`, clientKey: `team-video-${params.runId}-${params.taskId}`, chatId: chat.id, type: 'ai' as const,
     senderId: 'assistant', senderName: '助手', content: '视频', emotion: 0,
     timestamp: now, isDeleted: false,
@@ -97,6 +99,7 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
   if (!existing) {
     state.upsertMessage(message);
     state.queueMessageSync(message);
+    await advanceTeamConversation(message, params.sourceBranch);
     flushBufferedPersistenceWrites();
   }
   const synced = isLocalOnlyMediaMode() ? message : await waitForVideoState(params.runId, params.taskId, params.signal,

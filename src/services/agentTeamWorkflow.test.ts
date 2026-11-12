@@ -106,6 +106,43 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('binds the starting branch, pauses after outstanding planning, and restores the whole run', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `branch-${runId}`;
+    const setBranch = (name: string) => useChatStore.setState((state) => ({ chats: state.chats.map((chat) => chat.id === 'chat'
+      ? { ...chat, messageBranchState: { enabled: true, activeBranchName: name, refs: {
+        main: { name: 'main', headNodeId: null, createdAt: 1, updatedAt: 1, version: 0 },
+        alternate: { name: 'alternate', headNodeId: null, createdAt: 1, updatedAt: 1, version: 0 },
+      } } } : chat) }));
+    setBranch('main');
+    let finishPlan!: (value: string) => void;
+    generate.mockImplementationOnce(() => new Promise<string>((resolve) => { finishPlan = resolve; }));
+    const api = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const workflow = createAgentTeamWorkflow(api, () => scope);
+    const pending = workflow.start(runId, 'chat', '撰写报告');
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    setBranch('alternate');
+    finishPlan(JSON.stringify({ summary: '报告', roles: [{ id: 'writer', name: '作者', responsibility: '撰写', method: '整理', acceptance: '可读', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'report', roleId: 'writer', goal: '撰写报告', dependsOn: [], acceptance: '可读' }], finalAcceptance: '完整' }));
+    const paused = await pending;
+    expect(paused.snapshot.run).toMatchObject({ status: 'paused', pauseReason: expect.stringContaining('分支已切换') });
+    expect(paused.snapshot.run.goalSpec?.sourceBranch?.name).toBe('main');
+    expect(paused.snapshot.tasks.find((task) => task.id === 'report')?.attempt).toBe(0);
+    await createAgentTeamWorkflow(api, () => scope).resume(runId);
+    expect(generate).toHaveBeenCalledOnce();
+    setBranch('main');
+    generate.mockResolvedValueOnce('报告正文');
+    const restored = createAgentTeamWorkflow(api, () => scope);
+    expect((await restored.resume(runId)).snapshot.run.status).toBe('completed');
+    setBranch('alternate');
+    await expect(restored.publish(runId)).rejects.toThrow('分支已切换');
+    setBranch('main');
+    await restored.publish(runId);
+    const chat = useChatStore.getState().chats.find((item) => item.id === 'chat');
+    expect(chat?.messageBranchState?.refs?.main.headNodeId).toBe(`team-delivery-${runId}`);
+    expect(generate).toHaveBeenCalledTimes(2);
+  });
+
   it('passes a delegated image export to video generation after restoring its pending child', async () => {
     const runId = crypto.randomUUID();
     const scope = `export-${runId}`;
@@ -255,7 +292,7 @@ describe('agent team workflow', () => {
     const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
     const workflow = createAgentTeamWorkflow(config, () => scope);
     const result = await workflow.start(runId, 'chat', goal, true, undefined, undefined, spec);
-    expect(result.snapshot.run.goalSpec).toEqual(spec);
+    expect(result.snapshot.run.goalSpec).toEqual({ ...spec, sourceBranch: { enabled: false, name: 'main', headNodeId: null } });
     expect(generate.mock.calls[0][2][0].content).toContain('仅使用提供的资料');
     expect(generate.mock.calls[1][1]).toContain('列出未确定事项');
     expect(result.snapshot.tasks.filter((task) => task.kind === 'team_review')).toHaveLength(rounds);
@@ -428,8 +465,7 @@ describe('agent team workflow', () => {
     const runId = crypto.randomUUID();
     useChatStore.setState((state) => ({ chats: state.chats.map((chat) => chat.id === 'chat' ? { ...chat, deletedAt: Date.now() } : chat) }));
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `deleted-chat-${runId}`);
-    const result = await workflow.start(runId, 'chat', '写一份报告');
-    expect(result.snapshot.tasks[0]).toMatchObject({ status: 'failed', error: '助手会话已删除或不可用' });
+    await expect(workflow.start(runId, 'chat', '写一份报告')).rejects.toThrow('助手会话已删除或不可用');
     expect(generate).not.toHaveBeenCalled();
   });
 
@@ -1088,7 +1124,7 @@ describe('agent team workflow', () => {
   it('publishes one visible message and one document across repeated deliveries', async () => {
     const runId = crypto.randomUUID();
     const chatId = `team-chat-${runId}`;
-    const chat = { id: chatId, type: 'assistant', name: '团队交付', memberIds: [], deletedAt: null };
+    const chat = { id: chatId, type: 'assistant', name: '团队交付', memberIds: [], deletedAt: null, messageBranchState: { enabled: false } };
     useChatStore.setState((state) => ({ chats: [...state.chats, chat as (typeof state.chats)[number]] }));
     generate.mockResolvedValueOnce(JSON.stringify({
       summary: '交付报告',
@@ -1130,7 +1166,7 @@ describe('agent team workflow', () => {
   it('publishes typed task deliverables as separate artifacts attached to one idempotent message', async () => {
     const runId = crypto.randomUUID();
     const chatId = `typed-delivery-${runId}`;
-    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '多产物交付', memberIds: [], deletedAt: null } as (typeof state.chats)[number]] }));
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '多产物交付', memberIds: [], deletedAt: null, messageBranchState: { enabled: false } } as (typeof state.chats)[number]] }));
     generate.mockResolvedValueOnce(JSON.stringify({
       summary: '调研与数据交付',
       roles: [{ id: 'analyst', name: '分析师', responsibility: '调研并整理数据', method: '提取结论和数据', acceptance: '交付可复用', allowedTools: ['text_generation'] }],
@@ -1423,7 +1459,7 @@ describe('agent team workflow', () => {
   it('reopens a completed run for delegation and updates its existing delivery version', async () => {
     const runId = crypto.randomUUID();
     const chatId = `reopen-chat-${runId}`;
-    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '交付', memberIds: [], deletedAt: null } as (typeof state.chats)[number]] }));
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '交付', memberIds: [], deletedAt: null, messageBranchState: { enabled: false } } as (typeof state.chats)[number]] }));
     const basePlan = {
       summary: '基础研究', roles: [{ id: 'researcher', name: '研究员', responsibility: '研究', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
       tasks: [{ id: 'research', roleId: 'researcher', goal: '研究问题', dependsOn: [], acceptance: '有结论' }], finalAcceptance: '研究完成',

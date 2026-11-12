@@ -43,6 +43,33 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it('persists a dispatch pause and resumes only unfinished tasks after the guard clears', async () => {
+    const id = crypto.randomUUID();
+    const scope = `dispatch-guard-${id}`;
+    let reason: string | undefined;
+    const execute = vi.fn(async (task: WorkflowTask) => {
+      if (task.id === 'script') reason = '请回到原始分支';
+      return { output: task.id };
+    });
+    const makeRuntime = () => createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+      dispatchBlockReason: () => reason, execute,
+    }, () => scope);
+    const runtime = makeRuntime();
+    await runtime.create(snapshot(id));
+    const paused = await runtime.resume(id);
+    expect(paused.run).toMatchObject({ status: 'paused', pauseReason: reason });
+    expect(paused.tasks.map((task) => task.attempt)).toEqual([1, 0]);
+    expect((await makeRuntime().read(id))?.run.pauseReason).toBe(reason);
+    await makeRuntime().resume(id);
+    expect(execute).toHaveBeenCalledTimes(1);
+    reason = undefined;
+    const completed = await makeRuntime().resume(id);
+    expect(completed.run.status).toBe('completed');
+    expect(completed.run.pauseReason).toBeUndefined();
+    expect(completed.tasks.map((task) => task.attempt)).toEqual([1, 1]);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['valid', 'duplicate', 'cycle', 'missing'] as const)('atomically expands child tasks: %s', async (mode) => {
     const id = crypto.randomUUID();
     const scope = `expand-${id}`;

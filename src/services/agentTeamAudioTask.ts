@@ -4,6 +4,8 @@ import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { attachMessageToActiveBranch } from './messageBranching';
+import { advanceTeamConversation, teamConversationContext } from './agentTeamConversation';
+import type { WorkflowGoalSpec } from './workflowGoalSpec';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { isLocalOnlyMediaMode, processRichMessageMedia } from './richMessageMedia';
 import { WorkflowPreflightError, type WorkflowTaskResult } from './workflowRunRuntime';
@@ -50,7 +52,7 @@ function waitForMessage(runId: string, taskId: string, signal: AbortSignal) {
   });
 }
 
-export async function queueAgentTeamAudio(params: { runId: string; taskId: string; chatId: string; prompt: string; purpose?: 'music' | 'speech'; signal: AbortSignal }): Promise<WorkflowTaskResult> {
+export async function queueAgentTeamAudio(params: { runId: string; taskId: string; chatId: string; prompt: string; sourceBranch?: WorkflowGoalSpec['sourceBranch']; purpose?: 'music' | 'speech'; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -72,7 +74,7 @@ export async function queueAgentTeamAudio(params: { runId: string; taskId: strin
   const now = Date.now();
   const state = useMessageStore.getState();
   const known = [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])];
-  const message = existing || attachMessageToActiveBranch(chat, known, {
+  const message = existing || attachMessageToActiveBranch(teamConversationContext(chat, params), known, {
     id: `team-audio-${params.runId}-${params.taskId}`, clientKey: `team-audio-${params.runId}-${params.taskId}`, chatId: chat.id,
     type: 'ai' as const, senderId: 'assistant', senderName: '助手', content: label, emotion: 0, timestamp: now, isDeleted: false,
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, attachments: [{
@@ -83,6 +85,7 @@ export async function queueAgentTeamAudio(params: { runId: string; taskId: strin
   if (!existing) {
     state.upsertMessage(message);
     state.queueMessageSync(message);
+    await advanceTeamConversation(message, params.sourceBranch);
     flushBufferedPersistenceWrites();
   }
   const synced = isLocalOnlyMediaMode() ? message : await waitForMessage(params.runId, params.taskId, params.signal);
