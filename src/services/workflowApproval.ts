@@ -1,10 +1,12 @@
 import type { WorkflowSnapshot, WorkflowTask } from './workflowRunRuntime';
 import { workflowJsonDigest } from './workflowToolRequest';
+import { parsePreparedMediaExecution, type PreparedMediaExecution } from './preparedMediaExecution';
 
 export interface WorkflowApprovalRequirement {
   summary: string;
   consequences: string;
   executionSha256?: string;
+  mediaExecution?: PreparedMediaExecution;
 }
 
 export interface WorkflowApproval extends WorkflowApprovalRequirement {
@@ -27,7 +29,12 @@ export function parseWorkflowApprovalRequirement(value: unknown): WorkflowApprov
   }
   if (item.executionSha256 !== undefined && (typeof item.executionSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(item.executionSha256))) throw new Error('审批执行配置摘要无效');
   return { summary: (item.summary as string).trim(), consequences: (item.consequences as string).trim(),
-    ...(item.executionSha256 === undefined ? {} : { executionSha256: item.executionSha256 as string }) };
+    ...(item.executionSha256 === undefined ? {} : { executionSha256: item.executionSha256 as string }),
+    ...(item.mediaExecution === undefined ? {} : { mediaExecution: parsePreparedMediaExecution(item.mediaExecution) }) };
+}
+
+export function workflowApprovalExecutionDigest(requirement: WorkflowApprovalRequirement) {
+  return workflowJsonDigest({ executionSha256: requirement.executionSha256, mediaExecution: requirement.mediaExecution });
 }
 
 function approvalScope(snapshot: WorkflowSnapshot, task: WorkflowTask) {
@@ -53,7 +60,7 @@ export function pendingWorkflowApproval(task: WorkflowTask) {
 export function workflowApprovalMatches(task: WorkflowTask, requirement: WorkflowApprovalRequirement, expectedAttempt = task.attempt + 1) {
   const last = task.approvals?.at(-1);
   return Boolean(last && last.invalidatedAt === undefined && last.attempt === expectedAttempt
-    && last.decision?.outcome === 'approved' && last.executionSha256 === requirement.executionSha256);
+    && last.decision?.outcome === 'approved' && workflowApprovalExecutionDigest(last) === workflowApprovalExecutionDigest(requirement));
 }
 
 export function assertWorkflowApprovals(snapshot: WorkflowSnapshot, task: WorkflowTask) {
@@ -99,7 +106,7 @@ export function assertWorkflowApprovalTransition(before: WorkflowSnapshot | null
           || (!record.decision && (task.status !== 'waiting_user' || next.status !== 'waiting_user'
             || before!.tasks.some((item) => item.status === 'running') || !['active', 'paused'].includes(before!.run.status)
             || after.run.status !== before!.run.status || after.run.planVersion !== before!.run.planVersion + 1 || changed.decision !== undefined))
-          || next.approvals.at(-1)?.executionSha256 === record.executionSha256)) throw new Error('只有执行配置变化才能使审批失效');
+          || workflowApprovalExecutionDigest(next.approvals.at(-1)!) === workflowApprovalExecutionDigest(record))) throw new Error('只有执行配置变化才能使审批失效');
       if (record.invalidatedAt === undefined && record.attempt > task.attempt && next.attempt >= record.attempt
         && (record.decision?.outcome !== 'approved' || record.scopeSha256 !== approvalScope(after, next))) throw new Error('执行范围未获当前审批');
       if (!record.decision && changed.decision && (task.status !== 'waiting_user' || next.attempt !== task.attempt

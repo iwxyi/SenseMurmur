@@ -38,6 +38,8 @@ export interface MessageAttachment {
   width?: number;
   height?: number;
   generationJobId?: string;
+  /** Local workflow approval reference. The signed quote and request remain in the workflow store. */
+  executionQuoteId?: string;
   /** Server-side persisted async media task. Used to resume polling after reload. */
   mediaTaskId?: string;
   promptText?: string;

@@ -5,6 +5,7 @@ import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
 import { processRichMessageMedia, isLocalOnlyMediaMode } from './richMessageMedia';
+import type { PreparedMediaExecution } from './preparedMediaExecution';
 
 vi.mock('./richMessageMedia', () => ({ processRichMessageMedia: vi.fn(), isLocalOnlyMediaMode: vi.fn(() => true) }));
 
@@ -20,6 +21,35 @@ beforeEach(() => {
 });
 
 describe('agent team audio task', () => {
+  it('refreshes the approved request on a budget-rejected placeholder before processing it again', async () => {
+    const usageReference = { schemaVersion: 1 as const, runId: 'retry-run', taskId: 'music', attempt: 2, kind: 'tool' as const };
+    const mediaExecution: PreparedMediaExecution = { schemaVersion: 1, submittedRequestSha256: 'a'.repeat(64),
+      request: { model: 'music-model', async: true, prompt: '新的配乐', client_request_key: 'new-request-key' },
+      quote: { schemaVersion: 1, id: 'b'.repeat(64), model: 'music-model', modality: 'audio', requestSha256: 'c'.repeat(64),
+        costQuoteId: 'd'.repeat(64), amount: '1.000000', unit: 'point', kind: 'request_tariff', capturedAt: 1, expiresAt: 300001, token: 'e'.repeat(64) } };
+    const old: Message = { id: 'retry-message', chatId: 'team-audio-chat', type: 'ai', senderId: 'assistant', senderName: '助手',
+      content: '音乐', emotion: 0, timestamp: 1, isDeleted: false, metadata: {
+        agentTeamMedia: { runId: 'retry-run', taskId: 'music' }, workflowUsage: { ...usageReference, attempt: 1 }, attachments: [{
+          id: 'audio', kind: 'audio', audioPurpose: 'music_generation', status: 'failed', altText: '音乐', promptText: '旧配乐',
+          executionQuoteId: 'old-quote', generationJobId: 'old-request', createdAt: 1, updatedAt: 1,
+          admissionRejection: { status: 402, code: 'WORKFLOW_BUDGET_EXHAUSTED' },
+        }],
+      } };
+    useMessageStore.setState({ messages: [old] });
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
+      expect(message.id).toBe(old.id);
+      expect(message.metadata?.workflowUsage).toEqual(usageReference);
+      expect(message.metadata?.attachments?.[0]).toMatchObject({ status: 'queued', promptText: '新的配乐',
+        generationJobId: 'new-request-key', executionQuoteId: mediaExecution.quote.id });
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'generating', mediaTaskId: 'accepted-retry',
+      })) } });
+    });
+    expect(await queueAgentTeamAudio({ runId: 'retry-run', taskId: 'music', chatId: 'team-audio-chat', prompt: '新的配乐',
+      mediaExecution, usageReference, signal: new AbortController().signal })).toEqual({ externalTaskId: 'accepted-retry' });
+    expect(useMessageStore.getState().messages).toHaveLength(1);
+  });
+
   it.each(['music', 'speech'] as const)('keeps the approved %s model when current settings change', async (purpose) => {
     const profile = { id: 'approved', name: '已批准模型', type: purpose === 'speech' ? 'tts' as const : 'audio' as const,
       provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'approved-model', isDefault: true };

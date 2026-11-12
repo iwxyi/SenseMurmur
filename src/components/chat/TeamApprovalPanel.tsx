@@ -13,6 +13,7 @@ export default function TeamApprovalPanel({ run, task, disabled, onDecide }: {
   const [error, setError] = useState<string | null>(null);
   const approval = pendingWorkflowApproval(task);
   if (!approval) return null;
+  const quote = approval.mediaExecution?.quote;
   function decide(outcome: 'approved' | 'rejected') {
     setSaving(true);
     setError(null);
@@ -21,9 +22,17 @@ export default function TeamApprovalPanel({ run, task, disabled, onDecide }: {
     }).finally(() => setSaving(false));
   }
   return <Box sx={{ display: 'grid', gap: 1, overflowWrap: 'anywhere' }}>
-    <Typography variant="subtitle2">{task.approvals?.at(-2)?.invalidatedAt !== undefined ? '模型、生成设置或预算已更改，请重新确认' : '等待你的确认'}</Typography>
+    <Typography variant="subtitle2">{task.approvals?.at(-2)?.invalidatedAt !== undefined ? '模型、生成设置、预算或报价已更改，请重新确认' : '等待你的确认'}</Typography>
     <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{approval.summary}</Typography>
     <Typography variant="body2" color="warning.main" sx={{ whiteSpace: 'pre-wrap' }}>{approval.consequences}</Typography>
+    {quote && <Box sx={{ display: 'grid', gap: 0.5 }}>
+      <Typography variant="body2">模型：{quote.model}</Typography>
+      <Typography variant="body2">{quote.kind === 'usage_estimate' ? '预估费用' : '本次报价'}：{quote.amount} {quote.unit === 'point' ? '积分' : quote.unit}</Typography>
+      <Typography variant="caption" color="text.secondary">
+        报价有效至 {new Date(quote.expiresAt).toLocaleTimeString()}，过期后需要重新确认。
+        {quote.kind === 'usage_estimate' ? '最终费用以实际用量结算。' : ''}
+      </Typography>
+    </Box>}
     {run.run.goalSpec?.platformBudget && <Typography variant="body2" color="text.secondary">
       平台任务总预算 {run.run.goalSpec.platformBudget.limitAmount} {run.run.goalSpec.platformBudget.billingUnit === 'point' ? '积分' : run.run.goalSpec.platformBudget.billingUnit}
     </Typography>}

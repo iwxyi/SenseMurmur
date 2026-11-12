@@ -11,6 +11,7 @@ import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope'
 import { isLocalOnlyMediaMode, processRichMessageMedia } from './richMessageMedia';
 import { WorkflowPreflightError, type WorkflowTaskResult } from './workflowRunRuntime';
 import { inspectTeamMediaAdmission, recoverTeamMediaAdmission } from './agentTeamMediaAdmission';
+import type { PreparedMediaExecution } from './preparedMediaExecution';
 
 function teamAudioMessage(runId: string, taskId: string): Message | null {
   const state = useMessageStore.getState();
@@ -56,7 +57,7 @@ function waitForMessage(runId: string, taskId: string, signal: AbortSignal) {
   });
 }
 
-export async function queueAgentTeamAudio(params: { runId: string; taskId: string; chatId: string; prompt: string; profile?: AIModelProfile; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; purpose?: 'music' | 'speech'; signal: AbortSignal }): Promise<WorkflowTaskResult> {
+export async function queueAgentTeamAudio(params: { runId: string; taskId: string; chatId: string; prompt: string; profile?: AIModelProfile; mediaExecution?: PreparedMediaExecution; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; purpose?: 'music' | 'speech'; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -65,7 +66,9 @@ export async function queueAgentTeamAudio(params: { runId: string; taskId: strin
   const chat = useChatStore.getState().chats.find((item) => item.id === params.chatId && item.type === 'assistant' && item.deletedAt == null);
   if (!chat) throw new WorkflowPreflightError('助手会话已删除');
   if (params.signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
-  const existing = recoverTeamMediaAdmission(teamAudioMessage(params.runId, params.taskId), 'audio', params.usageReference);
+  const priorMessage = teamAudioMessage(params.runId, params.taskId);
+  const rejectedBeforeSubmission = priorMessage?.metadata?.attachments?.some((item) => item.kind === 'audio' && inspectTeamMediaAdmission(item));
+  const existing = recoverTeamMediaAdmission(priorMessage, 'audio', params.usageReference);
   const prior = inspectAgentTeamAudioAttachment(params.runId, params.taskId);
   if (prior?.status === 'completed') return { output: prior.output };
   if (prior?.status === 'failed') throw new WorkflowPreflightError(prior.error);
@@ -78,14 +81,29 @@ export async function queueAgentTeamAudio(params: { runId: string; taskId: strin
   const now = Date.now();
   const state = useMessageStore.getState();
   const known = [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])];
-  const message = existing || attachMessageToActiveBranch(teamConversationContext(chat, params), known, {
+  let message = existing || attachMessageToActiveBranch(teamConversationContext(chat, params), known, {
     id: `team-audio-${params.runId}-${params.taskId}`, clientKey: `team-audio-${params.runId}-${params.taskId}`, chatId: chat.id,
     type: 'ai' as const, senderId: 'assistant', senderName: '助手', content: label, emotion: 0, timestamp: now, isDeleted: false,
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, workflowUsage: params.usageReference, attachments: [{
       id: `team-audio-${params.taskId}`, kind: 'audio' as const, audioPurpose: speech ? 'chat_voice' as const : 'music_generation' as const, status: 'queued' as const,
       altText: `团队生成${label}`, promptText: params.prompt, createdAt: now, updatedAt: now,
+      ...(params.mediaExecution ? { executionQuoteId: params.mediaExecution.quote.id,
+        generationJobId: String(params.mediaExecution.request.client_request_key) } : {}),
     }] },
   }) as Message;
+  const unsubmitted = existing?.metadata?.attachments?.find((item) => item.kind === 'audio'
+    && item.status === 'queued' && !item.mediaTaskId && !item.generationJobId);
+  if (unsubmitted && (params.mediaExecution || rejectedBeforeSubmission)) {
+    message = { ...message, metadata: { ...message.metadata, workflowUsage: params.usageReference,
+      attachments: message.metadata?.attachments?.map((item) => item.id === unsubmitted.id ? {
+        ...item, promptText: params.prompt, updatedAt: now,
+        executionQuoteId: params.mediaExecution?.quote.id,
+        generationJobId: params.mediaExecution ? String(params.mediaExecution.request.client_request_key) : undefined,
+      } : item) } };
+    state.upsertMessage(message);
+    state.queueMessageSync(message);
+    flushBufferedPersistenceWrites();
+  }
   if (!existing) {
     state.upsertMessage(message);
     state.queueMessageSync(message);

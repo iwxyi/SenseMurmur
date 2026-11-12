@@ -29,7 +29,9 @@ import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTea
 import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReference } from './agentTeamImageTask';
 import { inspectAgentTeamImages } from './agentTeamImageInspection';
 import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
-import { listAvailableModels } from './aiClient';
+import { listAvailableModels, prepareAiMediaTask } from './aiClient';
+import type { WorkflowApprovalRequirement } from './workflowApproval';
+import { resolveVideoGenerationParameters } from './aiGenerationAdapter';
 import { canComposeTeamMedia, composeAgentTeamMedia, inspectAgentTeamComposition, teamMediaAttachment } from './agentTeamMediaComposition';
 import { hasRepeatedTeamReviewWithoutProgress, hasSemanticallyStalledTeamReview, parseTeamProgressAssessment, teamReviewProgressComparison } from './agentTeamProgress';
 import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
@@ -275,11 +277,67 @@ function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<R
   }
 }
 
+function teamMusicPrompt(input: TeamTaskInput, snapshot: WorkflowSnapshot, savedTextContent: string[]) {
+  const upstream = input.task.dependsOn.map((id) => {
+    const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
+    const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
+    if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('音乐的上游歌词或说明尚未就绪');
+    if (dependency.kind !== 'agent_text' && dependency.kind !== 'agent_web_search' && dependency.kind !== 'agent_user_input') throw new WorkflowPreflightError('音乐任务目前只能读取文字歌词或说明');
+    return dependency.output.slice(0, 12_000);
+  });
+  return [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
+}
+
+async function teamVideoRequest(task: WorkflowTask, input: TeamTaskInput, snapshot: WorkflowSnapshot, savedTextContent: string[]) {
+  const existingVideo = inspectAgentTeamVideoAttachment(task.runId, task.id);
+  const upstreamTaskIds = new Set<string>();
+  const savedImageTaskIds = new Set<string>();
+  const collectSavedImages = (source: AgentTeamTask) => source.savedMedia?.filter((media) => media.kind === 'image')
+    .forEach((media) => savedImageTaskIds.add(resolveTeamMediaTask(snapshot, media.taskId, 'image')));
+  collectSavedImages(input.task);
+  const collectUpstream = (id: string) => {
+    const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
+    if (upstreamTaskIds.has(dependencyId)) return;
+    const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
+    if (!dependency) throw new WorkflowPreflightError('视频的上游素材尚未就绪');
+    upstreamTaskIds.add(dependencyId);
+    const dependencyInput = isTeamTaskInput(dependency.input) ? dependency.input : null;
+    if (dependency.kind !== 'agent_delegation' && dependencyInput) {
+      collectSavedImages(dependencyInput.task);
+      dependencyInput.task.dependsOn.forEach(collectUpstream);
+    }
+  };
+  input.task.dependsOn.forEach(collectUpstream);
+  const imageTaskIds = [...new Set([...[...upstreamTaskIds].filter((id) => {
+    const source = snapshot.tasks.find((item) => item.id === id);
+    return source && isTeamTaskInput(source.input) && teamTaskMediaKind(source.input.task) === 'image';
+  }).map((id) => resolveTeamMediaTask(snapshot, id, 'image')), ...savedImageTaskIds])];
+  const hasImageDependency = imageTaskIds.length > 0;
+  if (!existingVideo || existingVideo.status === 'queued') {
+    const capabilities = await teamMediaCapabilities();
+    if (!capabilities.videoGeneration) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用', { tool: 'video_generation', code: 'service_unavailable' });
+    if (hasImageDependency && !capabilities.videoReferenceImages) throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换支持参考图的视频模型后继续', { tool: 'video_generation', code: 'model_unsupported' });
+    if (!hasImageDependency && capabilities.videoRequiresReferenceImage) throw new WorkflowPreflightError('当前视频模型必须提供参考图片，请先生成图片素材或更换模型', { tool: 'video_generation', code: 'input_unsupported' });
+    if (capabilities.maxVideoReferenceImages !== undefined && imageTaskIds.length > capabilities.maxVideoReferenceImages) {
+      throw new WorkflowPreflightError(`当前视频模型最多支持 ${capabilities.maxVideoReferenceImages} 张参考图片，请减少素材或更换模型`, { tool: 'video_generation', code: 'input_unsupported' });
+    }
+  }
+  const referenceImages = imageTaskIds.map((dependencyId) => {
+    const reference = teamImageReference(task.runId, dependencyId);
+    if (!reference) throw new WorkflowPreflightError('参考图片文件尚未就绪');
+    return reference;
+  });
+  const upstream = [...upstreamTaskIds].map((dependencyId) => {
+    const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
+    if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('视频的上游素材尚未就绪');
+    return dependency.kind === 'agent_text' || dependency.kind === 'agent_user_input' || dependency.kind === 'agent_web_search' || dependency.kind === 'agent_image_inspection' || dependency.kind === 'agent_delegation'
+      ? dependency.output.slice(0, 12_000) : null;
+  }).filter((content): content is string => content !== null);
+  return { referenceImages, prompt: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n') };
+}
+
 export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
-  const runtime: ReturnType<typeof createWorkflowRunRuntime> = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
-    tracksModelInvocations: true,
-    tracksToolInvocations: true,
-    approvalRequirement(task, snapshot) {
+  function approvalRequirement(task: WorkflowTask, snapshot: WorkflowSnapshot): WorkflowApprovalRequirement | undefined {
       if (!isTeamTaskInput(task.input)) return undefined;
       const input = task.input;
       const tool = input.task.tool || 'text_generation';
@@ -292,12 +350,39 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           : tool === 'image_inspection' || tool === 'video_inspection' ? 'text' : undefined;
       const profile = profileType ? getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, profileType) : undefined;
       const config = profileType ? profile : tool === 'media_composition' || tool === 'user_input' ? undefined : api;
-      return { ...requirement, executionSha256: workflowJsonDigest({ tool, platformBudget: snapshot.run.goalSpec?.platformBudget, model: config ? {
+      const executionSha256 = workflowJsonDigest({ tool, platformBudget: snapshot.run.goalSpec?.platformBudget, model: config ? {
         provider: config.provider, baseUrl: config.baseUrl, model: config.model,
         maxOutputTokens: config.maxOutputTokens, advancedOptions: config.advancedOptions,
         ...(profile ? { defaultImageSize: profile.defaultImageSize, videoDefaults: profile.videoDefaults,
           imageCapabilities: profile.imageCapabilities, inputCapabilities: profile.inputCapabilities } : {}),
-      } : null }) };
+      } : null });
+      const prior = task.approvals?.at(-1);
+      const expectedAttempt = task.status === 'running' ? task.attempt : task.attempt + 1;
+      return { ...requirement, executionSha256,
+        ...(prior?.attempt === expectedAttempt && prior.executionSha256 === executionSha256 && prior.mediaExecution
+          && prior.mediaExecution.quote.expiresAt > Date.now() ? { mediaExecution: prior.mediaExecution } : {}) };
+  }
+  const runtime: ReturnType<typeof createWorkflowRunRuntime> = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+    tracksModelInvocations: true,
+    tracksToolInvocations: true,
+    approvalRequirement,
+    async prepareApprovalRequirement(task, snapshot, requirement, signal) {
+      if (requirement.mediaExecution || !isTeamTaskInput(task.input)
+        || !['audio_generation', 'video_generation'].includes(task.input.task.tool || '')) return requirement;
+      const video = task.input.task.tool === 'video_generation';
+      const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, video ? 'video' : 'audio');
+      if (!profile || profile.provider !== 'official-ace') return requirement;
+      if (task.input.task.savedText?.some((reference) => reference.artifact)) await ensureAssistantArtifactStoreHydrated();
+      const savedText = resolveTeamSavedText(task.input.task, snapshot, task.input.contextTaskIds || [], useAssistantArtifactStore.getState().items);
+      const content = savedText.map((entry) => entry.content);
+      const request = video ? await teamVideoRequest(task, task.input, snapshot, content) : { prompt: teamMusicPrompt(task.input, snapshot, content) };
+      const mediaExecution = await prepareAiMediaTask({ profile, prompt: request.prompt, signal,
+        ...(video ? { parameters: resolveVideoGenerationParameters({ profile, ...request }) } : {}),
+        clientRequestKey: workflowJsonDigest({ runId: task.runId, taskId: task.id, attempt: task.attempt + 1 }),
+        aiUsage: { type: video ? 'video_generation' : 'audio_generation', label: video ? '聊天视频生成' : '聊天音乐生成', scope: 'chat', resourceId: snapshot.run.chatId,
+          workflow: { schemaVersion: 1, runId: task.runId, taskId: task.id, attempt: task.attempt + 1, kind: 'tool',
+            ...(snapshot.run.goalSpec?.platformBudget ? { budgetRevision: snapshot.run.goalSpec.platformBudget.revision } : {}) } } });
+      return { ...requirement, mediaExecution };
     },
     dispatchBlockReason(snapshot) {
       return teamConversationBlockReason(useChatStore.getState().chats.find((chat) => chat.id === snapshot.run.chatId), snapshot.run.goalSpec);
@@ -584,74 +669,32 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           prompt, purpose: 'speech', signal });
       }
       if (selectedTool === 'audio_generation') {
-        const upstream = input.task.dependsOn.map((id) => {
-          const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
-          const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
-          if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('音乐的上游歌词或说明尚未就绪');
-          if (dependency.kind !== 'agent_text' && dependency.kind !== 'agent_web_search' && dependency.kind !== 'agent_user_input') throw new WorkflowPreflightError('音乐任务目前只能读取文字歌词或说明');
-          return dependency.output.slice(0, 12_000);
-        });
-        const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
+        const prompt = teamMusicPrompt(input, snapshot, savedTextContent);
+        const mediaExecution = task.approvals?.at(-1)?.mediaExecution;
+        if (mediaExecution && mediaExecution.request.prompt !== prompt) throw new WorkflowPreflightError('音乐素材或要求已改变，请重新确认审批');
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'audio');
         if (!profile) throw new WorkflowPreflightError('音乐模型未配置', { tool: 'audio_generation', code: 'model_missing' });
         await context.beginToolInvocation(describeWorkflowToolRequest('audio_generation', { prompt }));
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           profile,
+          mediaExecution,
           usageReference: context.usageReference,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt, signal });
       }
       if (selectedTool === 'video_generation') {
-        const existingVideo = inspectAgentTeamVideoAttachment(task.runId, task.id);
-        const upstreamTaskIds = new Set<string>();
-        const savedImageTaskIds = new Set<string>();
-        const collectSavedImages = (source: AgentTeamTask) => source.savedMedia?.filter((media) => media.kind === 'image')
-          .forEach((media) => savedImageTaskIds.add(resolveTeamMediaTask(snapshot, media.taskId, 'image')));
-        collectSavedImages(input.task);
-        const collectUpstream = (id: string) => {
-          const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
-          if (upstreamTaskIds.has(dependencyId)) return;
-          const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
-          if (!dependency) throw new WorkflowPreflightError('视频的上游素材尚未就绪');
-          upstreamTaskIds.add(dependencyId);
-          const dependencyInput = isTeamTaskInput(dependency.input) ? dependency.input : null;
-          if (dependency.kind !== 'agent_delegation' && dependencyInput) {
-            collectSavedImages(dependencyInput.task);
-            dependencyInput.task.dependsOn.forEach(collectUpstream);
-          }
-        };
-        input.task.dependsOn.forEach(collectUpstream);
-        const imageTaskIds = [...new Set([...[...upstreamTaskIds].filter((id) => {
-          const source = snapshot.tasks.find((item) => item.id === id);
-          return source && isTeamTaskInput(source.input) && teamTaskMediaKind(source.input.task) === 'image';
-        }).map((id) => resolveTeamMediaTask(snapshot, id, 'image')), ...savedImageTaskIds])];
-        const hasImageDependency = imageTaskIds.length > 0;
-        if (!existingVideo || existingVideo.status === 'queued') {
-          const capabilities = await teamMediaCapabilities();
-          if (!capabilities.videoGeneration) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用', { tool: 'video_generation', code: 'service_unavailable' });
-          if (hasImageDependency && !capabilities.videoReferenceImages) throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换支持参考图的视频模型后继续', { tool: 'video_generation', code: 'model_unsupported' });
-          if (!hasImageDependency && capabilities.videoRequiresReferenceImage) throw new WorkflowPreflightError('当前视频模型必须提供参考图片，请先生成图片素材或更换模型', { tool: 'video_generation', code: 'input_unsupported' });
-          if (capabilities.maxVideoReferenceImages !== undefined && imageTaskIds.length > capabilities.maxVideoReferenceImages) {
-            throw new WorkflowPreflightError(`当前视频模型最多支持 ${capabilities.maxVideoReferenceImages} 张参考图片，请减少素材或更换模型`, { tool: 'video_generation', code: 'input_unsupported' });
-          }
+        const { prompt, referenceImages } = await teamVideoRequest(task, input, snapshot, savedTextContent);
+        const mediaExecution = task.approvals?.at(-1)?.mediaExecution;
+        if (mediaExecution && (mediaExecution.request.prompt !== prompt
+          || workflowJsonDigest(mediaExecution.request.image_urls ?? []) !== workflowJsonDigest(referenceImages.map((item) => item.url)))) {
+          throw new WorkflowPreflightError('视频素材或要求已改变，请重新确认审批');
         }
-        const referenceImages = imageTaskIds.flatMap((dependencyId) => {
-          const reference = teamImageReference(task.runId, dependencyId);
-          if (!reference) throw new WorkflowPreflightError('参考图片文件尚未就绪');
-          return [reference];
-        });
-        const upstream = [...upstreamTaskIds].map((dependencyId) => {
-          const dependency = snapshot.tasks.find((item) => item.id === dependencyId);
-          if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('视频的上游素材尚未就绪');
-          return dependency.kind === 'agent_text' || dependency.kind === 'agent_user_input' || dependency.kind === 'agent_web_search' || dependency.kind === 'agent_image_inspection' || dependency.kind === 'agent_delegation'
-            ? dependency.output.slice(0, 12_000) : null;
-        }).filter((content): content is string => content !== null);
-        const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video');
         if (!profile) throw new WorkflowPreflightError('视频模型未配置', { tool: 'video_generation', code: 'model_missing' });
         await context.beginToolInvocation(describeWorkflowToolRequest('video_generation', { prompt, referenceImages }));
         return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           profile,
+          mediaExecution,
           usageReference: context.usageReference,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt, referenceImages, signal });

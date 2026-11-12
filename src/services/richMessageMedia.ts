@@ -4,7 +4,8 @@ import { isAIProfileUsable, type AIModelProfile } from '../types/settings';
 import { api, ApiError } from './api';
 import { workspaceFetch as fetch } from './workspaceLifecycle';
 import { generateAudioWithAdapter, generateImageWithAdapter, generateVideoWithAdapter, synthesizeSpeechWithAdapter } from './aiGenerationAdapter';
-import { waitForAiMediaTask } from './aiClient';
+import { submitPreparedAiMediaTask, waitForAiMediaTask } from './aiClient';
+import { readApprovedWorkflowMedia } from './workflowApprovedMedia';
 import { readAuthSnapshot } from './authSnapshot';
 import { logRecoverableError, reportRecoverableError } from './diagnostics';
 import { assertWorkflowBudgetChannel, workflowAdmissionRejection } from './workflowAdmission';
@@ -735,9 +736,10 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
           taskId = task.task_id;
         } catch (lookupError) {
           if (!(lookupError instanceof ApiError) || lookupError.status !== 404) throw lookupError;
+          const approved = await readApprovedWorkflowMedia(workingMessage, attachment);
           const profile = findGenerationProfile(entry.aiProfiles, 'audio');
-          if (!profile) throw new Error('音频模型未配置');
-          const task = await generateAudioWithAdapter({ profile, prompt: attachment.promptText || attachment.altText, signal,
+          if (!profile && !approved) throw new Error('音频模型未配置');
+          const task = approved ? await submitPreparedAiMediaTask(approved, { signal }) : await generateAudioWithAdapter({ profile: profile!, prompt: attachment.promptText || attachment.altText, signal,
             clientRequestKey, aiUsage: { type: 'audio_generation', label: '聊天音乐生成', scope: 'chat', resourceId: workingMessage.chatId, workflow: workingMessage.metadata?.workflowUsage } });
           taskId = task.task_id;
         }
@@ -788,10 +790,11 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
           task = await api.getAiMediaTaskByRequestKey(clientRequestKey);
         } catch (lookupError) {
           if (!(lookupError instanceof ApiError) || lookupError.status !== 404) throw lookupError;
-          if (!profile) throw new Error('视频模型未配置');
+          const approved = await readApprovedWorkflowMedia(workingMessage, attachment);
+          if (!profile && !approved) throw new Error('视频模型未配置');
           if (!attachment.promptText) throw new Error('视频提示词缺失');
-          task = await generateVideoWithAdapter({
-            profile,
+          task = approved ? await submitPreparedAiMediaTask(approved, { signal }) : await generateVideoWithAdapter({
+            profile: profile!,
             prompt: attachment.promptText,
             clientRequestKey,
             aspectRatio: attachment.aspectRatio,

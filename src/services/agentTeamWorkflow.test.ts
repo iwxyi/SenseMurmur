@@ -86,7 +86,10 @@ vi.mock('./agentTeamImageTask', () => ({
 vi.spyOn(appApi, 'searchWeb');
 const search = vi.mocked(appApi.searchWeb);
 
-vi.mock('./aiClient', () => ({ generateResponse: vi.fn(), listAvailableModels: vi.fn() }));
+vi.mock('./aiClient', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./aiClient')>();
+  return { generateResponse: vi.fn(), listAvailableModels: vi.fn(), prepareAiMediaTask: actual.prepareAiMediaTask };
+});
 const generate = vi.mocked(generateResponse);
 
 afterEach(() => vi.unstubAllGlobals());
@@ -116,6 +119,48 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it.each(['audio_generation', 'video_generation'] as const)('quotes the final script and submits the persisted approval for %s', async (tool) => {
+    const runId = crypto.randomUUID(); const scope = `signed-media-${runId}`;
+    const video = tool === 'video_generation';
+    const model = video ? 'MiniMax-H3' : 'fixture-music';
+    useSettingsStore.setState({ aiProfiles: [{ id: 'media', name: '媒体', type: video ? 'video' : 'audio', provider: 'official-ace',
+      apiKey: '', baseUrl: '/api/ai', model, isDefault: true,
+      ...(video ? { videoDefaults: { aspectRatio: '9:16', resolution: '720p', duration: 6 } } : {}) }] });
+    const now = Date.now();
+    const quote = vi.spyOn(appApi, 'quoteAiMedia').mockResolvedValue({ schemaVersion: 1, id: 'a'.repeat(64), model,
+      modality: video ? 'video' : 'audio', requestSha256: 'b'.repeat(64), costQuoteId: 'c'.repeat(64), amount: '1.250000', unit: 'point',
+      kind: 'request_tariff', capturedAt: now, expiresAt: now + 300000, token: 'd'.repeat(64) });
+    try {
+      generate.mockResolvedValueOnce(JSON.stringify({ summary: '制作森林作品', roles: [{ id: 'maker', name: '创作者',
+        responsibility: '制作', method: '先写脚本再制作', acceptance: '可播放', allowedTools: ['text_generation', tool] }],
+        tasks: [{ id: 'script', roleId: 'maker', goal: '写森林脚本', tool: 'text_generation', dependsOn: [], acceptance: '有正文' },
+          { id: 'media', roleId: 'maker', goal: '根据脚本制作', tool, dependsOn: ['script'], acceptance: '有文件' }], finalAcceptance: '可播放' }))
+        .mockResolvedValueOnce('脚本正文：森林中的木琴与追逐。');
+      vi.mocked(queueAgentTeamAudio).mockResolvedValue({ externalTaskId: 'accepted-music' });
+      vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'accepted-video' });
+      const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+      const goalSpec = { ...defaultWorkflowGoalSpec('制作森林作品'), approvalTools: [tool] };
+      const pending = await createAgentTeamWorkflow(config, () => scope).start(runId, 'chat', '制作森林作品', false, undefined, undefined, goalSpec);
+      const proposal = pending.snapshot.tasks.find((task) => task.id === 'media')!.approvals!.at(-1)!;
+      expect(proposal.mediaExecution?.request.prompt).toContain('脚本正文：森林中的木琴与追逐。');
+      expect(proposal.mediaExecution?.request).toMatchObject({ model, client_request_key: expect.any(String), metadata: { aiUsage: {
+        resourceId: 'chat', workflow: { runId, taskId: 'media', attempt: 1, kind: 'tool' },
+      } } });
+      if (video) expect(proposal.mediaExecution?.request).toMatchObject({ aspect_ratio: '9:16', resolution: '720p', duration: 6 });
+      expect(queueAgentTeamAudio).not.toHaveBeenCalled(); expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+      const restored = createAgentTeamWorkflow(config, () => scope);
+      await restored.decideApproval(runId, 'media', pending.snapshot.run.planVersion, 'approved');
+      const submitted = await restored.resume(runId);
+      expect(submitted.snapshot.tasks.find((task) => task.id === 'media')?.status).toBe('waiting_external');
+      const queue = video ? queueAgentTeamVideo : queueAgentTeamAudio;
+      expect(queue).toHaveBeenCalledWith(expect.objectContaining({ mediaExecution: proposal.mediaExecution,
+        prompt: proposal.mediaExecution!.request.prompt }));
+      expect(quote).toHaveBeenCalledOnce();
+      await restored.resume(runId);
+      expect(queue).toHaveBeenCalledOnce();
+    } finally { quote.mockRestore(); }
+  });
+
   it.each(['saved', 'failed', 'scope-changed'] as const)('persists the first-planning budget gate before saving (%s)', async (outcome) => {
     const runId = crypto.randomUUID();
     const originalScope = `initial-budget-${runId}`;

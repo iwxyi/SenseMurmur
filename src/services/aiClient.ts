@@ -7,6 +7,9 @@ import { assertWorkspaceActive, getResponseWorkspaceSignal, getWorkspaceSignal, 
 import { assertChatExecutionLease } from './chatExecutionLease';
 import { getChatExecutionFence } from './chatExecutionFence';
 import { assertWorkflowBudgetChannel } from './workflowAdmission';
+import { parseMediaExecutionQuote, type MediaExecutionQuote } from '../types/mediaExecutionQuote';
+import { captureMediaExecutionRequest, parsePreparedMediaExecution, type PreparedMediaExecution } from './preparedMediaExecution';
+import { workflowJsonDigest } from './workflowToolRequest';
 
 type ChatRole = 'user' | 'assistant' | 'system';
 export interface ChatMessageImageAttachment {
@@ -161,17 +164,17 @@ export interface AiMediaTask {
   updatedAt: number;
 }
 
-/** Submit an ACE media task through the authenticated backend proxy. */
-export async function submitAiMediaTask(options: {
+export interface AiMediaRequestOptions {
   profile: Pick<APIConfig, 'provider' | 'model'>;
   prompt: string;
   parameters?: Record<string, unknown>;
   signal?: AbortSignal;
   aiUsage?: AiUsageMetadata;
   clientRequestKey?: string;
-}) {
-  if (options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId) assertChatExecutionLease(options.aiUsage.resourceId);
-  const request = {
+}
+
+function buildAiMediaRequest(options: AiMediaRequestOptions) {
+  return {
     provider: options.profile.provider,
     model: options.profile.model,
     prompt: options.prompt,
@@ -182,6 +185,44 @@ export async function submitAiMediaTask(options: {
     ...(options.parameters || {}),
     ...(options.aiUsage ? { metadata: { aiUsage: options.aiUsage } } : {}),
   };
+}
+
+/** Preview the same effective request without submitting a generation task. */
+export async function quoteAiMediaTask(options: AiMediaRequestOptions): Promise<MediaExecutionQuote> {
+  options.signal?.throwIfAborted();
+  const response = await api.quoteAiMedia(buildAiMediaRequest(options), { signal: options.signal });
+  options.signal?.throwIfAborted();
+  return parseMediaExecutionQuote(response);
+}
+
+/** Capture once before quoting, so later settings or caller mutations cannot change the approved request. */
+export async function prepareAiMediaTask(options: AiMediaRequestOptions): Promise<PreparedMediaExecution> {
+  options.signal?.throwIfAborted();
+  const { executionFence: transientFence, ...body } = buildAiMediaRequest(options);
+  void transientFence;
+  const request = captureMediaExecutionRequest(body);
+  const quote = parseMediaExecutionQuote(await api.quoteAiMedia(request, { signal: options.signal }));
+  options.signal?.throwIfAborted();
+  return parsePreparedMediaExecution({ schemaVersion: 1, request, submittedRequestSha256: workflowJsonDigest(request), quote });
+}
+
+/** Refresh only the transient lease; the signed generation parameters remain exactly as captured. */
+export async function submitPreparedAiMediaTask(value: PreparedMediaExecution, options: { signal?: AbortSignal } = {}) {
+  options.signal?.throwIfAborted();
+  const prepared = parsePreparedMediaExecution(value);
+  const metadata = prepared.request.metadata as { aiUsage?: AiUsageMetadata } | undefined;
+  const usage = metadata?.aiUsage;
+  if (usage?.scope === 'chat' && usage.resourceId) assertChatExecutionLease(usage.resourceId);
+  const fence = usage?.scope === 'chat' && usage.resourceId ? getChatExecutionFence(usage.resourceId) : undefined;
+  return api.generateAiMedia({ ...prepared.request, ...(fence ? { executionFence: fence } : {}), execution_quote: prepared.quote }, options);
+}
+
+/** Submit an ACE media task through the authenticated backend proxy. */
+export async function submitAiMediaTask(options: AiMediaRequestOptions & { executionQuote?: MediaExecutionQuote }) {
+  options.signal?.throwIfAborted();
+  if (options.aiUsage?.scope === 'chat' && options.aiUsage.resourceId) assertChatExecutionLease(options.aiUsage.resourceId);
+  const request = { ...buildAiMediaRequest(options),
+    ...(options.executionQuote ? { execution_quote: parseMediaExecutionQuote(options.executionQuote) } : {}) };
   const result = options.signal
     ? await api.generateAiMedia(request, { signal: options.signal })
     : await api.generateAiMedia(request);

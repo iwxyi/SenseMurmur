@@ -14,10 +14,12 @@ import { assertWorkflowDecisions, assertWorkflowDecisionTransition, deliveryCopy
 import { assertWorkflowUserResponse, createWorkflowUserResponse, type WorkflowUserResponse } from './workflowUserResponse';
 import { parseWorkflowModelRequest, type WorkflowModelRequest } from './workflowModelRequest';
 import { assertWorkflowApprovals, assertWorkflowApprovalTransition, pendingWorkflowApproval, proposeWorkflowApproval, workflowApprovalMatches,
+  parseWorkflowApprovalRequirement, workflowApprovalExecutionDigest,
   type WorkflowApproval, type WorkflowApprovalRequirement } from './workflowApproval';
 import type { WorkflowUsageReference } from '../types/workflowUsage';
 import { workflowAdmissionBlockReason } from './workflowAdmission';
 import { parseWorkflowCapabilityIssue, type WorkflowCapabilityIssue, type WorkflowCapabilityRequirement } from './workflowCapability';
+import { redactAiDiagnosticText } from './aiDiagnosticText';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -300,6 +302,7 @@ export interface WorkflowExecutor {
   tracksToolInvocations?: boolean;
   dispatchBlockReason?(snapshot: WorkflowSnapshot): string | undefined;
   approvalRequirement?(task: WorkflowTask, snapshot: WorkflowSnapshot): WorkflowApprovalRequirement | undefined;
+  prepareApprovalRequirement?(task: WorkflowTask, snapshot: WorkflowSnapshot, requirement: WorkflowApprovalRequirement, signal: AbortSignal): Promise<WorkflowApprovalRequirement>;
   execute(task: WorkflowTask, signal: AbortSignal, context: WorkflowExecutionContext): Promise<WorkflowTaskResult>;
   inspectExternal?(task: WorkflowTask, signal: AbortSignal): Promise<{ status: 'pending' | 'completed' | 'failed'; output?: unknown; error?: string }>;
   reconcileInterrupted?(task: WorkflowTask): Promise<{ status: 'queued' | 'waiting_external' | 'completed' | 'failed'; externalTaskId?: string; output?: unknown; error?: string; admissionRejected?: true } | null>;
@@ -924,15 +927,33 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
 
   async function decideApproval(runId: string, taskId: string, expectedPlanVersion: number, outcome: 'approved' | 'rejected') {
     if (outcome !== 'approved' && outcome !== 'rejected') throw new Error('审批决定无效');
-    return mutate(scope(), runId, (current) => {
+    const storageScope = scope();
+    let prepared: { snapshotSha256: string; baselineSha256: string; requirement: WorkflowApprovalRequirement } | undefined;
+    if (outcome === 'approved' && executor.prepareApprovalRequirement) {
+      const snapshot = await repository.read(storageScope, runId);
+      const task = snapshot?.tasks.find((item) => item.id === taskId);
+      if (!snapshot || snapshot.run.planVersion !== expectedPlanVersion || !task || task.status !== 'waiting_user' || !pendingWorkflowApproval(task)) throw new Error('该步骤没有等待当前版本审批');
+      const baseline = executor.approvalRequirement?.(task, snapshot);
+      if (baseline) {
+        const snapshotSha256 = workflowJsonDigest(snapshot);
+        const baselineSha256 = workflowApprovalExecutionDigest(baseline);
+        const requirement = parseWorkflowApprovalRequirement(await executor.prepareApprovalRequirement(task, snapshot, baseline, AbortSignal.timeout(60_000)));
+        prepared = { snapshotSha256, baselineSha256, requirement };
+      }
+    }
+    return mutate(storageScope, runId, (current) => {
+      if (scope() !== storageScope) throw new Error('审批所属账号已改变');
       if (current.run.planVersion !== expectedPlanVersion) throw new Error('团队计划已更新，请刷新后重试');
       if (!['paused', 'active'].includes(current.run.status) || current.tasks.some((task) => task.status === 'running')) throw new Error('请等待当前步骤结束后审批');
       const task = current.tasks.find((item) => item.id === taskId);
       const pending = task && pendingWorkflowApproval(task);
       if (!task || task.status !== 'waiting_user' || !pending) throw new Error('该步骤没有等待审批');
       const now = Math.max(Date.now(), pending.proposedAt);
-      const requirement = outcome === 'approved' ? executor.approvalRequirement?.(task, current) : undefined;
-      if (requirement && requirement.executionSha256 !== pending.executionSha256) {
+      const baseline = outcome === 'approved' ? executor.approvalRequirement?.(task, current) : undefined;
+      if (prepared && (workflowJsonDigest(current) !== prepared.snapshotSha256 || !baseline
+        || workflowApprovalExecutionDigest(baseline) !== prepared.baselineSha256)) throw new Error('审批准备期间任务或配置已改变，请刷新后重试');
+      const requirement = prepared?.requirement ?? baseline;
+      if (requirement && workflowApprovalExecutionDigest(requirement) !== workflowApprovalExecutionDigest(pending)) {
         const next: WorkflowSnapshot = { ...current,
           run: { ...current.run, planVersion: current.run.planVersion + 1, updatedAt: now },
           tasks: current.tasks.map((item) => item.id !== taskId ? item : { ...item, updatedAt: now,
@@ -1173,17 +1194,47 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         const generation = snapshot.run.generation;
         const completed = new Set(snapshot.tasks.filter((task) => task.status === 'completed').map((task) => task.id));
         const ready = snapshot.tasks.filter((task) => (task.status === 'queued' || task.status === 'waiting_dependency') && task.dependsOn.every((id) => completed.has(id)));
-        const requiresApproval = ready.filter((task) => {
+        const preparedRequirements = new Map<string, { baseline: string; requirement: WorkflowApprovalRequirement }>();
+        const preparationSnapshotSha256 = executor.prepareApprovalRequirement ? workflowJsonDigest(snapshot) : undefined;
+        let preparationFailed = false;
+        for (const task of ready) {
           const requirement = executor.approvalRequirement?.(task, snapshot);
-          return requirement && !workflowApprovalMatches(task, requirement);
+          if (!requirement) continue;
+          const baseline = workflowApprovalExecutionDigest(requirement);
+          try {
+            const preparationSignal = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
+            const prepared = executor.prepareApprovalRequirement
+              ? parseWorkflowApprovalRequirement(await executor.prepareApprovalRequirement(task, snapshot, requirement, preparationSignal)) : requirement;
+            preparationSignal.throwIfAborted();
+            preparedRequirements.set(task.id, { baseline, requirement: prepared });
+          } catch (error) {
+            preparationFailed = true;
+            if (!signal.aborted) await mutate(storageScope, runId, (current) => {
+              if (scope() !== storageScope || workflowJsonDigest(current) !== preparationSnapshotSha256
+                || current.run.status !== 'active' || current.run.pauseRequested) return { snapshot: current, value: undefined };
+              const reason = workflowAdmissionBlockReason(error)
+                ?? `执行报价准备失败：${redactAiDiagnosticText(error instanceof Error ? error.message : '服务未返回有效报价', 500)}`;
+              return { snapshot: { ...current, run: { ...current.run, status: 'paused', pauseReason: reason, updatedAt: Date.now() } }, value: undefined };
+            });
+            break;
+          }
+        }
+        if (preparationFailed) break;
+        const requiresApproval = ready.filter((task) => {
+          const prepared = preparedRequirements.get(task.id);
+          return prepared && !workflowApprovalMatches(task, prepared.requirement);
         });
         if (requiresApproval.length) {
           await mutate(storageScope, runId, (current) => {
             if (scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' || current.run.pauseRequested) return { snapshot: current, value: undefined };
+            if (preparationSnapshotSha256 && workflowJsonDigest(current) !== preparationSnapshotSha256) return { snapshot: current, value: undefined };
+            for (const task of requiresApproval) {
+              const baseline = executor.approvalRequirement?.(task, current);
+              if (!baseline || workflowApprovalExecutionDigest(baseline) !== preparedRequirements.get(task.id)!.baseline) return { snapshot: current, value: undefined };
+            }
             return { snapshot: { ...current, tasks: current.tasks.map((task) => {
               if (!requiresApproval.some((item) => item.id === task.id)) return task;
-              const requirement = executor.approvalRequirement?.(task, current);
-              if (!requirement) throw new Error('审批要求已改变');
+              const requirement = preparedRequirements.get(task.id)!.requirement;
               const approvals = [...(task.approvals ?? [])];
               const prior = approvals.at(-1);
               if (prior?.attempt === task.attempt + 1 && prior.decision?.outcome === 'approved') {

@@ -981,6 +981,10 @@ class ApiClient {
     return this.request<{ authorized: true; limit: number | null; requested: number; tierCode: string }>('POST', '/ai/images/batches/authorize', { count });
   }
 
+  async quoteAiMedia(input: { model: string; provider?: string; [parameter: string]: unknown }, options: { signal?: AbortSignal } = {}) {
+    return this.request<unknown>('POST', '/ai/media/quotes', input, options);
+  }
+
   async generateAiMedia(input: { model: string; provider?: string; operation?: string; client_request_key?: string; [parameter: string]: unknown }, options: { signal?: AbortSignal } = {}) {
     return this.request<AiMediaTask>('POST', '/ai/media/generations', input, options);
   }

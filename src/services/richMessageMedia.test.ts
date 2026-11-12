@@ -4,7 +4,10 @@ import type { Message } from '../types/message';
 import type { AIModelProfile } from '../types/settings';
 import { getRecentRichMediaGenerationErrors, getRichMediaQueueSnapshot, processRichMessageMedia, resetRichMediaQueueForTests, retryRichMessageMedia, scrubLocalMediaUrlsForCloud, subscribeRichMediaQueue } from './richMessageMedia';
 import { generateAudioWithAdapter, generateImageWithAdapter, generateVideoWithAdapter, synthesizeSpeechWithAdapter } from './aiGenerationAdapter';
-import { waitForAiMediaTask } from './aiClient';
+import { submitPreparedAiMediaTask, waitForAiMediaTask } from './aiClient';
+import { readApprovedWorkflowMedia } from './workflowApprovedMedia';
+import { captureMediaExecutionRequest } from './preparedMediaExecution';
+import { workflowJsonDigest } from './workflowToolRequest';
 import { api, ApiError } from './api';
 import { runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
 
@@ -35,9 +38,11 @@ vi.mock('./aiGenerationAdapter', () => ({
   synthesizeSpeechWithAdapter: vi.fn(),
 }));
 vi.mock('./aiClient', () => ({
+  submitPreparedAiMediaTask: vi.fn(),
   waitForAiMediaTask: vi.fn(),
   extractAiMediaResultUrl: vi.fn(() => 'data:video/mp4;base64,AAAA'),
 }));
+vi.mock('./workflowApprovedMedia', () => ({ readApprovedWorkflowMedia: vi.fn() }));
 
 const imageProfile: AIModelProfile = {
   id: 'image-default',
@@ -200,12 +205,74 @@ describe('processRichMessageMedia', () => {
     vi.stubGlobal('navigator', { locks: { request: async (_name: string, work: () => Promise<void>) => work() } });
     Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, configurable: true });
     vi.clearAllMocks();
+    vi.mocked(readApprovedWorkflowMedia).mockReset();
     resetRichMediaQueueForTests();
     localStorage.clear();
     chatStoreState.chats = [];
     artifactStoreState.createImageArtifactFromAttachment.mockReset();
     vi.mocked(api.updateMessageMetadata).mockResolvedValue({});
     vi.mocked(api.getAiMediaTaskByRequestKey).mockRejectedValue(new ApiError('任务不存在', { status: 404 }));
+  });
+
+  it.each(['video', 'audio'] as const)('submits the approved %s capture without consulting a removed profile', async (kind) => {
+    const quote = { schemaVersion: 1 as const, id: 'a'.repeat(64), model: 'approved-model', modality: kind,
+      requestSha256: 'b'.repeat(64), costQuoteId: 'c'.repeat(64), amount: '1.250000', unit: 'credit',
+      kind: 'request_tariff' as const, capturedAt: 1000, expiresAt: 301000, token: 'd'.repeat(64) };
+    const request = captureMediaExecutionRequest({ model: 'approved-model', prompt: '获批正文', duration: 5, async: true });
+    const prepared = { schemaVersion: 1 as const, request, submittedRequestSha256: workflowJsonDigest(request), quote };
+    vi.mocked(readApprovedWorkflowMedia).mockResolvedValue(prepared);
+    vi.mocked(submitPreparedAiMediaTask).mockResolvedValue({ task_id: 'signed-task', status: 'running' });
+    const polling = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(waitForAiMediaTask).mockReturnValue(polling.promise);
+    const message = buildQueuedImageMessage({ metadata: { attachments: [{
+      id: 'signed-media', kind, ...(kind === 'audio' ? { audioPurpose: 'music_generation' as const } : {}),
+      status: 'queued', promptText: '获批正文', altText: '成片', executionQuoteId: quote.id,
+      generationJobId: 'signed-request', createdAt: 1, updatedAt: 1,
+    }] } });
+    const executionSignal = new AbortController().signal;
+    await processRichMessageMedia({ message, aiProfiles: [], upsertMessage: vi.fn(), sharesConversationLease: true, executionSignal });
+    expect(readApprovedWorkflowMedia).toHaveBeenCalledOnce();
+    expect(submitPreparedAiMediaTask).toHaveBeenCalledWith(prepared, { signal: executionSignal });
+    expect(generateVideoWithAdapter).not.toHaveBeenCalled();
+    expect(generateAudioWithAdapter).not.toHaveBeenCalled();
+    expect(waitForAiMediaTask).toHaveBeenCalledWith('signed-task');
+    polling.resolve({ task_id: 'signed-task', model: 'approved-model', status: 'failed', result: { error: '测试结束' },
+      chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(getRichMediaQueueSnapshot()).toHaveLength(0));
+  });
+
+  it.each(['video', 'audio'] as const)('recovers an accepted signed %s without reapproval or resubmission', async (kind) => {
+    vi.mocked(api.getAiMediaTaskByRequestKey).mockResolvedValue({ task_id: 'already-accepted', model: 'removed-model', status: 'running',
+      result: null, chargedAmount: null, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
+    const polling = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
+    vi.mocked(waitForAiMediaTask).mockReturnValue(polling.promise);
+    const message = buildQueuedImageMessage({ metadata: { attachments: [{
+      id: 'accepted-media', kind, ...(kind === 'audio' ? { audioPurpose: 'music_generation' as const } : {}),
+      status: 'queued', promptText: '原正文', altText: '成片', executionQuoteId: 'expired-quote',
+      generationJobId: 'accepted-request', createdAt: 1, updatedAt: 1,
+    }] } });
+    await processRichMessageMedia({ message, aiProfiles: [], upsertMessage: vi.fn() });
+    expect(readApprovedWorkflowMedia).not.toHaveBeenCalled();
+    expect(submitPreparedAiMediaTask).not.toHaveBeenCalled();
+    expect(waitForAiMediaTask).toHaveBeenCalledWith('already-accepted');
+    polling.resolve({ task_id: 'already-accepted', model: 'removed-model', status: 'failed', result: { error: '测试结束' },
+      chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
+    await waitForExpectation(() => expect(getRichMediaQueueSnapshot()).toHaveLength(0));
+  });
+
+  it.each(['video', 'audio'] as const)('blocks an invalid signed %s without falling back to unsigned generation', async (kind) => {
+    vi.mocked(readApprovedWorkflowMedia).mockRejectedValue(new Error('媒体执行审批已失效'));
+    const updates: Message[] = [];
+    const message = buildQueuedImageMessage({ metadata: { attachments: [{
+      id: 'invalid-media', kind, ...(kind === 'audio' ? { audioPurpose: 'music_generation' as const } : {}),
+      status: 'queued', promptText: '正文', altText: '成片', executionQuoteId: 'invalid-quote',
+      generationJobId: 'invalid-request', createdAt: 1, updatedAt: 1,
+    }] } });
+    await processRichMessageMedia({ message, aiProfiles: [{ ...imageProfile, type: kind }], upsertMessage: (next) => updates.push(next) });
+    await waitForExpectation(() => expect(updates.at(-1)?.metadata?.attachments?.[0]?.error).toContain('媒体执行审批已失效'));
+    expect(submitPreparedAiMediaTask).not.toHaveBeenCalled();
+    expect(generateVideoWithAdapter).not.toHaveBeenCalled();
+    expect(generateAudioWithAdapter).not.toHaveBeenCalled();
   });
 
   it('keeps the original workflow attempt on the managed narration request', async () => {

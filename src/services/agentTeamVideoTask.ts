@@ -13,6 +13,7 @@ import { inspectTeamMediaAdmission, recoverTeamMediaAdmission } from './agentTea
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { isLocalOnlyMediaMode } from './richMessageMedia';
 import type { WorkflowTaskResult } from './workflowRunRuntime';
+import type { PreparedMediaExecution } from './preparedMediaExecution';
 
 function teamVideoMessage(runId: string, taskId: string): Message | null {
   const state = useMessageStore.getState();
@@ -67,7 +68,7 @@ function waitForVideoState(runId: string, taskId: string, signal: AbortSignal, p
   });
 }
 
-export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; profile?: AIModelProfile; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
+export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; profile?: AIModelProfile; mediaExecution?: PreparedMediaExecution; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -76,7 +77,9 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
   const chat = useChatStore.getState().chats.find((item) => item.id === params.chatId && item.type === 'assistant' && item.deletedAt == null);
   if (!chat) throw new WorkflowPreflightError('助手会话已删除');
   if (params.signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
-  const existing = recoverTeamMediaAdmission(teamVideoMessage(params.runId, params.taskId), 'video', params.usageReference);
+  const priorMessage = teamVideoMessage(params.runId, params.taskId);
+  const rejectedBeforeSubmission = priorMessage?.metadata?.attachments?.some((item) => item.kind === 'video' && inspectTeamMediaAdmission(item));
+  const existing = recoverTeamMediaAdmission(priorMessage, 'video', params.usageReference);
   if (existing) {
     const result = inspectAgentTeamVideoAttachment(params.runId, params.taskId);
     if (result?.status === 'waiting_external') return { externalTaskId: result.externalTaskId };
@@ -92,15 +95,33 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
   const now = Date.now();
   const state = useMessageStore.getState();
   const known = [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])];
-  const message = existing || attachMessageToActiveBranch(teamConversationContext(chat, params), known, {
+  const executionFields = params.mediaExecution ? { executionQuoteId: params.mediaExecution.quote.id,
+    generationJobId: String(params.mediaExecution.request.client_request_key),
+    aspectRatio: typeof params.mediaExecution.request.aspect_ratio === 'string' ? params.mediaExecution.request.aspect_ratio : undefined,
+    videoDuration: typeof params.mediaExecution.request.duration === 'number' ? params.mediaExecution.request.duration : undefined,
+    videoResolution: typeof params.mediaExecution.request.resolution === 'string' ? params.mediaExecution.request.resolution : undefined,
+  } : {};
+  let message = existing || attachMessageToActiveBranch(teamConversationContext(chat, params), known, {
     id: `team-video-${params.runId}-${params.taskId}`, clientKey: `team-video-${params.runId}-${params.taskId}`, chatId: chat.id, type: 'ai' as const,
     senderId: 'assistant', senderName: '助手', content: '视频', emotion: 0,
     timestamp: now, isDeleted: false,
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, workflowUsage: params.usageReference,
       attachments: [{ id: `team-video-${params.taskId}`, kind: 'video' as const, status: 'queued' as const,
         altText: '团队生成视频', promptText: params.prompt, aspectRatio: profile?.videoDefaults?.aspectRatio,
-        referenceImages: params.referenceImages, createdAt: now, updatedAt: now }] },
+        referenceImages: params.referenceImages, createdAt: now, updatedAt: now, ...executionFields }] },
   }) as Message;
+  const unsubmitted = existing?.metadata?.attachments?.find((item) => item.kind === 'video'
+    && item.status === 'queued' && !item.mediaTaskId && !item.generationJobId);
+  if (unsubmitted && (params.mediaExecution || rejectedBeforeSubmission)) {
+    message = { ...message, metadata: { ...message.metadata, workflowUsage: params.usageReference,
+      attachments: message.metadata?.attachments?.map((item) => item.id === unsubmitted.id ? {
+        ...item, promptText: params.prompt, referenceImages: params.referenceImages, updatedAt: now,
+        executionQuoteId: undefined, ...executionFields,
+      } : item) } };
+    state.upsertMessage(message);
+    state.queueMessageSync(message);
+    flushBufferedPersistenceWrites();
+  }
   if (!existing) {
     state.upsertMessage(message);
     state.queueMessageSync(message);
