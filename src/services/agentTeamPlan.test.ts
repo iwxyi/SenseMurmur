@@ -15,6 +15,25 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('preserves artifact version references and rejects guessed artifact IDs even with the same text digest', async () => {
+    const reference = { taskId: 'old', attempt: 1, outputSha256: 'a'.repeat(64), artifact: { id: 'artifact', versionId: 'edited' } };
+    const candidate = { ...valid(), tasks: [{ ...valid().tasks[0], savedText: [{ ...reference, alias: 'edited' }] }] };
+    expect(validateAgentTeamPlan(candidate).tasks[0].savedText?.[0].artifact).toEqual(reference.artifact);
+    const params = { api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '使用修改后的正文' };
+    for (const source of [
+      { ...reference, artifact: undefined }, { ...reference, artifact: { id: 'other', versionId: 'edited' } },
+      { ...reference, artifact: { id: 'artifact', versionId: 'original' } },
+    ]) {
+      vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+      await expect(planAgentTeam({ ...params, savedText: [source] })).rejects.toThrow('未授权或版本不符');
+    }
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+    expect((await planAgentTeam({ ...params, savedText: [reference] })).tasks[0].savedText?.[0].artifact).toEqual(reference.artifact);
+    for (const artifact of [{ id: '', versionId: 'edited' }, { id: 'artifact' }, null]) {
+      expect(() => validateAgentTeamPlan({ ...candidate, tasks: [{ ...candidate.tasks[0], savedText: [{ ...reference, alias: 'edited', artifact }] }] })).toThrow();
+    }
+  });
+
   it('enforces image reference capability and count for saved sources', async () => {
     const sources = [1, 2].map((index) => ({ taskId: `previous_${index}`, kind: 'image' as const, attempt: 1, outputSha256: String(index).repeat(64) }));
     const params = { api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '复用旧图', savedMedia: sources };

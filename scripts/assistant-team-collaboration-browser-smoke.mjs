@@ -154,13 +154,18 @@ try {
     const textRunId = 'browser-collab-saved-text-' + crypto.randomUUID();
     const textChatId = textRunId + '-chat';
     const originalText = '逐字保留：' + '完整研究正文。'.repeat(400) + '末尾结论必须保留';
+    const textTask = { ...plan.tasks[0], deliverable: { kind: 'document', title: '完整研究报告' } };
+    const textPlan = { ...plan, tasks: [textTask] };
     const textSnapshot = { ...run, run: { ...run.run, id: textRunId, chatId: textChatId, autoReview: false },
-      tasks: run.tasks.map((task) => ({ ...task, runId: textRunId, ...(task.id === 'research' ? { output: originalText } : {}) })) };
+      tasks: run.tasks.map((task) => ({ ...task, runId: textRunId, ...(task.id === 'plan' ? { output: textPlan }
+        : { output: originalText, input: { ...task.input, task: textTask } }) })) };
     await runtime.create(textSnapshot);
     const { listTeamSavedText } = await import('/src/services/agentTeamSavedText.ts');
     const savedText = listTeamSavedText(textSnapshot, ['research']).map((entry) => ({ ...entry, alias: 'original_report' }));
     useChatStore.setState((state) => ({ chats: [...state.chats, { id: textChatId, type: 'assistant', name: '历史正文验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));
     let savedTextRequests = 0;
+    let artifactReference;
+    const editedText = '用户修订：' + originalText;
     window.fetch = async (input, init) => {
       if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
       const request = JSON.parse(init.body);
@@ -171,6 +176,13 @@ try {
       } else if (savedTextRequests === 1) {
         if (!JSON.stringify(request.messages).includes(originalText)) throw new Error('Saved text was truncated to a summary');
         content = '已根据完整研究正文完成后续交付';
+      } else if (savedTextRequests === 2) {
+        if (!JSON.stringify(request.messages).includes(artifactReference.artifact.versionId)) throw new Error('Missing edited artifact version catalog');
+        content = JSON.stringify({ ...plan, tasks: [{ ...plan.tasks[0], id: 'edited_followup', dependsOn: [], savedText: [artifactReference] }] });
+      } else if (savedTextRequests === 3) {
+        const messages = JSON.stringify(request.messages);
+        if (!messages.includes(editedText) || messages.includes('不应自动切换的新版本')) throw new Error('Pinned artifact version was replaced or truncated');
+        content = '已根据指定用户版本继续分析';
       } else throw new Error('Saved text recovery repeated a model request');
       savedTextRequests++;
       return Response.json({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
@@ -197,6 +209,36 @@ try {
         || JSON.stringify(await indexedDbWorkflowRepository.listPlanRevisions(currentWorkflowScope(), textRunId)) !== JSON.stringify(beforeRevision)
         || JSON.stringify(await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), textRunId, 'research')) !== JSON.stringify(beforeAttempts)) {
         throw new Error('Completed source evidence mutation did not roll back atomically');
+      }
+      const { useAssistantArtifactStore } = await import('/src/stores/useAssistantArtifactStore.ts');
+      const artifact = await restoredText.publish(textRunId);
+      const edit = (baseVersionId, search, replacement) => {
+        const result = useAssistantArtifactStore.getState().applyTextOperations({ chatId: textChatId, operations: [
+          { artifactId: artifact.id, baseVersionId, search, replacement },
+        ] });
+        if (result.results[0]?.error || result.results[0]?.replacements !== 1) throw new Error('Artifact edit failed');
+        return result.artifacts[0];
+      };
+      const edited = edit(artifact.currentVersionId, originalText, editedText);
+      const catalog = listTeamSavedText(done, ['research'], useAssistantArtifactStore.getState().items);
+      artifactReference = { ...catalog.find((entry) => entry.artifact?.id === artifact.id), alias: 'edited_report' };
+      if (!artifactReference.artifact) throw new Error('Edited artifact missing from catalog');
+      const reopened = await restoredText.addRevisionRequest(textRunId, done.run.planVersion, '使用用户修改后的报告继续分析');
+      await restoredText.setModelCallLimit(textRunId, reopened.run.planVersion, 5);
+      const paused = (await restoredText.resume(textRunId)).snapshot;
+      if (paused.run.status !== 'paused' || savedTextRequests !== 3) throw new Error('Artifact planning did not persist before budget pause');
+      const newer = edit(edited.currentVersionId, editedText, '不应自动切换的新版本');
+      const { commitBufferedPersistenceWrites } = await import('/src/stores/storePersistenceScope.ts');
+      await commitBufferedPersistenceWrites();
+      await useAssistantArtifactStore.persist.rehydrate();
+      const restoredArtifact = createAgentTeamWorkflow(config, currentWorkflowScope);
+      await restoredArtifact.setModelCallLimit(textRunId, paused.run.planVersion, 7);
+      const final = (await restoredArtifact.resume(textRunId)).snapshot;
+      await createAgentTeamWorkflow(config, currentWorkflowScope).resume(textRunId);
+      if (final.run.status !== 'completed' || savedTextRequests !== 4
+        || final.tasks.find((task) => task.id === 'research').output !== originalText
+        || useAssistantArtifactStore.getState().items.find((item) => item.id === artifact.id)?.currentVersionId !== newer.currentVersionId) {
+        throw new Error('Artifact version recovery changed source evidence, user edits or request count');
       }
     } finally {
       window.fetch = originalFetch;

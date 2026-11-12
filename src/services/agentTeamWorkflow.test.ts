@@ -113,19 +113,34 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
-  it.each(['text_generation', 'image_generation', 'video_generation', 'audio_generation', 'speech_generation', 'delegate_task'] as const)('restores exact historical text for %s without rewriting the source', async (tool) => {
+  it.each((['text_generation', 'image_generation', 'video_generation', 'audio_generation', 'speech_generation', 'delegate_task'] as const)
+    .flatMap((tool) => [false, true].map((artifactVersion) => ({ tool, artifactVersion }))))('restores exact historical text for $tool (artifact version: $artifactVersion) without rewriting the source', async ({ tool, artifactVersion }) => {
     const runId = crypto.randomUUID();
     const scope = `saved-text-${runId}`;
+    const chatId = `saved-text-chat-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
     const now = Date.now();
     const original = `逐字保留原稿：${'故事内容。'.repeat(400)}最后一句必须保留。`;
     const role = { id: 'writer', name: '作者', responsibility: '制作', method: '复用', acceptance: '准确', allowedTools: ['text_generation'] };
-    const sourceTask = { id: 'source', roleId: role.id, goal: '写原稿', acceptance: '准确', dependsOn: [], tool: 'text_generation' };
-    const snapshot: WorkflowSnapshot = { run: { id: runId, chatId: 'chat', goal: '制作', status: 'completed', generation: 1, planVersion: 2, planOpen: false, updatedAt: now }, tasks: [
+    const sourceTask = { id: 'source', roleId: role.id, goal: '写原稿', acceptance: '准确', dependsOn: [], tool: 'text_generation',
+      ...(artifactVersion ? { deliverable: { kind: 'document', title: '原稿' } } : {}) };
+    const snapshot: WorkflowSnapshot = { run: { id: runId, chatId, goal: '制作', status: 'completed', generation: 1, planVersion: 2, planOpen: false, updatedAt: now }, tasks: [
       { id: 'plan', runId, kind: 'team_plan', input: '制作', output: { summary: '制作', roles: [role], tasks: [sourceTask], finalAcceptance: '准确' }, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
       { id: 'source', runId, kind: 'agent_text', input: { task: sourceTask, role, goal: '制作' }, output: original, dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
     ] };
     await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot, value: undefined }));
-    const savedText = listTeamSavedText(snapshot, ['source']).map((entry) => ({ ...entry, alias: 'original' }));
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const expectedText = artifactVersion ? original.replace('逐字保留原稿：', '用户已经修改：') : original;
+    if (artifactVersion) {
+      const artifact = await createAgentTeamWorkflow(config, () => scope).publish(runId);
+      const edited = useAssistantArtifactStore.getState().applyTextOperations({ chatId, operations: [{
+        artifactId: artifact.id, baseVersionId: artifact.currentVersionId, search: original, replacement: expectedText,
+      }] });
+      expect(edited.results[0].error).toBeUndefined();
+    }
+    const savedText = listTeamSavedText(snapshot, ['source'], useAssistantArtifactStore.getState().items)
+      .filter((entry) => Boolean(entry.artifact) === artifactVersion).map((entry) => ({ ...entry, alias: 'original' }));
+    expect(savedText).toHaveLength(1);
     generate.mockResolvedValueOnce(JSON.stringify({ summary: '复用正文', finalAcceptance: '准确', roles: [{ ...role, allowedTools: tool === 'delegate_task' ? [tool, 'text_generation'] : [tool] }],
       tasks: [{ id: 'reuse', roleId: role.id, goal: '按原稿制作', tool, acceptance: '准确', dependsOn: [],
         savedText,
@@ -143,19 +158,18 @@ describe('agent team workflow', () => {
     vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已保存' });
     vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'submitted-video' });
     vi.mocked(queueAgentTeamAudio).mockResolvedValue({ output: '音频已保存' });
-    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
     await createAgentTeamWorkflow(config, () => scope).addRevisionRequest(runId, 2, '使用完整原稿继续制作');
     const result = await createAgentTeamWorkflow(config, () => scope).resume(runId);
     expect(result.snapshot.run.status, JSON.stringify(result.snapshot.tasks)).toBe(tool === 'video_generation' ? 'active' : 'completed');
-    if (tool === 'text_generation') expect(JSON.stringify(generate.mock.calls[1][2])).toContain(original);
+    if (tool === 'text_generation') expect(JSON.stringify(generate.mock.calls[1][2])).toContain(expectedText);
     if (tool === 'delegate_task') {
-      expect(JSON.stringify(generate.mock.calls[1])).toContain(original);
-      expect(JSON.stringify(generate.mock.calls[2][2])).toContain(original);
+      expect(JSON.stringify(generate.mock.calls[1])).toContain(expectedText);
+      expect(JSON.stringify(generate.mock.calls[2][2])).toContain(expectedText);
     }
-    if (tool === 'image_generation') expect(queueAgentTeamImage).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(original) }));
-    if (tool === 'video_generation') expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(original) }));
-    if (tool === 'audio_generation') expect(queueAgentTeamAudio).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(original) }));
-    if (tool === 'speech_generation') expect(queueAgentTeamAudio).toHaveBeenCalledWith(expect.objectContaining({ prompt: original, purpose: 'speech' }));
+    if (tool === 'image_generation') expect(queueAgentTeamImage).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(expectedText) }));
+    if (tool === 'video_generation') expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(expectedText) }));
+    if (tool === 'audio_generation') expect(queueAgentTeamAudio).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(expectedText) }));
+    if (tool === 'speech_generation') expect(queueAgentTeamAudio).toHaveBeenCalledWith(expect.objectContaining({ prompt: expectedText, purpose: 'speech' }));
     await createAgentTeamWorkflow(config, () => scope).resume(runId);
     expect((await indexedDbWorkflowRepository.read(scope, runId))?.tasks.find((task) => task.id === 'source')).toMatchObject({ attempt: 1, output: original });
     expect(generate).toHaveBeenCalledTimes(tool === 'delegate_task' ? 4 : tool === 'text_generation' ? 2 : 1);
@@ -215,7 +229,7 @@ describe('agent team workflow', () => {
     expect(inspectAgentTeamVideo).toHaveBeenCalledTimes(video ? 1 : 0);
   });
 
-  it('rejects a historical text version changed after planning before submitting paid generation', async () => {
+  it.each([false, true])('rejects an unavailable historical text version before paid generation (artifact: %s)', async (artifactVersion) => {
     const runId = crypto.randomUUID();
     const scope = `stale-text-${runId}`;
     const now = Date.now();
@@ -226,12 +240,20 @@ describe('agent team workflow', () => {
       { id: 'source', runId, kind: 'agent_text', input: { task: sourceTask, role, goal: '制作' }, output: '原稿', dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
     ] };
     await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot, value: undefined }));
-    const savedText = listTeamSavedText(snapshot, ['source']).map((entry) => ({ ...entry, alias: 'original' }));
+    const artifactId = `stale-artifact-${runId}`;
+    if (artifactVersion) useAssistantArtifactStore.setState((state) => ({ items: [...state.items, {
+      id: artifactId, chatId: 'chat', sourceMessageId: `team-delivery-${runId}:source`, kind: 'document', title: '用户稿件',
+      currentVersionId: 'edited', createdAt: now, updatedAt: now,
+      versions: [{ id: 'edited', artifactId, sourceMessageId: `team-delivery-${runId}:source`, content: '用户稿件', createdAt: now }],
+    }] }));
+    const savedText = listTeamSavedText(snapshot, ['source'], useAssistantArtifactStore.getState().items)
+      .filter((entry) => Boolean(entry.artifact) === artifactVersion).map((entry) => ({ ...entry, alias: 'original' }));
     const originalRead = indexedDbWorkflowRepository.read.bind(indexedDbWorkflowRepository);
     const read = vi.spyOn(indexedDbWorkflowRepository, 'read');
     generate.mockImplementationOnce(async () => {
+      if (artifactVersion) useAssistantArtifactStore.setState((state) => ({ items: state.items.filter((item) => item.id !== artifactId) }));
       // Simulate a source read corrupted outside the protected transaction boundary.
-      read.mockImplementation(async (storageScope, id) => {
+      else read.mockImplementation(async (storageScope, id) => {
         const current = await originalRead(storageScope, id);
         if (current && storageScope === scope && id === runId) current.tasks.find((task) => task.id === 'source')!.output = '已经变化的正文';
         return current;
@@ -246,7 +268,7 @@ describe('agent team workflow', () => {
       await workflow.addRevisionRequest(runId, 2, '用原稿配音');
       const result = await workflow.resume(runId);
       expect(result.snapshot.run.status).toBe('failed');
-      expect(result.snapshot.tasks.find((task) => task.kind === 'agent_audio')).toMatchObject({ status: 'failed', error: expect.stringContaining('版本已变化') });
+      expect(result.snapshot.tasks.find((task) => task.kind === 'agent_audio')).toMatchObject({ status: 'failed', error: expect.stringContaining(artifactVersion ? '指定版本不可用' : '版本已变化') });
       expect(queueAgentTeamAudio).not.toHaveBeenCalled();
       await createAgentTeamWorkflow(config, () => scope).resume(runId);
       expect(queueAgentTeamAudio).not.toHaveBeenCalled();

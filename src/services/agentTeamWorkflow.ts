@@ -320,8 +320,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
+        await ensureAssistantArtifactStoreHydrated();
         const plan = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}${revisionContext}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities,
-          savedMedia: listTeamSavedMedia(snapshot, task.input.sourceTaskIds), savedText: listTeamSavedText(snapshot, task.input.sourceTaskIds), delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
+          savedMedia: listTeamSavedMedia(snapshot, task.input.sourceTaskIds), savedText: listTeamSavedText(snapshot, task.input.sourceTaskIds, useAssistantArtifactStore.getState().items), delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         assertGoalPlanAuthorized(snapshot, plan);
         return { output: plan };
@@ -369,7 +370,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       }
       const selectedTool = input.task.tool || 'text_generation';
       assertTeamSavedMedia({ ...plan, tasks: [input.task] }, snapshot, input.contextTaskIds || []);
-      const savedText = resolveTeamSavedText(input.task, snapshot, input.contextTaskIds || []);
+      if (input.task.savedText?.some((reference) => reference.artifact) || selectedTool === 'delegate_task') await ensureAssistantArtifactStoreHydrated();
+      const savedText = resolveTeamSavedText(input.task, snapshot, input.contextTaskIds || [], useAssistantArtifactStore.getState().items);
       const savedTextContent = savedText.map((entry) => entry.content);
       assertGoalPlanAuthorized(snapshot, plan);
       if (task.kind !== teamTaskKind(input.task)) throw new WorkflowPreflightError('团队任务工具与计划不一致');
@@ -405,7 +407,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const delegated = await planAgentTeam({ api, goal: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n只拆分当前子目标：${input.task.goal}\n用户补充指示：${input.userInstruction || '无'}\n验收：${input.task.acceptance}\n${input.task.mediaOutput ? `必须交付一份 ${input.task.mediaOutput} 媒体，计划根字段 resultTaskId 必须指定对应的最终媒体任务。` : ''}\n本岗位可用工具：${role.allowedTools.join('、')}\n已有交付：${JSON.stringify(prior)}\n已绑定的历史文字交付：${JSON.stringify(savedText)}`,
           chatId: snapshot.run.chatId, ...capabilities,
           savedMedia: listTeamSavedMedia(snapshot, contextTaskIds),
-          savedText: listTeamSavedText(snapshot, contextTaskIds),
+          savedText: [
+            ...listTeamSavedText(snapshot, contextTaskIds, useAssistantArtifactStore.getState().items)
+              .filter((entry) => !input.task.savedText?.some((bound) => bound.taskId === entry.taskId)),
+            ...(input.task.savedText || []).map(({ taskId, attempt, outputSha256, artifact }) => ({ taskId, attempt, outputSha256, ...(artifact ? { artifact } : {}) })),
+          ],
           webSearch: can('web_search') && Boolean(chat.modeState && resolveChatAgentCapabilities(chat).webSearch),
           imageGeneration: can('image_generation') && capabilities.imageGeneration,
           audioGeneration: can('audio_generation') && capabilities.audioGeneration,

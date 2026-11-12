@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { validateAgentTeamPlan } from './agentTeamPlan';
 import { listTeamSavedText, resolveTeamSavedText } from './agentTeamSavedText';
 import type { WorkflowSnapshot } from './workflowRunRuntime';
+import type { AssistantArtifactItem } from '../types/assistantArtifact';
 
 function fixture(): WorkflowSnapshot {
   return { run: { id: 'run', chatId: 'chat', goal: '制作短片', status: 'completed', generation: 1, planVersion: 2, updatedAt: 1 }, tasks: [
@@ -19,6 +20,59 @@ function plan(tool = 'text_generation', snapshot = fixture()) {
 }
 
 describe('saved text in later plans', () => {
+  function editedArtifact(): AssistantArtifactItem {
+    return { id: 'artifact', chatId: 'chat', sourceMessageId: 'team-delivery-run:script', title: '用户稿件', kind: 'document',
+      currentVersionId: 'edited', createdAt: 1, updatedAt: 2, versions: [
+        { id: 'original', artifactId: 'artifact', content: '原稿', sourceMessageId: 'team-delivery-run:script', createdAt: 1 },
+        { id: 'edited', artifactId: 'artifact', content: '用户修改后的稿件。', sourceMessageId: 'team-delivery-run:script', createdAt: 2 },
+      ] };
+  }
+
+  it('catalogs the edited artifact alongside original task output and pins the selected version', () => {
+    const snapshot = fixture();
+    const artifact = editedArtifact();
+    const catalog = listTeamSavedText(snapshot, ['script'], [artifact]);
+    expect(catalog).toHaveLength(2);
+    expect(catalog[0].artifact).toEqual({ id: 'artifact', versionId: 'edited' });
+    const task = { ...validateAgentTeamPlan(plan()).tasks[0], savedText: [{ ...catalog[0], alias: 'edited' }] };
+    artifact.versions.push({ ...artifact.versions[1], id: 'later', content: '后续编辑', createdAt: 3 });
+    artifact.currentVersionId = 'later';
+    expect(resolveTeamSavedText(task, snapshot, ['script'], [artifact])[0].content).toBe('用户修改后的稿件。');
+    expect(snapshot.tasks[0].output).toBe('需要逐字保留的原稿。');
+    expect(JSON.stringify(catalog)).not.toContain('修改后的稿件');
+  });
+
+  it('rejects deleted, foreign, mutated or missing artifact versions and multi-file inputs', () => {
+    const snapshot = fixture();
+    const catalog = listTeamSavedText(snapshot, ['script'], [editedArtifact()]);
+    const task = { ...validateAgentTeamPlan(plan()).tasks[0], savedText: [{ ...catalog[0], alias: 'edited' }] };
+    for (const mutate of [
+      (item: AssistantArtifactItem) => { item.deletedAt = 3; },
+      (item: AssistantArtifactItem) => { item.chatId = 'other'; },
+      (item: AssistantArtifactItem) => { item.sourceMessageId = 'team-delivery-other:script'; },
+      (item: AssistantArtifactItem) => { item.versions[1].content = '篡改同版本'; },
+      (item: AssistantArtifactItem) => { item.versions.splice(1); },
+      (item: AssistantArtifactItem) => { item.versions[1].artifactId = 'other'; },
+      (item: AssistantArtifactItem) => { item.versions[1].content = '长'.repeat(12_001); },
+      (item: AssistantArtifactItem) => { item.versions[1].files = [{ path: 'main.js', content: 'code' }]; },
+    ]) {
+      const artifact = editedArtifact();
+      mutate(artifact);
+      expect(() => resolveTeamSavedText(task, snapshot, ['script'], [artifact])).toThrow('文字产物');
+    }
+    expect(() => resolveTeamSavedText(task, snapshot, [], [editedArtifact()])).toThrow('范围');
+  });
+
+  it('allows a short edited artifact even when original task output exceeds the text input limit', () => {
+    const snapshot = fixture();
+    snapshot.tasks[0].output = '长'.repeat(12_001);
+    const artifact = editedArtifact();
+    const references = listTeamSavedText(snapshot, ['script'], [artifact]);
+    expect(references).toHaveLength(1);
+    expect(resolveTeamSavedText({ ...validateAgentTeamPlan(plan()).tasks[0], savedText: [{ ...references[0], alias: 'short' }] }, snapshot, ['script'], [artifact])[0].content)
+      .toBe('用户修改后的稿件。');
+  });
+
   it('binds the exact original output and only catalogs authorized completed text', () => {
     const snapshot = fixture();
     const references = listTeamSavedText(snapshot, ['script']);
