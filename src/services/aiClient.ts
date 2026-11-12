@@ -57,6 +57,7 @@ export type AiUsageMetadata = {
   scope?: string;
   resourceId?: string;
   relatedIds?: string[];
+  workflow?: import('../types/workflowUsage').WorkflowUsageReference;
 };
 
 export type GenerateResponseOptions = {

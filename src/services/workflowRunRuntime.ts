@@ -15,6 +15,7 @@ import { assertWorkflowUserResponse, createWorkflowUserResponse, type WorkflowUs
 import { parseWorkflowModelRequest, type WorkflowModelRequest } from './workflowModelRequest';
 import { assertWorkflowApprovals, assertWorkflowApprovalTransition, pendingWorkflowApproval, proposeWorkflowApproval,
   type WorkflowApproval, type WorkflowApprovalRequirement } from './workflowApproval';
+import type { WorkflowUsageReference } from '../types/workflowUsage';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -290,7 +291,8 @@ export interface WorkflowExecutor {
 }
 
 export interface WorkflowExecutionContext {
-  beginModelInvocation(request?: WorkflowModelRequest): Promise<void>;
+  beginModelInvocation(request?: WorkflowModelRequest): Promise<void | WorkflowUsageReference>;
+  usageReference?: WorkflowUsageReference;
   beginToolInvocation(request?: WorkflowToolRequest): Promise<void>;
 }
 
@@ -1177,6 +1179,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
         await Promise.all(batch.map(async (task) => {
           const isReady = claimed.has(task.id);
           const context: WorkflowExecutionContext = {
+            usageReference: isReady && executor.tracksToolInvocations && isWorkflowToolTask(task.kind)
+              ? { schemaVersion: 1, runId, taskId: task.id, attempt: task.attempt + 1, kind: 'tool' } : undefined,
             async beginToolInvocation(request) {
               signal.throwIfAborted();
               const description = request === undefined ? undefined : parseWorkflowToolRequest(request);
@@ -1216,6 +1220,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                     ...(description ? { request: description } : {}) } } : candidate) }, value: undefined };
               });
               signal.throwIfAborted();
+              return { schemaVersion: 1, runId, taskId: task.id, attempt: task.attempt + 1, kind: 'model' };
             },
           };
           try {

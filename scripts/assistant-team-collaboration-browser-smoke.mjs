@@ -642,11 +642,55 @@ try {
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '答复并继续').click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.userResponse?.completed`), 'user answer persisted and downstream resumed');
   assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.userResponse`), { completed: true, modelRequests: 2, answer: '日本独立开发者' });
+  await cdp.evaluate(`(async () => {
+    const [{ useAuthStore }, { api }, { default: Panel }] = await Promise.all([
+      import('/src/stores/useAuthStore.ts'), import('/src/services/api.ts'), import('/src/components/chat/TeamUsagePanel.tsx'),
+    ]);
+    const main = await (await fetch('/src/main.tsx')).text();
+    const dependency = (name) => main.split('"').find((part) => part.startsWith('/node_modules/.vite/deps/' + name + '.js?'));
+    const [react, dom] = await Promise.all([import(dependency('react')), import(dependency('react-dom_client'))]);
+    const React = react.default || react;
+    const auth = useAuthStore.getState();
+    const originalQuery = api.getWorkflowUsage;
+    const container = document.createElement('div');
+    container.id = 'workflow-usage-smoke';
+    document.body.appendChild(container);
+    const root = (dom.createRoot || dom.default?.createRoot)(container);
+    window.__usageCalls = 0;
+    window.__usageCleanup = () => {
+      root.unmount(); container.remove(); api.getWorkflowUsage = originalQuery;
+      useAuthStore.setState({ token: auth.token, isLoggedIn: auth.isLoggedIn });
+    };
+    api.getWorkflowUsage = async (runId) => {
+      if (runId !== 'fee-fixture') throw new Error('Wrong Run queried');
+      if (++window.__usageCalls === 1) throw new Error('费用暂时不可用');
+      return { coverage: 'available_server_records', asOf: Date.now(), units: [
+        { billingUnit: 'point', settledAmount: '0.300003', reservedAmount: '0.500000', settledRequests: 2, pendingRequests: 1, unpricedRequests: 1 },
+        { billingUnit: 'usd', settledAmount: '0.100000', reservedAmount: '0', settledRequests: 1, pendingRequests: 0, unpricedRequests: 0 },
+      ] };
+    };
+    useAuthStore.setState({ token: 'browser-fixture-only', isLoggedIn: true });
+    root.render(React.createElement(Panel, { runId: 'fee-fixture' }));
+  })()`);
+  await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('#workflow-usage-smoke button'))`), 'on-demand fee action');
+  assert.equal(await cdp.evaluate(`window.__usageCalls`), 0, 'Mounting must not query fees');
+  await cdp.evaluate(`document.querySelector('#workflow-usage-smoke button').click()`);
+  await waitFor(() => cdp.evaluate(`document.querySelector('#workflow-usage-smoke [role="alert"]')?.textContent.includes('费用暂时不可用')`), 'fee error visible');
+  await cdp.evaluate(`document.querySelector('#workflow-usage-smoke button').click()`);
+  await waitFor(() => cdp.evaluate(`document.querySelector('#workflow-usage-smoke')?.textContent.includes('已结算 0.300003 积分')`), 'settled and reserved amounts visible');
+  assert.match(await cdp.evaluate(`document.querySelector('#workflow-usage-smoke').textContent`), /预留 0.500000 积分.*费用未知 1 次.*0.100000 美元/s);
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  assert.equal(await cdp.evaluate(`document.querySelector('#workflow-usage-smoke').scrollWidth <= 390`), true);
+  await cdp.send('Emulation.clearDeviceMetricsOverride');
+  assert.equal(await cdp.evaluate(`window.__usageCalls`), 2, 'Rendering and resizing must not poll fees');
+  await cdp.evaluate(`window.__usageCleanup()`);
   console.log(JSON.stringify({ ok: true, userResponse: await cdp.evaluate(`window.__assistantTeamSmoke.userResponse`), outputContractRetry: true, exactSavedTextRecovery: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } catch (error) {
   console.error(JSON.stringify({ browserErrors: cdp.errors }));
   throw error;
 } finally {
+  await cdp.evaluate(`window.__usageCleanup?.()`).catch((error) => console.error('Usage fixture cleanup failed:', error));
+  await cdp.send('Emulation.clearDeviceMetricsOverride');
   await cdp.evaluate(`(async () => { window.__assistantTeamSmoke?.root?.unmount(); window.__assistantTeamSmoke?.historyRoot?.unmount(); document.querySelector('#assistant-team-smoke-root')?.remove(); document.querySelector('#assistant-tool-history-smoke-root')?.remove(); await window.__cleanupCollaborationFixture?.(); })()`).catch((error) => console.error('Fixture cleanup failed:', error));
   cdp.close();
 }

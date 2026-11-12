@@ -274,6 +274,7 @@ export interface MessageMetadata {
   assistantReplyRunId?: string;
   groupTurnTaskId?: string;
   agentTeamMedia?: { runId: string; taskId: string };
+  workflowUsage?: import('./workflowUsage').WorkflowUsageReference;
   mentions?: CharacterMention[];
   conversationUpdate?: import('./conversationContinuity').ConversationUpdate;
   voice?: {

@@ -48,6 +48,18 @@ describe('workflow model request boundary', () => {
     expect(generateResponse).not.toHaveBeenCalled();
   });
 
+  it('uses the persisted invocation reference and preserves usage context', async () => {
+    const workflow = { schemaVersion: 1 as const, runId: 'run', taskId: 'task', attempt: 2, kind: 'model' as const };
+    vi.mocked(generateResponse).mockResolvedValue('done');
+    await generateWorkflowModelResponse(config, 'system', messages, undefined, {
+      aiUsage: { type: 'assistant_chat', label: '团队任务', scope: 'chat', resourceId: 'chat', workflow: { ...workflow, runId: 'spoofed' } },
+      beforeModelRequest: async () => workflow,
+    });
+    expect(vi.mocked(generateResponse).mock.calls[0][4]?.aiUsage).toEqual({
+      type: 'assistant_chat', label: '团队任务', scope: 'chat', resourceId: 'chat', workflow,
+    });
+  });
+
   it.each(['before', 'during'] as const)('does not dispatch when aborted %s persistence', async (when) => {
     const controller = new AbortController();
     if (when === 'before') controller.abort();

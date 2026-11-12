@@ -944,6 +944,11 @@ class ApiClient {
     return this.request<AiUsageRecordsResponse>('GET', `/ai/usage/records${suffix ? `?${suffix}` : ''}`);
   }
 
+  async getWorkflowUsage(runId: string) {
+    const query = new URLSearchParams({ runId });
+    return this.request<import('../types/workflowUsage').WorkflowUsageSummary>('GET', `/ai/usage/workflow?${query.toString()}`);
+  }
+
   async getAiUsageSummary(params: { groupBy: 'day' | 'month'; page?: number; limit?: number }) {
     const query = new URLSearchParams({ groupBy: params.groupBy });
     if (params.page) query.set('page', String(params.page));

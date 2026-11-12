@@ -33,9 +33,11 @@ describe('agent team image task', () => {
     vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
       upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({ ...item, status: 'ready', url: 'https://example.test/scene.png', updatedAt: Date.now() + 1 })) } });
     });
-    const params = { runId: 'run', taskId: 'shot', chatId: 'team-image-chat', prompt: '森林场景图', signal: new AbortController().signal };
+    const usageReference = { schemaVersion: 1 as const, runId: 'run', taskId: 'shot', attempt: 1, kind: 'tool' as const };
+    const params = { runId: 'run', taskId: 'shot', chatId: 'team-image-chat', prompt: '森林场景图', usageReference, signal: new AbortController().signal };
     expect(await queueAgentTeamImage(params)).toEqual({ output: expect.stringContaining('森林场景图') });
     expect(teamImageReference('run', 'shot')).toMatchObject({ url: 'https://example.test/scene.png' });
+    expect(useMessageStore.getState().messages[0].metadata?.workflowUsage).toEqual(usageReference);
     expect(await queueAgentTeamImage(params)).toEqual({ output: expect.stringContaining('森林场景图') });
     expect(processRichMessageMedia).toHaveBeenCalledTimes(1);
   });

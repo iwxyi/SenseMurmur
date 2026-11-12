@@ -679,6 +679,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
         signal,
         aiUsage: {
           type: 'image_generation',
+          workflow: workingMessage.metadata?.workflowUsage,
           label: '聊天图片生成',
           scope: 'chat',
           resourceId: workingMessage.chatId,
@@ -736,7 +737,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
           const profile = findGenerationProfile(entry.aiProfiles, 'audio');
           if (!profile) throw new Error('音频模型未配置');
           const task = await generateAudioWithAdapter({ profile, prompt: attachment.promptText || attachment.altText, signal,
-            clientRequestKey, aiUsage: { type: 'audio_generation', label: '聊天音乐生成', scope: 'chat', resourceId: workingMessage.chatId } });
+            clientRequestKey, aiUsage: { type: 'audio_generation', label: '聊天音乐生成', scope: 'chat', resourceId: workingMessage.chatId, workflow: workingMessage.metadata?.workflowUsage } });
           taskId = task.task_id;
         }
       }
@@ -797,7 +798,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
             resolution: attachment.videoResolution,
             referenceImages,
             signal,
-            aiUsage: { type: 'video_generation', label: '聊天视频生成', scope: 'chat', resourceId: workingMessage.chatId },
+            aiUsage: { type: 'video_generation', label: '聊天视频生成', scope: 'chat', resourceId: workingMessage.chatId, workflow: workingMessage.metadata?.workflowUsage },
           });
         }
         taskId = task.task_id;

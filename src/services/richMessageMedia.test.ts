@@ -214,7 +214,8 @@ describe('processRichMessageMedia', () => {
     vi.mocked(waitForAiMediaTask).mockReturnValue(pending.promise);
     vi.mocked(generateVideoWithAdapter).mockResolvedValue({ task_id: 'video-task' } as Awaited<ReturnType<typeof generateVideoWithAdapter>>);
     vi.mocked(api.createMediaAssetFromAiTask).mockResolvedValue({ id: 'video-asset', url: 'https://example.test/video.mp4', mimeType: 'video/mp4', sizeBytes: 123 } as Awaited<ReturnType<typeof api.createMediaAssetFromAiTask>>);
-    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
+    const workflowUsage = { schemaVersion: 1 as const, runId: 'run', taskId: 'video', attempt: 1, kind: 'tool' as const };
+    const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { workflowUsage, attachments: [{
       id: 'video-1', kind: 'video', status: resume ? 'generating' : 'queued',
       altText: '追逐短片',
       mediaTaskId: resume ? 'video-task' : undefined,
@@ -229,7 +230,8 @@ describe('processRichMessageMedia', () => {
     await waitForExpectation(() => expect(waitForAiMediaTask).toHaveBeenCalledWith('video-task'));
     expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'generating', mediaTaskId: 'video-task' });
     if (resume) expect(generateVideoWithAdapter).not.toHaveBeenCalled();
-    else expect(generateVideoWithAdapter).toHaveBeenCalledWith(expect.objectContaining({ prompt: '追逐场景', duration: 8, resolution: '720p', aspectRatio: '16:9' }));
+    else expect(generateVideoWithAdapter).toHaveBeenCalledWith(expect.objectContaining({ prompt: '追逐场景', duration: 8, resolution: '720p', aspectRatio: '16:9',
+      aiUsage: expect.objectContaining({ workflow: workflowUsage }) }));
     pending.resolve({ task_id: 'video-task', model: 'video-model', status: 'succeeded', result: {}, chargedAmount: 1, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
     await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({ status: 'ready', assetId: 'video-asset', url: 'https://example.test/video.mp4', mediaTaskId: undefined }));
   });

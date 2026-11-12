@@ -150,6 +150,7 @@ describe('workflow run runtime', () => {
     const request = describeWorkflowToolRequest('video_generation', { prompt: '森林追逐', references: [] });
     const execute = vi.fn(async (task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => {
       expect((await indexedDbWorkflowRepository.read(scope, id))?.tasks[0].toolInvocation?.state).toBe('reserved');
+      expect(context.usageReference).toEqual({ schemaVersion: 1, runId: id, taskId: task.id, attempt: 1, kind: 'tool' });
       if (outcome === 'preflight') throw new WorkflowPreflightError('无权限');
       if (outcome === 'missing-boundary') return { output: '不可信结果' };
       await context.beginToolInvocation(request);
@@ -443,7 +444,7 @@ describe('workflow run runtime', () => {
         const reserved = await indexedDbWorkflowRepository.read(scope, id);
         expect(reserved?.tasks[0].modelInvocation?.state).toBe('reserved');
         if (outcome === 'preflight') throw new WorkflowPreflightError('权限不足');
-        await context.beginModelInvocation(request);
+        expect(await context.beginModelInvocation(request)).toEqual({ schemaVersion: 1, runId: id, taskId: task.id, attempt: 1, kind: 'model' });
         const attempts = await indexedDbWorkflowRepository.listTaskAttempts(scope, id, task.id);
         expect(attempts[0].modelInvocation?.state).toBe('started');
         expect(attempts[0].modelInvocation?.request).toEqual(request);

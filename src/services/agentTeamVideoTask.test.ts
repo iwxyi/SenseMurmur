@@ -32,9 +32,11 @@ describe('agent team video task', () => {
         ...item, status: 'generating', mediaTaskId: 'task-one', updatedAt: item.updatedAt + 1,
       })) } });
     });
-    const params = { runId: 'run-one', taskId: 'shot', chatId: 'team-video-chat', prompt: '森林追逐', signal: new AbortController().signal };
+    const usageReference = { schemaVersion: 1 as const, runId: 'run-one', taskId: 'shot', attempt: 1, kind: 'tool' as const };
+    const params = { runId: 'run-one', taskId: 'shot', chatId: 'team-video-chat', prompt: '森林追逐', usageReference, signal: new AbortController().signal };
     expect(await queueAgentTeamVideo(params)).toEqual({ externalTaskId: 'task-one' });
     expect(processRichMessageMedia).toHaveBeenCalledTimes(1);
+    expect(useMessageStore.getState().messages[0].metadata?.workflowUsage).toEqual(usageReference);
     expect(inspectAgentTeamVideoAttachment('run-one', 'shot')).toEqual({ status: 'waiting_external', externalTaskId: 'task-one' });
     expect(await queueAgentTeamVideo(params)).toEqual({ externalTaskId: 'task-one' });
     expect(processRichMessageMedia).toHaveBeenCalledTimes(1);
@@ -91,14 +93,16 @@ describe('agent team video task', () => {
   });
 
   it('reuses a queued message after interruption without creating another attachment', async () => {
+    const originalReference = { schemaVersion: 1 as const, runId: 'interrupted-run', taskId: 'shot', attempt: 1, kind: 'tool' as const };
     vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
+      expect(message.metadata?.workflowUsage).toEqual(originalReference);
       upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
         ...item, status: 'generating', mediaTaskId: 'recovered-task', updatedAt: item.updatedAt + 1,
       })) } });
     });
-    const params = { runId: 'interrupted-run', taskId: 'shot', chatId: 'team-video-chat', prompt: '森林追逐', signal: new AbortController().signal };
+    const params = { runId: 'interrupted-run', taskId: 'shot', chatId: 'team-video-chat', prompt: '森林追逐', usageReference: { ...originalReference, attempt: 2 }, signal: new AbortController().signal };
     const queued: Message = { id: 'team-video-interrupted-run-shot', chatId: params.chatId, type: 'ai', senderId: 'assistant', senderName: '助手', content: '视频生成中', emotion: 0,
-      timestamp: 1, isDeleted: false, metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, attachments: [{
+      timestamp: 1, isDeleted: false, metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, workflowUsage: originalReference, attachments: [{
         id: 'team-video-shot', kind: 'video', status: 'queued', altText: '团队生成视频', promptText: params.prompt, createdAt: 1, updatedAt: 1,
       }] } };
     useMessageStore.setState({ messages: [queued] });

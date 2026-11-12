@@ -476,6 +476,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
         await context.beginToolInvocation(describeWorkflowToolRequest('image_generation', { prompt, referenceImages }));
         return queueAgentTeamImage({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          usageReference: context.usageReference,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt, referenceImages, signal });
       }
@@ -534,6 +535,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const prompt = text.trim();
         await context.beginToolInvocation(describeWorkflowToolRequest('speech_generation', { prompt }));
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          usageReference: context.usageReference,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt, purpose: 'speech', signal });
       }
@@ -548,6 +550,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
         await context.beginToolInvocation(describeWorkflowToolRequest('audio_generation', { prompt }));
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          usageReference: context.usageReference,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt, signal });
       }
@@ -599,6 +602,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
         await context.beginToolInvocation(describeWorkflowToolRequest('video_generation', { prompt, referenceImages }));
         return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          usageReference: context.usageReference,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt, referenceImages, signal });
       }

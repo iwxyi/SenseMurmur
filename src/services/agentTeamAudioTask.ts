@@ -1,4 +1,5 @@
 import type { Message } from '../types/message';
+import type { WorkflowUsageReference } from '../types/workflowUsage';
 import { getUsablePreferredAIProfile } from '../types/settings';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
@@ -52,7 +53,7 @@ function waitForMessage(runId: string, taskId: string, signal: AbortSignal) {
   });
 }
 
-export async function queueAgentTeamAudio(params: { runId: string; taskId: string; chatId: string; prompt: string; sourceBranch?: WorkflowGoalSpec['sourceBranch']; purpose?: 'music' | 'speech'; signal: AbortSignal }): Promise<WorkflowTaskResult> {
+export async function queueAgentTeamAudio(params: { runId: string; taskId: string; chatId: string; prompt: string; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; purpose?: 'music' | 'speech'; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -77,7 +78,7 @@ export async function queueAgentTeamAudio(params: { runId: string; taskId: strin
   const message = existing || attachMessageToActiveBranch(teamConversationContext(chat, params), known, {
     id: `team-audio-${params.runId}-${params.taskId}`, clientKey: `team-audio-${params.runId}-${params.taskId}`, chatId: chat.id,
     type: 'ai' as const, senderId: 'assistant', senderName: '助手', content: label, emotion: 0, timestamp: now, isDeleted: false,
-    metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, attachments: [{
+    metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, workflowUsage: params.usageReference, attachments: [{
       id: `team-audio-${params.taskId}`, kind: 'audio' as const, audioPurpose: speech ? 'chat_voice' as const : 'music_generation' as const, status: 'queued' as const,
       altText: `团队生成${label}`, promptText: params.prompt, createdAt: now, updatedAt: now,
     }] },

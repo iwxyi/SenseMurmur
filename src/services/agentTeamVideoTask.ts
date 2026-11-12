@@ -1,4 +1,5 @@
 import type { Message } from '../types/message';
+import type { WorkflowUsageReference } from '../types/workflowUsage';
 import { getUsablePreferredAIProfile } from '../types/settings';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
@@ -63,7 +64,7 @@ function waitForVideoState(runId: string, taskId: string, signal: AbortSignal, p
   });
 }
 
-export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; sourceBranch?: WorkflowGoalSpec['sourceBranch']; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
+export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -91,7 +92,7 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
     id: `team-video-${params.runId}-${params.taskId}`, clientKey: `team-video-${params.runId}-${params.taskId}`, chatId: chat.id, type: 'ai' as const,
     senderId: 'assistant', senderName: '助手', content: '视频', emotion: 0,
     timestamp: now, isDeleted: false,
-    metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId },
+    metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, workflowUsage: params.usageReference,
       attachments: [{ id: `team-video-${params.taskId}`, kind: 'video' as const, status: 'queued' as const,
         altText: '团队生成视频', promptText: params.prompt, aspectRatio: profile?.videoDefaults?.aspectRatio,
         referenceImages: params.referenceImages, createdAt: now, updatedAt: now }] },

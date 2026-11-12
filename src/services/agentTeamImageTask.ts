@@ -1,4 +1,5 @@
 import type { Message } from '../types/message';
+import type { WorkflowUsageReference } from '../types/workflowUsage';
 import { getUsablePreferredAIProfile } from '../types/settings';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
@@ -65,6 +66,7 @@ function waitForServerId(runId: string, taskId: string, signal: AbortSignal) {
 }
 
 export async function queueAgentTeamImage(params: { runId: string; taskId: string; chatId: string; prompt: string; sourceBranch?: WorkflowGoalSpec['sourceBranch'];
+  usageReference?: WorkflowUsageReference;
   referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
@@ -86,7 +88,7 @@ export async function queueAgentTeamImage(params: { runId: string; taskId: strin
   const message = existing || attachMessageToActiveBranch(teamConversationContext(chat, params), known, {
     id: `team-image-${params.runId}-${params.taskId}`, clientKey: `team-image-${params.runId}-${params.taskId}`, chatId: chat.id, type: 'ai' as const,
     senderId: 'assistant', senderName: '助手', content: '图片', emotion: 0, timestamp: now, isDeleted: false,
-    metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, attachments: [{
+    metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, workflowUsage: params.usageReference, attachments: [{
       id: `team-image-${params.taskId}`, kind: 'image' as const, status: 'queued' as const,
       altText: '团队生成图片', promptText: params.prompt, referenceImages: params.referenceImages, createdAt: now, updatedAt: now,
     }] },

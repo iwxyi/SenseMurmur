@@ -51,9 +51,11 @@ describe('agent team audio task', () => {
         ...item, status: 'generating', mediaTaskId: 'music-one', updatedAt: item.updatedAt + 1,
       })) } });
     });
-    const params = { runId: 'run-audio', taskId: 'theme', chatId: 'team-audio-chat', prompt: '轻快的木琴配乐', signal: new AbortController().signal };
+    const usageReference = { schemaVersion: 1 as const, runId: 'run-audio', taskId: 'theme', attempt: 1, kind: 'tool' as const };
+    const params = { runId: 'run-audio', taskId: 'theme', chatId: 'team-audio-chat', prompt: '轻快的木琴配乐', usageReference, signal: new AbortController().signal };
     expect(await queueAgentTeamAudio(params)).toEqual({ externalTaskId: 'music-one' });
     expect(inspectAgentTeamAudioAttachment('run-audio', 'theme')).toEqual({ status: 'waiting_external', externalTaskId: 'music-one' });
+    expect(useMessageStore.getState().messages[0].metadata?.workflowUsage).toEqual(usageReference);
     expect(await queueAgentTeamAudio(params)).toEqual({ externalTaskId: 'music-one' });
     expect(processRichMessageMedia).toHaveBeenCalledTimes(2);
   });
