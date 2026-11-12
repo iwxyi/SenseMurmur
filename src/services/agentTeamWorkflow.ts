@@ -38,6 +38,7 @@ import { parseWorkflowReviewVerdict, prepareWorkflowReviewRecord } from './workf
 import { analyzeWorkflowRevisionImpact, parseWorkflowRevisionImpact, type WorkflowRevisionImpact } from './workflowRevisionImpact';
 import { assertTeamSavedMedia, listTeamSavedMedia } from './agentTeamSavedMedia';
 import { listTeamSavedText, resolveTeamSavedText } from './agentTeamSavedText';
+import { teamOutputInstruction, validateTeamOutput } from './agentTeamOutputContract';
 
 const TOOL_TASK_KINDS = {
   text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio', speech_generation: 'agent_audio',
@@ -221,6 +222,7 @@ function sameAgentTeamTask(left: AgentTeamPlan['tasks'][number], right: AgentTea
     && (left.tool || 'text_generation') === (right.tool || 'text_generation')
     && left.mediaOutput === right.mediaOutput
     && left.deliverable?.kind === right.deliverable?.kind
+    && (left.deliverable?.schemaVersion ?? 1) === (right.deliverable?.schemaVersion ?? 1)
     && left.deliverable?.title === right.deliverable?.title
     && left.deliverable?.language === right.deliverable?.language
     && JSON.stringify(left.composition) === JSON.stringify(right.composition)
@@ -385,11 +387,10 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           }
           const evidence = selectReviewEvidence(snapshot, task.expansion.taskIds).evidence;
           await context.beginModelInvocation();
-          const output = await generateResponse(api, `你负责汇总下级 Agent 的真实交付。按父任务验收给出可用结果；不得声称未执行的工作已完成，明确列出缺口。${workflowGoalContext(snapshot.run.goalSpec)}`,
+          const output = await generateResponse(api, `你负责汇总下级 Agent 的真实交付。按父任务验收给出可用结果；不得声称未执行的工作已完成，明确列出缺口。${workflowGoalContext(snapshot.run.goalSpec)}\n${teamOutputInstruction(input.task)}`,
             [{ role: 'user', content: `总目标：${snapshot.run.goal}\n父任务：${input.task.goal}\n用户补充指示：${input.userInstruction || '无'}\n验收：${input.task.acceptance}\n下级交付：${JSON.stringify(evidence)}` }], undefined,
             { responseFormat: 'text', signal, aiUsage: { type: 'assistant_chat', label: '下级任务汇总', scope: 'chat', resourceId: snapshot.run.chatId } });
-          if (!output.trim()) throw new WorkflowPreflightError('下级任务汇总返回空内容');
-          return { output };
+          return { output: validateTeamOutput(input.task, output) };
         }
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const capabilities = await teamMediaCapabilities();
@@ -614,14 +615,14 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         `方法：${role.method}`,
         `岗位验收：${role.acceptance}`,
         `本任务验收：${input.task.acceptance}`,
+        teamOutputInstruction(input.task),
         workflowGoalContext(snapshot.run.goalSpec),
         '只根据提供的目标与上游交付工作；不声称调用了未提供的工具。缺少事实依据时标明不确定性。',
       ].join('\n'), [{ role: 'user', content: `总目标：${input.goal}\n当前任务：${input.task.goal}\n${input.userInstruction ? `用户补充指示：${input.userInstruction}\n` : ''}上游交付：${JSON.stringify(upstream)}` }], undefined, {
         responseFormat: 'text', signal,
         aiUsage: { type: 'assistant_chat', label: '团队文本任务', scope: 'chat', resourceId: snapshot.run.chatId },
       });
-      if (!output.trim()) throw new WorkflowPreflightError('子 Agent 未提交内容');
-      return { output: output.trim() };
+      return { output: validateTeamOutput(input.task, output) };
     },
     async inspectExternal(task) {
       if (task.kind === 'agent_image') {
@@ -758,7 +759,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return runtime.retryFailedReview(runId, expectedPlanVersion, reviewId);
       });
     },
-    async retryFailedPlan(runId: string, taskId: string, expectedPlanVersion: number) {
+    async retryFailedTask(runId: string, taskId: string, expectedPlanVersion: number) {
       if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务修改');
       const storageScope = scope();
       return navigator.locks.request(workflowRunLockName(storageScope, runId), { ifAvailable: true }, async (lock) => {
@@ -766,7 +767,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (scope() !== storageScope) throw new Error('账号已切换，任务修改已停止');
         const current = await runtime.read(runId);
         if (!current || current.tasks[0]?.kind !== 'team_plan') throw new Error('团队任务不存在');
-        return runtime.retryFailedTeamPlan(runId, expectedPlanVersion, taskId);
+        return runtime.retryFailedTeamTask(runId, expectedPlanVersion, taskId);
       });
     },
     async start(runId: string, chatId: string, goal: string, autoReview = false, signal = getWorkspaceSignal(), maxModelCalls?: number, goalSpec?: WorkflowGoalSpec) {
@@ -1266,10 +1267,10 @@ export async function retryAgentTeamReview(params: { runId: string; reviewId: st
   return result;
 }
 
-export async function retryAgentTeamPlan(params: { runId: string; taskId: string; expectedPlanVersion: number }) {
+export async function retryAgentTeamTask(params: { runId: string; taskId: string; expectedPlanVersion: number }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  const result = await currentTeamWorkflow().retryFailedPlan(params.runId, params.taskId, params.expectedPlanVersion);
+  const result = await currentTeamWorkflow().retryFailedTask(params.runId, params.taskId, params.expectedPlanVersion);
   notifyTeam();
   return result;
 }

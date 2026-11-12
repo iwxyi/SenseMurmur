@@ -202,6 +202,50 @@ try {
       window.fetch = originalFetch;
       useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== textChatId) }));
     }
+    const outputRunId = 'browser-collab-output-' + crypto.randomUUID();
+    const outputChatId = outputRunId + '-chat';
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: outputChatId, type: 'assistant', name: 'JSON交付验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));
+    const outputPlan = { ...plan, summary: 'JSON交付验证', tasks: [
+      { ...plan.tasks[0], id: 'source', goal: '整理原始证据' },
+      { ...plan.tasks[0], id: 'data', goal: '结构化数据', dependsOn: ['source'], deliverable: { schemaVersion: 1, kind: 'json', title: '数据' } },
+      { ...plan.tasks[0], id: 'report', goal: '根据数据写报告', dependsOn: ['data'] },
+    ] };
+    let outputRequests = 0;
+    const outputReplies = [JSON.stringify(outputPlan), '原始证据必须保留', '这里是数据：{"value":1}', '{"value":1}', '数据报告已完成'];
+    const outputFetch = async (input, init) => {
+      if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
+      const content = outputReplies[outputRequests++];
+      if (!content) throw new Error('Unexpected output contract model request');
+      return Response.json({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
+    };
+    let outputRun;
+    window.fetch = outputFetch;
+    try {
+      outputRun = (await createAgentTeamWorkflow(config, currentWorkflowScope).start(outputRunId, outputChatId, 'JSON交付验证')).snapshot;
+      if (outputRun.run.status !== 'failed' || outputRequests !== 3
+        || !outputRun.tasks.find((task) => task.id === 'data').error.includes('要求合法 JSON')
+        || outputRun.tasks.find((task) => task.id === 'report').attempt !== 0) throw new Error('Invalid JSON reached downstream');
+      await createAgentTeamWorkflow(config, currentWorkflowScope).resume(outputRunId);
+      if (outputRequests !== 3) throw new Error('Invalid JSON was automatically retried');
+    } finally { window.fetch = originalFetch; }
+    const retryOutput = async (selected, task) => {
+      window.fetch = outputFetch;
+      try {
+        const restored = createAgentTeamWorkflow(config, currentWorkflowScope);
+        await restored.retryFailedTask(selected.run.id, task.id, selected.run.planVersion);
+        const done = (await restored.resume(selected.run.id)).snapshot;
+        await createAgentTeamWorkflow(config, currentWorkflowScope).resume(selected.run.id);
+        const attempts = await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), selected.run.id, task.id);
+        if (done.run.status !== 'completed' || outputRequests !== 5
+          || done.tasks.find((item) => item.id === 'source').attempt !== 1
+          || done.tasks.find((item) => item.id === 'data').output !== '{"value":1}'
+          || attempts.map((item) => item.status).join(',') !== 'failed,completed') throw new Error('Output retry lost history or repeated upstream');
+        window.__assistantTeamSmoke.outputRetry = true;
+      } finally {
+        window.fetch = originalFetch;
+        useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== outputChatId) }));
+      }
+    };
     const journalRunId = 'browser-collab-journal-' + crypto.randomUUID();
     await runtime.create({ ...run, run: { ...run.run, id: journalRunId, status: 'paused' },
       tasks: run.tasks.map((task) => ({ ...task, runId: journalRunId })) });
@@ -293,7 +337,7 @@ try {
     const root = createRoot(container);
     window.__assistantTeamSmoke.root = root;
     root.render(React.createElement(Workbench, {
-      runs: [{ ...persistedRun, run: { ...persistedRun.run, deliveryStatus: 'pending', deliveryIssue: 'save_failed' } }, resumableRun, secondResumableRun, uncertainRun, recursiveRun, conflictRun], canRun: true, isRunActive: () => false, onResume: () => {},
+      runs: [{ ...persistedRun, run: { ...persistedRun.run, deliveryStatus: 'pending', deliveryIssue: 'save_failed' } }, resumableRun, secondResumableRun, uncertainRun, recursiveRun, conflictRun, outputRun], canRun: true, isRunActive: () => false, onResume: () => {},
       onResumeAll: async (items) => { window.__assistantTeamSmoke.resumed = items.map((item) => item.run.id); }, onCreate: () => {},
       onInstruct: async () => {}, onPause: async () => {},
       onUpdateModelCallLimit: async (item, limit) => { window.__assistantTeamSmoke.limits.push({ runId: item.run.id, limit }); },
@@ -324,7 +368,7 @@ try {
         window.__assistantTeamSmoke.revisionImpact = impact;
         window.__assistantTeamSmoke.calls.push(args);
       },
-      onAbandonReview: async () => {}, onResumeAfterReviewRetry: async () => {}, onResumeAfterPlanRetry: async () => {},
+      onAbandonReview: async () => {}, onResumeAfterReviewRetry: async () => {}, onResumeAfterTaskRetry: retryOutput,
     }));
     return true;
   })()`);
@@ -385,7 +429,13 @@ try {
   await cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root button').click()`);
   await waitFor(() => cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root')?.textContent.includes('工具执行已完成')`), 'persisted tool history visible');
   assert.doesNotMatch(await cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root').textContent`), /browser-collab-|agent_web_search|research/);
-  console.log(JSON.stringify({ ok: true, exactSavedTextRecovery: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent === 'JSON交付验证').click()`);
+  await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).some((button) => button.textContent.includes('市场分析师 · 失败'))`), 'invalid output task visible');
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent.includes('市场分析师 · 失败')).click()`);
+  await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('要求合法 JSON')`), 'output validation error visible');
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '重试该任务并继续').click()`);
+  await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.outputRetry === true`), 'failed JSON retried from workbench with preserved upstream');
+  console.log(JSON.stringify({ ok: true, outputContractRetry: true, exactSavedTextRecovery: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } catch (error) {
   console.error(JSON.stringify({ browserErrors: cdp.errors }));
   throw error;

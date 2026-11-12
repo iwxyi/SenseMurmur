@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Stack, TextField, Typography } from '@mui/material';
 import type { WorkflowSnapshot, WorkflowTask } from '../../services/workflowRunRuntime';
-import { countWorkflowModelCalls, summarizeWorkflowRun } from '../../services/workflowRunRuntime';
+import { countWorkflowModelCalls, isRetryableTeamTask, summarizeWorkflowRun } from '../../services/workflowRunRuntime';
 import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
 import { buildAgentTeamTaskRevisionRequest, isRecoverableAgentTeamRun } from '../../services/agentTeamWorkflow';
 import TeamTaskExecutionHistory from './TeamTaskExecutionHistory';
@@ -24,7 +24,7 @@ interface Props {
   onDelegate: (run: WorkflowSnapshot, request: string, targetTaskId?: string) => Promise<void>;
   onAbandonReview: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
   onResumeAfterReviewRetry: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
-  onResumeAfterPlanRetry: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
+  onResumeAfterTaskRetry: (run: WorkflowSnapshot, task: WorkflowTask) => Promise<void>;
 }
 
 const taskStatus: Record<WorkflowTask['status'], string> = {
@@ -53,7 +53,7 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onResumeAll, onCreate, onInstruct, onPause, onUpdateModelCallLimit, onUpdateDeadline, onSaveDeliveryCopy, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterPlanRetry }: Props) {
+export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onResumeAll, onCreate, onInstruct, onPause, onUpdateModelCallLimit, onUpdateDeadline, onSaveDeliveryCopy, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterTaskRetry }: Props) {
   const [open, setOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -95,6 +95,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const unknownReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'result_unknown');
   const failedReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'failed');
   const failedPlan = run.tasks.find((item) => (item.kind === 'team_plan' || item.kind === 'team_plan_revision' || item.kind === 'agent_delegation') && item.status === 'failed');
+  const failedTask = task && isRetryableTeamTask(task) ? task : null;
   const canAddRevision = canRun && (run.run.status === 'paused' || run.run.status === 'completed')
     && !run.tasks.some((item) => item.status === 'running' || item.status === 'result_unknown' || item.status === 'failed'
       || (item.kind === 'team_plan_revision' && item.status !== 'completed'));
@@ -159,6 +160,17 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           {details.method && <Typography variant="body2"><strong>方法</strong> {details.method}</Typography>}
           {details.acceptance && <Typography variant="body2"><strong>验收</strong> {details.acceptance}</Typography>}
           {task.error && <Typography variant="body2" color="error.main"><strong>问题</strong> {task.error}</Typography>}
+          {failedTask && canRun && !running && run.run.status === 'failed' && <Box>
+            {reviewActionError && reviewActionRunId === run.run.id && <Typography role="alert" variant="caption" color="error.main">{reviewActionError}</Typography>}
+            <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
+              setSavingReviewAction(true);
+              setReviewActionRunId(run.run.id);
+              void onResumeAfterTaskRetry(run, failedTask).then(() => setReviewActionError(null)).catch((error: unknown) => {
+                setReviewActionRunId(run.run.id);
+                setReviewActionError(error instanceof Error ? error.message : '重试任务失败');
+              }).finally(() => setSavingReviewAction(false));
+            }}>重试该任务并继续</Button>
+          </Box>}
           <TeamTaskExecutionHistory key={`${run.run.id}:${task.id}`} runId={run.run.id} taskId={task.id} updatedAt={task.updatedAt} statusLabels={taskStatus} />
           {typeof (task.input as { userInstruction?: unknown })?.userInstruction === 'string' && <Typography variant="body2"><strong>用户指示</strong> {String((task.input as { userInstruction: string }).userInstruction)}</Typography>}
           {canInstructSelectedTask && <Box sx={{ display: 'grid', gap: 1 }}>
@@ -214,7 +226,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
             <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
               setSavingReviewAction(true);
               setReviewActionRunId(run.run.id);
-              void onResumeAfterPlanRetry(run, failedPlan).then(() => setReviewActionError(null)).catch((error: unknown) => {
+              void onResumeAfterTaskRetry(run, failedPlan).then(() => setReviewActionError(null)).catch((error: unknown) => {
                 setReviewActionRunId(run.run.id);
                 setReviewActionError(error instanceof Error ? error.message : '重试规划失败');
               }).finally(() => setSavingReviewAction(false));

@@ -125,10 +125,11 @@ describe('agent team plan', () => {
     const plan = valid();
     plan.tasks[0] = { ...plan.tasks[0], deliverable: { kind: 'table', title: '竞品对照表', language: 'markdown' } };
     const parsed = validateAgentTeamPlan(plan);
-    expect(parsed.tasks[0].deliverable).toEqual({ kind: 'table', title: '竞品对照表', language: 'markdown' });
+    expect(parsed.tasks[0].deliverable).toEqual({ schemaVersion: 1, kind: 'table', title: '竞品对照表', language: 'markdown' });
     expect(parsed.tasks[1].deliverable).toBeUndefined();
     expect(() => validateAgentTeamPlan({ ...plan, tasks: [{ ...plan.tasks[0], deliverable: { kind: 'audio', title: '无效类型' } }, plan.tasks[1]] })).toThrow('交付类型无效');
     expect(() => validateAgentTeamPlan({ ...plan, tasks: [{ ...plan.tasks[0], deliverable: { kind: 'table', title: '' } }, plan.tasks[1]] })).toThrow('交付标题无效');
+    expect(() => validateAgentTeamPlan({ ...plan, tasks: [{ ...plan.tasks[0], deliverable: { schemaVersion: 2, kind: 'json', title: '结果' } }, plan.tasks[1]] })).toThrow('交付契约版本');
   });
 
   it('rejects unknown tools and missing role references', () => {

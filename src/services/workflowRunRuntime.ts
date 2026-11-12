@@ -208,6 +208,11 @@ export function summarizeWorkflowRun(snapshot: WorkflowSnapshot): WorkflowResume
   return result;
 }
 
+export function isRetryableTeamTask(task: WorkflowTask): boolean {
+  return task.status === 'failed' && ['team_plan', 'team_plan_revision', 'agent_delegation', 'agent_text',
+    'agent_image_inspection', 'agent_video_inspection', 'agent_web_search'].includes(task.kind);
+}
+
 export function countWorkflowModelCalls(snapshot: WorkflowSnapshot): number {
   return snapshot.tasks.filter((task) => isWorkflowModelTask(task.kind))
     .reduce((total, task) => total + task.attempt - (task.unstartedModelAttempts || 0), 0);
@@ -859,11 +864,11 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  async function retryFailedTeamPlan(runId: string, expectedPlanVersion: number, taskId: string) {
+  async function retryFailedTeamTask(runId: string, expectedPlanVersion: number, taskId: string) {
     return mutate(scope(), runId, (current) => {
       if (current.run.planVersion !== expectedPlanVersion || current.run.status !== 'failed') throw new Error('团队计划已更新，请刷新后重试');
-      const target = current.tasks.find((task) => task.id === taskId && (task.kind === 'team_plan' || task.kind === 'team_plan_revision' || task.kind === 'agent_delegation') && task.status === 'failed');
-      if (!target || current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown')) throw new Error('当前规划任务不能重试');
+      const target = current.tasks.find((task) => task.id === taskId && isRetryableTeamTask(task));
+      if (!target || current.tasks.some((task) => task.status === 'running' || task.status === 'result_unknown')) throw new Error('当前任务不能重试');
       const now = Date.now();
       const snapshot: WorkflowSnapshot = { ...current,
         run: { ...current.run, status: 'paused', planVersion: current.run.planVersion + 1, updatedAt: now },
@@ -1189,5 +1194,5 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
     });
   }
 
-  return { create, setModelCallLimit, setDeadline, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamPlan, addTasksOnce, expandPlanOnce, closePlan, prepareDelivery, prepareDeliveryCopy, markDeliveryPublished, recordDeliveryIssue, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
+  return { create, setModelCallLimit, setDeadline, addTasks, addTeamRevision, replaceUserBlockWithTasks, blockForUser, abandonUnknownReview, retryFailedReview, retryFailedTeamTask, addTasksOnce, expandPlanOnce, closePlan, prepareDelivery, prepareDeliveryCopy, markDeliveryPublished, recordDeliveryIssue, resume, pause, requestPauseAfterCurrentBatch, list: () => repository.list(scope()), read: (runId: string) => repository.read(scope(), runId) };
 }

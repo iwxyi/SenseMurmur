@@ -425,17 +425,54 @@ describe('agent team workflow', () => {
     expect(countWorkflowModelCalls(result.snapshot)).toBe(2);
   });
 
+  it('blocks invalid JSON before downstream work and retries only the failed task after restore', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `output-contract-${runId}`;
+    const role = { id: 'writer', name: '写作者', responsibility: '整理', method: '核对', acceptance: '准确', allowedTools: ['text_generation'] };
+    const plan = { summary: '结构化交付', roles: [role], tasks: [
+      { id: 'source', roleId: role.id, goal: '整理证据', dependsOn: [], acceptance: '准确' },
+      { id: 'data', roleId: role.id, goal: '生成数据', dependsOn: ['source'], acceptance: '合法 JSON', deliverable: { kind: 'json', title: '数据' } },
+      { id: 'report', roleId: role.id, goal: '使用数据', dependsOn: ['data'], acceptance: '完整' },
+    ], finalAcceptance: '准确' };
+    generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('完整原始证据').mockResolvedValueOnce('这里是数据：{"value":1}');
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const first = createAgentTeamWorkflow(config, () => scope);
+    const failed = (await first.start(runId, 'chat', '生成数据报告')).snapshot;
+    expect(failed.run.status).toBe('failed');
+    expect(failed.tasks.find((task) => task.id === 'data')).toMatchObject({ status: 'failed', error: expect.stringContaining('要求合法 JSON') });
+    expect(failed.tasks.find((task) => task.id === 'report')?.attempt).toBe(0);
+    expect(countWorkflowModelCalls(failed)).toBe(3);
+    const restored = createAgentTeamWorkflow(config, () => scope);
+    await restored.resume(runId);
+    expect(generate).toHaveBeenCalledTimes(3);
+    await expect(restored.retryFailedTask(runId, 'data', failed.run.planVersion - 1)).rejects.toThrow('计划已更新');
+    await expect(restored.retryFailedTask(runId, 'source', failed.run.planVersion)).rejects.toThrow('不能重试');
+    await restored.retryFailedTask(runId, 'data', failed.run.planVersion);
+    generate.mockResolvedValueOnce('```json\n{"value":1}\n```').mockResolvedValueOnce('完成数据报告');
+    const done = (await restored.resume(runId)).snapshot;
+    expect(done.run.status).toBe('completed');
+    expect(done.tasks.find((task) => task.id === 'source')).toEqual(failed.tasks.find((task) => task.id === 'source'));
+    expect(done.tasks.find((task) => task.id === 'data')).toMatchObject({ attempt: 2, output: '{"value":1}' });
+    expect(generate.mock.calls[3][1]).toContain('只返回一个合法 JSON');
+    expect(generate.mock.calls[4][2][0].content).toContain('value');
+    expect(countWorkflowModelCalls(done)).toBe(5);
+    expect((await indexedDbWorkflowRepository.listTaskAttempts(scope, runId, 'data')).map((attempt) => attempt.status)).toEqual(['failed', 'completed']);
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(generate).toHaveBeenCalledTimes(5);
+  });
+
   it('retries a failed delegation synthesis without repeating completed child work', async () => {
     const runId = crypto.randomUUID();
     const scope = `synthesis-retry-${runId}`;
     const role = { id: 'lead', name: '负责人', responsibility: '研究', method: '拆分', acceptance: '完整', allowedTools: ['delegate_task', 'text_generation'] };
-    generate.mockResolvedValueOnce(JSON.stringify({ summary: '研究', roles: [role], tasks: [{ id: 'research', roleId: role.id, goal: '研究市场', tool: 'delegate_task', dependsOn: [], acceptance: '报告' }], finalAcceptance: '报告' }))
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '研究', roles: [role], tasks: [{ id: 'research', roleId: role.id, goal: '研究市场', tool: 'delegate_task', dependsOn: [], acceptance: '报告', deliverable: { kind: 'json', title: '结论' } }], finalAcceptance: '报告' }))
       .mockResolvedValueOnce(JSON.stringify({ summary: '证据', roles: [{ ...role, allowedTools: ['text_generation'] }], tasks: [{ id: 'evidence', roleId: role.id, goal: '整理证据', tool: 'text_generation', dependsOn: [], acceptance: '证据' }], finalAcceptance: '证据' }))
-      .mockResolvedValueOnce('已完成的证据').mockResolvedValueOnce('').mockResolvedValueOnce('汇总完成');
+      .mockResolvedValueOnce('已完成的证据').mockResolvedValueOnce('无效 JSON 汇总').mockResolvedValueOnce('{"result":"汇总完成"}');
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
     const failed = await workflow.start(runId, 'chat', '调研', false);
     expect(failed.snapshot.run.status).toBe('failed');
-    await workflow.retryFailedPlan(runId, 'research', failed.snapshot.run.planVersion);
+    expect(failed.snapshot.tasks.find((task) => task.id === 'research')?.error).toContain('要求合法 JSON');
+    await workflow.retryFailedTask(runId, 'research', failed.snapshot.run.planVersion);
     const result = await workflow.resume(runId);
     expect(result.snapshot.run.status).toBe('completed');
     expect(result.snapshot.tasks.find((task) => task.id === 'research_evidence')?.attempt).toBe(1);
@@ -958,7 +995,7 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks[0].error).toContain('未在可用模型列表中');
     expect(queueAgentTeamVideo).not.toHaveBeenCalled();
     useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
-    const retry = await workflow.retryFailedPlan(runId, 'plan', result.snapshot.run.planVersion);
+    const retry = await workflow.retryFailedTask(runId, 'plan', result.snapshot.run.planVersion);
     expect(retry.run.status).toBe('paused');
     generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '生成视频', method: '生成', acceptance: '成片', allowedTools: ['video_generation'] }],
       tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' }));
