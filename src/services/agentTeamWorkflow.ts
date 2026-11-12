@@ -246,31 +246,31 @@ export function buildAgentTeamTaskRevisionRequest(task: WorkflowTask, instructio
 }
 
 function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<ReturnType<typeof teamMediaCapabilities>>, webSearch: boolean) {
-  if (!webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索');
-  if (!capabilities.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');
-  if (!capabilities.audioGeneration && plan.tasks.some((task) => task.tool === 'audio_generation')) throw new WorkflowPreflightError('当前未配置音乐生成模型');
-  if (!capabilities.speechGeneration && plan.tasks.some((task) => task.tool === 'speech_generation')) throw new WorkflowPreflightError('当前未配置 TTS 配音模型');
-  if (!capabilities.mediaComposition && plan.tasks.some((task) => task.tool === 'media_composition')) throw new WorkflowPreflightError('此设备不支持本地音视频合成');
-  if (!capabilities.imageInspection && plan.tasks.some((task) => task.tool === 'image_inspection')) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
-  if (!capabilities.videoInspection && plan.tasks.some((task) => task.tool === 'video_inspection')) throw new WorkflowPreflightError('当前设备或文字模型不支持视频抽帧检查');
-  if (!capabilities.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
+  if (!webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索', { tool: 'web_search', code: 'tool_disabled' });
+  if (!capabilities.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型', { tool: 'image_generation', code: 'model_missing' });
+  if (!capabilities.audioGeneration && plan.tasks.some((task) => task.tool === 'audio_generation')) throw new WorkflowPreflightError('当前未配置音乐生成模型', { tool: 'audio_generation', code: 'model_missing' });
+  if (!capabilities.speechGeneration && plan.tasks.some((task) => task.tool === 'speech_generation')) throw new WorkflowPreflightError('当前未配置 TTS 配音模型', { tool: 'speech_generation', code: 'model_missing' });
+  if (!capabilities.mediaComposition && plan.tasks.some((task) => task.tool === 'media_composition')) throw new WorkflowPreflightError('此设备不支持本地音视频合成', { tool: 'media_composition', code: 'device_unsupported' });
+  if (!capabilities.imageInspection && plan.tasks.some((task) => task.tool === 'image_inspection')) throw new WorkflowPreflightError('当前文字模型不支持图片检查', { tool: 'image_inspection', code: 'model_unsupported' });
+  if (!capabilities.videoInspection && plan.tasks.some((task) => task.tool === 'video_inspection')) throw new WorkflowPreflightError('当前设备或文字模型不支持视频抽帧检查', { tool: 'video_inspection', code: 'model_unsupported' });
+  if (!capabilities.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用', { tool: 'video_generation', code: 'service_unavailable' });
   const byId = new Map(plan.tasks.map((task) => [task.id, task]));
   if (!capabilities.imageReferenceImages && plan.tasks.some((task) => task.tool === 'image_generation' && directImageDependencies(task, byId).length > 0)) {
-    throw new WorkflowPreflightError('当前图片模型不支持参考图片，请切换模型或改用图片检查文字迭代');
+    throw new WorkflowPreflightError('当前图片模型不支持参考图片，请切换模型或改用图片检查文字迭代', { tool: 'image_generation', code: 'model_unsupported' });
   }
   if (capabilities.maxImageReferenceImages !== undefined && plan.tasks.some((task) => task.tool === 'image_generation'
     && directImageDependencies(task, byId).length > capabilities.maxImageReferenceImages!)) {
-    throw new WorkflowPreflightError(`当前图片模型最多支持 ${capabilities.maxImageReferenceImages} 张参考图片，请减少素材或更换模型`);
+    throw new WorkflowPreflightError(`当前图片模型最多支持 ${capabilities.maxImageReferenceImages} 张参考图片，请减少素材或更换模型`, { tool: 'image_generation', code: 'input_unsupported' });
   }
   if (!capabilities.videoReferenceImages && plan.tasks.some((task) => task.tool === 'video_generation' && countImageUpstream(task, byId) > 0)) {
-    throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换视频模型或调整追加要求');
+    throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换视频模型或调整追加要求', { tool: 'video_generation', code: 'model_unsupported' });
   }
   if (capabilities.videoRequiresReferenceImage && plan.tasks.some((task) => task.tool === 'video_generation' && countImageUpstream(task, byId) === 0)) {
-    throw new WorkflowPreflightError('当前视频模型必须提供参考图片，请先生成图片素材或更换模型');
+    throw new WorkflowPreflightError('当前视频模型必须提供参考图片，请先生成图片素材或更换模型', { tool: 'video_generation', code: 'input_unsupported' });
   }
   if (capabilities.maxVideoReferenceImages !== undefined && plan.tasks.some((task) => task.tool === 'video_generation'
     && countImageUpstream(task, byId) > capabilities.maxVideoReferenceImages!)) {
-    throw new WorkflowPreflightError(`当前视频模型最多支持 ${capabilities.maxVideoReferenceImages} 张参考图片，请减少素材或调整计划`);
+    throw new WorkflowPreflightError(`当前视频模型最多支持 ${capabilities.maxVideoReferenceImages} 张参考图片，请减少素材或调整计划`, { tool: 'video_generation', code: 'input_unsupported' });
   }
 }
 
@@ -478,6 +478,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         })) } };
       }
       if (selectedTool === 'media_composition') {
+        if (!canComposeTeamMedia()) throw new WorkflowPreflightError('此设备不支持本地音视频合成', { tool: 'media_composition', code: 'device_unsupported' });
         if (!input.task.composition) throw new WorkflowPreflightError('缺少音视频合成配置');
         const clips = new Set(input.task.composition.clips.map((clip) => clip.taskId));
         const sources = Object.fromEntries([...input.task.composition.clips, ...(input.task.composition.audioTracks || [])].map(({ taskId }) => [taskId,
@@ -495,10 +496,10 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (selectedTool === 'image_generation') {
         const imageTaskIds = directImageDependencies(input.task, new Map(plan.tasks.map((item) => [item.id, item])));
         const imageProfile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image');
-        if (!imageProfile) throw new WorkflowPreflightError('图片模型未配置');
+        if (!imageProfile) throw new WorkflowPreflightError('图片模型未配置', { tool: 'image_generation', code: 'model_missing' });
         const imageCapabilities = normalizeImageCapabilities(imageProfile?.imageCapabilities);
-        if (imageTaskIds.length && (!imageProfile || !imageCapabilities.referenceImage)) throw new WorkflowPreflightError('当前图片模型不支持参考图片');
-        if (imageTaskIds.length > 1 && !imageCapabilities.multiReferenceImage) throw new WorkflowPreflightError('当前图片模型只支持一张参考图片');
+        if (imageTaskIds.length && (!imageProfile || !imageCapabilities.referenceImage)) throw new WorkflowPreflightError('当前图片模型不支持参考图片', { tool: 'image_generation', code: 'model_unsupported' });
+        if (imageTaskIds.length > 1 && !imageCapabilities.multiReferenceImage) throw new WorkflowPreflightError('当前图片模型只支持一张参考图片', { tool: 'image_generation', code: 'model_unsupported' });
         const referenceImages = imageTaskIds.map((id) => {
           const dependencyId = input.task.savedMedia?.find((media) => media.alias === id)?.taskId
             ?? (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id);
@@ -522,11 +523,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (selectedTool === 'image_inspection') {
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'text');
         const capabilities = resolveAIModelInputCapabilities(profile);
-        if (!profile || !capabilities.imageInput) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
+        if (!profile || !capabilities.imageInput) throw new WorkflowPreflightError('当前文字模型不支持图片检查', { tool: 'image_inspection', code: 'model_unsupported' });
         const imageTaskIds = directImageDependencies(input.task, new Map(plan.tasks.map((item) => [item.id, item])))
           .map((id) => resolveTeamMediaTask(snapshot, input.task.savedMedia?.find((media) => media.alias === id)?.taskId
             ?? (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id), 'image'));
-        if (!imageTaskIds.length || imageTaskIds.length > capabilities.maxAttachments) throw new WorkflowPreflightError('图片检查的参考图片数量不符合当前模型限制');
+        if (!imageTaskIds.length || imageTaskIds.length > capabilities.maxAttachments) throw new WorkflowPreflightError('图片检查的参考图片数量不符合当前模型限制', { tool: 'image_inspection', code: 'input_unsupported' });
         const references = imageTaskIds.map((id) => teamImageReference(task.runId, id));
         if (references.some((reference) => !reference)) throw new WorkflowPreflightError('图片检查的参考图片尚未就绪');
         const output = await inspectAgentTeamImages({
@@ -541,7 +542,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (selectedTool === 'video_inspection') {
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'text');
         const capabilities = resolveAIModelInputCapabilities(profile);
-        if (!profile || !capabilities.imageInput || capabilities.maxAttachments < 1) throw new WorkflowPreflightError('当前文字模型不支持视频抽帧检查');
+        if (!profile || !capabilities.imageInput || capabilities.maxAttachments < 1) throw new WorkflowPreflightError('当前文字模型不支持视频抽帧检查', { tool: 'video_inspection', code: 'model_unsupported' });
         const videoTaskIds = directTeamMediaReferences(input.task, new Map(plan.tasks.map((source) => [source.id, source])), 'video')
           .map((id) => resolveTeamMediaTask(snapshot, input.task.savedMedia?.find((media) => media.alias === id)?.taskId
             ?? (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id), 'video'));
@@ -573,7 +574,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (input.userInstruction) throw new WorkflowPreflightError('配音正文已确定，请通过追加任务修订正文后重新配音');
         const prompt = text.trim();
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'tts');
-        if (!profile) throw new WorkflowPreflightError('旁白模型未配置');
+        if (!profile) throw new WorkflowPreflightError('旁白模型未配置', { tool: 'speech_generation', code: 'model_missing' });
         await context.beginToolInvocation(describeWorkflowToolRequest('speech_generation', { prompt }));
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           profile,
@@ -591,7 +592,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         });
         const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'audio');
-        if (!profile) throw new WorkflowPreflightError('音乐模型未配置');
+        if (!profile) throw new WorkflowPreflightError('音乐模型未配置', { tool: 'audio_generation', code: 'model_missing' });
         await context.beginToolInvocation(describeWorkflowToolRequest('audio_generation', { prompt }));
         return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           profile,
@@ -626,11 +627,11 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const hasImageDependency = imageTaskIds.length > 0;
         if (!existingVideo || existingVideo.status === 'queued') {
           const capabilities = await teamMediaCapabilities();
-          if (!capabilities.videoGeneration) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
-          if (hasImageDependency && !capabilities.videoReferenceImages) throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换支持参考图的视频模型后继续');
-          if (!hasImageDependency && capabilities.videoRequiresReferenceImage) throw new WorkflowPreflightError('当前视频模型必须提供参考图片，请先生成图片素材或更换模型');
+          if (!capabilities.videoGeneration) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用', { tool: 'video_generation', code: 'service_unavailable' });
+          if (hasImageDependency && !capabilities.videoReferenceImages) throw new WorkflowPreflightError('当前视频模型不支持参考图片，请切换支持参考图的视频模型后继续', { tool: 'video_generation', code: 'model_unsupported' });
+          if (!hasImageDependency && capabilities.videoRequiresReferenceImage) throw new WorkflowPreflightError('当前视频模型必须提供参考图片，请先生成图片素材或更换模型', { tool: 'video_generation', code: 'input_unsupported' });
           if (capabilities.maxVideoReferenceImages !== undefined && imageTaskIds.length > capabilities.maxVideoReferenceImages) {
-            throw new WorkflowPreflightError(`当前视频模型最多支持 ${capabilities.maxVideoReferenceImages} 张参考图片，请减少素材或更换模型`);
+            throw new WorkflowPreflightError(`当前视频模型最多支持 ${capabilities.maxVideoReferenceImages} 张参考图片，请减少素材或更换模型`, { tool: 'video_generation', code: 'input_unsupported' });
           }
         }
         const referenceImages = imageTaskIds.flatMap((dependencyId) => {
@@ -646,7 +647,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         }).filter((content): content is string => content !== null);
         const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video');
-        if (!profile) throw new WorkflowPreflightError('视频模型未配置');
+        if (!profile) throw new WorkflowPreflightError('视频模型未配置', { tool: 'video_generation', code: 'model_missing' });
         await context.beginToolInvocation(describeWorkflowToolRequest('video_generation', { prompt, referenceImages }));
         return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           profile,
@@ -656,7 +657,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       }
       if (selectedTool === 'web_search') {
         const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId && item.type === 'assistant' && item.deletedAt == null);
-        if (!chat?.modeState || !resolveChatAgentCapabilities(chat).webSearch) throw new WorkflowPreflightError('当前会话未开启网页搜索');
+        if (!chat?.modeState || !resolveChatAgentCapabilities(chat).webSearch) throw new WorkflowPreflightError('当前会话未开启网页搜索', { tool: 'web_search', code: 'tool_disabled' });
         await context.beginToolInvocation(describeWorkflowToolRequest('web_search', { query: input.task.goal, count: 8 }));
         const response = await appApi.searchWeb(input.task.goal, { source: 'assistant_agent', resourceId: snapshot.run.chatId, count: 8 });
         if (signal.aborted) throw signal.reason || new Error('团队任务已中断');

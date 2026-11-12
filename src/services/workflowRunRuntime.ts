@@ -16,6 +16,7 @@ import { parseWorkflowModelRequest, type WorkflowModelRequest } from './workflow
 import { assertWorkflowApprovals, assertWorkflowApprovalTransition, pendingWorkflowApproval, proposeWorkflowApproval, workflowApprovalMatches,
   type WorkflowApproval, type WorkflowApprovalRequirement } from './workflowApproval';
 import type { WorkflowUsageReference } from '../types/workflowUsage';
+import { parseWorkflowCapabilityIssue, type WorkflowCapabilityIssue, type WorkflowCapabilityRequirement } from './workflowCapability';
 
 export type WorkflowTaskStatus = 'queued' | 'running' | 'waiting_dependency' | 'waiting_external' | 'waiting_user' | 'result_unknown' | 'completed' | 'failed' | 'cancelled' | 'abandoned';
 
@@ -32,6 +33,7 @@ export interface WorkflowTask {
   approvals?: WorkflowApproval[];
   externalTaskId?: string;
   error?: string;
+  capabilityIssue?: WorkflowCapabilityIssue;
   attempt: number;
   unstartedModelAttempts?: number;
   modelInvocation?: WorkflowModelInvocation;
@@ -145,6 +147,11 @@ function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapsh
     assertWorkflowUserResponse(candidate as unknown as WorkflowTask, Number(run.planVersion));
     assertWorkflowApprovals(value as unknown as WorkflowSnapshot, candidate as unknown as WorkflowTask);
     if (!Number.isSafeInteger(candidate.attempt) || (candidate.attempt as number) < 0) throw new Error('工作流任务尝试次数无效');
+    if (candidate.capabilityIssue !== undefined) {
+      const issue = parseWorkflowCapabilityIssue(candidate.capabilityIssue);
+      if (issue.attempt !== candidate.attempt
+        || issue.planVersion > Number(run.planVersion)) throw new Error('能力不足记录不属于当前失败任务');
+    }
     if (candidate.kind === 'team_review' && isRecord(candidate.input) && candidate.input.schemaVersion !== undefined) parseTeamReviewInput(candidate.input);
     if (candidate.kind === 'team_plan_revision' && isRecord(candidate.input) && candidate.input.impact !== undefined) {
       const impact = parseWorkflowRevisionImpact(candidate.input.impact);
@@ -297,9 +304,12 @@ export interface WorkflowExecutionContext {
 }
 
 export class WorkflowPreflightError extends Error {
-  constructor(message: string) {
+  readonly capability?: WorkflowCapabilityRequirement;
+
+  constructor(message: string, capability?: WorkflowCapabilityRequirement) {
     super(message);
     this.name = 'WorkflowPreflightError';
+    this.capability = capability;
   }
 }
 
@@ -969,7 +979,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
       const now = Date.now();
       const snapshot: WorkflowSnapshot = { ...current,
         run: { ...current.run, status: 'paused', planVersion: current.run.planVersion + 1, updatedAt: now },
-        tasks: current.tasks.map((task) => task.id === taskId ? { ...task, status: 'queued', error: undefined, updatedAt: now } : task),
+        tasks: current.tasks.map((task) => task.id === taskId ? { ...task, status: 'queued', error: undefined, capabilityIssue: undefined, updatedAt: now } : task),
       };
       return { snapshot, value: snapshot };
     });
@@ -1174,7 +1184,7 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
           return { snapshot: {
             ...current,
             tasks: current.tasks.map((item) => claimed.has(item.id)
-              ? { ...item, status: 'running', attempt: item.attempt + 1, updatedAt: Date.now(),
+              ? { ...item, status: 'running', capabilityIssue: undefined, attempt: item.attempt + 1, updatedAt: Date.now(),
                 ...(executor.tracksModelInvocations && isWorkflowModelTask(item.kind) ? { modelInvocation: {
                   schemaVersion: 1 as const, id: workflowModelInvocationId(runId, item.id, item.attempt + 1),
                   runId, taskId: item.id, attempt: item.attempt + 1, state: 'reserved' as const, reservedAt: Date.now(),
@@ -1285,6 +1295,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                 && (workflowDeadlineBlockReason(current.run.goalSpec) || executor.dispatchBlockReason?.(current));
               return { ...(isReady ? finishInvocation(item, definiteFailure ? 'failed' : 'result_unknown', Date.now()) : item),
                 status: blockedBeforeRequest ? 'queued' : !isReady ? 'waiting_external' : definiteFailure ? 'failed' : 'result_unknown',
+                capabilityIssue: !blockedBeforeRequest && isReady && error instanceof WorkflowPreflightError && error.capability
+                  ? { schemaVersion: 1, ...error.capability, attempt: item.attempt, planVersion: current.run.planVersion } : undefined,
                 error: blockedBeforeRequest ? undefined : error instanceof Error ? error.message : '任务状态查询失败', updatedAt: Date.now() };
             }) }, value: undefined }));
             if (!isReady) inspectedExternalIds.add(task.id);

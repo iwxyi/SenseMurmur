@@ -1101,6 +1101,55 @@ describe('workflow run runtime', () => {
     const result = await runtime.resume(id);
     expect(result.run.status).toBe('failed');
     expect(result.tasks[0]).toMatchObject({ status: 'failed', error: '原始消息已删除' });
+    expect(result.tasks[0].capabilityIssue).toBeUndefined();
+  });
+
+  it('persists capability recovery and retries only the blocked step after explicit repair', async () => {
+    const id = crypto.randomUUID();
+    const scope = `capability-${id}`;
+    let repaired = false;
+    const execute = vi.fn(async (_task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => {
+      if (!repaired) throw new WorkflowPreflightError('未配置视频模型', { tool: 'video_generation', code: 'model_missing' });
+      await context.beginModelInvocation();
+      return { output: '视频完成' };
+    });
+    const executor = { execute, tracksModelInvocations: true };
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, executor, () => scope);
+    const initial = snapshot(id);
+    initial.tasks[0] = { ...initial.tasks[0], status: 'completed', attempt: 1, output: '已保存的脚本' };
+    initial.tasks[1] = { ...initial.tasks[1], kind: 'agent_text' };
+    await runtime.create(initial);
+    const failed = await runtime.resume(id);
+    expect(failed.tasks[1]).toMatchObject({ status: 'failed', capabilityIssue: {
+      schemaVersion: 1, tool: 'video_generation', code: 'model_missing', attempt: 1, planVersion: 1,
+    } });
+    expect(countWorkflowModelCalls(failed)).toBe(0);
+    const restored = createWorkflowRunRuntime(indexedDbWorkflowRepository, executor, () => scope);
+    expect((await restored.read(id))?.tasks[1].capabilityIssue).toEqual(failed.tasks[1].capabilityIssue);
+    repaired = true;
+    await restored.resume(id);
+    expect(execute).toHaveBeenCalledTimes(1);
+    const retried = await restored.retryFailedTeamTask(id, 1, 'video');
+    expect(retried.tasks[1].capabilityIssue).toBeUndefined();
+    const completed = await restored.resume(id);
+    expect(completed.run.status).toBe('completed');
+    expect(completed.tasks[0]).toEqual(failed.tasks[0]);
+    expect(completed.tasks[1]).toMatchObject({ status: 'completed', attempt: 2, output: '视频完成' });
+    expect(countWorkflowModelCalls(completed)).toBe(1);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { schemaVersion: 2 }, { code: 'unknown' }, { tool: 'unknown' }, { attempt: 2 }, { planVersion: 2 },
+  ])('rejects invalid capability provenance %j', async (override) => {
+    const id = crypto.randomUUID();
+    const initial = snapshot(id);
+    Object.assign(initial.tasks[0], { status: 'failed', attempt: 1, capabilityIssue: {
+      schemaVersion: 1, tool: 'video_generation', code: 'model_missing', attempt: 1, planVersion: 1, ...override,
+    } });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'invalid-capability');
+    await expect(runtime.create(initial)).rejects.toThrow('能力不足记录');
+    expect(await runtime.read(id)).toBeNull();
   });
 
   it('keeps an open plan available for delegation after its initial tasks finish', async () => {

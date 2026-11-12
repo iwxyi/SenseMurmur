@@ -13,6 +13,7 @@ import TeamUserInputPanel from './TeamUserInputPanel';
 import TeamApprovalPanel from './TeamApprovalPanel';
 import TeamUsagePanel from './TeamUsagePanel';
 import { pendingWorkflowApproval } from '../../services/workflowApproval';
+import { WORKFLOW_CAPABILITY_RECOVERY } from '../../services/workflowCapability';
 
 interface Props {
   runs: WorkflowSnapshot[];
@@ -174,6 +175,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           {details.method && <Typography variant="body2"><strong>方法</strong> {details.method}</Typography>}
           {details.acceptance && <Typography variant="body2"><strong>验收</strong> {details.acceptance}</Typography>}
           {task.error && <Typography variant="body2" color="error.main"><strong>问题</strong> {task.error}</Typography>}
+          {task.status === 'failed' && task.capabilityIssue && <Typography role="status" variant="body2" color="warning.main"><strong>继续条件</strong> {WORKFLOW_CAPABILITY_RECOVERY[task.capabilityIssue.code]}</Typography>}
           {failedTask && canRun && !running && run.run.status === 'failed' && <Box>
             {reviewActionError && reviewActionRunId === run.run.id && <Typography role="alert" variant="caption" color="error.main">{reviewActionError}</Typography>}
             <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {

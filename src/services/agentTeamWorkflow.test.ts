@@ -1346,10 +1346,14 @@ describe('agent team workflow', () => {
     const result = await workflow.start(runId, 'chat', '生成短片');
     expect(result.snapshot.tasks[0].status).toBe('failed');
     expect(result.snapshot.tasks[0].error).toContain('未在可用模型列表中');
+    expect(result.snapshot.tasks[0].capabilityIssue).toMatchObject({ schemaVersion: 1, tool: 'video_generation', code: 'service_unavailable', attempt: 1 });
+    const recovered = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-removed-video-test');
+    expect((await recovered.read(runId))?.tasks[0].capabilityIssue).toEqual(result.snapshot.tasks[0].capabilityIssue);
     expect(queueAgentTeamVideo).not.toHaveBeenCalled();
     useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
     const retry = await workflow.retryFailedTask(runId, 'plan', result.snapshot.run.planVersion);
     expect(retry.run.status).toBe('paused');
+    expect(retry.tasks[0].capabilityIssue).toBeUndefined();
     generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '生成视频', method: '生成', acceptance: '成片', allowedTools: ['video_generation'] }],
       tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' }));
     vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'restored-video' });

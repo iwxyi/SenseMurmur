@@ -350,22 +350,22 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
   }
   if (plan.tasks.some((task) => task.savedText?.some((entry) => !params.savedText?.some((source) => sameTeamSavedTextVersion(source, entry))))) throw new WorkflowPreflightError('规划引用了未授权或版本不符的历史文字');
   if (!params.delegation && plan.roles.some((role) => role.allowedTools.includes('delegate_task'))) throw new WorkflowPreflightError('本层未获准下级委派');
-  if (!params.webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索');
-  if (!params.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');
+  if (!params.webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索', { tool: 'web_search', code: 'tool_disabled' });
+  if (!params.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型', { tool: 'image_generation', code: 'model_missing' });
   if (!params.imageReferenceImages && plan.tasks.some((task) => task.tool === 'image_generation'
     && directTeamMediaReferences(task, new Map(plan.tasks.map((source) => [source.id, source])), 'image').length > 0)) {
-    throw new WorkflowPreflightError('当前图片模型不支持参考图片');
+    throw new WorkflowPreflightError('当前图片模型不支持参考图片', { tool: 'image_generation', code: 'model_unsupported' });
   }
   if (params.maxImageReferenceImages && plan.tasks.some((task) => task.tool === 'image_generation'
     && directTeamMediaReferences(task, new Map(plan.tasks.map((source) => [source.id, source])), 'image').length > params.maxImageReferenceImages!)) {
-    throw new WorkflowPreflightError(`当前图片模型最多支持 ${params.maxImageReferenceImages} 张参考图片`);
+    throw new WorkflowPreflightError(`当前图片模型最多支持 ${params.maxImageReferenceImages} 张参考图片`, { tool: 'image_generation', code: 'input_unsupported' });
   }
-  if (!params.audioGeneration && plan.tasks.some((task) => task.tool === 'audio_generation')) throw new WorkflowPreflightError('当前未配置音乐生成模型');
-  if (!params.speechGeneration && plan.tasks.some((task) => task.tool === 'speech_generation')) throw new WorkflowPreflightError('当前未配置 TTS 配音模型');
-  if (!params.mediaComposition && plan.tasks.some((task) => task.tool === 'media_composition')) throw new WorkflowPreflightError('此设备不支持本地音视频合成');
-  if (!params.imageInspection && plan.tasks.some((task) => task.tool === 'image_inspection')) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
-  if (!params.videoInspection && plan.tasks.some((task) => task.tool === 'video_inspection')) throw new WorkflowPreflightError('当前设备或文字模型不支持视频抽帧检查');
-  if (!params.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(params.videoUnavailableReason || '当前未配置视频模型');
+  if (!params.audioGeneration && plan.tasks.some((task) => task.tool === 'audio_generation')) throw new WorkflowPreflightError('当前未配置音乐生成模型', { tool: 'audio_generation', code: 'model_missing' });
+  if (!params.speechGeneration && plan.tasks.some((task) => task.tool === 'speech_generation')) throw new WorkflowPreflightError('当前未配置 TTS 配音模型', { tool: 'speech_generation', code: 'model_missing' });
+  if (!params.mediaComposition && plan.tasks.some((task) => task.tool === 'media_composition')) throw new WorkflowPreflightError('此设备不支持本地音视频合成', { tool: 'media_composition', code: 'device_unsupported' });
+  if (!params.imageInspection && plan.tasks.some((task) => task.tool === 'image_inspection')) throw new WorkflowPreflightError('当前文字模型不支持图片检查', { tool: 'image_inspection', code: 'model_unsupported' });
+  if (!params.videoInspection && plan.tasks.some((task) => task.tool === 'video_inspection')) throw new WorkflowPreflightError('当前设备或文字模型不支持视频抽帧检查', { tool: 'video_inspection', code: 'model_unsupported' });
+  if (!params.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(params.videoUnavailableReason || '当前未配置视频模型', { tool: 'video_generation', code: 'service_unavailable' });
   const tasksById = new Map(plan.tasks.map((task) => [task.id, task]));
   const dependsOnImage = (task: AgentTeamTask, visited = new Set<string>()): boolean => Boolean(task.savedMedia?.some((media) => media.kind === 'image')) || task.dependsOn.some((dependency) => {
     if (visited.has(dependency)) return false;
@@ -377,7 +377,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     return dependsOnImage(upstream, visited);
   });
   if (!params.videoReferenceImages && plan.tasks.some((task) => task.tool === 'video_generation' && dependsOnImage(task))) {
-    throw new WorkflowPreflightError('当前视频模型不支持参考图片，请改用文字脚本到视频或切换视频模型');
+    throw new WorkflowPreflightError('当前视频模型不支持参考图片，请改用文字脚本到视频或切换视频模型', { tool: 'video_generation', code: 'model_unsupported' });
   }
   return plan;
 }

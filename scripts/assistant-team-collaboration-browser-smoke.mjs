@@ -78,7 +78,7 @@ try {
       { id: 'plan', runId, kind: 'team_plan', input: '研究市场机会', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
       { id: 'research', runId, kind: 'agent_text', input: { task: plan.tasks[0], role: plan.roles[0], goal: '研究市场机会' }, output: '主要竞争者采用订阅模式', dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: now },
     ] };
-    const { createWorkflowRunRuntime, indexedDbWorkflowRepository, currentWorkflowScope } = await import('/src/services/workflowRunRuntime.ts');
+    const { createWorkflowRunRuntime, indexedDbWorkflowRepository, currentWorkflowScope, WorkflowPreflightError } = await import('/src/services/workflowRunRuntime.ts');
     const { defaultWorkflowGoalSpec } = await import('/src/services/workflowGoalSpec.ts');
     window.__cleanupCollaborationFixture = async () => {
       const database = await new Promise((resolve, reject) => {
@@ -99,6 +99,38 @@ try {
     }, currentWorkflowScope);
     await runtime.create({ ...run, run: { ...run.run, status: 'active' }, tasks: run.tasks.map((task) => task.id === 'research' ? { ...task, status: 'queued', attempt: 0, output: undefined } : task) });
     const persistedRun = await runtime.resume(runId);
+    const capabilityRunId = 'browser-collab-capability-' + crypto.randomUUID();
+    let capabilityRepaired = false;
+    let capabilityExecutions = 0;
+    let capabilityRequests = 0;
+    const capabilityExecutor = { tracksModelInvocations: true, execute: async (_task, _signal, context) => {
+      capabilityExecutions += 1;
+      if (!capabilityRepaired) throw new WorkflowPreflightError('未配置视频模型', { tool: 'video_generation', code: 'model_missing' });
+      await context.beginModelInvocation();
+      capabilityRequests += 1;
+      return { output: '修复配置后的交付' };
+    } };
+    const capabilityRuntime = createWorkflowRunRuntime(indexedDbWorkflowRepository, capabilityExecutor, currentWorkflowScope);
+    await capabilityRuntime.create({ ...run, run: { ...run.run, id: capabilityRunId, status: 'active' }, tasks: run.tasks.map((task) => ({
+      ...task, runId: capabilityRunId,
+      ...(task.id === 'plan' ? { output: { ...plan, summary: '能力恢复验证' } } : { status: 'queued', attempt: 0, output: undefined }),
+    })) });
+    await capabilityRuntime.resume(capabilityRunId);
+    const capabilityRestored = createWorkflowRunRuntime(indexedDbWorkflowRepository, capabilityExecutor, currentWorkflowScope);
+    const capabilityRun = await capabilityRestored.read(capabilityRunId);
+    if (capabilityRun.tasks[1].capabilityIssue?.code !== 'model_missing' || capabilityRequests !== 0) throw new Error('Capability failure was not persisted before request');
+    await capabilityRestored.resume(capabilityRunId);
+    if (capabilityExecutions !== 1) throw new Error('Capability failure automatically repeated');
+    const retryCapability = async (item, task) => {
+      capabilityRepaired = true;
+      const retry = await capabilityRestored.retryFailedTeamTask(item.run.id, item.run.planVersion, task.id);
+      if (retry.tasks[1].capabilityIssue) throw new Error('Old capability issue survived retry');
+      const completed = await capabilityRestored.resume(item.run.id);
+      await createWorkflowRunRuntime(indexedDbWorkflowRepository, capabilityExecutor, currentWorkflowScope).resume(item.run.id);
+      if (completed.run.status !== 'completed' || capabilityExecutions !== 2 || capabilityRequests !== 1
+        || JSON.stringify(completed.tasks[0]) !== JSON.stringify(capabilityRun.tasks[0])) throw new Error('Capability repair repeated upstream work');
+      window.__assistantTeamSmoke.capabilityRecovery = true;
+    };
     const toolRunId = 'browser-collab-tool-' + crypto.randomUUID();
     const toolRuntime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
       tracksToolInvocations: true,
@@ -602,7 +634,7 @@ try {
     const root = createRoot(container);
     window.__assistantTeamSmoke.root = root;
     root.render(React.createElement(Workbench, {
-      runs: [{ ...persistedRun, run: { ...persistedRun.run, deliveryStatus: 'pending', deliveryIssue: 'save_failed' } }, resumableRun, secondResumableRun, uncertainRun, recursiveRun, conflictRun, outputRun, questionRun], canRun: true, isRunActive: () => false, onResume: () => {},
+      runs: [{ ...persistedRun, run: { ...persistedRun.run, deliveryStatus: 'pending', deliveryIssue: 'save_failed' } }, resumableRun, secondResumableRun, uncertainRun, recursiveRun, conflictRun, outputRun, questionRun, capabilityRun], canRun: true, isRunActive: () => false, onResume: () => {},
       onResumeAll: async (items) => { window.__assistantTeamSmoke.resumed = items.map((item) => item.run.id); }, onCreate: () => {},
       onInstruct: async () => {}, onPause: async () => {},
       onAnswer: async (item, task, answer) => {
@@ -650,7 +682,10 @@ try {
         window.__assistantTeamSmoke.revisionImpact = impact;
         window.__assistantTeamSmoke.calls.push(args);
       },
-      onAbandonReview: async () => {}, onResumeAfterReviewRetry: async () => {}, onResumeAfterTaskRetry: retryOutput,
+      onAbandonReview: async () => {}, onResumeAfterReviewRetry: async () => {}, onResumeAfterTaskRetry: async (item, task) => {
+        if (item.run.id === capabilityRunId) await retryCapability(item, task);
+        else await retryOutput(item, task);
+      },
     }));
     return true;
   })()`);
@@ -717,6 +752,11 @@ try {
   await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('JSON 不符合已声明的字段契约')`), 'output validation error visible');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '重试该任务并继续').click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.outputRetry === true`), 'failed JSON retried from workbench with preserved upstream');
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent === '能力恢复验证').click()`);
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent.includes('市场分析师 · 失败')).click()`);
+  await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"] [role="status"]')?.textContent.includes('继续条件') && document.querySelector('[role="dialog"] [role="status"]').textContent.includes('配置对应类型的模型')`), 'persisted capability recovery condition visible');
+  await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '重试该任务并继续').click()`);
+  await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.capabilityRecovery === true`), 'capability repair retries only blocked step');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent === '用户答复验证').click()`);
   await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('目标市场是哪里？')`), 'persisted user question visible');
   await cdp.evaluate(`(() => {
@@ -786,7 +826,7 @@ try {
   await cdp.send('Emulation.clearDeviceMetricsOverride');
   assert.equal(await cdp.evaluate(`window.__usageCalls`), 2, 'Rendering and resizing must not poll fees');
   await cdp.evaluate(`window.__usageCleanup()`);
-  console.log(JSON.stringify({ ok: true, userResponse: await cdp.evaluate(`window.__assistantTeamSmoke.userResponse`), outputContractRetry: true, exactSavedTextRecovery: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
+  console.log(JSON.stringify({ ok: true, capabilityRecovery: await cdp.evaluate(`window.__assistantTeamSmoke.capabilityRecovery`), userResponse: await cdp.evaluate(`window.__assistantTeamSmoke.userResponse`), outputContractRetry: true, exactSavedTextRecovery: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } catch (error) {
   console.error(JSON.stringify({ browserErrors: cdp.errors }));
   throw error;
