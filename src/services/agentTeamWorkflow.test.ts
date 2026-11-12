@@ -829,7 +829,8 @@ describe('agent team workflow', () => {
     const basePlan = { summary: '研究', roles: [{ id: 'writer', name: '写作者', responsibility: '研究', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
       tasks: [{ id: 'research', roleId: 'writer', goal: '研究问题', dependsOn: [], acceptance: '有结论' }], finalAcceptance: '报告可读' };
     const followup = { ...basePlan, summary: '补写报告', tasks: [{ id: 'report', roleId: 'writer', goal: '根据研究写报告', dependsOn: [], acceptance: '报告可读' }] };
-    generate.mockResolvedValueOnce(JSON.stringify(basePlan)).mockResolvedValueOnce('研究结论')
+    const researchOutput = '研究结论'.repeat(600);
+    generate.mockResolvedValueOnce(JSON.stringify(basePlan)).mockResolvedValueOnce(researchOutput)
       .mockResolvedValueOnce(JSON.stringify({ complete: false, reason: '缺少报告', nextRequest: '根据研究结论写报告' }))
       .mockResolvedValueOnce(JSON.stringify(followup)).mockResolvedValueOnce('完整报告')
       .mockResolvedValueOnce(JSON.stringify({ complete: true, reason: '报告已完成' }));
@@ -844,6 +845,14 @@ describe('agent team workflow', () => {
     expect(reviews[1].output).toMatchObject({ schemaVersion: 1, taskId: 'review_2', complete: true });
     const saved = JSON.stringify(reviews.map((task) => task.output));
     expect(generate.mock.calls[2][2][0].content).toContain('最终验收标准：报告可读');
+    const firstEvidence = JSON.parse(generate.mock.calls[2][2][0].content.split('项已完成记录未列出）：')[1]);
+    expect(firstEvidence).toEqual([{ task: 'research', kind: 'agent_text', goal: '研究问题', acceptance: '有结论',
+      output: researchOutput.slice(0, 1800), outputCharacters: researchOutput.length, truncated: true }]);
+    expect(generate.mock.calls[2][1]).toContain('未展示的部分不能当作已读取');
+    const secondEvidence = JSON.parse(generate.mock.calls[5][2][0].content.split('项已完成记录未列出）：')[1]);
+    expect(secondEvidence.find((item: { task: string }) => item.task === 'auto_delegate_1_report')).toMatchObject({
+      goal: '根据研究写报告', acceptance: '报告可读', output: '完整报告', outputCharacters: 4, truncated: false,
+    });
     const resumed = await workflow.resume(runId);
     expect(JSON.stringify(resumed.snapshot.tasks.filter((task) => task.kind === 'team_review').map((task) => task.output))).toBe(saved);
     await expect(indexedDbWorkflowRepository.transact('team-auto-review-test', runId, (current) => {

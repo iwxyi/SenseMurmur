@@ -151,6 +151,40 @@ try {
       window.fetch = originalFetch;
       useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== recursiveChatId) }));
     }
+    const reviewRunId = 'browser-collab-review-evidence-' + crypto.randomUUID();
+    const reviewChatId = reviewRunId + '-chat';
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: reviewChatId, type: 'assistant', name: '审核依据验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));
+    const reviewBody = '研究正文。'.repeat(500);
+    let reviewRequests = 0;
+    let reviewedEvidence;
+    window.fetch = async (input, init) => {
+      if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
+      const request = JSON.parse(init.body);
+      const index = reviewRequests++;
+      if (index === 2) {
+        const content = request.messages.at(-1).content;
+        reviewedEvidence = JSON.parse(content.split('项已完成记录未列出）：')[1].split('\\n')[0]);
+        const entry = reviewedEvidence[0];
+        if (entry.goal !== plan.tasks[0].goal || entry.acceptance !== plan.tasks[0].acceptance
+          || entry.kind !== 'agent_text' || entry.output !== reviewBody.slice(0, 1800)
+          || entry.outputCharacters !== reviewBody.length || entry.truncated !== true
+          || !request.messages.some((message) => String(message.content).includes('未展示的部分不能当作已读取'))) throw new Error('Review lost task criteria or concealed truncation');
+      }
+      const content = [JSON.stringify(plan), reviewBody, JSON.stringify({ complete: true, reason: '确定性审核结果，仅验证链路' })][index];
+      if (!content) throw new Error('Review evidence recovery duplicated model requests');
+      return Response.json({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
+    };
+    try {
+      const finished = await createAgentTeamWorkflow(config, currentWorkflowScope).start(reviewRunId, reviewChatId, '研究市场', true);
+      const savedReview = finished.snapshot.tasks.find((task) => task.id === 'review_1').output;
+      const { workflowJsonDigest } = await import('/src/services/workflowToolRequest.ts');
+      if (finished.snapshot.run.status !== 'completed' || !reviewedEvidence || savedReview?.evidenceSha256 !== workflowJsonDigest(reviewedEvidence)) throw new Error('Review evidence was not durably bound: ' + JSON.stringify({ status: finished.snapshot.run.status, requests: reviewRequests, expected: reviewedEvidence && workflowJsonDigest(reviewedEvidence), actual: savedReview?.evidenceSha256, failures: finished.snapshot.tasks.filter((task) => task.error).map((task) => ({ kind: task.kind, error: task.error })) }));
+      const restored = await createAgentTeamWorkflow(config, currentWorkflowScope).resume(reviewRunId);
+      if (reviewRequests !== 3 || JSON.stringify(restored.snapshot.tasks.find((task) => task.id === 'review_1').output) !== JSON.stringify(savedReview)) throw new Error('Review record changed after recovery');
+    } finally {
+      window.fetch = originalFetch;
+      useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== reviewChatId) }));
+    }
     const textRunId = 'browser-collab-saved-text-' + crypto.randomUUID();
     const textChatId = textRunId + '-chat';
     const originalText = '逐字保留：' + '完整研究正文。'.repeat(400) + '末尾结论必须保留';
