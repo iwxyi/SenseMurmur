@@ -6,6 +6,17 @@ const task: AgentTeamTask = { id: 'data', roleId: 'writer', goal: '结果', acce
   deliverable: { schemaVersion: 1, kind: 'json', title: '结果' } };
 
 describe('team output contract', () => {
+  it('enforces declared JSON fields without leaking output or silently coercing types', () => {
+    const structured: AgentTeamTask = { ...task, deliverable: { ...task.deliverable!, jsonSchema: {
+      type: 'object', properties: { count: { type: 'integer', minimum: 0 } }, required: ['count'], additionalProperties: false,
+    } } };
+    expect(teamOutputInstruction(structured)).toContain('"required":["count"]');
+    expect(validateTeamOutput(structured, '{"count":3}')).toBe('{"count":3}');
+    for (const value of ['{}', '{"count":"3"}', '{"count":-1}', '{"count":3,"private":"sensitive"}']) {
+      expect(() => validateTeamOutput(structured, value)).toThrow('JSON 不符合已声明的字段契约');
+      try { validateTeamOutput(structured, value); } catch (error) { expect(String(error)).not.toContain('sensitive'); }
+    }
+  });
   it('validates the same table syntax used by artifact previews', () => {
     const tableTask: AgentTeamTask = { ...task, deliverable: { kind: 'table', title: '数据', language: 'csv' } };
     expect(validateTeamOutput(tableTask, '```csv\na,b\n1,"two\nlines"\n```')).toBe('a,b\n1,"two\nlines"');

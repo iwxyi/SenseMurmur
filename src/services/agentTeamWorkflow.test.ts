@@ -425,21 +425,22 @@ describe('agent team workflow', () => {
     expect(countWorkflowModelCalls(result.snapshot)).toBe(2);
   });
 
-  it('blocks invalid JSON before downstream work and retries only the failed task after restore', async () => {
+  it.each(['syntax', 'fields'])('blocks invalid JSON %s before downstream work and retries only the failed task after restore', async (mode) => {
     const runId = crypto.randomUUID();
     const scope = `output-contract-${runId}`;
     const role = { id: 'writer', name: '写作者', responsibility: '整理', method: '核对', acceptance: '准确', allowedTools: ['text_generation'] };
     const plan = { summary: '结构化交付', roles: [role], tasks: [
       { id: 'source', roleId: role.id, goal: '整理证据', dependsOn: [], acceptance: '准确' },
-      { id: 'data', roleId: role.id, goal: '生成数据', dependsOn: ['source'], acceptance: '合法 JSON', deliverable: { kind: 'json', title: '数据' } },
+      { id: 'data', roleId: role.id, goal: '生成数据', dependsOn: ['source'], acceptance: '合法 JSON', deliverable: { kind: 'json', title: '数据',
+        jsonSchema: { type: 'object', properties: { value: { type: 'number' } }, required: ['value'], additionalProperties: false } } },
       { id: 'report', roleId: role.id, goal: '使用数据', dependsOn: ['data'], acceptance: '完整' },
     ], finalAcceptance: '准确' };
-    generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('完整原始证据').mockResolvedValueOnce('这里是数据：{"value":1}');
+    generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('完整原始证据').mockResolvedValueOnce(mode === 'syntax' ? '这里是数据：{"value":1}' : '{"value":"1"}');
     const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
     const first = createAgentTeamWorkflow(config, () => scope);
     const failed = (await first.start(runId, 'chat', '生成数据报告')).snapshot;
     expect(failed.run.status).toBe('failed');
-    expect(failed.tasks.find((task) => task.id === 'data')).toMatchObject({ status: 'failed', error: expect.stringContaining('要求合法 JSON') });
+    expect(failed.tasks.find((task) => task.id === 'data')).toMatchObject({ status: 'failed', error: expect.stringContaining(mode === 'syntax' ? '要求合法 JSON' : 'JSON 不符合已声明的字段契约') });
     expect(failed.tasks.find((task) => task.id === 'report')?.attempt).toBe(0);
     expect(countWorkflowModelCalls(failed)).toBe(3);
     const restored = createAgentTeamWorkflow(config, () => scope);
@@ -1729,6 +1730,37 @@ describe('agent team workflow', () => {
     expect(result.snapshot.run.status).toBe('completed');
     expect(generate.mock.calls[0][2][0].content).toContain('用户补充指示：用简体中文');
     await expect(scoped.instructQueuedTask(runId, 'write', 3, '再次修改')).rejects.toThrow('请先暂停整个团队任务');
+  });
+
+  it.each([undefined, true])('rejects a queued task with weakened JSON schema %s before calling the model', async (jsonSchema) => {
+    const runId = `team-${crypto.randomUUID()}`;
+    const scope = 'team-json-schema-consistency-test';
+    const plan = {
+      summary: '生成数据',
+      roles: [{ id: 'writer', name: '写作者', responsibility: '生成数据', method: '整理材料', acceptance: '字段正确', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '生成数据', dependsOn: [], acceptance: '字段正确', deliverable: {
+        kind: 'json', title: '数据', jsonSchema: { type: 'object', required: ['value'], properties: { value: { type: 'number' } } },
+      } }],
+      finalAcceptance: '字段正确',
+    };
+    const now = Date.now();
+    const scoped = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
+      run: { id: runId, chatId: 'chat', goal: '生成数据', status: 'paused', generation: 1, planVersion: 2, planOpen: true, updatedAt: now },
+      tasks: [
+        { id: 'plan', runId, kind: 'team_plan', input: '生成数据', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        { id: 'write', runId, kind: 'agent_text', input: {
+          task: { ...plan.tasks[0], deliverable: { kind: 'json', title: '数据', jsonSchema } },
+          role: plan.roles[0], goal: '生成数据',
+        }, dependsOn: ['plan'], status: 'queued', attempt: 0, updatedAt: now },
+      ],
+    }, value: undefined }));
+
+    const resumed = await scoped.resume(runId);
+    expect(resumed.snapshot.tasks.find((task) => task.id === 'write')).toMatchObject({
+      status: 'failed', error: '团队任务与已保存计划不一致', modelInvocation: { state: 'not_started' },
+    });
+    expect(generate).not.toHaveBeenCalled();
   });
 
   it('resumes legacy task inputs after role schema migration without treating normalization as tampering', async () => {

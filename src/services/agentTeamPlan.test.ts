@@ -133,6 +133,10 @@ describe('agent team plan', () => {
     expect(() => validateAgentTeamPlan({ ...plan, tasks: [{ ...plan.tasks[0], deliverable: { kind: 'table', title: '数据', language: 'html' } }] })).toThrow('表格');
     expect(() => validateAgentTeamPlan({ ...plan, roles: [{ ...plan.roles[0], allowedTools: ['image_generation'] }],
       tasks: [{ ...plan.tasks[0], tool: 'image_generation' }] })).toThrow('交付');
+    const jsonSchema = { type: 'object', properties: { total: { type: 'number' } }, required: ['total'] };
+    const structured = { ...plan, tasks: [{ ...plan.tasks[0], deliverable: { kind: 'json', title: '结果', jsonSchema } }] };
+    expect(validateAgentTeamPlan(structured).tasks[0].deliverable?.jsonSchema).toEqual(jsonSchema);
+    expect(() => validateAgentTeamPlan({ ...structured, tasks: [{ ...plan.tasks[0], deliverable: { kind: 'table', title: '数据', jsonSchema } }] })).toThrow('仅 JSON');
   });
 
   it('rejects unknown tools and missing role references', () => {

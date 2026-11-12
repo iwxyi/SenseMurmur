@@ -225,6 +225,7 @@ function sameAgentTeamTask(left: AgentTeamPlan['tasks'][number], right: AgentTea
     && (left.deliverable?.schemaVersion ?? 1) === (right.deliverable?.schemaVersion ?? 1)
     && left.deliverable?.title === right.deliverable?.title
     && left.deliverable?.language === right.deliverable?.language
+    && JSON.stringify(left.deliverable?.jsonSchema) === JSON.stringify(right.deliverable?.jsonSchema)
     && JSON.stringify(left.composition) === JSON.stringify(right.composition)
     && JSON.stringify(left.savedMedia) === JSON.stringify(right.savedMedia)
     && JSON.stringify(left.savedText) === JSON.stringify(right.savedText)

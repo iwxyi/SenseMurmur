@@ -207,11 +207,12 @@ try {
     useChatStore.setState((state) => ({ chats: [...state.chats, { id: outputChatId, type: 'assistant', name: 'JSON交付验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));
     const outputPlan = { ...plan, summary: 'JSON交付验证', tasks: [
       { ...plan.tasks[0], id: 'source', goal: '整理原始证据' },
-      { ...plan.tasks[0], id: 'data', goal: '结构化数据', dependsOn: ['source'], deliverable: { schemaVersion: 1, kind: 'json', title: '数据' } },
+      { ...plan.tasks[0], id: 'data', goal: '结构化数据', dependsOn: ['source'], deliverable: { schemaVersion: 1, kind: 'json', title: '数据',
+        jsonSchema: { type: 'object', properties: { value: { type: 'number' } }, required: ['value'], additionalProperties: false } } },
       { ...plan.tasks[0], id: 'report', goal: '根据数据写报告', dependsOn: ['data'] },
     ] };
     let outputRequests = 0;
-    const outputReplies = [JSON.stringify(outputPlan), '原始证据必须保留', '这里是数据：{"value":1}', '{"value":1}', '数据报告已完成'];
+    const outputReplies = [JSON.stringify(outputPlan), '原始证据必须保留', '{"value":"1"}', '{"value":1}', '数据报告已完成'];
     const outputFetch = async (input, init) => {
       if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
       const content = outputReplies[outputRequests++];
@@ -223,7 +224,7 @@ try {
     try {
       outputRun = (await createAgentTeamWorkflow(config, currentWorkflowScope).start(outputRunId, outputChatId, 'JSON交付验证')).snapshot;
       if (outputRun.run.status !== 'failed' || outputRequests !== 3
-        || !outputRun.tasks.find((task) => task.id === 'data').error.includes('要求合法 JSON')
+        || !outputRun.tasks.find((task) => task.id === 'data').error.includes('JSON 不符合已声明的字段契约')
         || outputRun.tasks.find((task) => task.id === 'report').attempt !== 0) throw new Error('Invalid JSON reached downstream');
       await createAgentTeamWorkflow(config, currentWorkflowScope).resume(outputRunId);
       if (outputRequests !== 3) throw new Error('Invalid JSON was automatically retried');
@@ -432,7 +433,7 @@ try {
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent === 'JSON交付验证').click()`);
   await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).some((button) => button.textContent.includes('市场分析师 · 失败'))`), 'invalid output task visible');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent.includes('市场分析师 · 失败')).click()`);
-  await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('要求合法 JSON')`), 'output validation error visible');
+  await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('JSON 不符合已声明的字段契约')`), 'output validation error visible');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '重试该任务并继续').click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.outputRetry === true`), 'failed JSON retried from workbench with preserved upstream');
   console.log(JSON.stringify({ ok: true, outputContractRetry: true, exactSavedTextRecovery: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));

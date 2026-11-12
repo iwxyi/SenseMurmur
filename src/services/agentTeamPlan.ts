@@ -4,6 +4,7 @@ import { WorkflowPreflightError } from './workflowRunRuntime';
 import { validateMediaCompositionPlan, type MediaCompositionPlan } from './mediaCompositionPlan';
 import { WORKFLOW_TOOLS, type WorkflowTool } from './workflowGoalSpec';
 import type { AgentTeamSavedText } from './agentTeamSavedText';
+import { parseTeamJsonSchema, type TeamJsonSchema } from './agentTeamJsonSchema';
 
 export interface AgentTeamRole {
   schemaVersion?: 1;
@@ -32,6 +33,7 @@ export interface AgentTeamTask {
     kind: 'document' | 'code' | 'diagram' | 'html' | 'table' | 'json' | 'text';
     title: string;
     language?: string;
+    jsonSchema?: TeamJsonSchema;
   };
 }
 
@@ -158,11 +160,13 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
       if (!['document', 'code', 'diagram', 'html', 'table', 'json', 'text'].includes(String(kind))) throw new Error('任务交付类型无效');
       if ((kind === 'table' || kind === 'json') && selectedTool !== 'text_generation' && selectedTool !== 'delegate_task') throw new Error('结构化交付须由文本或委派任务生成');
       if (kind === 'table' && rawDeliverable.language !== undefined && !['csv', 'tsv', 'markdown', 'md'].includes(String(rawDeliverable.language).trim().toLowerCase())) throw new Error('表格交付语言须为 csv、tsv 或 markdown');
+      if (rawDeliverable.jsonSchema !== undefined && kind !== 'json') throw new Error('仅 JSON 交付可以声明字段契约');
       deliverable = {
         schemaVersion: 1,
         kind: kind as NonNullable<AgentTeamTask['deliverable']>['kind'],
         title: requiredText(rawDeliverable.title, '任务交付标题', 120),
         ...(rawDeliverable.language === undefined ? {} : { language: requiredText(rawDeliverable.language, '交付语言', 40) }),
+        ...(rawDeliverable.jsonSchema === undefined ? {} : { jsonSchema: parseTeamJsonSchema(rawDeliverable.jsonSchema) }),
       };
     }
     return {
@@ -273,6 +277,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; chat
     '你是通用任务的主 Agent。根据用户目标设计最小可行的团队与无环任务图。简单任务只用一个岗位。',
     `当前开放工具：text_generation${params.webSearch ? '、web_search' : ''}${params.imageGeneration ? '、image_generation' : ''}${params.audioGeneration ? '、audio_generation' : ''}${params.imageInspection ? '、image_inspection' : ''}${params.videoGeneration ? '、video_generation' : ''}${params.mediaComposition ? '、media_composition' : ''}。${params.videoUnavailableReason ? `视频生成当前不可用：${params.videoUnavailableReason}。` : ''}网页搜索任务的 goal 是搜索词；图片任务的 goal 是可生成的画面提示词，可依赖文字脚本、搜索摘要或图片检查文字${params.imageReferenceImages ? `，也可直接依赖已生成图片并作为参考图${params.maxImageReferenceImages ? `（最多 ${params.maxImageReferenceImages} 张）` : ''}` : '；当前图片模型不支持参考图，不要让图片任务直接依赖图片任务'}；音乐任务的 goal 是包含风格、情绪、乐器与可选歌词要求的音乐提示词，系统异步生成完整音频。用户要求明确歌词时，先用 text_generation 写歌词，再让 audio_generation 依赖歌词任务；系统会把歌词交付作为音乐提示词的一部分。图片检查必须直接依赖已生成图片，模型会收到真实画面；视频任务的 goal 是精炼成片提示词，可以依赖脚本${params.videoReferenceImages ? '和图片' : ''}任务。video_generation 不能依赖音乐或其他视频片段。${params.videoRequiresReferenceImage ? '当前视频模型必须先有参考图片。' : ''}${params.videoReferenceImages ? `依赖图片时系统把图片作为参考素材${params.maxVideoReferenceImages ? `，当前模型最多 ${params.maxVideoReferenceImages} 张` : ''}。` : '当前视频模型不能接收参考图片，不要规划图片到视频的依赖。'}视频由系统异步生成，不能声称立即成片。只安排确实必要的图像、音乐与视频生成，避免为验证或补充说明而反复生成同一媒体。不得承诺任意文件写入或代码执行；能力不足时在摘要说明。`,
     '岗位必须有具体职责、方法和可检查的验收标准；任务必须有唯一 ID、岗位归属、明确目标和依赖。不要用岗位名称冒充专业能力。',
+    'JSON 交付需要固定字段时，在 deliverable 增加 jsonSchema，按 JSON Schema draft-07 声明 type、properties、required、additionalProperties、items、enum/const 和数值、长度、数量约束，也支持 anyOf/allOf/oneOf/not。每层约束显式声明 type；不支持 $ref、format、pattern 或自定义关键字。例：{"kind":"json","title":"调研结果","jsonSchema":{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}}。该契约由程序校验，不得把它当作事实真实性验收。',
     params.delegation ? '另开放 delegate_task 委派工具。仅对确实需要执行时再拆分的复杂子目标使用，不要用它替代普通写作。执行该任务的岗位必须同时获准 delegate_task 和下级工作需要的工具。系统会规划下级任务、等待它们完成，再由父 Agent 汇总交付；下级权限只能缩小，共用总调用预算与并发。委派最多3层，不要重复祖先目标。需要向后续任务交付素材时，在委派任务声明 mediaOutput:"image"、"video" 或 "audio"，下级计划必须以根字段 resultTaskId 指定同类型的最终媒体任务，可继续指向同类型的委派任务。每次委派只交付一份主要媒体；需要多份素材时分别安排任务。后续图片/视频生成、图片/视频检查和合成按委派任务 ID 引用对应类型素材，系统解析实际已保存文件，不读取摘要中的 URL。未声明 mediaOutput 的委派只交付文字汇总。' : '本层不开放 delegate_task，直接安排具体工作，不得创建下级委派；若父任务要求媒体交付，仍须在计划根字段 resultTaskId 指定具体媒体任务。',
     params.videoInspection ? '另开放 video_inspection 视频抽帧检查工具。必须直接依赖唯一的 video_generation 或 media_composition 任务；系统读取该任务已保存的视频并按时间均匀抽取最多6帧，使用当前视觉模型检查实际画面。它只能判断抽样内容，不能检查音轨、逐帧流畅度或保证全部镜头正确。需要检查成片时在合成之后安排此任务；不能为了检查而重新生成视频。' : '当前设备或模型不支持视频抽帧检查，不得安排 video_inspection。',
     params.speechGeneration ? '另开放 speech_generation 旁白配音工具，使用用户配置的 TTS 模型及默认音色。必须声明 speech:{"text":"需要逐字朗读的正文"} 且 dependsOn:[]，或先安排 text_generation 只撰写旁白正文，再声明 speech:{"textTaskId":"narration_script"} 且 dependsOn:["narration_script"]。二者只能选一。goal 描述制作目的，不能混入配音正文；系统只朗读 speech 指定内容，不朗读岗位说明或验收要求。请控制正文长度以适配视频时长，配音不能直接作为 video_generation 的输入，应交给 media_composition 叠加。' : '当前未配置 TTS 模型，不得安排 speech_generation 配音。',
