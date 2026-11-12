@@ -495,6 +495,19 @@ describe('cloud no-op sync', () => {
       expect(store.getState().pendingOperations).toEqual([]);
     });
 
+    it('keeps a failed create queued after a plain proxy 500', async () => {
+      const store = await prepare();
+      const { ApiError } = await import('../services/api');
+      apiMocks.createChat.mockRejectedValueOnce(new ApiError('请求失败', { status: 500, code: 'REQUEST_FAILED' }));
+      store.getState().queuePatch('chat-1', { ...chat() }, 'create');
+
+      await store.getState().flushPendingOperations();
+
+      expect(store.getState().pendingOperations[0]).toMatchObject({
+        kind: 'create', status: 'pending', lastError: 'server_unavailable: 请求失败',
+      });
+    });
+
     it('rebuilds a missing chat and retries the edit with a separate idempotency key', async () => {
       const store = await prepare();
       const { ApiError } = await import('../services/api');
@@ -1261,6 +1274,8 @@ describe('cloud no-op sync', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { useChatStore } = await import('./useChatStore');
+    const { useCharacterStore } = await import('./useCharacterStore');
+    useCharacterStore.setState({ characters: [character()] });
     await useChatStore.persist.rehydrate();
     useChatStore.setState({
       chats: [chat({
@@ -1287,10 +1302,42 @@ describe('cloud no-op sync', () => {
     expect(loaded?.name).toBe('本地会话');
     expect(loadedAgain?.name).toBe('本地会话');
     expect(apiMocks.getChat).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().pendingOperations).toEqual([expect.objectContaining({
+      kind: 'create', entityId: 'local-chat-1', status: 'pending',
+    })]);
     expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('[recoverable-warning] cloud-sync:chat-detail-load'), expect.anything());
     expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining('[recoverable] cloud-sync:chat-detail-load'), expect.anything());
     warnSpy.mockRestore();
     errorSpy.mockRestore();
+  });
+
+  it('does not fetch a cloud detail while its local create is pending', async () => {
+    const { useChatStore } = await import('./useChatStore');
+    await useChatStore.persist.rehydrate();
+    useChatStore.setState({ chats: [chat({ id: 'local-chat-pending' })], pendingOperations: [] });
+    useChatStore.getState().queuePatch('local-chat-pending', { ...chat({ id: 'local-chat-pending' }) }, 'create');
+
+    const loaded = await useChatStore.getState().loadChat('local-chat-pending');
+
+    expect(loaded?.id).toBe('local-chat-pending');
+    expect(apiMocks.getChat).not.toHaveBeenCalled();
+  });
+
+  it('requeues a legacy failed local create after cloud detail returns 404', async () => {
+    const { useChatStore } = await import('./useChatStore');
+    await useChatStore.persist.rehydrate();
+    useChatStore.setState({ chats: [chat({ id: 'local-chat-failed', type: 'assistant' })], pendingOperations: [] });
+    useChatStore.getState().queuePatch('local-chat-failed', { ...chat({ id: 'local-chat-failed', type: 'assistant' }) }, 'create');
+    const failed = useChatStore.getState().pendingOperations[0];
+    useChatStore.setState({ pendingOperations: [{ ...failed, status: 'failed', lastError: 'validation: 请求失败' }] });
+    apiMocks.getChat.mockRejectedValueOnce(Object.assign(new Error('Not Found'), { status: 404 }));
+
+    await useChatStore.getState().loadChat('local-chat-failed');
+
+    await vi.waitFor(() => expect(useChatStore.getState().pendingOperations).toEqual([expect.objectContaining({
+      kind: 'create', entityId: 'local-chat-failed', status: 'pending',
+    })]));
+    expect(useChatStore.getState().pendingOperations[0].id).not.toBe(failed.id);
   });
 
   it('hydrates character summaries from chat detail changes', async () => {

@@ -101,6 +101,7 @@ export function parseSyncErrorClassification(value: unknown): SyncErrorClassific
 export function classifySyncError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   const code = typeof (error as { code?: unknown })?.code === 'string' ? String((error as { code: string }).code) : '';
+  const status = typeof (error as { status?: unknown })?.status === 'number' ? (error as { status: number }).status : null;
   if (/^CHAT_EXECUTION_(?:LEASE_LOST|OWNED)$/.test(code)) {
     return `ownership_conflict: ${message}`;
   }
@@ -111,6 +112,9 @@ export function classifySyncError(error: unknown) {
     return `conflict_ignored: ${message}`;
   }
   if (/chat:create pending|branch parent pending|会话尚未完成云端创建|对应会话尚未完成云端创建|分支父消息尚未完成云端同步/i.test(message)) return `network: ${message}`;
+  if (status === 401) return `auth: ${message}`;
+  if (status === 408 || status === 429 || (status !== null && status >= 500)) return `server_unavailable: ${message}`;
+  if (status === 404) return `conflict_ignored: ${message}`;
   if (/401|登录已过期|未登录/i.test(message)) return `auth: ${message}`;
   if (/Failed to fetch|NetworkError|fetch/i.test(message)) return `network: ${message}`;
   if (/500|502|503|504|服务器错误/i.test(message)) return `server_unavailable: ${message}`;

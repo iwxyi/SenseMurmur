@@ -109,6 +109,13 @@ describe('storeSyncHelpers', () => {
     });
   });
 
+  it('retries a proxy 500 even when its response has no useful error message', () => {
+    const classified = helpers.classifySyncError(Object.assign(new Error('请求失败'), { status: 500, code: 'REQUEST_FAILED' }));
+    expect(helpers.parseSyncErrorClassification(classified)).toMatchObject({
+      kind: 'server_unavailable', retryable: true, terminal: false,
+    });
+  });
+
   it('runs due operations through the shared worker executor', async () => {
     const operations = [{
       id: 'op-1',

@@ -1444,6 +1444,10 @@ export const useChatStore = create<ChatStore>()(
             }, 'info', 'chat-sync');
             return cached || null;
           }
+          if (cached && get().pendingOperations.some((operation) => operation.entityId === id && operation.kind === 'create' && operation.status !== 'failed')) {
+            scheduleChatFlush(flushPendingOperations, 0);
+            return cached;
+          }
           const scope = chatDetailScope(id);
           if ((isChatRuntimeDetailLoaded(cached) || cached?.id.startsWith('local-chat-')) && chatSyncScopes.isFresh(scope, CHAT_DETAIL_REFRESH_TTL_MS)) {
             logDeveloperDiagnostic('chat-store:loadChat:skip-fresh', {
@@ -1534,6 +1538,7 @@ export const useChatStore = create<ChatStore>()(
             } catch (error) {
               const fallback = get().chats.find((chat) => chat.id === id) || null;
               if (getErrorStatus(error) === 404 && fallback) {
+                get().queueMissingCloudChat(id);
                 chatSyncScopes.markChecked(scope, { applied: false });
                 if (hasChatRuntimeDetailEvidence(fallback) && fallback.runtimeDetailLoaded !== true) {
                   const loadedFallback = markChatRuntimeDetailLoaded(fallback);
