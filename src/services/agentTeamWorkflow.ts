@@ -321,8 +321,20 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
         await ensureAssistantArtifactStoreHydrated();
+        const savedMedia = listTeamSavedMedia(snapshot, task.input.sourceTaskIds);
+        const savedText = listTeamSavedText(snapshot, task.input.sourceTaskIds, useAssistantArtifactStore.getState().items);
+        const rootPlan = validateAgentTeamPlan(snapshot.tasks.find((item) => item.id === 'plan')?.output);
+        const canPatchRoot = impact && rootPlan.tasks.some((item) => item.id === impact.targetTaskId)
+          && !rootPlan.tasks.some((item) => item.tool === 'delegate_task')
+          && !snapshot.tasks.some((item) => item.kind === 'team_plan_revision' && item.id !== task.id)
+          && rootPlan.tasks.every((item) => {
+            const source = snapshot.tasks.find((candidate) => candidate.id === item.id);
+            return source?.status === 'completed' && isTeamTaskInput(source.input) && !source.input.sourcePlanTaskId
+              && !source.input.userInstruction && sameAgentTeamTask(source.input.task, item);
+          });
         const plan = await planAgentTeam({ api, goal: task.input.request, context: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}${revisionContext}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities,
-          savedMedia: listTeamSavedMedia(snapshot, task.input.sourceTaskIds), savedText: listTeamSavedText(snapshot, task.input.sourceTaskIds, useAssistantArtifactStore.getState().items), delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
+          savedMedia, savedText, ...(canPatchRoot ? { revisionBase: { plan: rootPlan, targetTaskId: impact.targetTaskId, savedMedia, savedText } } : {}),
+          delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         assertGoalPlanAuthorized(snapshot, plan);
         return { output: plan };

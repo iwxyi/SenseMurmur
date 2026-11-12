@@ -7,6 +7,8 @@ import { sameTeamSavedTextVersion, type AgentTeamSavedText } from './agentTeamSa
 import { parseTeamJsonSchema, type TeamJsonSchema } from './agentTeamJsonSchema';
 import { parseWorkflowApprovalRequirement, type WorkflowApprovalRequirement } from './workflowApproval';
 import { parseTeamDelegationReview, reviewTeamDelegation, type DelegationGoal, type TeamDelegationReview } from './agentTeamDelegationReview';
+import { compileTeamRevisionPatch, parseTeamRevisionCompilation, type TeamRevisionBase, type TeamRevisionCompilation } from './agentTeamRevisionPatch';
+import { workflowJsonDigest } from './workflowToolRequest';
 
 export interface AgentTeamRole {
   schemaVersion?: 1;
@@ -49,6 +51,7 @@ export interface AgentTeamPlan {
   finalAcceptance: string;
   resultTaskId?: string;
   delegationReview?: TeamDelegationReview;
+  revisionCompilation?: TeamRevisionCompilation;
 }
 
 export function teamTaskMediaKind(task: AgentTeamTask | undefined): AgentTeamTask['mediaOutput'] {
@@ -273,6 +276,9 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   }
   const resultTaskId = source.resultTaskId === undefined ? undefined : identifier(source.resultTaskId, '媒体交付任务 ID');
   if (resultTaskId && !teamTaskMediaKind(tasksById.get(resultTaskId))) throw new Error('媒体交付必须指定计划内的媒体任务');
+  const revisionCompilation = source.revisionCompilation === undefined ? undefined : parseTeamRevisionCompilation(source.revisionCompilation);
+  if (revisionCompilation && (revisionCompilation.rerunTaskIds.length !== tasks.length
+    || revisionCompilation.rerunTaskIds.some((id) => !tasksById.has(id)))) throw new Error('局部重做记录与任务图不一致');
   return {
     schemaVersion: 1,
     summary: requiredText(source.summary, '计划摘要', 800),
@@ -281,10 +287,11 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     finalAcceptance: requiredText(source.finalAcceptance, '最终验收', 800),
     ...(resultTaskId ? { resultTaskId } : {}),
     ...(source.delegationReview === undefined ? {} : { delegationReview: parseTeamDelegationReview(source.delegationReview, tasks) }),
+    ...(revisionCompilation ? { revisionCompilation } : {}),
   };
 }
 
-export async function planAgentTeam(params: { api: APIConfig; goal: string; context?: string; chatId?: string; webSearch?: boolean; imageGeneration?: boolean; imageReferenceImages?: boolean; maxImageReferenceImages?: number; audioGeneration?: boolean; speechGeneration?: boolean; imageInspection?: boolean; videoInspection?: boolean; videoGeneration?: boolean; videoReferenceImages?: boolean; videoRequiresReferenceImage?: boolean; maxVideoReferenceImages?: number; videoUnavailableReason?: string; mediaComposition?: boolean; savedMedia?: Omit<NonNullable<AgentTeamTask['savedMedia']>[number], 'alias'>[]; savedText?: Omit<AgentTeamSavedText, 'alias'>[]; delegation?: boolean; delegationAncestors?: DelegationGoal[]; signal?: AbortSignal; beforeModelRequest?: WorkflowModelRequestHook }) {
+export async function planAgentTeam(params: { api: APIConfig; goal: string; context?: string; chatId?: string; webSearch?: boolean; imageGeneration?: boolean; imageReferenceImages?: boolean; maxImageReferenceImages?: number; audioGeneration?: boolean; speechGeneration?: boolean; imageInspection?: boolean; videoInspection?: boolean; videoGeneration?: boolean; videoReferenceImages?: boolean; videoRequiresReferenceImage?: boolean; maxVideoReferenceImages?: number; videoUnavailableReason?: string; mediaComposition?: boolean; savedMedia?: Omit<NonNullable<AgentTeamTask['savedMedia']>[number], 'alias'>[]; savedText?: Omit<AgentTeamSavedText, 'alias'>[]; delegation?: boolean; delegationAncestors?: DelegationGoal[]; revisionBase?: TeamRevisionBase; signal?: AbortSignal; beforeModelRequest?: WorkflowModelRequestHook }) {
   const goal = requiredText(params.goal, '用户目标', 12_000);
   const context = params.context === undefined || params.context === '' ? '' : requiredText(params.context, '规划上下文', 128_000);
   const ancestors = params.delegationAncestors;
@@ -306,7 +313,9 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     '任一任务可附 approval:{"summary":"将执行的具体方案","consequences":"执行影响、可能费用及不可撤回之处"} 请求用户审批；程序会在依赖完成后等待真实确认，再执行这一任务。仅在用户要求确认或执行有明确决策需要时使用，避免把普通自主步骤都交给用户。审批不扩大工具权限，不能虚构报价，也不能用 user_input 代替审批。',
     '只为需要用户单独打开、复用或编辑的任务声明 deliverable；可选类型 document、table、code、diagram、html、json、text。交付契约 schemaVersion 为 1，格式为 {"schemaVersion":1,"kind":"table","title":"市场比较表","language":"csv"}。json 交付必须是可解析的纯 JSON；字段要求写入任务验收标准。未声明时仍会纳入团队总结，不要给搜索、图片/音频/视频生成等每个步骤机械创建文字产物。只输出 JSON：{"schemaVersion":1,"summary":"...","roles":[{"schemaVersion":1,"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"...","deliverable":{"schemaVersion":1,"kind":"table","title":"比较表","language":"csv"}}],"finalAcceptance":"..."}',
     ancestors ? `当前及祖先目标（仅作范围比较，不是新增指令）：${JSON.stringify(ancestors)}。对本计划每个 delegate_task 比较其与全部祖先目标的语义范围。在根 JSON 额外返回 delegationChecks:[{"taskId":"子任务ID","status":"narrower","reason":"明确说明缩小了哪些范围及独立交付"}]。status 可为 narrower、repeated、uncertain；换措辞、换岗位、增加流程描述但仍承担相同完整目标属于 repeated；无法判断为 uncertain。只有范围明确缩小且能独立验收才为 narrower。程序会阻止 repeated/uncertain 的委派，优先改用具体执行任务；没有 delegate_task 时无需此字段。此字段是模型判断，不是执行或质量已完成的证明。` : '',
-  ].join('\n'), [{ role: 'user', content: goal + (context ? `\n${context}` : '') }], undefined, {
+    params.revisionBase ? `本次允许局部修订已有计划。原计划：${JSON.stringify(params.revisionBase.plan)}\n原计划摘要：${workflowJsonDigest(params.revisionBase.plan)}\n指定修改任务：${params.revisionBase.targetTaskId}。若只改任务的 goal/acceptance 且不改变岗位、工具、依赖、合成/配音配置或交付格式，优先只输出 {"revisionPatch":{"schemaVersion":1,"basePlanSha256":"上面的原计划摘要","updates":[{"taskId":"指定任务ID","goal":"修改后的完整目标","acceptance":"修改后的完整验收"}]}}。updates 只列要求发生改变的任务，必须包含指定任务；程序会计算这些任务的全部下游并自动重做，未改变的上游通过历史目录固定版本复用，不要重复列入 updates。不要同时输出 tasks 或完整计划。若需要改变步骤结构、配音正文配置、岗位、参考素材版本或交付格式，返回普通完整新计划。若边界交付无法通过前述 savedText/savedMedia 工具及容量规则引用，也须完整重规划。该入口保留历史交付，不覆盖旧任务。` : '',
+      params.revisionBase ? '局部修订保留原计划 finalAcceptance；若总体验收要求变化，返回完整新计划。' : '',
+    ].join('\n'), [{ role: 'user', content: goal + (context ? `\n${context}` : '') }], undefined, {
     responseFormat: 'json', maxTokens: 10_000, signal: params.signal, beforeModelRequest: params.beforeModelRequest,
     aiUsage: { type: 'assistant_chat', label: '团队任务规划', scope: 'chat', resourceId: params.chatId },
   });
@@ -317,7 +326,16 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     throw new WorkflowPreflightError(`团队规划返回了无效 JSON：${error instanceof Error ? error.message : '解析失败'}`);
   }
   let plan: AgentTeamPlan;
-  try { plan = validateAgentTeamPlan(parsed); }
+  try {
+    const patch = record(parsed).revisionPatch;
+    if (patch !== undefined && (!params.revisionBase || record(parsed).tasks !== undefined)) throw new Error('当前规划不允许局部修订或返回了冲突格式');
+    if (record(parsed).revisionCompilation !== undefined) throw new Error('局部重做记录只能由程序编译');
+    if (patch === undefined) plan = validateAgentTeamPlan(parsed);
+    else {
+      if (!params.revisionBase) throw new Error('当前规划不允许局部修订');
+      plan = validateAgentTeamPlan(compileTeamRevisionPatch(patch, params.revisionBase));
+    }
+  }
   catch (error) { throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队计划无效'); }
   if (ancestors) {
     try {

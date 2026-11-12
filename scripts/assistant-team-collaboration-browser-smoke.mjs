@@ -172,6 +172,52 @@ try {
       window.fetch = originalFetch;
       useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== recursiveChatId) }));
     }
+    const patchId = 'browser-collab-patch-' + crypto.randomUUID();
+    const patchChatId = patchId + '-chat';
+    const { workflowJsonDigest } = await import('/src/services/workflowToolRequest.ts');
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: patchChatId, type: 'assistant', name: '局部重做验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));
+    const patchPlan = { ...plan, tasks: [
+      { ...plan.tasks[0], id: 'source', goal: '资料整理' },
+      { ...plan.tasks[0], id: 'draft', goal: '草稿撰写', dependsOn: ['source'] },
+      { ...plan.tasks[0], id: 'other', goal: '独立数据' },
+      { ...plan.tasks[0], id: 'final', goal: '报告汇总', dependsOn: ['draft', 'other'] },
+    ] };
+    let patchRequests = 0;
+    let patchResponse;
+    window.fetch = async (input, init) => {
+      if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
+      const request = JSON.parse(init.body);
+      const index = patchRequests++;
+      if (index === 5 && !request.messages.some((message) => String(message.content).includes('revisionPatch'))) throw new Error('Missing revision patch protocol');
+      if (index === 7 && (!JSON.stringify(request.messages).includes('修改后的草稿') || !JSON.stringify(request.messages).includes('原始交付正文'))) throw new Error('Revision lost pinned or new evidence');
+      if (index > 7) throw new Error('Revision repeated completed work');
+      const content = index === 0 ? JSON.stringify(patchPlan) : index === 5 ? patchResponse : index === 6 ? '修改后的草稿' : index === 7 ? '修改后的汇总' : '原始交付正文';
+      return Response.json({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
+    };
+    try {
+      const workflow = createAgentTeamWorkflow(config, currentWorkflowScope);
+      const first = (await workflow.start(patchId, patchChatId, '撰写报告', false, new AbortController().signal, 7)).snapshot;
+      if (first.run.status !== 'completed' || patchRequests !== 5) throw new Error('Base revision fixture failed');
+      const originalTasks = JSON.stringify(first.tasks.filter((task) => task.id !== 'plan'));
+      patchResponse = JSON.stringify({ revisionPatch: { schemaVersion: 1, basePlanSha256: workflowJsonDigest(first.tasks.find((task) => task.id === 'plan').output),
+        updates: [{ taskId: 'draft', goal: '通俗解释资料', acceptance: '易于理解' }] } });
+      await workflow.addRevisionRequest(patchId, first.run.planVersion, '草稿改为通俗解释', 'draft');
+      const paused = (await workflow.resume(patchId)).snapshot;
+      const compilation = paused.tasks.find((task) => task.id === 'delegate').output.revisionCompilation;
+      if (paused.run.status !== 'paused' || patchRequests !== 7 || JSON.stringify(compilation.rerunTaskIds) !== JSON.stringify(['draft', 'final'])
+        || JSON.stringify(compilation.reusedTaskIds) !== JSON.stringify(['source', 'other'])
+        || JSON.stringify(paused.tasks.filter((task) => ['source', 'draft', 'other', 'final'].includes(task.id))) !== originalTasks) throw new Error('Revision reissued unchanged work');
+      const restored = createAgentTeamWorkflow(config, currentWorkflowScope);
+      const checkpoint = await restored.read(patchId);
+      if (!checkpoint.tasks.find((task) => task.id === 'delegate').output.revisionCompilation.basePlanSha256) throw new Error('Compilation not persisted');
+      await restored.setModelCallLimit(patchId, checkpoint.run.planVersion, 8);
+      if ((await restored.resume(patchId)).snapshot.run.status !== 'completed' || patchRequests !== 8) throw new Error('Partial revision recovery failed');
+      await createAgentTeamWorkflow(config, currentWorkflowScope).resume(patchId);
+      if (patchRequests !== 8) throw new Error('Repeated revision recovery duplicated requests');
+    } finally {
+      window.fetch = originalFetch;
+      useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== patchChatId) }));
+    }
     const reviewRunId = 'browser-collab-review-evidence-' + crypto.randomUUID();
     const reviewChatId = reviewRunId + '-chat';
     useChatStore.setState((state) => ({ chats: [...state.chats, { id: reviewChatId, type: 'assistant', name: '审核依据验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));

@@ -24,6 +24,7 @@ import { listTeamSavedText } from './agentTeamSavedText';
 import * as persistence from '../stores/storePersistenceScope';
 import { parseTeamReviewInput, teamReviewLeafSources, TEAM_REVIEW_EVIDENCE_LIMIT } from './agentTeamReviewEvidence';
 import { workflowJsonDigest } from './workflowToolRequest';
+import { validateAgentTeamPlan } from './agentTeamPlan';
 
 vi.mock('./agentTeamMediaComposition', () => ({ canComposeTeamMedia: () => true, composeAgentTeamMedia: vi.fn(), inspectAgentTeamComposition: vi.fn(), teamMediaAttachment: vi.fn() }));
 vi.mock('./agentTeamVideoInspection', () => ({ inspectAgentTeamVideo: vi.fn() }));
@@ -537,6 +538,45 @@ describe('agent team workflow', () => {
     await createAgentTeamWorkflow(config, () => scope).resume(runId);
     expect(composeAgentTeamMedia).toHaveBeenCalledTimes(1);
     expect(generate).toHaveBeenCalledTimes(1);
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+    expect(queueAgentTeamAudio).not.toHaveBeenCalled();
+  });
+
+  it('compiles a final-cut revision with original video and music aliases without paid resubmission', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `patch-media-${runId}`;
+    const now = Date.now();
+    const plan = validateAgentTeamPlan({ summary: '短片', finalAcceptance: '可播放',
+      roles: [{ id: 'maker', name: '制作', responsibility: '制作', method: '剪辑', acceptance: '可播放', allowedTools: ['video_generation', 'audio_generation', 'media_composition'] }],
+      tasks: [
+        { id: 'shot', roleId: 'maker', tool: 'video_generation', goal: '镜头', acceptance: '可播放', dependsOn: [] },
+        { id: 'music', roleId: 'maker', tool: 'audio_generation', goal: '伴奏', acceptance: '可播放', dependsOn: [] },
+        { id: 'film', roleId: 'maker', tool: 'media_composition', goal: '合成短片', acceptance: '可播放', dependsOn: ['shot', 'music'],
+          composition: { clips: [{ taskId: 'shot' }], audioTracks: [{ taskId: 'music' }] } },
+      ] });
+    const kinds = ['agent_video', 'agent_audio', 'agent_media_composition'];
+    const snapshot: WorkflowSnapshot = { run: { id: runId, chatId: 'chat', goal: '短片', status: 'completed', generation: 1, planVersion: 2, planOpen: false, updatedAt: now },
+      tasks: [{ id: 'plan', runId, kind: 'team_plan', input: '短片', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
+        ...plan.tasks.map((task, index) => ({ id: task.id, runId, kind: kinds[index], input: { task, role: plan.roles[0], goal: '短片' },
+          output: `${task.id}已保存`, dependsOn: ['plan', ...task.dependsOn], status: 'completed' as const, attempt: 1, updatedAt: now }))] };
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot, value: undefined }));
+    generate.mockResolvedValueOnce(JSON.stringify({ revisionPatch: { schemaVersion: 1, basePlanSha256: workflowJsonDigest(plan),
+      updates: [{ taskId: 'film', goal: '再次输出短片供确认', acceptance: '可播放且保留已有配乐' }] } }));
+    vi.mocked(composeAgentTeamMedia).mockResolvedValue({ output: '新成片已保存' });
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const workflow = createAgentTeamWorkflow(config, () => scope);
+    await workflow.addRevisionRequest(runId, 2, '再次输出成片，保持剪辑配置', 'film');
+    const result = await workflow.resume(runId);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'delegate')?.output).toMatchObject({
+      revisionCompilation: { rerunTaskIds: ['film'], reusedTaskIds: ['shot', 'music'] },
+    });
+    const params = vi.mocked(composeAgentTeamMedia).mock.calls[0][0];
+    expect(params.resolveTaskId?.('shot')).toBe('shot');
+    expect(params.resolveTaskId?.('music')).toBe('music');
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(composeAgentTeamMedia).toHaveBeenCalledTimes(1);
     expect(queueAgentTeamVideo).not.toHaveBeenCalled();
     expect(queueAgentTeamAudio).not.toHaveBeenCalled();
   });
@@ -2152,6 +2192,50 @@ describe('agent team workflow', () => {
     expect(content).toContain('完整报告');
     await scoped.resume(runId);
     expect(generate).toHaveBeenCalledTimes(4);
+  });
+
+  it('compiles a targeted revision, reuses pinned branches and resumes only unfinished downstream work', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `patch-chat-${runId}`;
+    const scope = `patch-scope-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', name: '局部重做', memberIds: [], deletedAt: null } as (typeof state.chats)[number]] }));
+    const basePlan = { summary: '双分支报告', finalAcceptance: '完整报告',
+      roles: [{ id: 'writer', name: '写作', responsibility: '写作', method: '按证据撰写', acceptance: '完整', allowedTools: ['text_generation'] }],
+      tasks: [
+        { id: 'source', roleId: 'writer', goal: '准备资料', acceptance: '完整', dependsOn: [] },
+        { id: 'draft', roleId: 'writer', goal: '撰写草稿', acceptance: '完整', dependsOn: ['source'] },
+        { id: 'other', roleId: 'writer', goal: '独立数据', acceptance: '完整', dependsOn: [] },
+        { id: 'final', roleId: 'writer', goal: '最终汇总', acceptance: '完整', dependsOn: ['draft', 'other'] },
+      ] };
+    generate.mockResolvedValueOnce(JSON.stringify(basePlan)).mockResolvedValue('原始交付正文');
+    const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
+    const workflow = createAgentTeamWorkflow(config, () => scope);
+    const first = await workflow.start(runId, chatId, '写报告', false, undefined, 7);
+    expect(first.snapshot.run.status).toBe('completed');
+    expect(generate).toHaveBeenCalledTimes(5);
+    const originals = first.snapshot.tasks.filter((task) => task.id !== 'plan');
+    const rootPlan = first.snapshot.tasks.find((task) => task.id === 'plan')!.output;
+    await workflow.addRevisionRequest(runId, first.snapshot.run.planVersion, '草稿改为通俗解释', 'draft');
+    generate.mockResolvedValueOnce(JSON.stringify({ revisionPatch: { schemaVersion: 1, basePlanSha256: workflowJsonDigest(rootPlan),
+      updates: [{ taskId: 'draft', goal: '通俗解释资料', acceptance: '易于理解' }] } })).mockResolvedValueOnce('修改后的草稿');
+    const paused = await workflow.resume(runId);
+    expect(paused.snapshot.run.status).toBe('paused');
+    expect(generate).toHaveBeenCalledTimes(7);
+    expect(paused.snapshot.tasks.find((task) => task.id === 'delegate')?.output).toMatchObject({
+      revisionCompilation: { changedTaskIds: ['draft'], rerunTaskIds: ['draft', 'final'], reusedTaskIds: ['source', 'other'] },
+    });
+    expect(paused.snapshot.tasks.filter((task) => task.id.startsWith('delegated_')).map((task) => task.id)).toEqual(['delegated_draft', 'delegated_final']);
+    for (const original of originals) expect(paused.snapshot.tasks.find((task) => task.id === original.id)).toEqual(original);
+    const restored = createAgentTeamWorkflow(config, () => scope);
+    await restored.setModelCallLimit(runId, paused.snapshot.run.planVersion, 8);
+    generate.mockResolvedValueOnce('修改后的汇总');
+    const completed = await restored.resume(runId);
+    expect(completed.snapshot.run.status).toBe('completed');
+    expect(generate).toHaveBeenCalledTimes(8);
+    expect(generate.mock.calls[7][2][0].content).toContain('修改后的草稿');
+    expect(generate.mock.calls[7][2][0].content).toContain('原始交付正文');
+    await createAgentTeamWorkflow(config, () => scope).resume(runId);
+    expect(generate).toHaveBeenCalledTimes(8);
   });
 
   it('reopens a completed run for delegation and updates its existing delivery version', async () => {
