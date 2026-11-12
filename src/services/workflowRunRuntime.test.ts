@@ -41,12 +41,33 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it('atomically journals plan edits, rejects version jumps and isolates accounts', async () => {
+    const id = crypto.randomUUID();
+    const scope = `revisions-${id}`;
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => scope);
+    await runtime.create(snapshot(id));
+    await runtime.addTasks(id, 1, [{ ...snapshot(id).tasks[0], id: 'extra' }]);
+    const revisions = await indexedDbWorkflowRepository.listPlanRevisions(scope, id);
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]).toMatchObject({ parentVersion: 1, version: 2, addedTaskIds: ['extra'] });
+    expect(await indexedDbWorkflowRepository.listPlanRevisions('other-account', id)).toEqual([]);
+    const before = await runtime.read(id);
+    await expect(indexedDbWorkflowRepository.transact(scope, id, (current) => {
+      if (!current) throw new Error('missing');
+      return { snapshot: { ...current, run: { ...current.run, planVersion: 4 } }, value: undefined };
+    })).rejects.toThrow('按版本顺序');
+    expect(await runtime.read(id)).toEqual(before);
+    expect(await indexedDbWorkflowRepository.listPlanRevisions(scope, id)).toEqual(revisions);
+    await runtime.pause(id);
+    expect(await indexedDbWorkflowRepository.listPlanRevisions(scope, id)).toEqual(revisions);
+  });
+
   it('upgrades a version 1 database and preserves its legacy run snapshot', async () => {
     const upgraded = await indexedDbWorkflowRepository.read('legacy-scope', 'legacy-v1');
     expect(upgraded?.schemaVersion).toBe(1);
     expect(upgraded?.run.goal).toBe('制作短片');
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = testIndexedDb!.open('pneumata-workflow-runs', 4);
+      const request = testIndexedDb!.open('pneumata-workflow-runs', 5);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -55,6 +76,8 @@ describe('workflow run runtime', () => {
     expect(db.objectStoreNames.contains('outbox')).toBe(true);
     expect(db.objectStoreNames.contains('outbox_consumers')).toBe(true);
     expect(db.objectStoreNames.contains('task_attempts')).toBe(true);
+    expect(db.objectStoreNames.contains('plan_revisions')).toBe(true);
+    expect(await indexedDbWorkflowRepository.listPlanRevisions('legacy-scope', 'legacy-v1')).toEqual([]);
     db.close();
   });
 
@@ -300,7 +323,7 @@ describe('workflow run runtime', () => {
     const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'test');
     await runtime.create(snapshot(id));
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = testIndexedDb!.open('pneumata-workflow-runs', 4);
+      const request = testIndexedDb!.open('pneumata-workflow-runs', 5);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });

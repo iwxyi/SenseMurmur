@@ -81,12 +81,12 @@ try {
     const { createWorkflowRunRuntime, indexedDbWorkflowRepository, currentWorkflowScope } = await import('/src/services/workflowRunRuntime.ts');
     window.__cleanupCollaborationFixture = async () => {
       const database = await new Promise((resolve, reject) => {
-        const request = indexedDB.open('pneumata-workflow-runs', 4);
+        const request = indexedDB.open('pneumata-workflow-runs', 5);
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
       });
       try {
-        const tx = database.transaction(['runs', 'events', 'outbox', 'outbox_consumers', 'task_attempts'], 'readwrite');
+        const tx = database.transaction(['runs', 'events', 'outbox', 'outbox_consumers', 'task_attempts', 'plan_revisions'], 'readwrite');
         const prefix = currentWorkflowScope() + String.fromCharCode(10) + 'browser-collab-';
         for (const name of tx.objectStoreNames) tx.objectStore(name).delete(IDBKeyRange.bound(prefix, prefix + String.fromCharCode(65535)));
         await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error); });
@@ -98,6 +98,25 @@ try {
     }, currentWorkflowScope);
     await runtime.create({ ...run, run: { ...run.run, status: 'active' }, tasks: run.tasks.map((task) => task.id === 'research' ? { ...task, status: 'queued', attempt: 0, output: undefined } : task) });
     const persistedRun = await runtime.resume(runId);
+    const journalRunId = 'browser-collab-journal-' + crypto.randomUUID();
+    await runtime.create({ ...run, run: { ...run.run, id: journalRunId, status: 'paused' },
+      tasks: run.tasks.map((task) => ({ ...task, runId: journalRunId })) });
+    await runtime.setModelCallLimit(journalRunId, 2, 12);
+    const revisions = await indexedDbWorkflowRepository.listPlanRevisions(currentWorkflowScope(), journalRunId);
+    if (revisions.length !== 1 || revisions[0].parentVersion !== 2 || revisions[0].version !== 3
+      || revisions[0].changedRunFields.join(',') !== 'maxModelCalls') throw new Error('Plan revision was not persisted');
+    const isolated = await indexedDbWorkflowRepository.listPlanRevisions(currentWorkflowScope() + '-other-user', journalRunId);
+    if (isolated.length) throw new Error('Plan revision leaked across accounts');
+    let rejectedJump = false;
+    try {
+      await indexedDbWorkflowRepository.transact(currentWorkflowScope(), journalRunId, (current) => ({
+        snapshot: { ...current, run: { ...current.run, planVersion: 5 } }, value: undefined,
+      }));
+    } catch (error) { rejectedJump = error.message.includes('按版本顺序'); }
+    if (!rejectedJump || (await runtime.read(journalRunId)).run.planVersion !== 3
+      || (await indexedDbWorkflowRepository.listPlanRevisions(currentWorkflowScope(), journalRunId)).length !== 1) {
+      throw new Error('Invalid plan revision did not roll back atomically');
+    }
     const resumableRun = { run: { ...run.run, id: 'browser-resume-run', status: 'paused' }, tasks: [
       { id: 'plan', runId: 'browser-resume-run', kind: 'team_plan', input: '研究市场机会', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
       { id: 'research', runId: 'browser-resume-run', kind: 'agent_text', input: { task: plan.tasks[0], role: plan.roles[0], goal: '研究市场机会' }, dependsOn: ['plan'], status: 'queued', attempt: 0, updatedAt: now },
@@ -161,7 +180,7 @@ try {
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '保存调用上限').click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.limits.length === 1`), 'model call limit saved');
   assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.limits[0]`), { runId: 'browser-resume-run', limit: 12 });
-  console.log(JSON.stringify({ ok: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
+  console.log(JSON.stringify({ ok: true, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } catch (error) {
   console.error(JSON.stringify({ browserErrors: cdp.errors }));
   throw error;
