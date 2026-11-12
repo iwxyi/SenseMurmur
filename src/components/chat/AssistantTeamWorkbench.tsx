@@ -36,10 +36,11 @@ function teamPlan(run: WorkflowSnapshot) {
 function taskDetails(task: WorkflowTask) {
   const input = task.input;
   if (!input || typeof input !== 'object' || !('task' in input)) return null;
-  const value = input as { task?: { goal?: unknown; acceptance?: unknown }; role?: { name?: unknown; responsibility?: unknown; method?: unknown } };
+  const value = input as { task?: { goal?: unknown; acceptance?: unknown; tool?: unknown }; role?: { name?: unknown; responsibility?: unknown; method?: unknown } };
   if (typeof value.task?.goal !== 'string') return null;
   return {
     goal: value.task.goal,
+    tool: typeof value.task.tool === 'string' ? value.task.tool : 'text_generation',
     acceptance: typeof value.task.acceptance === 'string' ? value.task.acceptance : '',
     role: typeof value.role?.name === 'string' ? value.role.name : '子 Agent',
     responsibility: typeof value.role?.responsibility === 'string' ? value.role.responsibility : '',
@@ -79,7 +80,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const blocked = summary.blocked.length > 0;
   const running = isRunActive(run.run.id);
   const modelCallLimitReached = run.run.maxModelCalls !== undefined && countWorkflowModelCalls(run) >= run.run.maxModelCalls;
-  const editable = Boolean(canRun && task && run.run.status === 'paused' && childTasks.includes(task) && task.kind !== 'agent_media_composition' && task.attempt === 0
+  const editable = Boolean(canRun && task && run.run.status === 'paused' && childTasks.includes(task) && task.kind !== 'agent_media_composition' && details?.tool !== 'speech_generation' && task.attempt === 0
     && (task.status === 'queued' || task.status === 'waiting_dependency'));
   const unknownReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'result_unknown');
   const failedReview = run.tasks.find((item) => item.kind === 'team_review' && item.status === 'failed');

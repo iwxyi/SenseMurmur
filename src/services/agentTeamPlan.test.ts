@@ -15,6 +15,26 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('accepts explicit narration text and a dedicated script dependency', () => {
+    const plan = valid();
+    plan.roles[0].allowedTools = ['text_generation', 'speech_generation'];
+    const tasks = [plan.tasks[0], { ...plan.tasks[1], tool: 'speech_generation', speech: { textTaskId: 'research' } }];
+    expect(validateAgentTeamPlan({ ...plan, tasks }).tasks[1].speech).toEqual({ textTaskId: 'research' });
+    expect(validateAgentTeamPlan({ ...plan, tasks: [{ ...tasks[1], dependsOn: [], speech: { text: '欢迎来到森林。' } }] }).tasks[0].speech).toEqual({ text: '欢迎来到森林。' });
+    expect(() => validateAgentTeamPlan({ ...plan, tasks: [tasks[0], { ...tasks[1], speech: { text: '你好', textTaskId: 'research' } }] })).toThrow('只能选择一种');
+    expect(() => validateAgentTeamPlan({ ...plan, tasks: [tasks[0], { ...tasks[1], speech: { text: '你好' } }] })).toThrow('唯一的文字正文任务');
+    expect(() => validateAgentTeamPlan({ ...plan, tasks: [tasks[0], { ...tasks[1], speech: undefined }] })).toThrow('格式无效');
+  });
+
+  it('accepts narration in composition audio tracks while rejecting it as video generation input', () => {
+    const role = { ...valid().roles[0], allowedTools: ['speech_generation', 'video_generation', 'media_composition'] };
+    const speech = { id: 'voice', roleId: role.id, goal: '生成旁白', acceptance: '可播放', dependsOn: [], tool: 'speech_generation', speech: { text: '森林里一场追逐开始了。' } };
+    const video = { id: 'shot', roleId: role.id, goal: '森林', acceptance: '可播放', dependsOn: [], tool: 'video_generation' };
+    const film = { id: 'film', roleId: role.id, goal: '配音短片', acceptance: '可播放', dependsOn: ['voice', 'shot'], tool: 'media_composition', composition: { clips: [{ taskId: 'shot' }], audioTracks: [{ taskId: 'voice', volume: 1 }] } };
+    expect(validateAgentTeamPlan({ ...valid(), roles: [role], tasks: [speech, video, film] }).tasks[2].composition?.audioTracks?.[0].taskId).toBe('voice');
+    expect(() => validateAgentTeamPlan({ ...valid(), roles: [role], tasks: [speech, { ...video, dependsOn: ['voice'] }] })).toThrow('音视频合成工具');
+  });
+
   it('accepts a bounded task graph with explicit role contracts', () => {
     const plan = validateAgentTeamPlan(valid());
     expect(plan.tasks[1].dependsOn).toEqual(['research']);

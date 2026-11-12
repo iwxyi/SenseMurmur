@@ -68,6 +68,22 @@ try {
       useMessageStore.persist.hasHydrated() ? undefined : useMessageStore.persist.rehydrate(),
       useAssistantArtifactStore.persist.hasHydrated() ? undefined : useAssistantArtifactStore.persist.rehydrate(),
     ]);
+    window.__cleanupDeliveryFixture = async () => {
+      const database = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('pneumata-workflow-runs', 4);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      try {
+        const tx = database.transaction(['runs', 'events', 'outbox', 'outbox_consumers', 'task_attempts'], 'readwrite');
+        for (const idPrefix of ['browser-team-delivery-', 'stalled-']) {
+          const prefix = currentWorkflowScope() + String.fromCharCode(10) + idPrefix;
+          for (const name of tx.objectStoreNames) tx.objectStore(name).delete(IDBKeyRange.bound(prefix, prefix + String.fromCharCode(65535)));
+        }
+        await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error); });
+      } finally { database.close(); }
+    };
+    await window.__cleanupDeliveryFixture();
     const now = Date.now();
     const runId = 'browser-team-delivery-' + crypto.randomUUID();
     const chatId = 'browser-team-chat-' + crypto.randomUUID();
@@ -164,5 +180,6 @@ try {
   assert.equal(result.stalledModelCalls, 6);
   console.log(JSON.stringify({ ok: true, ...result }));
 } finally {
+  await cdp.evaluate('window.__cleanupDeliveryFixture?.()').catch((error) => console.error('Fixture cleanup failed:', error));
   cdp.close();
 }

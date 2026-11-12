@@ -28,7 +28,7 @@ import { canComposeTeamMedia, composeAgentTeamMedia, inspectAgentTeamComposition
 import { hasRepeatedTeamReviewWithoutProgress } from './agentTeamProgress';
 
 const TOOL_TASK_KINDS = {
-  text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio',
+  text_generation: 'agent_text', web_search: 'agent_web_search', image_generation: 'agent_image', audio_generation: 'agent_audio', speech_generation: 'agent_audio',
   image_inspection: 'agent_image_inspection', video_generation: 'agent_video', media_composition: 'agent_media_composition',
 } as const;
 
@@ -49,7 +49,8 @@ async function teamMediaCapabilities() {
   const imageCapabilities = normalizeImageCapabilities(imageProfile?.imageCapabilities);
   const media = { imageGeneration: Boolean(imageProfile), imageReferenceImages: Boolean(imageProfile && imageCapabilities.referenceImage),
     maxImageReferenceImages: imageProfile && imageCapabilities.referenceImage ? imageCapabilities.multiReferenceImage ? undefined : 1 : 0,
-    audioGeneration: Boolean(audioProfile), imageInspection: Boolean(imageProfile && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput),
+    audioGeneration: Boolean(audioProfile), speechGeneration: Boolean(getUsablePreferredAIProfile(profiles, 'tts')),
+    imageInspection: Boolean(imageProfile && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput),
     mediaComposition: canComposeTeamMedia() };
   const videoProfile = getUsablePreferredAIProfile(profiles, 'video');
   if (!videoProfile) return { ...media, videoGeneration: false, videoReferenceImages: false, videoRequiresReferenceImage: false, maxVideoReferenceImages: 0, videoUnavailableReason: '当前未配置视频模型' };
@@ -177,6 +178,7 @@ function sameAgentTeamTask(left: AgentTeamPlan['tasks'][number], right: AgentTea
     && left.deliverable?.title === right.deliverable?.title
     && left.deliverable?.language === right.deliverable?.language
     && JSON.stringify(left.composition) === JSON.stringify(right.composition)
+    && JSON.stringify(left.speech) === JSON.stringify(right.speech)
     && leftDependencies.size === rightDependencies.size
     && [...leftDependencies].every((id) => rightDependencies.has(id));
 }
@@ -204,6 +206,7 @@ function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<R
   if (!webSearch && plan.tasks.some((task) => task.tool === 'web_search')) throw new WorkflowPreflightError('当前会话未开启网页搜索');
   if (!capabilities.imageGeneration && plan.tasks.some((task) => task.tool === 'image_generation')) throw new WorkflowPreflightError('当前未配置图片模型');
   if (!capabilities.audioGeneration && plan.tasks.some((task) => task.tool === 'audio_generation')) throw new WorkflowPreflightError('当前未配置音乐生成模型');
+  if (!capabilities.speechGeneration && plan.tasks.some((task) => task.tool === 'speech_generation')) throw new WorkflowPreflightError('当前未配置 TTS 配音模型');
   if (!capabilities.mediaComposition && plan.tasks.some((task) => task.tool === 'media_composition')) throw new WorkflowPreflightError('此设备不支持本地音视频合成');
   if (!capabilities.imageInspection && plan.tasks.some((task) => task.tool === 'image_inspection')) throw new WorkflowPreflightError('当前文字模型不支持图片检查');
   if (!capabilities.videoGeneration && plan.tasks.some((task) => task.tool === 'video_generation')) throw new WorkflowPreflightError(capabilities.videoUnavailableReason || '当前视频模型不可用');
@@ -338,6 +341,21 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           references: references.filter((reference): reference is NonNullable<typeof reference> => Boolean(reference)), signal,
         });
         return { output };
+      }
+      if (selectedTool === 'speech_generation') {
+        const speech = input.task.speech;
+        if (!speech) throw new WorkflowPreflightError('配音正文配置缺失');
+        let text = speech.text;
+        if (speech.textTaskId) {
+          const sourceId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, speech.textTaskId) : speech.textTaskId;
+          const source = snapshot.tasks.find((item) => item.id === sourceId);
+          if (!source || source.kind !== 'agent_text' || source.status !== 'completed' || typeof source.output !== 'string') throw new WorkflowPreflightError('旁白正文尚未就绪');
+          text = source.output;
+        }
+        if (!text?.trim() || text.length > 12_000) throw new WorkflowPreflightError('旁白正文必须为 1 到 12000 个字符');
+        if (input.userInstruction) throw new WorkflowPreflightError('配音正文已确定，请通过追加任务修订正文后重新配音');
+        return queueAgentTeamAudio({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          prompt: text.trim(), purpose: 'speech', signal });
       }
       if (selectedTool === 'audio_generation') {
         const upstream = input.task.dependsOn.map((id) => {
@@ -506,6 +524,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const target = current.tasks.find((task) => task.id === taskId);
           if (!target || !isAgentTaskKind(target.kind) || !isTeamTaskInput(target.input) || target.attempt !== 0
             || (target.status !== 'queued' && target.status !== 'waiting_dependency')) throw new Error('只能修改尚未执行的子任务');
+          if (target.input.task.tool === 'speech_generation') throw new WorkflowPreflightError('配音正文已确定，请通过追加任务修订正文后重新配音');
           const next: WorkflowSnapshot = {
             ...current,
             run: { ...current.run, planVersion: current.run.planVersion + 1, updatedAt: Date.now() },

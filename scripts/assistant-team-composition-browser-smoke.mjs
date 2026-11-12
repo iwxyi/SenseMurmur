@@ -14,6 +14,8 @@ try {
   make(['-f', 'lavfi', '-i', 'color=c=red:s=320x240:d=0.6:r=24', '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(fixtureDir, 'red.mp4')]);
   make(['-f', 'lavfi', '-i', 'color=c=blue:s=240x320:d=0.6:r=24', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=0.6', '-shortest', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', join(fixtureDir, 'blue.mp4')]);
   make(['-f', 'lavfi', '-i', 'sine=frequency=880:duration=0.3', join(fixtureDir, 'music.wav')]);
+  make(['-f', 'lavfi', '-i', 'sine=frequency=660:duration=0.3', join(fixtureDir, 'speech.wav')]);
+  const speechFixture = (await readFile(join(fixtureDir, 'speech.wav'))).toString('base64');
   const fixtures = {};
   for (const [id, name, mime] of [['shot_a', 'red.mp4', 'video/mp4'], ['shot_b', 'blue.mp4', 'video/mp4'], ['music', 'music.wav', 'audio/wav']]) {
     fixtures[id] = `data:${mime};base64,${(await readFile(join(fixtureDir, name))).toString('base64')}`;
@@ -53,8 +55,9 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   await evaluate(`window.__compositionSmoke = { done: false }; void (async () => {
-    const [{ useAuthStore }, { useChatStore }, { useMessageStore }, { createAgentTeamWorkflow }, runtime, composition, { validateAgentTeamPlan }] = await Promise.all([
+    const [{ useAuthStore }, { useChatStore }, { useMessageStore }, { useSettingsStore }, { createAgentTeamWorkflow }, runtime, composition, { validateAgentTeamPlan }] = await Promise.all([
       import('/src/stores/useAuthStore.ts'), import('/src/stores/useChatStore.ts'), import('/src/stores/useMessageStore.ts'),
+      import('/src/stores/useSettingsStore.ts'),
       import('/src/services/agentTeamWorkflow.ts'), import('/src/services/workflowRunRuntime.ts'),
       import('/src/services/agentTeamMediaComposition.ts'), import('/src/services/agentTeamPlan.ts'),
     ]);
@@ -62,6 +65,7 @@ try {
     localStorage.setItem('pneumata-cloud-sync-enabled', '0');
     useAuthStore.setState({ authMode: 'local', token: null, user: null, isLoggedIn: false, isLoading: false });
     await Promise.all([useChatStore.persist.hasHydrated() ? undefined : useChatStore.persist.rehydrate(), useMessageStore.persist.hasHydrated() ? undefined : useMessageStore.persist.rehydrate()]);
+    if (!useSettingsStore.persist.hasHydrated()) await useSettingsStore.persist.rehydrate();
     const now = Date.now();
     const runId = 'composition-smoke-' + crypto.randomUUID();
     const chatId = 'composition-chat-' + crypto.randomUUID();
@@ -73,18 +77,32 @@ try {
         id: 'fixture-' + taskId, kind: taskId === 'music' ? 'audio' : 'video', status: 'ready', altText: '测试素材', url, createdAt: now, updatedAt: now,
       }] },
     });
-    const role = { id: 'director', name: '导演', responsibility: '制作短片', method: '拼接配乐', acceptance: '成片可用', allowedTools: ['video_generation', 'audio_generation', 'media_composition'] };
+    const role = { id: 'director', name: '导演', responsibility: '制作短片', method: '拼接配乐', acceptance: '成片可用', allowedTools: ['text_generation', 'speech_generation', 'video_generation', 'audio_generation', 'media_composition'] };
     const tasks = ['shot_a', 'shot_b', 'music'].map((id) => ({ id, roleId: role.id, goal: id, dependsOn: [], acceptance: '素材已保存', tool: id === 'music' ? 'audio_generation' : 'video_generation' }));
-    tasks.push({ id: 'film', roleId: role.id, goal: '合并两镜头并循环配乐，关闭原声', dependsOn: ['shot_a', 'shot_b', 'music'], tool: 'media_composition', acceptance: '视频带音乐',
-      composition: { clips: [{ taskId: 'shot_a', startSeconds: 0.1, durationSeconds: 0.4 }, { taskId: 'shot_b', durationSeconds: 0.4 }], audioTracks: [{ taskId: 'music', loop: true }], aspectRatio: '16:9', originalAudioVolume: 0 } });
+    tasks.push({ id: 'script', roleId: role.id, goal: '只写旁白正文', dependsOn: [], acceptance: '有正文', tool: 'text_generation' });
+    tasks.push({ id: 'narration', roleId: role.id, goal: '制作旁白，不朗读这条指令', dependsOn: ['script'], acceptance: '旁白可播放', tool: 'speech_generation', speech: { textTaskId: 'script' } });
+    tasks.push({ id: 'film', roleId: role.id, goal: '合并两镜头并循环配乐，叠加旁白，关闭原声', dependsOn: ['shot_a', 'shot_b', 'music', 'narration'], tool: 'media_composition', acceptance: '视频带音乐与旁白',
+      composition: { clips: [{ taskId: 'shot_a', startSeconds: 0.1, durationSeconds: 0.4 }, { taskId: 'shot_b', durationSeconds: 0.4 }], audioTracks: [{ taskId: 'music', loop: true }, { taskId: 'narration', volume: 0.5, offsetSeconds: 0.4 }], aspectRatio: '16:9', originalAudioVolume: 0 } });
     const plan = validateAgentTeamPlan({ summary: '合成验证', roles: [role], tasks, finalAcceptance: '视频带配乐' });
     const snapshot = { run: { id: runId, chatId, goal: '合成验证', status: 'paused', generation: 0, planVersion: 1, updatedAt: now, planOpen: true }, tasks: [
       { id: 'plan', runId, kind: 'team_plan', input: '合成验证', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
-      ...plan.tasks.map((task) => ({ id: task.id, runId, kind: task.id === 'music' ? 'agent_audio' : task.id === 'film' ? 'agent_media_composition' : 'agent_video',
-        input: { task, role: plan.roles[0], goal: '合成验证' }, output: task.id === 'film' ? undefined : '素材已保存', dependsOn: ['plan', ...task.dependsOn], status: task.id === 'film' ? 'running' : 'completed', attempt: 1, updatedAt: now })),
+      ...plan.tasks.map((task) => ({ id: task.id, runId, kind: task.id === 'music' || task.id === 'narration' ? 'agent_audio' : task.id === 'script' ? 'agent_text' : task.id === 'film' ? 'agent_media_composition' : 'agent_video',
+        input: { task, role: plan.roles[0], goal: '合成验证' }, output: ['film', 'narration'].includes(task.id) ? undefined : task.id === 'script' ? '森林深处，一场追逐开始了。' : '素材已保存', dependsOn: ['plan', ...task.dependsOn], status: task.id === 'film' ? 'running' : task.id === 'narration' ? 'waiting_dependency' : 'completed', attempt: task.id === 'narration' ? 0 : 1, updatedAt: now })),
     ] };
     await runtime.indexedDbWorkflowRepository.transact(runtime.currentWorkflowScope(), runId, () => ({ snapshot, value: undefined }));
     const workflow = createAgentTeamWorkflow({ provider: 'openai', baseUrl: '', apiKey: '', model: 'not-called' }, runtime.currentWorkflowScope);
+    const originalFetch = window.fetch;
+    const originalProfiles = useSettingsStore.getState().aiProfiles;
+    let speechRequests = 0;
+    useSettingsStore.setState({ aiProfiles: [{ id: 'speech-smoke', name: '测试旁白', type: 'tts', provider: 'openai', baseUrl: 'https://speech-smoke.invalid/v1', apiKey: 'test-fixture', model: 'tts-1', isDefault: true }] });
+    window.fetch = async (input, init) => {
+      if (!String(input).startsWith('https://speech-smoke.invalid/')) return originalFetch(input, init);
+      const body = JSON.parse(init.body);
+      if (body.input !== '森林深处，一场追逐开始了。' || body.voice !== 'alloy' || body.model !== 'tts-1') throw new Error('Incorrect speech request: ' + JSON.stringify(body));
+      speechRequests++;
+      return new Response(Uint8Array.from(atob(${JSON.stringify(speechFixture)}), (char) => char.charCodeAt(0)), { headers: { 'Content-Type': 'audio/wav' } });
+    };
+    try {
     const completed = await workflow.resume(runId);
     if (completed.snapshot.run.status !== 'completed') throw new Error('Workflow did not complete: ' + JSON.stringify(completed.snapshot.tasks));
     const attachment = composition.teamMediaAttachment(runId, 'film');
@@ -107,12 +125,16 @@ try {
       for (let index = Math.floor(audio.sampleRate * 0.45); index < Math.floor(audio.sampleRate * 0.7); index++) { real += samples[index] * Math.cos(2 * Math.PI * hz * index / audio.sampleRate); imag += samples[index] * Math.sin(2 * Math.PI * hz * index / audio.sampleRate); }
       return Math.hypot(real, imag);
     };
-    const musicEnergy = energy(880), originalEnergy = energy(330);
-    await workflow.resume(runId);
+    const musicEnergy = energy(880), originalEnergy = energy(330), narrationEnergy = energy(660);
+    const recoveredWorkflow = createAgentTeamWorkflow({ provider: 'openai', baseUrl: '', apiKey: '', model: 'not-called' }, runtime.currentWorkflowScope);
+    await recoveredWorkflow.resume(runId);
     const after = await workflow.read(runId);
     const state = useMessageStore.getState();
     const matches = new Set([...state.messages, ...Object.values(state.messageWindowsByChatId).flatMap((window) => window.messages)].filter((message) => message.id === 'team-composition-' + runId + '-film').map((message) => message.id));
-    window.__compositionSmoke = { done: true, result: { status: after.run.status, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
+    const narration = composition.teamMediaAttachment(runId, 'narration');
+    if (!narration?.url?.startsWith('data:audio/') || narration.audioPurpose !== 'chat_voice') throw new Error('Narration not saved locally');
+    window.__compositionSmoke = { done: true, result: { status: after.run.status, width: video.videoWidth, height: video.videoHeight, duration: video.duration, firstPixel, secondPixel, musicEnergy, originalEnergy, narrationEnergy, speechRequests, messageCount: matches.size, attempt: after.tasks.find((task) => task.id === 'film').attempt, localUrl: attachment.url } };
+    } finally { window.fetch = originalFetch; useSettingsStore.setState({ aiProfiles: originalProfiles }); }
   })().catch((error) => { window.__compositionSmoke = { done: true, error: String(error?.stack || error) }; });`);
   let result;
   for (let attempt = 0; attempt < 360; attempt += 1) {
@@ -127,6 +149,8 @@ try {
   assert.ok(result.firstPixel[0] > 180 && result.firstPixel[2] < 40, 'First clip must remain red');
   assert.ok(result.secondPixel[2] > 180 && result.secondPixel[0] < 40, 'Second clip must remain blue');
   assert.ok(result.musicEnergy > 10 && result.musicEnergy > result.originalEnergy * 20, 'Music must loop into the second clip and original audio must be muted');
+  assert.ok(result.narrationEnergy > 10 && result.narrationEnergy > result.originalEnergy * 10, 'Narration must be mixed into the second clip');
+  assert.equal(result.speechRequests, 1, 'Recreating the workflow must not synthesize narration twice');
   assert.equal(result.messageCount, 1); assert.equal(result.attempt, 2);
   const outputUrl = await evaluate('window.__compositionSmoke.result.localUrl');
   const outputPath = process.env.PNEUMATA_COMPOSITION_OUTPUT;

@@ -209,6 +209,25 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks.find((task) => task.id === 'theme')).toMatchObject({ kind: 'agent_audio', status: 'waiting_external', externalTaskId: 'music-task' });
     expect(queueAgentTeamAudio).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining('木琴和鼓点') }));
   });
+  it.each([false, true])('reads only narration text with no production instructions (script dependency: %s)', async (dependency) => {
+    const runId = crypto.randomUUID();
+    const role = { id: 'narrator', name: '旁白制作', responsibility: '制作旁白', method: '先写正文再配音', acceptance: '可播放', allowedTools: ['text_generation', 'speech_generation'] };
+    useSettingsStore.setState({ aiProfiles: [{ id: 'tts', name: '旁白', type: 'tts', provider: 'openai', apiKey: 'test', baseUrl: 'https://example.test', model: 'tts-1', isDefault: true }] });
+    const text = '森林深处，一场追逐开始了。';
+    const tasks = [
+      ...(dependency ? [{ id: 'script', roleId: role.id, goal: '只写旁白正文', dependsOn: [], acceptance: '正文完整' }] : []),
+      { id: 'narration', roleId: role.id, goal: '制作旁白，不应朗读这条指令', dependsOn: dependency ? ['script'] : [], tool: 'speech_generation', speech: dependency ? { textTaskId: 'script' } : { text }, acceptance: '附件可播放' },
+    ];
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '配音', roles: [role], tasks, finalAcceptance: '旁白可播放' }));
+    if (dependency) generate.mockResolvedValueOnce(text);
+    vi.mocked(queueAgentTeamAudio).mockResolvedValue({ output: '旁白已保存' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'text-model' }, () => `speech-${runId}`);
+    const result = await workflow.start(runId, 'chat', '制作森林短片旁白');
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'narration')).toMatchObject({ kind: 'agent_audio', status: 'completed' });
+    expect(queueAgentTeamAudio).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ prompt: text, purpose: 'speech' }));
+  });
+
   it('passes completed lyrics into a dependent music generation task', async () => {
     const runId = crypto.randomUUID();
     const chatId = `lyrics-${runId}`;

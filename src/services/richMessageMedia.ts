@@ -853,7 +853,8 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
 
     const profile = findGenerationProfile(entry.aiProfiles, 'audio', entry.character?.modelProfileIds?.tts || entry.character?.modelProfileIds?.audio);
     if (!profile) throw new Error('语音模型未配置');
-    const voice = attachment.ttsVoice || entry.character?.voiceConfig?.voiceName || profile.model;
+    const voice = attachment.ttsVoice || entry.character?.voiceConfig?.voiceName
+      || (profile.provider === 'microsoft' ? profile.model : undefined);
     const speechText = attachment.promptText || workingMessage.content;
     const localOnly = isLocalOnlyMediaMode();
     const voiceStyle = [entry.character?.voiceConfig?.style, entry.character?.voiceConfig?.instructions].filter(Boolean).join('；') || undefined;

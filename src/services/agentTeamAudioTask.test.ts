@@ -20,6 +20,29 @@ beforeEach(() => {
 });
 
 describe('agent team audio task', () => {
+  it('queues narration with only the TTS profile and reuses the saved result', async () => {
+    const tts = { id: 'tts', name: '旁白', type: 'tts' as const, provider: 'openai' as const, apiKey: 'test', baseUrl: 'https://example.test', model: 'tts-1', isDefault: true };
+    useSettingsStore.setState((state) => ({ aiProfiles: [...state.aiProfiles, tts] }));
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, aiProfiles, upsertMessage }) => {
+      expect(aiProfiles).toEqual([expect.objectContaining(tts)]);
+      expect(message.metadata?.attachments?.[0]).toMatchObject({ audioPurpose: 'chat_voice', promptText: '欢迎来到森林。' });
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'ready', url: 'data:audio/mpeg;base64,AAAA', updatedAt: item.updatedAt + 1,
+      })) } });
+    });
+    const params = { runId: 'run-speech', taskId: 'narration', chatId: 'team-audio-chat', purpose: 'speech' as const, prompt: '欢迎来到森林。', signal: new AbortController().signal };
+    expect(await queueAgentTeamAudio(params)).toEqual({ output: '旁白已生成并保存在当前聊天附件。正文：欢迎来到森林。' });
+    expect(await queueAgentTeamAudio(params)).toEqual({ output: '旁白已生成并保存在当前聊天附件。正文：欢迎来到森林。' });
+    expect(processRichMessageMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an unusable TTS profile before creating an attachment', async () => {
+    useSettingsStore.setState({ aiProfiles: [{ id: 'tts', name: '旁白', type: 'tts', provider: 'openai', apiKey: '', baseUrl: 'https://example.test', model: 'tts-1', isDefault: true }] });
+    await expect(queueAgentTeamAudio({ runId: 'missing-tts', taskId: 'narration', chatId: 'team-audio-chat', purpose: 'speech', prompt: '你好', signal: new AbortController().signal })).rejects.toThrow('旁白模型未配置');
+    expect(useMessageStore.getState().messages).toHaveLength(0);
+    expect(processRichMessageMedia).not.toHaveBeenCalled();
+  });
+
   it('creates a music attachment and returns its persisted external task ID', async () => {
     vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
       expect(message.metadata?.attachments?.[0]).toMatchObject({ kind: 'audio', audioPurpose: 'music_generation', promptText: '轻快的木琴配乐' });
