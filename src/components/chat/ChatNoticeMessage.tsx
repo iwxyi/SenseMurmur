@@ -10,13 +10,13 @@ export default function ChatNoticeMessage({ message }: { message: Message }) {
   if (!notice) return null;
   const details = notice.details || [];
   const colors = { info: 'divider', working: 'primary.light', success: 'success.light', warning: 'warning.light', error: 'error.light' };
-  return <ChatTimelineFrame placement="center" messageId={message.id} messageType={message.type} sx={{ px: { xs: 2, sm: 3 }, py: 0.25 }}>
-    <Box component="aside" aria-label="聊天提示" sx={{ width: '100%', maxWidth: 640, minWidth: 0 }}>
-    <Box sx={{ width: '100%', minWidth: 0, border: '1px solid', borderColor: colors[notice.tone], borderRadius: 1.5,
+  return <ChatTimelineFrame presentation={{ family: 'center', variant: 'notice', placement: 'center' }} messageId={message.id} messageType={message.type} sx={{ px: { xs: 2, sm: 3 }, py: 0.25 }}>
+    <Box component="aside" aria-label="聊天提示" sx={{ width: 'fit-content', maxWidth: 'min(100%, 520px)', minWidth: 0 }}>
+    <Box sx={{ width: 'fit-content', maxWidth: '100%', minWidth: 0, border: '1px solid', borderColor: colors[notice.tone], borderRadius: 1.5,
       px: 1, py: 0.45, bgcolor: 'background.paper' }}>
       <Stack direction="row" spacing={0.6} sx={{ minWidth: 0, alignItems: 'center' }}>
         <Typography variant="caption" color={notice.tone === 'error' ? 'error.main' : 'text.secondary'}
-          sx={{ minWidth: 0, flex: 1, overflowWrap: 'anywhere', lineHeight: 1.35 }}>{message.content}</Typography>
+          sx={{ minWidth: 0, overflowWrap: 'anywhere', lineHeight: 1.35 }}>{message.content}</Typography>
         {notice.progress ? <Typography variant="caption" color="text.disabled" sx={{ flexShrink: 0 }}>
           {notice.progress.completed}/{notice.progress.total}
         </Typography> : null}

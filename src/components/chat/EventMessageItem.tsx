@@ -112,7 +112,7 @@ export default function EventMessageItem({ message, members = [] }: { message: M
   const payload: { eventType?: string; title?: string; summary?: string; pair?: string[]; metrics?: unknown } = getRuntimeEventPayload(message);
 
   return (
-    <ChatTimelineFrame placement="center" messageId={message.id} messageType="event"
+    <ChatTimelineFrame presentation={{ family: 'center', variant: 'event', placement: 'center' }} messageId={message.id} messageType="event"
       sx={{ py: 0.5, px: { xs: 1, sm: 2 }, pointerEvents: 'none' }}>
       <Box sx={{
         maxWidth: 620,

@@ -183,7 +183,7 @@ function StoryChoicePanel({ options, onChoose, showDeveloperDetails = false, sub
   if (!options.length) return null;
   const isSubmitting = Boolean(submittingValue);
   return (
-    <ChatTimelineFrame placement="center" messageId="story-choice-panel" messageType="story-choice" sx={{ px: { xs: 2, sm: 3 }, py: 0.75 }}>
+    <ChatTimelineFrame presentation={{ family: 'center', variant: 'story-choice', placement: 'center' }} messageId="story-choice-panel" messageType="story-choice" sx={{ px: { xs: 2, sm: 3 }, py: 0.75 }}>
       <Stack spacing={0.75} sx={{ width: '100%', maxWidth: maxContentWidth, mx: 'auto', px: { xs: 0.5, sm: 1 }, transition: 'gap 220ms ease' }}>
         <Typography variant="caption" color="text.secondary" sx={{ px: 0.5, fontWeight: 700, transition: 'opacity 180ms ease, max-height 220ms ease, margin 220ms ease', opacity: isSubmitting ? 0 : 1, maxHeight: isSubmitting ? 0 : 24, overflow: 'hidden' }}>
           {isSubmitting ? '已选择剧情走向' : '选择接下来的剧情走向'}
@@ -262,7 +262,7 @@ function StoryNodeProgressBar({ message }: { message: Message }) {
   if (!progress) return null;
   const maxContentWidth = chatAppearance.maxContentWidthUnlimited ? '100%' : chatAppearance.maxContentWidth;
   return (
-    <ChatTimelineFrame placement="center" sx={{ px: { xs: 2, sm: 3 }, pt: 0.15, pb: 0.55 }}>
+    <ChatTimelineFrame presentation={{ family: 'center', variant: 'story-progress', placement: 'center' }} sx={{ px: { xs: 2, sm: 3 }, pt: 0.15, pb: 0.55 }}>
       <Stack direction="row" spacing={0.55} useFlexGap sx={{ flexWrap: 'wrap', maxWidth: maxContentWidth, mx: 'auto', px: { xs: 0.5, sm: 1 } }}>
         {progress.chips.map((chip) => (
           <Chip

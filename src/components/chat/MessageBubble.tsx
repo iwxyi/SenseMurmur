@@ -577,7 +577,7 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
         : undefined;
     return (
       <>
-        <ChatTimelineFrame placement="center" messageId={message.id} messageType={message.type} sx={{ px: { xs: 2, sm: 3 }, py: 1.1 }}>
+        <ChatTimelineFrame presentation={{ family: 'center', variant: 'narrative', placement: 'center' }} messageId={message.id} messageType={message.type} sx={{ px: { xs: 2, sm: 3 }, py: 1.1 }}>
           <Box
             {...bubbleHandlers}
             sx={{
@@ -619,7 +619,7 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
 
   return (
     <Box sx={{ width: '100%', minWidth: 0, maxWidth: '100%' }}>
-      <ChatTimelineFrame placement={isUser ? 'right' : 'left'} messageId={message.id} messageType={message.type}
+      <ChatTimelineFrame presentation={{ family: 'bubble', variant: 'message', placement: isUser ? 'right' : 'left' }} messageId={message.id} messageType={message.type}
         ariaLabel={continuesPreviousSender ? `${displaySenderName} 的连续消息` : undefined}
         sx={{ px: hidePrivateChatIdentity ? { xs: 2, sm: 3 } : 2, py: continuesPreviousSender ? 0.2 : 0.75, gap: hidePrivateChatIdentity ? 0 : 1.25, alignItems: 'flex-start' }}>
         {!isUser && !hidePrivateChatIdentity ? (

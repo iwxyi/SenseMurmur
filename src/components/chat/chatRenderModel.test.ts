@@ -40,6 +40,7 @@ describe('buildChatRenderItems', () => {
     ]);
 
     expect(items.map((item) => item.renderKind)).toEqual(['notice', 'system', 'event', 'narrative', 'bubble', 'bubble']);
+    expect(items.map((item) => item.presentation.family)).toEqual(['center', 'center', 'center', 'center', 'bubble', 'bubble']);
     expect(items.map((item) => item.presentation.placement)).toEqual(['center', 'center', 'center', 'center', 'left', 'right']);
   });
 

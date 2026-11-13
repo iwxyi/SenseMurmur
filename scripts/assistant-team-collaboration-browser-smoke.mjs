@@ -789,8 +789,8 @@ try {
       metadata: { chatNotice: { tone: 'working', progress: { completed: 2, total: 4 },
         details: ['撰写剧本 · 已完成', '生成图片素材 · 已完成', '生成视频 · 进行中', '检查交付结果 · 排队中'] } },
     }] }),
-      React.createElement(ChatTimelineFrame, { placement: 'left', messageId: 'left-fixture' }, '左侧'),
-      React.createElement(ChatTimelineFrame, { placement: 'right', messageId: 'right-fixture' }, '右侧')));
+      React.createElement(ChatTimelineFrame, { presentation: { family: 'bubble', variant: 'message', placement: 'left' }, messageId: 'left-fixture' }, '左侧'),
+      React.createElement(ChatTimelineFrame, { presentation: { family: 'bubble', variant: 'message', placement: 'right' }, messageId: 'right-fixture' }, '右侧')));
     const historyContainer = document.createElement('div');
     historyContainer.id = 'assistant-tool-history-smoke-root';
     document.body.append(historyContainer);
@@ -869,9 +869,12 @@ try {
   await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('#assistant-team-progress-smoke-root [aria-label="聊天提示"]'))`), 'chat notice rendered');
   assert.equal(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root [data-message-id="left-fixture"]')?.dataset.timelinePlacement`), 'left');
   assert.equal(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root [data-message-id="right-fixture"]')?.dataset.timelinePlacement`), 'right');
+  assert.equal(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root [data-message-id="left-fixture"]')?.dataset.timelineFamily`), 'bubble');
+  assert.equal(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root [data-message-id="right-fixture"]')?.dataset.timelineVariant`), 'message');
   assert.equal(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root [data-message-id="system-fixture"][data-timeline-placement]')?.dataset.timelinePlacement`), 'center');
   assert.equal(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root [data-message-id="progress-fixture"][data-timeline-placement]')?.dataset.timelinePlacement`), 'center');
   assert.equal(await cdp.evaluate(`Boolean(document.querySelector('#assistant-team-progress-smoke-root [aria-label="正在执行"]'))`), true);
+  assert.equal(await cdp.evaluate(`(() => { const notice = document.querySelector('#assistant-team-progress-smoke-root [aria-label="聊天提示"]'); return notice.getBoundingClientRect().width < document.querySelector('#assistant-team-progress-smoke-root').getBoundingClientRect().width * 0.75; })()`), true);
   assert.match(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root').textContent`), /生成视频 · 进行中.*2\/4/);
   assert.doesNotMatch(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root').textContent`), /撰写剧本|检查交付结果/);
   await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root button[aria-label="展开提示详情"]').click()`);

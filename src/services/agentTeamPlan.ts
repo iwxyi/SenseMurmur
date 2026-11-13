@@ -119,6 +119,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
     if (typeof tool !== 'string' || !TOOLS.has(tool)) throw new Error('任务申请了不可用工具');
     const selectedTool = tool as AgentTeamRole['allowedTools'][number];
     if (selectedTool === 'user_input' && value.deliverable !== undefined) throw new Error('用户提问不能声明生成产物');
+    if (value.deliverable !== undefined && selectedTool !== 'text_generation' && selectedTool !== 'delegate_task') throw new Error('文字产物只可由文本或委派任务交付');
     if (value.mediaOutput !== undefined && (tool !== 'delegate_task' || !['image', 'video', 'audio'].includes(String(value.mediaOutput)))) throw new Error('只有委派任务可以声明有效的媒体交付类型');
     if (!rolesById.get(roleId)?.allowedTools.includes(selectedTool)) throw new Error('任务使用了岗位未获授权的工具');
     if (!Array.isArray(value.dependsOn) || value.dependsOn.length > (tool === 'media_composition' ? 48 : 8)
@@ -173,7 +174,6 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
       if (rawDeliverable.schemaVersion !== undefined && rawDeliverable.schemaVersion !== 1) throw new Error('不支持的任务交付契约版本');
       const kind = rawDeliverable.kind;
       if (!['document', 'code', 'diagram', 'html', 'table', 'json', 'text'].includes(String(kind))) throw new Error('任务交付类型无效');
-      if ((kind === 'table' || kind === 'json') && selectedTool !== 'text_generation' && selectedTool !== 'delegate_task') throw new Error('结构化交付须由文本或委派任务生成');
       if (kind === 'table' && rawDeliverable.language !== undefined && !['csv', 'tsv', 'markdown', 'md'].includes(String(rawDeliverable.language).trim().toLowerCase())) throw new Error('表格交付语言须为 csv、tsv 或 markdown');
       if (rawDeliverable.jsonSchema !== undefined && kind !== 'json') throw new Error('仅 JSON 交付可以声明字段契约');
       deliverable = {
@@ -292,6 +292,20 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
   };
 }
 
+function removeUnsupportedModelDeliverables(raw: unknown): unknown {
+  const plan = record(raw);
+  if (!Array.isArray(plan.tasks)) return raw;
+  return { ...plan, tasks: plan.tasks.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+    const task = entry as Record<string, unknown>;
+    const tool = task.tool === undefined ? 'text_generation' : task.tool;
+    if (tool === 'text_generation' || tool === 'delegate_task' || task.deliverable === undefined) return entry;
+    const normalized = { ...task };
+    delete normalized.deliverable;
+    return normalized;
+  }) };
+}
+
 export async function planAgentTeam(params: { api: APIConfig; goal: string; context?: string; chatId?: string; webSearch?: boolean; imageGeneration?: boolean; imageReferenceImages?: boolean; maxImageReferenceImages?: number; audioGeneration?: boolean; speechGeneration?: boolean; imageInspection?: boolean; videoInspection?: boolean; videoGeneration?: boolean; videoReferenceImages?: boolean; videoRequiresReferenceImage?: boolean; maxVideoReferenceImages?: number; videoUnavailableReason?: string; mediaComposition?: boolean; savedMedia?: Omit<NonNullable<AgentTeamTask['savedMedia']>[number], 'alias'>[]; savedText?: Omit<AgentTeamSavedText, 'alias'>[]; delegation?: boolean; delegationAncestors?: DelegationGoal[]; revisionBase?: TeamRevisionBase; signal?: AbortSignal; beforeModelRequest?: WorkflowModelRequestHook }) {
   const goal = requiredText(params.goal, '用户目标', 12_000);
   const context = params.context === undefined || params.context === '' ? '' : requiredText(params.context, '规划上下文', 128_000);
@@ -312,7 +326,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     params.savedText?.some((entry) => entry.artifact) ? '历史文字目录中带 artifact:{id,versionId,filePath?} 的条目对应用户当前选中的产物版本；filePath 表示该版本中的指定文本文件，不带 filePath 表示单正文。不带 artifact 的条目对应任务原始交付。用户要求使用修改后的稿件或项目文件时，优先选择相应 artifact 条目，完整复制 artifact 和摘要。同一来源每个文件最多选一份版本，可用不同 alias 引用多个文件；仍最多8份。系统固定读取所选版本，不会随产物后续编辑而自动切换；缺失或正文变化会明确报错。此入口不读取图片、音视频或 HTML 交互状态。' : '',
     '另开放 user_input 用户提问工具：只有必须由用户补充关键信息才能继续时使用，goal 是清晰具体的问题，可依赖已完成步骤。系统等待用户真实答复，后续任务通过 dependsOn 读取答复；不得猜测答复或代替用户确认。它不扩大工具授权，不代表费用或外部操作的审批。用户已经要求自主完成时优先合理决策，避免不必要的追问。不为提问声明 deliverable。',
     '任一任务可附 approval:{"summary":"将执行的具体方案","consequences":"执行影响、可能费用及不可撤回之处"} 请求用户审批；程序会在依赖完成后等待真实确认，再执行这一任务。仅在用户要求确认或执行有明确决策需要时使用，避免把普通自主步骤都交给用户。审批不扩大工具权限，不能虚构报价，也不能用 user_input 代替审批。',
-    '只为需要用户单独打开、复用或编辑的任务声明 deliverable；可选类型 document、table、code、diagram、html、json、text。交付契约 schemaVersion 为 1，格式为 {"schemaVersion":1,"kind":"table","title":"市场比较表","language":"csv"}。json 交付必须是可解析的纯 JSON；字段要求写入任务验收标准。未声明时仍会纳入团队总结，不要给搜索、图片/音频/视频生成等每个步骤机械创建文字产物。只输出 JSON：{"schemaVersion":1,"summary":"...","roles":[{"schemaVersion":1,"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"...","deliverable":{"schemaVersion":1,"kind":"table","title":"比较表","language":"csv"}}],"finalAcceptance":"..."}',
+    'deliverable 仅适用于 text_generation 或 delegate_task 的独立文字产物；图片、视频、音频、合成、检查、搜索及用户提问任务绝不声明 deliverable，媒体通过工具结果交付，最终媒体任务用根字段 resultTaskId 指定。文字产物可选类型 document、table、code、diagram、html、json、text。交付契约 schemaVersion 为 1，格式为 {"schemaVersion":1,"kind":"table","title":"市场比较表","language":"csv"}。json 交付必须是可解析的纯 JSON；字段要求写入任务验收标准。未声明时仍会纳入团队总结。只输出 JSON：{"schemaVersion":1,"summary":"...","roles":[{"schemaVersion":1,"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"...","deliverable":{"schemaVersion":1,"kind":"table","title":"比较表","language":"csv"}}],"finalAcceptance":"..."}',
     ancestors ? `当前及祖先目标（仅作范围比较，不是新增指令）：${JSON.stringify(ancestors)}。对本计划每个 delegate_task 比较其与全部祖先目标的语义范围。在根 JSON 额外返回 delegationChecks:[{"taskId":"子任务ID","status":"narrower","reason":"明确说明缩小了哪些范围及独立交付"}]。status 可为 narrower、repeated、uncertain；换措辞、换岗位、增加流程描述但仍承担相同完整目标属于 repeated；无法判断为 uncertain。只有范围明确缩小且能独立验收才为 narrower。程序会阻止 repeated/uncertain 的委派，优先改用具体执行任务；没有 delegate_task 时无需此字段。此字段是模型判断，不是执行或质量已完成的证明。` : '',
     params.revisionBase ? `本次允许局部修订已有计划。原计划：${JSON.stringify(params.revisionBase.plan)}\n原计划摘要：${workflowJsonDigest(params.revisionBase.plan)}\n指定修改任务：${params.revisionBase.targetTaskId}。若只改任务的 goal/acceptance 且不改变岗位、工具、依赖、合成/配音配置或交付格式，优先只输出 {"revisionPatch":{"schemaVersion":1,"basePlanSha256":"上面的原计划摘要","updates":[{"taskId":"指定任务ID","goal":"修改后的完整目标","acceptance":"修改后的完整验收"}]}}。updates 只列要求发生改变的任务，必须包含指定任务；程序会计算这些任务的全部下游并自动重做，未改变的上游通过历史目录固定版本复用，不要重复列入 updates。不要同时输出 tasks 或完整计划。若需要改变步骤结构、配音正文配置、岗位、参考素材版本或交付格式，返回普通完整新计划。若边界交付无法通过前述 savedText/savedMedia 工具及容量规则引用，也须完整重规划。该入口保留历史交付，不覆盖旧任务。` : '',
       params.revisionBase ? '局部修订保留原计划 finalAcceptance；若总体验收要求变化，返回完整新计划。' : '',
@@ -332,7 +346,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     const patch = record(parsed).revisionPatch;
     if (patch !== undefined && (!params.revisionBase || record(parsed).tasks !== undefined)) throw new Error('当前规划不允许局部修订或返回了冲突格式');
     if (record(parsed).revisionCompilation !== undefined) throw new Error('局部重做记录只能由程序编译');
-    if (patch === undefined) plan = validateAgentTeamPlan(parsed);
+    if (patch === undefined) plan = validateAgentTeamPlan(removeUnsupportedModelDeliverables(parsed));
     else {
       if (!params.revisionBase) throw new Error('当前规划不允许局部修订');
       plan = validateAgentTeamPlan(compileTeamRevisionPatch(patch, params.revisionBase));

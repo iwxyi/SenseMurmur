@@ -1,7 +1,7 @@
 import type { Message } from '../../types/message';
 import { getMessageRenderIdentity, messagesShareIdentity } from '../../services/messageIdentity';
 import { parseRuntimeEvent } from '../../services/runtimeEventFactory';
-import { resolveChatTimelinePresentation, type ChatTimelinePresentation } from './chatTimelinePresentation';
+import { resolveChatTimelinePresentation, type ChatMessageTimelinePresentation } from './chatTimelinePresentation';
 
 export type ChatRenderKind = 'bubble' | 'narrative' | 'system' | 'notice' | 'event';
 
@@ -10,7 +10,7 @@ export interface ChatRenderItem {
   message: Message;
   pending: boolean;
   renderKind: ChatRenderKind;
-  presentation: ChatTimelinePresentation;
+  presentation: ChatMessageTimelinePresentation;
 }
 
 function getEventSourceMessageId(message: Message) {
@@ -43,7 +43,7 @@ export function buildChatRenderItems(messages: Message[]): ChatRenderItem[] {
       key: message.clientKey || identity,
       message,
       pending: Boolean(message.isStreaming),
-      renderKind: presentation.kind === 'message' ? 'bubble' : presentation.kind,
+      renderKind: presentation.family === 'bubble' ? 'bubble' : presentation.variant,
       presentation,
       order,
     });

@@ -228,6 +228,21 @@ describe('agent team plan', () => {
     expect(() => validateAgentTeamPlan({ ...structured, tasks: [{ ...plan.tasks[0], deliverable: { kind: 'table', title: '数据', jsonSchema } }] })).toThrow('仅 JSON');
   });
 
+  it('keeps a media plan when the model attaches a redundant text deliverable to media tasks', async () => {
+    const role = { ...valid().roles[0], allowedTools: ['text_generation', 'image_generation', 'video_generation'] };
+    const candidate = { ...valid(), roles: [role], tasks: [
+      { id: 'script', roleId: role.id, goal: '写 15 秒剧本', dependsOn: [], acceptance: '含分镜', tool: 'text_generation', deliverable: { kind: 'document', title: '剧本' } },
+      { id: 'image', roleId: role.id, goal: '生成角色素材', dependsOn: ['script'], acceptance: '图片可用', tool: 'image_generation', deliverable: { kind: 'json', title: '图片素材' } },
+      { id: 'film', roleId: role.id, goal: '生成视频', dependsOn: ['script', 'image'], acceptance: '视频可播放', tool: 'video_generation', deliverable: { kind: 'table', title: '成片' } },
+    ], resultTaskId: 'film' };
+    expect(() => validateAgentTeamPlan(candidate)).toThrow('文字产物只可由文本或委派任务交付');
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+    const plan = await planAgentTeam({ api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '生成短片',
+      imageGeneration: true, videoGeneration: true, videoReferenceImages: true });
+    expect(plan.tasks.map((task) => task.deliverable?.kind)).toEqual(['document', undefined, undefined]);
+    expect(plan.resultTaskId).toBe('film');
+  });
+
   it('rejects unknown tools and missing role references', () => {
     const unknownTool = valid();
     unknownTool.roles[0].allowedTools = ['shell'];
