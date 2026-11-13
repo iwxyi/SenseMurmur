@@ -949,6 +949,22 @@ class ApiClient {
     return this.request<import('../types/workflowUsage').WorkflowUsageSummary>('GET', `/ai/usage/workflow?${query.toString()}`);
   }
 
+  async listWorkflowCheckpoints(chatId: string) {
+    return this.request<{ items: Array<{ runId: string; revision: number; sha256: string; updatedAt: number }> }>('GET',
+      `/workflow-checkpoints?${new URLSearchParams({ chatId })}`);
+  }
+
+  async getWorkflowCheckpoint(runId: string) {
+    return this.request<{ runId: string; chatId: string; revision: number; sha256: string; payload: import('./workflowCheckpoint').WorkflowCheckpoint; updatedAt: number }>(
+      'GET', `/workflow-checkpoints/${encodeURIComponent(runId)}`);
+  }
+
+  async putWorkflowCheckpoint(runId: string, input: { chatId: string; expectedRevision: number;
+    executionFence: import('./chatExecutionFence').ChatExecutionFence; payload: import('./workflowCheckpoint').WorkflowCheckpoint }) {
+    return this.request<{ runId: string; chatId: string; revision: number; sha256: string }>(
+      'PUT', `/workflow-checkpoints/${encodeURIComponent(runId)}`, input);
+  }
+
   async getWorkflowBudget(runId: string) {
     const query = new URLSearchParams({ runId });
     return this.request<import('../types/workflowUsage').WorkflowBudget | null>('GET', `/ai/usage/workflow/budget?${query.toString()}`);

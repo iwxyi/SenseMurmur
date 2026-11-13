@@ -102,7 +102,7 @@ function assertNonEmptyString(value: unknown, label: string): asserts value is s
   if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`工作流${label}无效`);
 }
 
-function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapshot {
+export function assertWorkflowSnapshot(value: unknown): asserts value is WorkflowSnapshot {
   if (!isRecord(value) || !isRecord(value.run) || !Array.isArray(value.tasks)) throw new Error('工作流快照结构无效');
   if (value.schemaVersion !== undefined && value.schemaVersion !== 1) throw new Error('工作流快照版本不受支持');
   const run = value.run;
@@ -334,6 +334,16 @@ export interface WorkflowRepository {
   listOutboxEvents(scope: string, runId: string, consumerId: string, limit?: number): Promise<WorkflowEvent[]>;
   acknowledgeOutboxEvents(scope: string, runId: string, consumerId: string, throughSequence: number): Promise<void>;
   transact<T>(scope: string, runId: string, update: (current: WorkflowSnapshot | null) => { snapshot: WorkflowSnapshot; value: T }): Promise<T>;
+  exportCheckpoint(scope: string, runId: string): Promise<WorkflowRepositoryCheckpoint | null>;
+  importCheckpoint(scope: string, checkpoint: WorkflowRepositoryCheckpoint): Promise<void>;
+}
+
+export interface WorkflowRepositoryCheckpoint {
+  snapshot: WorkflowSnapshot;
+  outbox: WorkflowEvent[];
+  attempts: WorkflowTaskAttempt[];
+  revisions: WorkflowPlanRevision[];
+  consumers: Array<{ consumerId: string; acknowledgedThrough: number }>;
 }
 
 const DB_NAME = 'pneumata-workflow-runs';
@@ -430,6 +440,89 @@ export function currentWorkflowScope() {
 }
 
 export const indexedDbWorkflowRepository: WorkflowRepository = {
+  async exportCheckpoint(scope, runId) {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE, OUTBOX_STORE, ATTEMPT_STORE, REVISION_STORE, CONSUMER_STORE], 'readonly');
+      const prefix = eventPrefix(scope, runId);
+      const range = IDBKeyRange.bound(prefix, prefix + '\uffff');
+      const snapshotRequest = tx.objectStore(STORE).get(rowKey(scope, runId));
+      const outboxRequest = tx.objectStore(OUTBOX_STORE).getAll(range);
+      const attemptsRequest = tx.objectStore(ATTEMPT_STORE).getAll(range);
+      const revisionsRequest = tx.objectStore(REVISION_STORE).getAll(range);
+      const consumersRequest = tx.objectStore(CONSUMER_STORE).getAll(range);
+      tx.oncomplete = () => {
+        try {
+          if (snapshotRequest.result === undefined) { resolve(null); return; }
+          const snapshot = migrateWorkflowSnapshot(snapshotRequest.result);
+          const outbox = outboxRequest.result.map(({ key: _key, ...event }) => { void _key; return event as WorkflowEvent; });
+          const attempts = attemptsRequest.result.map(parseWorkflowTaskAttempt);
+          const revisions = revisionsRequest.result.map(parseWorkflowPlanRevision);
+          const consumers = consumersRequest.result.map((item) => ({ consumerId: String(item.consumerId), acknowledgedThrough: Number(item.acknowledgedThrough) }));
+          resolve({ snapshot, outbox, attempts, revisions, consumers });
+        } catch (error) { reject(error); }
+      };
+      tx.onerror = () => reject(tx.error || new Error('导出工作流检查点失败'));
+      tx.onabort = () => reject(tx.error || new Error('导出工作流检查点事务中止'));
+    });
+  },
+  async importCheckpoint(scope, checkpoint) {
+    assertWorkflowSnapshot(checkpoint.snapshot);
+    const runId = checkpoint.snapshot.run.id;
+    if (!Array.isArray(checkpoint.outbox) || !Array.isArray(checkpoint.attempts)
+      || !Array.isArray(checkpoint.revisions) || !Array.isArray(checkpoint.consumers)) throw new Error('工作流检查点历史无效');
+    const db = await openDb();
+    return new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([STORE, OUTBOX_STORE, ATTEMPT_STORE, REVISION_STORE, CONSUMER_STORE], 'readwrite');
+      const store = tx.objectStore(STORE);
+      const request = store.get(rowKey(scope, runId));
+      request.onsuccess = () => {
+        try {
+          if (request.result !== undefined) throw new Error('本机已有工作流，不能用远端检查点覆盖');
+          store.add(checkpoint.snapshot, rowKey(scope, runId));
+          const addUnique = (values: unknown[], name: string, keyFor: (value: unknown) => string) => {
+            const seen = new Set<string>();
+            for (const value of values) {
+              const key = keyFor(value);
+              if (seen.has(key)) throw new Error(`${name}重复`);
+              seen.add(key);
+            }
+          };
+          addUnique(checkpoint.outbox, '工作流事件', (event) => String((event as WorkflowEvent).sequence));
+          for (const event of checkpoint.outbox) {
+            if (event.runId !== runId || !Number.isSafeInteger(event.sequence) || event.sequence < 1
+              || event.eventId !== `${runId}:${event.sequence}` || event.aggregateVersion !== event.sequence) throw new Error('工作流事件归属无效');
+            tx.objectStore(OUTBOX_STORE).add({ ...event, key: eventKey(scope, runId, event.sequence) });
+          }
+          addUnique(checkpoint.attempts, '任务执行记录', (item) => `${(item as WorkflowTaskAttempt).taskId}:${(item as WorkflowTaskAttempt).attempt}`);
+          for (const raw of checkpoint.attempts) {
+            const attempt = parseWorkflowTaskAttempt(raw);
+            if (attempt.runId !== runId || !checkpoint.snapshot.tasks.some((task) => task.id === attempt.taskId)) throw new Error('任务执行记录归属无效');
+            const key = `${rowKey(scope, runId)}\n${JSON.stringify(attempt.taskId)}\n${String(attempt.attempt).padStart(16, '0')}`;
+            tx.objectStore(ATTEMPT_STORE).add(attempt, key);
+          }
+          addUnique(checkpoint.revisions, '计划修订记录', (item) => String((item as WorkflowPlanRevision).version));
+          for (const raw of checkpoint.revisions) {
+            const revision = parseWorkflowPlanRevision(raw);
+            if (revision.runId !== runId) throw new Error('计划修订记录归属无效');
+            tx.objectStore(REVISION_STORE).add(revision, `${rowKey(scope, runId)}\n${String(revision.version).padStart(16, '0')}`);
+          }
+          addUnique(checkpoint.consumers, '工作流消费回执', (item) => String((item as { consumerId: string }).consumerId));
+          const maxSequence = Math.max(0, ...checkpoint.outbox.map((event) => event.sequence));
+          for (const consumer of checkpoint.consumers) {
+            if (!consumer.consumerId || !Number.isSafeInteger(consumer.acknowledgedThrough)
+              || consumer.acknowledgedThrough < 0 || consumer.acknowledgedThrough > maxSequence) throw new Error('工作流消费回执无效');
+            const key = consumerKey(scope, runId, consumer.consumerId);
+            tx.objectStore(CONSUMER_STORE).add({ key, scope, runId, ...consumer });
+          }
+        } catch (error) { tx.abort(); reject(error); }
+      };
+      request.onerror = () => reject(request.error || new Error('读取本机工作流失败'));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('导入工作流检查点失败'));
+      tx.onabort = () => reject(tx.error || new Error('导入工作流检查点事务中止'));
+    });
+  },
   async listPlanRevisions(scope, runId) {
     const db = await openDb();
     return new Promise((resolve, reject) => {

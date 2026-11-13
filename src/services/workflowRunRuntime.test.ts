@@ -992,6 +992,27 @@ describe('workflow run runtime', () => {
     await expect(indexedDbWorkflowRepository.acknowledgeOutboxEvents('outbox-test', id, 'delivery', 3)).rejects.toThrow('尚未写入');
   });
 
+  it('exports a consistent checkpoint and imports it without replaying acknowledged delivery', async () => {
+    const id = crypto.randomUUID();
+    const sourceScope = `checkpoint-source-${id}`;
+    const targetScope = `checkpoint-target-${id}`;
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => sourceScope);
+    await runtime.create(snapshot(id));
+    await indexedDbWorkflowRepository.registerOutboxConsumer(sourceScope, id, 'team-delivery');
+    await indexedDbWorkflowRepository.acknowledgeOutboxEvents(sourceScope, id, 'team-delivery', 1);
+    const exported = await indexedDbWorkflowRepository.exportCheckpoint(sourceScope, id);
+    expect(exported?.outbox.map((event) => event.sequence)).toEqual([1]);
+    expect(exported?.consumers).toEqual([{ consumerId: 'team-delivery', acknowledgedThrough: 1 }]);
+    await indexedDbWorkflowRepository.importCheckpoint(targetScope, exported!);
+    expect(await indexedDbWorkflowRepository.read(targetScope, id)).toEqual(exported!.snapshot);
+    expect(await indexedDbWorkflowRepository.listOutboxEvents(targetScope, id, 'team-delivery')).toEqual([]);
+    await expect(indexedDbWorkflowRepository.importCheckpoint(targetScope, exported!)).rejects.toThrow('不能用远端检查点覆盖');
+    expect(await indexedDbWorkflowRepository.exportCheckpoint(targetScope, id)).toEqual(exported);
+    const invalid = { ...exported!, attempts: [{ schemaVersion: 2 }] as typeof exported.attempts };
+    await expect(indexedDbWorkflowRepository.importCheckpoint(`checkpoint-invalid-${id}`, invalid)).rejects.toThrow();
+    expect(await indexedDbWorkflowRepository.read(`checkpoint-invalid-${id}`, id)).toBeNull();
+  });
+
   it('retains the latest 256 events without deleting the boundary event', async () => {
     const id = crypto.randomUUID();
     const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'event-retention-test');
