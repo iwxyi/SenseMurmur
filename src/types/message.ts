@@ -275,6 +275,12 @@ export interface MessageMetadata {
   directReplyToUserMessageId?: string;
   assistantReplyToUserMessageId?: string;
   assistantReplyRunId?: string;
+  assistantTeamFinal?: boolean;
+  chatNotice?: {
+    tone: 'info' | 'working' | 'success' | 'warning' | 'error';
+    details?: string[];
+    progress?: { completed: number; total: number };
+  };
   groupTurnTaskId?: string;
   agentTeamMedia?: { runId: string; taskId: string };
   workflowUsage?: import('./workflowUsage').WorkflowUsageReference;

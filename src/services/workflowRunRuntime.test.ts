@@ -46,6 +46,45 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it.each(['model', 'tool'] as const)('persists the %s invocation before sending a request', async (kind) => {
+    const id = crypto.randomUUID();
+    const scope = `checkpoint-before-${kind}-${id}`;
+    const states: string[] = [];
+    const checkpoint = vi.fn(async () => {
+      const current = await indexedDbWorkflowRepository.read(scope, id);
+      states.push(current?.tasks[0][kind === 'model' ? 'modelInvocation' : 'toolInvocation']?.state || 'missing');
+    });
+    const execute = vi.fn(async (_task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => {
+      if (kind === 'model') await context.beginModelInvocation();
+      else await context.beginToolInvocation();
+      return { output: '完成' };
+    });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+      tracksModelInvocations: true, tracksToolInvocations: true, checkpoint, execute,
+    }, () => scope);
+    await runtime.create({ run: snapshot(id).run, tasks: [{ ...snapshot(id).tasks[0], kind: kind === 'model' ? 'agent_text' : 'agent_video' }] });
+    expect((await runtime.resume(id)).run.status).toBe('completed');
+    expect(checkpoint).toHaveBeenCalledTimes(2);
+    expect(states).toEqual(['started', 'succeeded']);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not send a model request when the invocation checkpoint fails', async () => {
+    const id = crypto.randomUUID();
+    const execute = vi.fn(async (_task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => {
+      await context.beginModelInvocation();
+      return { output: '不能执行' };
+    });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+      tracksModelInvocations: true, checkpoint: async () => { throw new Error('云端暂不可用'); }, execute,
+    }, () => `checkpoint-failed-${id}`);
+    await runtime.create({ run: snapshot(id).run, tasks: [{ ...snapshot(id).tasks[0], kind: 'agent_text' }] });
+    const result = await runtime.resume(id);
+    expect(result.tasks[0]).toMatchObject({ status: 'failed', modelInvocation: { state: 'failed' } });
+    expect(result.tasks[0].error).toContain('云端暂不可用');
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
   it('blocks restored runs before claiming any attempt until the required initial budget is bound', async () => {
     const id = crypto.randomUUID();
     const scope = `required-budget-${id}`;
@@ -777,7 +816,7 @@ describe('workflow run runtime', () => {
     expect(upgraded?.schemaVersion).toBe(1);
     expect(upgraded?.run.goal).toBe('制作短片');
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = testIndexedDb!.open('pneumata-workflow-runs', 5);
+      const request = testIndexedDb!.open('pneumata-workflow-runs', 6);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
@@ -1008,9 +1047,33 @@ describe('workflow run runtime', () => {
     expect(await indexedDbWorkflowRepository.listOutboxEvents(targetScope, id, 'team-delivery')).toEqual([]);
     await expect(indexedDbWorkflowRepository.importCheckpoint(targetScope, exported!)).rejects.toThrow('不能用远端检查点覆盖');
     expect(await indexedDbWorkflowRepository.exportCheckpoint(targetScope, id)).toEqual(exported);
+    const execute = vi.fn(async () => ({ output: 'finished on device B' }));
+    const restored = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute }, () => targetScope);
+    const resumed = await restored.resume(id);
+    expect(resumed.run.status).toBe('completed');
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(await indexedDbWorkflowRepository.listTaskAttempts(targetScope, id, 'video')).toHaveLength(1);
     const invalid = { ...exported!, attempts: [{ schemaVersion: 2 }] as typeof exported.attempts };
     await expect(indexedDbWorkflowRepository.importCheckpoint(`checkpoint-invalid-${id}`, invalid)).rejects.toThrow();
     expect(await indexedDbWorkflowRepository.read(`checkpoint-invalid-${id}`, id)).toBeNull();
+  });
+
+  it('persists a remote sync cursor separately from the workflow snapshot', async () => {
+    const id = crypto.randomUUID();
+    const scope = `checkpoint-cursor-${id}`;
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => scope);
+    await runtime.create(snapshot(id));
+    expect(await indexedDbWorkflowRepository.readCheckpointSync(scope, id)).toBeNull();
+    await indexedDbWorkflowRepository.saveCheckpointSync(scope, id, { revision: 1, sha256: 'a'.repeat(64) });
+    expect(await indexedDbWorkflowRepository.readCheckpointSync(scope, id)).toEqual({ revision: 1, sha256: 'a'.repeat(64) });
+    await expect(indexedDbWorkflowRepository.saveCheckpointSync(scope, id, { revision: 1, sha256: 'b'.repeat(64) }))
+      .rejects.toThrow('版本已变化');
+    await indexedDbWorkflowRepository.saveCheckpointSync(scope, id, { revision: 2, sha256: 'b'.repeat(64) });
+    await expect(indexedDbWorkflowRepository.saveCheckpointSync(scope, id, { revision: 1, sha256: 'a'.repeat(64) }))
+      .rejects.toThrow('版本已变化');
+    expect((await indexedDbWorkflowRepository.read(scope, id))?.run.planVersion).toBe(1);
+    await expect(indexedDbWorkflowRepository.saveCheckpointSync(scope, 'missing', { revision: 1, sha256: 'a'.repeat(64) }))
+      .rejects.toThrow('工作流不存在');
   });
 
   it('retains the latest 256 events without deleting the boundary event', async () => {
@@ -1054,7 +1117,7 @@ describe('workflow run runtime', () => {
     const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => 'test');
     await runtime.create(snapshot(id));
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = testIndexedDb!.open('pneumata-workflow-runs', 5);
+      const request = testIndexedDb!.open('pneumata-workflow-runs', 6);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });

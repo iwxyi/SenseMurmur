@@ -5,6 +5,7 @@ import AppSnackbar from '../components/common/AppSnackbar';
 import LoadingState from '../components/common/LoadingState';
 import PeopleIcon from '@mui/icons-material/People';
 import ExtensionOutlinedIcon from '@mui/icons-material/ExtensionOutlined';
+import AccountTreeOutlinedIcon from '@mui/icons-material/AccountTreeOutlined';
 import InfoIcon from '@mui/icons-material/Info';
 import PlayIcon from '@mui/icons-material/PlayArrow';
 import PauseIcon from '@mui/icons-material/Pause';
@@ -50,9 +51,9 @@ import { useChatSurfaceActions } from '../hooks/useChatSurfaceActions';
 import { useReplyOperation } from '../hooks/useReplyOperation';
 import { getActiveAssistantBackgroundChats, getAssistantBackgroundRunRevision, getAssistantBackgroundStreamingSnapshot, listAssistantBackgroundReplies, resumeAssistantBackgroundReply, retryAssistantBackgroundReply, subscribeAssistantBackgroundReplies, subscribeAssistantBackgroundRunChanges, subscribeAssistantBackgroundStreaming } from '../services/assistantBackgroundReply';
 import type { WorkflowSnapshot } from '../services/workflowRunRuntime';
-import { abandonAgentTeamReview, answerAgentTeamUserInput, decideAgentTeamApproval, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamTask, retryAgentTeamReview, runAgentTeam, saveAgentTeamDeliveryCopy, subscribeAgentTeamRuns, updateAgentTeamDeadline, updateAgentTeamModelCallLimit } from '../services/agentTeamWorkflow';
-import { defaultWorkflowGoalSpec, type WorkflowGoalSpec } from '../services/workflowGoalSpec';
+import { abandonAgentTeamReview, answerAgentTeamUserInput, decideAgentTeamApproval, delegateAgentTeamTask, getAgentTeamRunRevision, hasActiveAgentTeamRuns, importRemoteAgentTeamRun, instructAgentTeamTask, isAgentTeamRunActive, listAgentTeamRuns, listRemoteAgentTeamRuns, pauseAgentTeamAfterCurrentBatch, retryAgentTeamTask, retryAgentTeamReview, runAgentTeam, saveAgentTeamDeliveryCopy, subscribeAgentTeamRuns, updateAgentTeamDeadline, updateAgentTeamModelCallLimit } from '../services/agentTeamWorkflow';
 import { getDirectBackgroundRevision, isDirectBackgroundActive, listDirectBackgroundReplies, resumeDirectBackgroundReply, startDirectBackgroundReply, subscribeDirectBackgroundReplies } from '../services/directBackgroundReply';
+import { canContinueConversationsInBackground } from '../services/backgroundExecutionPreferences';
 import { getAiDirectBackgroundRevision, isAiDirectBackgroundActive, listAiDirectBackgroundReplies, resumeAiDirectBackgroundReply, startAiDirectBackgroundReply, subscribeAiDirectBackgroundReplies } from '../services/aiDirectBackgroundReply';
 import { getGroupBackgroundRevision, listAiDirectBackgroundConversations, listGroupBackgroundConversations, subscribeGroupBackgroundConversations } from '../services/groupBackgroundConversation';
 import AssistantTeamWorkbench from '../components/chat/AssistantTeamWorkbench';
@@ -78,6 +79,7 @@ import { attachMessageToActiveBranch, buildBranchStateWithHead, buildMessageBran
 import { getLatestChatPreviewMessage } from '../services/chatLatestMessage';
 import { projectCurrentChatMessages, projectMergedChatMessages } from '../services/currentChatMessages';
 import { overlayTransientMessages, releaseConfirmedTransientMessages, removeTransientMessage, upsertTransientMessage } from '../services/transientMessageOverlay';
+import { assistantTeamProgressMessage } from '../services/assistantTeamProgress';
 import { resolveSessionFamilyKey } from '../services/sessionEngineKeys';
 import { isAssistantArtifactCloudSyncEnabled, setAssistantArtifactCloudSyncEnabled } from '../services/assistantArtifactCloudSyncPreference';
 import { hasRoomCapability } from '../services/capabilityRuntime';
@@ -919,7 +921,6 @@ export default function ChatDetailPage() {
   const [assistantBackgroundResumeRunId, setAssistantBackgroundResumeRunId] = useState<string | null>(null);
   const [assistantBackgroundRetryRunId, setAssistantBackgroundRetryRunId] = useState<string | null>(null);
   const [assistantBackgroundRetryUncertain, setAssistantBackgroundRetryUncertain] = useState(false);
-  const [assistantRuns, setAssistantRuns] = useState<WorkflowSnapshot[]>([]);
   const directBackgroundRevision = useSyncExternalStore(subscribeDirectBackgroundReplies, getDirectBackgroundRevision, getDirectBackgroundRevision);
   const [directBackgroundRuns, setDirectBackgroundRuns] = useState<WorkflowSnapshot[]>([]);
   const visibleDirectBackgroundRun = directBackgroundRuns.find((run) => run.run.status !== 'completed') || null;
@@ -944,13 +945,9 @@ export default function ChatDetailPage() {
   }, [id, directBackgroundRevision]);
   const teamRevision = useSyncExternalStore(subscribeAgentTeamRuns, getAgentTeamRunRevision, getAgentTeamRunRevision);
   const [teamRuns, setTeamRuns] = useState<WorkflowSnapshot[]>([]);
-  const [teamGoalOpen, setTeamGoalOpen] = useState(false);
-  const [teamGoal, setTeamGoal] = useState('');
-  const [teamModelCallLimit, setTeamModelCallLimit] = useState('');
-  const [teamPlatformBudget, setTeamPlatformBudget] = useState('');
-  const [teamPreferences, setTeamPreferences] = useState('');
-  const [teamDeadline, setTeamDeadline] = useState('');
-  const [teamMediaApproval, setTeamMediaApproval] = useState(false);
+  const [remoteTeamRuns, setRemoteTeamRuns] = useState<Array<{ runId: string; revision: number; sha256: string; updatedAt: number }>>([]);
+  const [importingTeamRunId, setImportingTeamRunId] = useState<string | null>(null);
+  const [teamWorkbenchOpen, setTeamWorkbenchOpen] = useState(false);
   const [teamProgressTick, setTeamProgressTick] = useState(0);
   useEffect(() => {
     if (!hasActiveAgentTeamRuns()) return;
@@ -958,7 +955,7 @@ export default function ChatDetailPage() {
     return () => window.clearInterval(timer);
   }, [teamRevision]);
   useEffect(() => {
-    if (!id) { setTeamRuns([]); return; }
+    if (!id) { setTeamRuns([]); setRemoteTeamRuns([]); return; }
     let cancelled = false;
     void listAgentTeamRuns(id).then((runs) => {
       if (!cancelled) setTeamRuns(runs.sort((left, right) => right.run.updatedAt - left.run.updatedAt));
@@ -966,18 +963,24 @@ export default function ChatDetailPage() {
     return () => { cancelled = true; };
   }, [id, teamRevision, teamProgressTick]);
   useEffect(() => {
+    if (!id) { setRemoteTeamRuns([]); return; }
+    let cancelled = false;
+    void listRemoteAgentTeamRuns(id).then((runs) => {
+      if (!cancelled) setRemoteTeamRuns(runs);
+    }).catch((error) => { if (!cancelled) console.error('[agent-team:remote-list-failed]', error); });
+    return () => { cancelled = true; };
+  }, [id, teamRevision]);
+  useEffect(() => {
     if (!id) {
       setAssistantBackgroundNotice(null);
       setAssistantBackgroundResumeRunId(null);
       setAssistantBackgroundRetryRunId(null);
       setAssistantBackgroundRetryUncertain(false);
-      setAssistantRuns([]);
       return;
     }
     let cancelled = false;
     void listAssistantBackgroundReplies(id).then((runs) => {
       if (cancelled) return;
-      setAssistantRuns(runs.sort((left, right) => right.run.updatedAt - left.run.updatedAt));
       const supersededRunIds = new Set(runs.flatMap((run) => run.run.retryOfRunId ? [run.run.retryOfRunId] : []));
       const currentRuns = runs.filter((run) => !supersededRunIds.has(run.run.id));
       const uncertain = currentRuns.find((run) => run.tasks.some((task) => task.status === 'result_unknown'));
@@ -1257,11 +1260,18 @@ export default function ChatDetailPage() {
     return result;
   }, [chat, rawCurrentMessageWindow, id, messages]);
   const visibleChatMessages = useMemo(
-    () => overlayTransientMessages(currentChatMessages, [
-      ...transientMessages,
-      ...assistantBackgroundStreamingMessages.filter((message) => message.chatId === id),
-    ]),
-    [currentChatMessages, transientMessages, assistantBackgroundStreamingMessages, id],
+    () => {
+      const branchMessages = chat && isMessageBranchingEnabled(chat)
+        ? projectActiveBranchMessages(chat, currentChatAllMessages) : currentChatMessages;
+      const visibleSourceMessageIds = new Set(branchMessages.flatMap((message) => [message.id, message.clientKey, message.metadata?.branching?.nodeId].filter((value): value is string => Boolean(value))));
+      const progress = chat?.type === 'assistant' && id ? assistantTeamProgressMessage(id, teamRuns, visibleSourceMessageIds) : null;
+      return overlayTransientMessages(currentChatMessages, [
+        ...transientMessages,
+        ...assistantBackgroundStreamingMessages.filter((message) => message.chatId === id),
+        ...(progress ? [progress] : []),
+      ]);
+    },
+    [chat, currentChatAllMessages, currentChatMessages, transientMessages, assistantBackgroundStreamingMessages, id, teamRuns],
   );
   useEffect(() => {
     setTransientMessages((current) => releaseConfirmedTransientMessages(current, currentChatMessages));
@@ -2394,7 +2404,7 @@ export default function ChatDetailPage() {
           }
         })();
       } else if (chat.type === 'assistant' && createdRevision.type === 'user') {
-        if (typeof navigator.locks?.request === 'function') {
+        if (canContinueConversationsInBackground()) {
           void import('../services/assistantBackgroundReply').then(({ startAssistantBackgroundReply }) => startAssistantBackgroundReply({
             chatId: id,
             userMessageId: createdRevision.id,
@@ -2552,7 +2562,7 @@ export default function ChatDetailPage() {
           }
           nextState = buildBranchStateWithHead(nextState, sourceNode.parentNodeId, activeName);
           const nextChat: GroupChat = { ...chat, messageBranchState: nextState };
-          const runInBackground = chat.type === 'assistant' && !shouldResume && typeof navigator.locks?.request === 'function';
+          const runInBackground = chat.type === 'assistant' && !shouldResume && canContinueConversationsInBackground();
           if (!runInBackground) await updateChat(id, { messageBranchState: nextState });
           if (!shouldContinue()) return;
           if (runInBackground) {
@@ -2920,7 +2930,7 @@ export default function ChatDetailPage() {
         metadata: { assistantHtmlRuntimeError: { ...runtimeError, reportedAt: Date.now() } },
       });
       void updateChat(id, { lastMessageAt: userMessage.timestamp, latestMessage: userMessage });
-      if (typeof navigator.locks?.request === 'function') {
+      if (canContinueConversationsInBackground()) {
         try {
           const { startAssistantBackgroundReply } = await import('../services/assistantBackgroundReply');
           const result = await startAssistantBackgroundReply({ chatId: id, userMessageId: userMessage.id, selectedArtifactId: artifact.id });
@@ -2939,7 +2949,7 @@ export default function ChatDetailPage() {
     if (!htmlRepairRetry || htmlRepairRetry.chatId !== id) return;
     const request = htmlRepairRetry;
     setHtmlRepairRetry(null);
-    if (typeof navigator.locks?.request === 'function') {
+    if (canContinueConversationsInBackground()) {
       const runId = `${request.chatId}\nhtml-repair-retry\n${request.userMessage.id}\n${crypto.randomUUID()}`;
       void import('../services/assistantBackgroundReply').then(({ startAssistantBackgroundReply }) => startAssistantBackgroundReply({
         chatId: request.chatId,
@@ -3071,6 +3081,7 @@ export default function ChatDetailPage() {
   useEffect(() => {
     if (!id) return undefined;
     return () => {
+      const wasPageLoop = Boolean(loopTokenRef.current && !loopTokenRef.current.startsWith('background-group-'));
       if (openedChatWindowRef.current?.chatId === id) openedChatWindowRef.current = null;
       activeChatIdRef.current = null;
       loopTokenRef.current = null;
@@ -3079,6 +3090,8 @@ export default function ChatDetailPage() {
       closeChatWindow(id, { clearActiveOnly: true });
       cancelReplyOperation();
       stop();
+      if (wasPageLoop) void useChatStore.getState().updateChat(id, { isActive: false })
+        .catch((error) => console.error('[chat-run:page-exit-stop-failed]', error));
     };
   }, [cancelReplyOperation, closeChatWindow, discardStreamingMessage, id, resetRunLoopUiState, stop]);
 
@@ -3112,7 +3125,7 @@ export default function ChatDetailPage() {
       const recentMessages = useMessageStore.getState().messages.filter((message) => message.chatId === id);
       const recentMessagesWithUser = [...recentMessages.filter((message) => message.id !== userMessage.id), userMessage];
       if (chat.type === 'direct') {
-        if (typeof navigator.locks?.request === 'function') {
+        if (canContinueConversationsInBackground()) {
           void startDirectBackgroundReply(id, userMessage.id).then((result) => {
             if (result.summary.blocked.length) showErrorToast(result.summary.blocked[0].reason);
           }).catch((error) => {
@@ -3158,7 +3171,7 @@ export default function ChatDetailPage() {
         return;
       }
       if (chat.type === 'assistant') {
-        if (!navigator.locks?.request) {
+        if (!canContinueConversationsInBackground()) {
           setSnackbar({ open: true, message: '当前连接不支持后台运行，回复期间请保持此页面打开。', severity: 'info' });
           const { controller, epoch } = beginReplyOperation();
           void import('../services/assistantChatFlow').then(({ runAssistantChatReplyFlow }) => runAssistantChatReplyFlow({
@@ -3250,7 +3263,7 @@ export default function ChatDetailPage() {
         return;
       }
       if (latestChat.type === 'ai_direct') {
-        if (typeof navigator.locks?.request === 'function') {
+        if (canContinueConversationsInBackground()) {
           void startAiDirectBackgroundReply(id, userMessage.id).catch((error) => {
             console.error('[ai-direct-workflow:send-failed]', error);
             showErrorToast(error instanceof Error ? error.message : 'AI 私聊回复失败');
@@ -4582,6 +4595,18 @@ export default function ChatDetailPage() {
           ) : (
             <>
               {isAssistantChat ? null : headerPrimaryActionButton}
+              {isAssistantChat && (teamRuns.length > 0 || remoteTeamRuns.length > 0) ? <Tooltip title={importingTeamRunId ? '正在接管团队任务' : '团队工作台'}><span><IconButton disabled={Boolean(importingTeamRunId)} onClick={() => {
+                if (!teamRuns.length && remoteTeamRuns.length) {
+                  const selected = remoteTeamRuns[0];
+                  setImportingTeamRunId(selected.runId);
+                  void importRemoteAgentTeamRun(chat.id, selected.runId)
+                    .then(() => setTeamWorkbenchOpen(true))
+                    .catch((error) => showErrorToast(error instanceof Error ? error.message : '接管团队任务失败'))
+                    .finally(() => setImportingTeamRunId(null));
+                  return;
+                }
+                setTeamWorkbenchOpen(true);
+              }} aria-label="打开团队工作台">{importingTeamRunId ? <CircularProgress size={20} color="inherit" /> : <AccountTreeOutlinedIcon />}</IconButton></span></Tooltip> : null}
               {isAssistantChat ? (
                 <IconButton onClick={toggleRightPanel} aria-label="打开助手能力面板">
                   <ExtensionOutlinedIcon />
@@ -4620,10 +4645,9 @@ export default function ChatDetailPage() {
             {visibleAiDirectBackgroundRun.tasks[0]?.error || (isAiDirectBackgroundActive(chat.id) ? '正在回复，离开此页面后仍会继续' : visibleAiDirectBackgroundRun.run.status === 'paused' ? 'AI 私聊任务已暂停' : 'AI 私聊任务等待处理')}
           </Alert>
         ) : null}
-        {isAssistantChat && agentEntitled && !teamRuns.length ? (
-          <Button size="small" variant="outlined" onClick={() => setTeamGoalOpen(true)} sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, right: 16, zIndex: 5, bgcolor: 'background.paper' }}>团队任务</Button>
-        ) : null}
         {isAssistantChat && teamRuns.length ? <AssistantTeamWorkbench
+          open={teamWorkbenchOpen}
+          onClose={() => setTeamWorkbenchOpen(false)}
           runs={teamRuns}
           canRun={agentEntitled}
           isRunActive={isAgentTeamRunActive}
@@ -4632,7 +4656,6 @@ export default function ChatDetailPage() {
             const failures = results.filter((result) => result.status === 'rejected').length;
             if (failures) throw new Error(`${failures} 个团队任务恢复失败，请检查各 Run 状态`);
           }}
-          onCreate={() => setTeamGoalOpen(true)}
           onInstruct={async (selected, task, instruction) => { await instructAgentTeamTask({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, instruction }); }}
           onAnswer={async (selected, task, answer) => {
             await answerAgentTeamUserInput({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, answer });
@@ -4658,14 +4681,6 @@ export default function ChatDetailPage() {
           }}
           onResume={(selected) => { void runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id }).catch((error) => showErrorToast(error instanceof Error ? error.message : '恢复团队任务失败')); }}
         /> : null}
-        {isAssistantChat && assistantRuns.length && (isAssistantBackgroundPending || assistantBackgroundNotice) ? (
-          <Box role="status" sx={{ position: 'absolute', top: { xs: 'calc(64px + env(safe-area-inset-top, 0px))', sm: 56 }, left: 0, right: 0, zIndex: 4, display: 'flex', gap: 0.75, px: { xs: 1.5, sm: 2.5 }, py: 0.75, overflowX: 'auto', bgcolor: 'background.paper', borderBottom: '1px solid', borderColor: 'divider' }}>
-            <Chip size="small" label={`助手任务 · ${assistantRuns[0].run.status === 'completed' ? '已完成' : assistantRuns[0].run.status === 'paused' ? '已暂停' : assistantRuns[0].tasks.some((task) => task.status === 'running') ? '执行中' : '等待中'}`} />
-            {assistantRuns[0].tasks.map((task, index) => (
-              <Chip key={task.id} size="small" variant="outlined" label={`步骤 ${index + 1} · ${task.status === 'completed' ? '完成' : task.status === 'result_unknown' ? '待核对' : task.status === 'failed' ? '失败' : task.status === 'running' ? '执行中' : task.status === 'waiting_external' ? '等待生成' : '排队中'}`} />
-            ))}
-          </Box>
-        ) : null}
         {isAssistantChat && assistantBackgroundNotice ? (
           <Alert severity="warning" role="status" action={(
             <Stack direction="row" spacing={0.5}>
@@ -4681,7 +4696,7 @@ export default function ChatDetailPage() {
                 });
               }}>重试</Button> : null}
             </Stack>
-          )} sx={{ position: 'absolute', top: { xs: 'calc(112px + env(safe-area-inset-top, 0px))', sm: 104 }, left: 12, right: 12, zIndex: 5, borderRadius: 2, '& .MuiAlert-message': { overflowWrap: 'anywhere' } }}>
+          )} sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, left: 12, right: 12, zIndex: 5, borderRadius: 2, '& .MuiAlert-message': { overflowWrap: 'anywhere' } }}>
             {assistantBackgroundNotice}
           </Alert>
         ) : null}
@@ -4729,8 +4744,8 @@ export default function ChatDetailPage() {
             hasMoreNewer={hasMoreNewer}
             loadingText={t('common.loading')}
             topHint="没有更早的消息"
-            topInset={isAssistantChat && assistantRuns.length && (isAssistantBackgroundPending || assistantBackgroundNotice)
-              ? (isSplitDetailPane ? { xs: assistantBackgroundNotice ? '164px' : '104px', sm: assistantBackgroundNotice ? '164px' : '104px' } : { xs: assistantBackgroundNotice ? 'calc(176px + env(safe-area-inset-top, 0px))' : 'calc(116px + env(safe-area-inset-top, 0px))', sm: assistantBackgroundNotice ? '168px' : '108px' })
+            topInset={isAssistantChat && assistantBackgroundNotice
+              ? (isSplitDetailPane ? { xs: '120px', sm: '120px' } : { xs: 'calc(132px + env(safe-area-inset-top, 0px))', sm: '124px' })
               : isSplitDetailPane ? { xs: '68px', sm: '68px' } : { xs: 'calc(80px + env(safe-area-inset-top, 0px))', sm: '72px' }}
             bottomInset={messageListBottomInset}
             emptyContent={isStoryRoom && storyRoomOpeningPreview ? <StoryRoomOpeningEmptyState preview={storyRoomOpeningPreview} /> : undefined}
@@ -5060,53 +5075,6 @@ export default function ChatDetailPage() {
           </Box>
         </PageSection>
       </RightPanel>}
-      <Dialog open={teamGoalOpen} onClose={() => setTeamGoalOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>创建团队任务</DialogTitle>
-        <DialogContent>
-          <TextField autoFocus multiline minRows={4} fullWidth label="目标与验收要求" value={teamGoal} onChange={(event) => setTeamGoal(event.target.value)} />
-          <TextField sx={{ mt: 2 }} size="small" multiline minRows={2} fullWidth label="偏好（可选）" value={teamPreferences} onChange={(event) => setTeamPreferences(event.target.value)} slotProps={{ htmlInput: { maxLength: 2000 } }} />
-          <TextField sx={{ mt: 2 }} size="small" type="datetime-local" fullWidth label="截止时间（可选）" value={teamDeadline} onChange={(event) => setTeamDeadline(event.target.value)} slotProps={{ inputLabel: { shrink: true } }} />
-          <FormControlLabel sx={{ mt: 1 }} control={<Checkbox checked={teamMediaApproval} onChange={(event) => setTeamMediaApproval(event.target.checked)} />} label="每次生成图片、音乐、配音或视频前由我确认" />
-          <TextField sx={{ mt: 2 }} size="small" type="number" fullWidth label="模型调用次数上限（可选）" value={teamModelCallLimit} onChange={(event) => setTeamModelCallLimit(event.target.value)} slotProps={{ htmlInput: { min: 1, max: 1000, step: 1 } }} helperText="留空则不限制；计入规划、文本任务、图片检查和验收。此项不代表金额预算。" />
-          {authMode === 'cloud' && <TextField sx={{ mt: 2 }} size="small" fullWidth label="平台任务总预算（积分，可选）" value={teamPlatformBudget}
-            onChange={(event) => setTeamPlatformBudget(event.target.value)} slotProps={{ htmlInput: { inputMode: 'decimal' } }}
-            error={Boolean(teamPlatformBudget.trim() && !/^(?:0|[1-9]\d{0,17})(?:\.\d{1,6})?$/.test(teamPlatformBudget.trim()))}
-            helperText="包含首次规划及后续平台调用；无可靠报价时暂停。直连第三方费用不包含在内。" />}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setTeamGoalOpen(false)}>取消</Button>
-          <Button disabled={!teamGoal.trim() || !navigator.locks?.request || Boolean(teamDeadline && !Number.isFinite(new Date(teamDeadline).getTime())) || Boolean(teamModelCallLimit.trim() && (!Number.isSafeInteger(Number(teamModelCallLimit)) || Number(teamModelCallLimit) < 1 || Number(teamModelCallLimit) > 1000)) || Boolean(authMode === 'cloud' && teamPlatformBudget.trim() && !/^(?:0|[1-9]\d{0,17})(?:\.\d{1,6})?$/.test(teamPlatformBudget.trim()))} onClick={() => {
-            if (!id) return;
-            if (teamDeadline && new Date(teamDeadline).getTime() <= Date.now()) {
-              showErrorToast('截止时间必须晚于当前时间');
-              return;
-            }
-            const goal = teamGoal.trim();
-            const maxModelCalls = teamModelCallLimit.trim() ? Number(teamModelCallLimit) : undefined;
-            const initialBudget = authMode === 'cloud' && teamPlatformBudget.trim()
-              ? { limitAmount: teamPlatformBudget.trim(), billingUnit: 'point' } : undefined;
-            const goalSpec: WorkflowGoalSpec = { ...defaultWorkflowGoalSpec(goal), preferences: teamPreferences.trim() ? [teamPreferences.trim()] : [],
-              ...(teamMediaApproval ? { approvalTools: ['image_generation', 'audio_generation', 'speech_generation', 'video_generation'] } : {}),
-              ...(teamDeadline ? { deadlineAt: new Date(teamDeadline).getTime() } : {}) };
-            const chatId = id;
-            setTeamGoalOpen(false);
-            setTeamGoal('');
-            setTeamModelCallLimit('');
-            setTeamPlatformBudget('');
-            setTeamPreferences('');
-            setTeamDeadline('');
-            setTeamMediaApproval(false);
-            void (async () => {
-              const message = await addMessageStable({
-                chatId, type: 'user', senderId: 'user', senderName: currentUser?.nickname?.trim() || '我',
-                content: goal, emotion: 0, timestamp: getNextMessageTimestamp(),
-              });
-              void updateChat(chatId, { lastMessageAt: message.timestamp, latestMessage: message });
-              await runAgentTeam({ chatId, goal, maxModelCalls, goalSpec, initialBudget });
-            })().catch((error) => showErrorToast(error instanceof Error ? error.message : '团队任务启动失败'));
-          }}>开始</Button>
-        </DialogActions>
-      </Dialog>
       <ChatPageSettingsDialog
         open={chatPageSettingsOpen}
         onClose={() => setChatPageSettingsOpen(false)}

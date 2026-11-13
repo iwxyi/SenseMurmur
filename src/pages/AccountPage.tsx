@@ -553,6 +553,7 @@ export default function AccountPage() {
     { label: zh ? '角色数量' : 'Characters', value: quotaValue(membershipUsage.characters, membershipEntitlement.maxCharacters) },
     { label: zh ? '聊天数量' : 'Chats', value: quotaValue(membershipUsage.chats, membershipEntitlement.maxChats) },
     { label: zh ? '群成员上限' : 'Group member limit', value: membershipEntitlement.maxGroupMembers == null || membershipEntitlement.maxGroupMembers === -1 ? '-' : `${membershipEntitlement.maxGroupMembers}` },
+    { label: zh ? '后台会话上限' : 'Background conversation limit', value: `${membershipEntitlement.maxBackgroundConversations ?? 1}` },
     { label: zh ? '今日 AI 生成' : 'AI generations today', value: quotaValue(membership?.dailyAiGenerationUsage?.used || 0, membershipEntitlement.dailyAiGenerationLimit) },
     { label: zh ? '单次批量生成' : 'Batch generation per run', value: membershipEntitlement.batchGenerationLimit == null
       ? '-'

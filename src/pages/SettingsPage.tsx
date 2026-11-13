@@ -18,7 +18,6 @@ import {
   FormControlLabel,
   Switch,
   Tooltip,
-  MenuItem,
 } from '@mui/material';
 import CheckIcon from '@mui/icons-material/Check';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutlineOutlined';
@@ -68,7 +67,7 @@ import { SETTINGS_TAB_KEYS, buildSettingsPath, getSettingsTabForCard, resolveSet
 import { clearAllCachedSpeechPlayback } from '../services/speechPlaybackCache';
 import ChatReplyPreferencesSection from '../components/settings/ChatReplyPreferencesSection';
 import { normalizeChatReplyPreferences } from '../types/chatReplyPreferences';
-import { getBackgroundExecutionPreferences, setBackgroundExecutionMaxActiveConversations, subscribeBackgroundExecutionPreferences } from '../services/backgroundExecutionPreferences';
+import { getBackgroundExecutionPreferences, getMaxBackgroundConversationsEntitled, setBackgroundExecutionMaxActiveConversations, subscribeBackgroundExecutionPreferences } from '../services/backgroundExecutionPreferences';
 
 function buildPageSx(activeTab: SettingsTabKey) {
   return {
@@ -1581,7 +1580,9 @@ export default function SettingsPage() {
   });
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabKey>(() => resolveSettingsTab(new URLSearchParams(window.location.search).get('tab')));
   const [tabTransitionDirection, setTabTransitionDirection] = useState<-1 | 1>(1);
-  const [backgroundConcurrency, setBackgroundConcurrency] = useState(() => getBackgroundExecutionPreferences().maxActiveConversations);
+  const [backgroundConcurrency, setBackgroundConcurrency] = useState(() => String(getBackgroundExecutionPreferences().maxActiveConversations));
+  const [backgroundEntitlementLimit, setBackgroundEntitlementLimit] = useState(getMaxBackgroundConversationsEntitled);
+  const [backgroundEntitlementError, setBackgroundEntitlementError] = useState(false);
   const userBubbleStyle = useMemo(
     () => resolveCharacterBubbleStyle({
       bubbleStyle: settings.userBubbleStyle,
@@ -1662,10 +1663,28 @@ export default function SettingsPage() {
   }, [user?.id]);
 
   useEffect(() => {
-    const refreshBackgroundPreference = () => setBackgroundConcurrency(getBackgroundExecutionPreferences().maxActiveConversations);
+    const refreshBackgroundPreference = () => {
+      setBackgroundConcurrency(String(getBackgroundExecutionPreferences().maxActiveConversations));
+      setBackgroundEntitlementLimit(getMaxBackgroundConversationsEntitled());
+    };
     refreshBackgroundPreference();
     return subscribeBackgroundExecutionPreferences(refreshBackgroundPreference);
   }, [authMode, user?.id]);
+
+  useEffect(() => {
+    if (activeSettingsTab !== 'chat' || authMode !== 'cloud' || !user?.id) return undefined;
+    let cancelled = false;
+    setBackgroundEntitlementError(false);
+    void api.getMe().then((latestUser) => {
+      if (cancelled || useAuthStore.getState().user?.id !== latestUser.id) return;
+      return useAuthStore.getState().setUser(latestUser);
+    }).catch((error) => {
+      if (cancelled) return;
+      console.error('[background-execution:entitlement-refresh-failed]', error);
+      setBackgroundEntitlementError(true);
+    });
+    return () => { cancelled = true; };
+  }, [activeSettingsTab, authMode, user?.id]);
 
   useEffect(() => {
     if (authMode !== 'cloud' || developerEntitlementRefreshRequested) return;
@@ -2463,21 +2482,34 @@ export default function SettingsPage() {
 
         <SurfaceCard id="settings-card-background-execution" contentSx={buildCardBodySx()}>
           <Box sx={buildSectionBodySx()}>
-            <SectionHeader title={i18n.language.startsWith('zh') ? '后台运行' : 'Background execution'} subtitle={i18n.language.startsWith('zh') ? '限制同时运行的后台会话数量；调低上限不会中断当前任务。' : 'Limit concurrent background conversations. Lowering the limit does not interrupt active work.'} />
+            <SectionHeader title={i18n.language.startsWith('zh') ? '后台运行' : 'Background execution'} subtitle={i18n.language.startsWith('zh') ? '选择 0 后，离开聊天即停止自动会话。' : 'Choose 0 to stop automatic conversations when leaving chat.'} />
+            {typeof navigator.locks?.request !== 'function' ? <Typography variant="caption" color="text.secondary">
+              {i18n.language.startsWith('zh') ? '当前连接不支持安全的后台运行；聊天仅在页面打开时运行。' : 'This connection does not support safe background execution. Chats run only while their page is open.'}
+            </Typography> : null}
             <TextField
-              select
+              type="number"
               size="small"
               label={i18n.language.startsWith('zh') ? '最多同时运行' : 'Maximum active conversations'}
-              value={backgroundConcurrency}
-              onChange={(event) => {
-                const value = Number(event.target.value);
-                setBackgroundConcurrency(value);
-                setBackgroundExecutionMaxActiveConversations(value);
+              disabled={typeof navigator.locks?.request !== 'function'}
+              value={typeof navigator.locks?.request === 'function' ? backgroundConcurrency : '0'}
+              slotProps={{ htmlInput: { min: 0, max: backgroundEntitlementLimit, step: 1 } }}
+              onChange={(event) => setBackgroundConcurrency(event.target.value)}
+              onBlur={() => {
+                const value = Number(backgroundConcurrency);
+                if (backgroundConcurrency.trim() && Number.isSafeInteger(value) && value >= 0 && value <= backgroundEntitlementLimit) {
+                  setBackgroundExecutionMaxActiveConversations(value);
+                } else {
+                  setBackgroundConcurrency(String(getBackgroundExecutionPreferences().maxActiveConversations));
+                }
               }}
               sx={{ maxWidth: 260 }}
-            >
-              {[1, 2, 3].map((value) => <MenuItem key={value} value={value}>{i18n.language.startsWith('zh') ? `${value} 个会话` : `${value} conversation${value === 1 ? '' : 's'}`}</MenuItem>)}
-            </TextField>
+            />
+            {typeof navigator.locks?.request === 'function' ? <Typography variant="caption" color="text.secondary">
+              {i18n.language.startsWith('zh') ? `当前权益最多 ${backgroundEntitlementLimit} 个后台会话。` : `Your plan allows up to ${backgroundEntitlementLimit} background conversations.`}
+            </Typography> : null}
+            {backgroundEntitlementError ? <Typography variant="caption" color="error">
+              {i18n.language.startsWith('zh') ? '权益刷新失败，当前显示上次获取的上限。' : 'Could not refresh benefits. Showing the last known limit.'}
+            </Typography> : null}
           </Box>
         </SurfaceCard>
 

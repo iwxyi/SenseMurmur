@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getBackgroundExecutionSummary, scheduleBackgroundExecution, subscribeBackgroundExecution } from './backgroundExecutionScheduler';
 import { setBackgroundExecutionMaxActiveConversations } from './backgroundExecutionPreferences';
+import { useAuthStore } from '../stores/useAuthStore';
 
 function deferred() {
   let release!: () => void;
@@ -9,7 +10,22 @@ function deferred() {
 }
 
 describe('background execution scheduler', () => {
-  beforeEach(() => setBackgroundExecutionMaxActiveConversations(3));
+  beforeEach(() => {
+    useAuthStore.setState({ authMode: 'cloud', user: { id: 'scheduler-test', phone: '', nickname: '', avatar: '', maxBackgroundConversations: 10 } });
+    setBackgroundExecutionMaxActiveConversations(3);
+  });
+  it('rejects queued work when background conversations are switched off', async () => {
+    setBackgroundExecutionMaxActiveConversations(1);
+    const gate = deferred();
+    const first = scheduleBackgroundExecution('active-before-off', async () => { await gate.wait; });
+    const queued = scheduleBackgroundExecution('queued-before-off', async () => undefined);
+    setBackgroundExecutionMaxActiveConversations(0);
+    await expect(queued).rejects.toThrow('后台会话运行已关闭');
+    await expect(scheduleBackgroundExecution('after-off', async () => undefined)).rejects.toThrow('后台会话运行已关闭');
+    gate.release();
+    await first;
+    setBackgroundExecutionMaxActiveConversations(3);
+  });
   it('honors the concurrency preference and starts queued work when the limit increases', async () => {
     setBackgroundExecutionMaxActiveConversations(1);
     const firstGate = deferred();

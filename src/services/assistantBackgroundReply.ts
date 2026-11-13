@@ -1,7 +1,9 @@
 import type { Message } from '../types/message';
 import type { MessageBranchState } from '../types/chat';
 import { projectCurrentChatMessages, projectMergedChatMessages } from './currentChatMessages';
-import { buildBranchStateWithHead } from './messageBranching';
+import { attachMessageToActiveBranch, buildBranchStateWithHead, isMessageBranchingEnabled } from './messageBranching';
+import { advanceTeamConversation, captureTeamSourceBranch, teamConversationContext } from './agentTeamConversation';
+import { persistLocalFirstMessage } from './chatCommitMessage';
 import { getWorkspaceSignal } from './workspaceLifecycle';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
@@ -11,6 +13,11 @@ import { currentWorkflowScope } from './workflowRunRuntime';
 import { scheduleBackgroundExecution } from './backgroundExecutionScheduler';
 import { runWithConversationExecutionLock } from './conversationExecutionLock';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
+import { decideAssistantTaskRoute } from './assistantTeamIntent';
+import { readAuthSnapshot } from './authSnapshot';
+import { resolveChatAgentCapabilities } from './chatAgentCapabilities';
+import { assistantTeamFailureReply } from './assistantTeamProgress';
+import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
 
 interface AssistantReplyInput {
   chatId: string;
@@ -95,6 +102,14 @@ async function executeAssistantReplyUnlocked(task: WorkflowTask, signal: AbortSi
   if (committed) return { output: committed.id };
   const messages = allMessages.filter((message) => message.timestamp <= userMessage.timestamp);
   const settings = useSettingsStore.getState();
+  if (!input.branchRegeneration && !input.revisionOfNodeId && !input.selectedArtifactId
+    && !userMessage.metadata?.attachments?.length && !userMessage.metadata?.assistantHtmlSubmission
+    && resolveChatAgentCapabilities(chat).enabled
+    && (readAuthSnapshot().mode !== 'cloud' || readAuthSnapshot().user?.agentEntitled === true)) {
+    const route = await decideAssistantTaskRoute({ fallback: settings.api, profiles: settings.aiProfiles, messages, signal });
+    if (route.route === 'team') return { output: { route: 'team', userMessageId: userMessage.id, goal: route.goal,
+      sourceBranch: captureTeamSourceBranch(chat) } };
+  }
   const { runAssistantChatReplyFlow } = await import('./assistantChatFlow');
   const result = await runAssistantChatReplyFlow({
     api: settings.api,
@@ -239,6 +254,13 @@ async function runAssistantBackgroundReply(runId: string, chatId: string, comman
     const result = await scheduleBackgroundExecution(chatId, () => runWithConversationExecutionLock(scope, chatId,
       (signal) => assistantRuntime.resume(runId, signal, commandId), workspaceSignal), workspaceSignal, runId);
     publishRun();
+    const routedTeam = isRoutedTeamReply(result);
+    if (routedTeam) {
+      void continueRoutedTeamReply(result).catch((error) => {
+        console.error('[assistant-team:start-failed]', error);
+        publishRun();
+      });
+    }
     return { snapshot: result, summary: summarizeWorkflowRun(result) };
   } finally {
     activeRunIds.delete(runId);
@@ -248,6 +270,92 @@ async function runAssistantBackgroundReply(runId: string, chatId: string, comman
     publishActive();
     publishRun();
   }
+}
+
+function isRoutedTeamReply(result: WorkflowSnapshot) {
+  const output = result.tasks[0]?.output;
+  return Boolean(output && typeof output === 'object' && !Array.isArray(output) && 'route' in output && output.route === 'team');
+}
+
+async function continueRoutedTeamReply(result: WorkflowSnapshot) {
+  const output = result.tasks[0]?.output;
+  if (!output || typeof output !== 'object' || Array.isArray(output) || !('route' in output) || output.route !== 'team'
+    || !('goal' in output) || typeof output.goal !== 'string'
+    || !('userMessageId' in output) || typeof output.userMessageId !== 'string') return;
+  const { runAgentTeam } = await import('./agentTeamWorkflow');
+  const sourceBranch = (() => {
+    if ('sourceBranch' in output && output.sourceBranch && typeof output.sourceBranch === 'object'
+      && 'enabled' in output.sourceBranch && typeof output.sourceBranch.enabled === 'boolean'
+      && 'name' in output.sourceBranch && typeof output.sourceBranch.name === 'string'
+      && 'headNodeId' in output.sourceBranch
+      && (output.sourceBranch.headNodeId === null || typeof output.sourceBranch.headNodeId === 'string')) {
+      return { enabled: output.sourceBranch.enabled, name: output.sourceBranch.name, headNodeId: output.sourceBranch.headNodeId };
+    }
+    const input = result.tasks[0]?.input;
+    if (!isAssistantReplyInput(input)) return undefined;
+    const state = input.branchRegeneration?.rewoundState;
+    const chat = useChatStore.getState().chats.find((item) => item.id === result.run.chatId);
+    if (!chat || !isMessageBranchingEnabled(chat)) return undefined;
+    const branchName = state?.activeBranchName || chat.messageBranchState?.activeBranchName || 'main';
+    const headNodeId = input.expectedBranchLeafNodeId ?? state?.activeLeafNodeId ?? null;
+    return headNodeId ? { enabled: true, name: branchName, headNodeId } : undefined;
+  })();
+  const messageId = `assistant-team-start-${output.userMessageId}`;
+  const messageStore = useMessageStore.getState();
+  const known = projectMergedChatMessages({ chatId: result.run.chatId,
+    activeMessages: messageStore.messages.filter((message) => message.chatId === result.run.chatId),
+    cachedWindow: messageStore.messageWindowsByChatId[result.run.chatId] });
+  if (!known.some((message) => message.clientKey === messageId || message.metadata?.assistantReplyToUserMessageId === output.userMessageId)) {
+    const chat = useChatStore.getState().chats.find((item) => item.id === result.run.chatId);
+    if (!chat || chat.deletedAt != null) throw new Error('助手会话已删除，无法启动团队任务');
+    const userMessage = known.find((message) => message.id === output.userMessageId);
+    if (!userMessage || userMessage.isDeleted) throw new Error('原始用户消息已删除，无法启动团队任务');
+    const draft = attachMessageToActiveBranch(teamConversationContext(chat, { sourceBranch }), known, {
+      id: messageId, clientKey: messageId, chatId: result.run.chatId, type: 'ai', senderId: 'assistant', senderName: '助手',
+      content: '我会根据目标组织所需的步骤和协作角色。任务已交给后台执行，进度可在团队工作台查看。',
+      emotion: 0, timestamp: Math.max(Date.now(), userMessage.timestamp + 1), isDeleted: false,
+      metadata: { format: 'markdown', assistant: { mode: 'general' }, assistantReplyToUserMessageId: userMessage.id,
+        assistantReplyRunId: result.run.id },
+    });
+    const created = await persistLocalFirstMessage({ message: draft, upsertMessage: (message) => useMessageStore.getState().upsertMessage(message),
+      localMessageIdentitySalt: messageId, timestamp: draft.timestamp });
+    if (chat.messageBranchState?.enabled) await advanceTeamConversation(created, sourceBranch);
+    await useChatStore.getState().updateChat(chat.id, { lastMessageAt: created.timestamp, latestMessage: created });
+  }
+  try {
+    const teamResult = await runAgentTeam({ chatId: result.run.chatId, goal: output.goal, sourceMessageId: output.userMessageId,
+      ...(sourceBranch ? { goalSpec: { ...defaultWorkflowGoalSpec(output.goal), sourceBranch } } : {}) });
+    if (teamResult.snapshot.run.status === 'failed') {
+      const failedTask = teamResult.snapshot.tasks.find((task) => task.status === 'failed' || task.status === 'result_unknown');
+      await persistRoutedTeamFailure(teamResult.snapshot, output.userMessageId,
+        failedTask?.error || '团队规划失败，未能生成可执行的计划。');
+    }
+  } catch (error) {
+    await persistRoutedTeamFailure(result, output.userMessageId, error instanceof Error ? error.message : '团队任务启动失败', sourceBranch);
+    throw error;
+  }
+}
+
+async function persistRoutedTeamFailure(snapshot: WorkflowSnapshot, userMessageId: string, reason: string, sourceBranch = snapshot.run.goalSpec?.sourceBranch) {
+  const messageId = `assistant-team-result-${userMessageId}`;
+  const state = useMessageStore.getState();
+  const known = projectMergedChatMessages({ chatId: snapshot.run.chatId,
+    activeMessages: state.messages.filter((message) => message.chatId === snapshot.run.chatId),
+    cachedWindow: state.messageWindowsByChatId[snapshot.run.chatId] });
+  if (known.some((message) => message.metadata?.assistantTeamFinal && message.metadata.assistantReplyToUserMessageId === userMessageId)) return;
+  const chat = useChatStore.getState().chats.find((item) => item.id === snapshot.run.chatId);
+  const userMessage = known.find((message) => message.id === userMessageId);
+  if (!chat || chat.deletedAt != null || !userMessage || userMessage.isDeleted) return;
+  const draft = attachMessageToActiveBranch(teamConversationContext(chat, { sourceBranch }), known, {
+    id: messageId, clientKey: messageId, chatId: snapshot.run.chatId, type: 'ai', senderId: 'assistant', senderName: '助手',
+    content: assistantTeamFailureReply(reason), emotion: 0, timestamp: Math.max(Date.now(), userMessage.timestamp + 1), isDeleted: false,
+    metadata: { format: 'markdown', assistant: { mode: 'general' }, assistantReplyToUserMessageId: userMessageId,
+      assistantReplyRunId: snapshot.run.id, assistantTeamFinal: true },
+  });
+  const saved = await persistLocalFirstMessage({ message: draft, upsertMessage: (message) => useMessageStore.getState().upsertMessage(message),
+    localMessageIdentitySalt: messageId, timestamp: draft.timestamp });
+  if (chat.messageBranchState?.enabled) await advanceTeamConversation(saved, sourceBranch);
+  await useChatStore.getState().updateChat(chat.id, { lastMessageAt: saved.timestamp, latestMessage: saved });
 }
 
 export async function recoverAssistantBackgroundReplies() {
@@ -277,12 +385,23 @@ export async function recoverAssistantBackgroundReplies() {
     if (interrupted) recovered.push(interrupted);
   }
   if (recovered.length) publishRun();
+  const routed = (await assistantRuntime.list()).filter((item) => item.run.status === 'completed' && isRoutedTeamReply(item));
+  for (const item of routed) {
+    if (!useChatStore.getState().chats.some((chat) => chat.id === item.run.chatId && chat.type === 'assistant' && chat.deletedAt == null)) continue;
+    const output = item.tasks[0]?.output;
+    if (!output || typeof output !== 'object' || Array.isArray(output) || !('userMessageId' in output) || typeof output.userMessageId !== 'string') continue;
+    const teamId = `team-${output.userMessageId}`;
+    const existing = await indexedDbWorkflowRepository.read(currentWorkflowScope(), teamId);
+    if (existing) continue;
+    try { await continueRoutedTeamReply(item); }
+    catch (error) { console.error('[assistant-team:recovery-start-failed]', error); }
+  }
   return recovered.map((item) => ({ ...item, summary: summarizeWorkflowRun(item) }));
 }
 
 export async function listAssistantBackgroundReplies(chatId?: string) {
   const runs = await assistantRuntime.list();
-  return runs.filter((item) => item.tasks[0]?.kind === 'assistant_reply' && (!chatId || item.run.chatId === chatId));
+  return runs.filter((item) => item.tasks[0]?.kind === 'assistant_reply' && !isRoutedTeamReply(item) && (!chatId || item.run.chatId === chatId));
 }
 
 async function reconcileCommittedAssistantReply(runId: string) {
@@ -326,7 +445,11 @@ export async function resumeAssistantBackgroundReply(runId: string, commandId: s
   if (!activeRunIds.has(runId)) await reconcileCommittedAssistantReply(runId);
   const run = await assistantRuntime.read(runId);
   if (!run) throw new Error('助手任务不存在');
-  if (run.run.status === 'cancelled' || run.run.status === 'completed') return { snapshot: run, summary: summarizeWorkflowRun(run) };
+  if (run.run.status === 'completed') {
+    await continueRoutedTeamReply(run);
+    return { snapshot: run, summary: summarizeWorkflowRun(run) };
+  }
+  if (run.run.status === 'cancelled') return { snapshot: run, summary: summarizeWorkflowRun(run) };
   if (run.tasks.some((task) => task.status === 'result_unknown')) {
     return { snapshot: run, summary: summarizeWorkflowRun(run) };
   }

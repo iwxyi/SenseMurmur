@@ -18,6 +18,7 @@ import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope'
 import { createWorkflowRunRuntime, currentWorkflowScope, indexedDbWorkflowRepository, workflowRunLockName, WorkflowPreflightError, type WorkflowSnapshot, type WorkflowTask } from './workflowRunRuntime';
 import { getStoryChoiceGateState } from './storyChoices';
 import { resolveSessionFamilyKey } from './sessionEngineKeys';
+import { canContinueConversationsInBackground, subscribeBackgroundExecutionPreferences } from './backgroundExecutionPreferences';
 
 const active = new Map<string, Promise<void>>();
 const starting = new Map<string, Promise<void>>();
@@ -168,7 +169,7 @@ function waitsForReaderOrLearner(chat: GroupChat) {
 }
 
 async function startBackgroundConversationOnce(chatId: string, type: 'group' | 'ai_direct') {
-  if (!navigator.locks?.request) throw new Error('此设备不支持安全的会话后台运行');
+  if (!canContinueConversationsInBackground()) throw new Error('会话后台运行未启用或当前连接不支持');
   const runId = type === 'group' ? groupConversationRunId(chatId) : aiDirectConversationRunId(chatId);
   const running = active.get(runId);
   if (running) {
@@ -214,6 +215,7 @@ export function startGroupBackgroundConversation(chatId: string) { return startB
 export function startAiDirectBackgroundConversation(chatId: string) { return startBackgroundConversation(chatId, 'ai_direct'); }
 
 async function resumeBackgroundConversation(chatId: string, type: 'group' | 'ai_direct') {
+  if (!canContinueConversationsInBackground()) throw new Error('会话后台运行未启用或当前连接不支持');
   const runId = type === 'group' ? groupConversationRunId(chatId) : aiDirectConversationRunId(chatId);
   const existing = active.get(runId);
   if (existing) return existing;
@@ -321,3 +323,15 @@ export async function recoverGroupBackgroundConversations() {
   }
   publish();
 }
+
+subscribeBackgroundExecutionPreferences(() => {
+  if (canContinueConversationsInBackground()) return;
+  for (const snapshotId of active.keys()) {
+    const chatId = snapshotId.startsWith('group-conversation-')
+      ? snapshotId.slice('group-conversation-'.length)
+      : snapshotId.slice('ai-direct-conversation-'.length);
+    const pause = snapshotId.startsWith('group-conversation-')
+      ? pauseGroupBackgroundConversation : pauseAiDirectBackgroundConversation;
+    void pause(chatId).catch((error) => console.error('[conversation-background:pause-failed]', error));
+  }
+});

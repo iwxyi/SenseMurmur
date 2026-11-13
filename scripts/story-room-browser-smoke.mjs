@@ -266,7 +266,7 @@ const seedStoryRoomExpression = String.raw`
     };
   });
   await new Promise((resolve, reject) => {
-    const request = indexedDB.open('pneumata-workflow-runs', 5);
+    const request = indexedDB.open('pneumata-workflow-runs', 6);
     request.onupgradeneeded = () => {
       const database = request.result;
       if (!database.objectStoreNames.contains('runs')) database.createObjectStore('runs');

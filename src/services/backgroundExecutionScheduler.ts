@@ -32,6 +32,14 @@ export function getBackgroundExecutionSummary() {
 }
 
 function pump() {
+  if (getBackgroundExecutionPreferences().maxActiveConversations === 0) {
+    for (const item of queue.splice(0)) {
+      if (item.onAbort) item.signal?.removeEventListener('abort', item.onAbort);
+      item.reject(new Error('后台会话运行已关闭'));
+    }
+    publish();
+    return;
+  }
   while (activeCount < getBackgroundExecutionPreferences().maxActiveConversations) {
     let index = -1;
     let oldestDispatch = Number.POSITIVE_INFINITY;
@@ -80,6 +88,7 @@ function pump() {
 
 export function scheduleBackgroundExecution<T>(chatId: string, run: () => Promise<T>, signal?: AbortSignal, workId?: string): Promise<T> {
   if (!chatId) return Promise.reject(new Error('后台任务缺少会话'));
+  if (getBackgroundExecutionPreferences().maxActiveConversations === 0) return Promise.reject(new Error('后台会话运行已关闭'));
   if (signal?.aborted) return Promise.reject(signal.reason || new Error('任务已取消'));
   if (workId) {
     const scheduled = scheduledWorkById.get(workId);

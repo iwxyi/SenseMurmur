@@ -23,6 +23,7 @@ import { readSessionLoopContinuation, writeSessionLoopContinuation } from '../se
 import { runWithConversationExecutionLock } from '../services/conversationExecutionLock';
 import { resolveSessionFamilyKey } from '../services/sessionEngineKeys';
 import { isBackgroundConversationActive } from '../services/groupBackgroundConversation';
+import { canContinueConversationsInBackground } from '../services/backgroundExecutionPreferences';
 
 export type ConversationLoopStartBlockReason = 'direct_chat' | 'waiting_story_choice' | 'already_active';
 type ConversationLoopStartOptions = { ignoreReaderPositionOnce?: boolean; immediate?: boolean; allowDirect?: boolean };
@@ -541,7 +542,8 @@ export function useChatRunLoop(params: {
     const isStoryReader = conversationChat.sessionKind?.scenarioId === 'story-reader';
     const canRunStoryInBackground = !isStoryReader || options.ignoreReaderPositionOnce
       || Boolean(current.isStoryReaderAtTail?.());
-    if (usesPersistentConversationExecution(conversationChat) && canRunStoryInBackground) {
+    if (usesPersistentConversationExecution(conversationChat) && canRunStoryInBackground
+      && canContinueConversationsInBackground()) {
       const token = `background-group-${conversationChat.id}`;
       current.loopTokenRef.current = token;
       current.activeChatIdRef.current = conversationChat.id;
@@ -622,7 +624,8 @@ export function useChatRunLoop(params: {
     setIsWaitingForInput(false);
     const current = paramsRef.current;
     const loopToken = current.loopTokenRef.current;
-    if (current.chat && usesPersistentConversationExecution(current.chat)) {
+    if (current.chat && loopToken?.startsWith('background-group-')
+      && usesPersistentConversationExecution(current.chat)) {
       void import('../services/groupBackgroundConversation')
         .then((service) => current.chat?.type === 'ai_direct'
           ? service.pauseAiDirectBackgroundConversation(current.chat.id)

@@ -7,7 +7,7 @@ import type { WorkflowToolInvocation } from '../../services/workflowToolInvocati
 
 const invocationLabels: Record<WorkflowModelInvocation['state'], string> = {
   reserved: '等待调用模型', started: '模型请求已开始', succeeded: '模型请求已完成',
-  failed: '模型调用后处理失败', result_unknown: '模型结果待核对', not_started: '未调用模型',
+  failed: '模型调用或结果校验失败', result_unknown: '模型结果待核对', not_started: '未调用模型',
   rejected: '请求因预算限制未获受理',
 };
 const toolInvocationLabels: Record<WorkflowToolInvocation['state'], string> = {

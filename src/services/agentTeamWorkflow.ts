@@ -21,6 +21,8 @@ import { readAuthSnapshot } from './authSnapshot';
 import { getWorkspaceSignal } from './workspaceLifecycle';
 import { scheduleBackgroundExecution } from './backgroundExecutionScheduler';
 import { runWithConversationExecutionLock } from './conversationExecutionLock';
+import { assertWorkflowCheckpointCurrent, pullNewWorkflowCheckpoint, pushWorkflowCheckpoint } from './workflowCheckpoint';
+import { isCloudSyncEnabled } from './cloudSyncPreference';
 import { assertChatExecutionLease } from './chatExecutionLease';
 import { getChatExecutionFence } from './chatExecutionFence';
 import { api as appApi } from './api';
@@ -31,6 +33,7 @@ import { inspectAgentTeamImages } from './agentTeamImageInspection';
 import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
 import { listAvailableModels, prepareAiMediaTask } from './aiClient';
 import { TEAM_SPEECH_TEXT_LIMIT } from './teamSpeechLimit';
+import { resolveTeamVideoProfile } from './teamVideoProfile';
 import type { WorkflowApprovalRequirement } from './workflowApproval';
 import { resolveVideoGenerationParameters } from './aiGenerationAdapter';
 import { canComposeTeamMedia, composeAgentTeamMedia, inspectAgentTeamComposition, teamMediaAttachment } from './agentTeamMediaComposition';
@@ -80,7 +83,7 @@ async function teamMediaCapabilities() {
     imageInspection: Boolean(textProfile && resolveAIModelInputCapabilities(textProfile).imageInput),
     videoInspection: Boolean(typeof document !== 'undefined' && textProfile && resolveAIModelInputCapabilities(textProfile).imageInput),
     mediaComposition: canComposeTeamMedia() };
-  const videoProfile = getUsablePreferredAIProfile(profiles, 'video');
+  const videoProfile = await resolveTeamVideoProfile();
   if (!videoProfile) return { ...media, videoGeneration: false, videoReferenceImages: false, videoRequiresReferenceImage: false, maxVideoReferenceImages: 0, videoUnavailableReason: '当前未配置视频模型' };
   let videoReferenceImages = false;
   let videoRequiresReferenceImage = false;
@@ -395,14 +398,17 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
   const runtime: ReturnType<typeof createWorkflowRunRuntime> = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
     tracksModelInvocations: true,
     tracksToolInvocations: true,
+    async checkpoint(runId) {
+      if (readAuthSnapshot().mode === 'cloud' && isCloudSyncEnabled()) await pushWorkflowCheckpoint(scope(), runId);
+    },
     approvalRequirement,
     async prepareApprovalRequirement(task, snapshot, requirement, signal) {
       if (requirement.mediaExecution || !isTeamTaskInput(task.input)
         || !['image_generation', 'audio_generation', 'video_generation'].includes(task.input.task.tool || '')) return requirement;
       const image = task.input.task.tool === 'image_generation';
       const video = task.input.task.tool === 'video_generation';
-      const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, image ? 'image' : video ? 'video' : 'audio');
-      if (!profile || profile.provider !== 'official-ace') return requirement;
+      const profile = video ? await resolveTeamVideoProfile() : getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, image ? 'image' : 'audio');
+      if (!profile || (profile.provider !== 'official-ace' && profile.provider !== 'official-acedata')) return requirement;
       if (task.input.task.savedText?.some((reference) => reference.artifact)) await ensureAssistantArtifactStoreHydrated();
       const savedText = resolveTeamSavedText(task.input.task, snapshot, task.input.contextTaskIds || [], useAssistantArtifactStore.getState().items);
       const content = savedText.map((entry) => entry.content);
@@ -710,7 +716,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           || workflowJsonDigest(mediaExecution.request.image_urls ?? []) !== workflowJsonDigest(referenceImages.map((item) => item.url)))) {
           throw new WorkflowPreflightError('视频素材或要求已改变，请重新确认审批');
         }
-        const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video');
+        const profile = await resolveTeamVideoProfile();
         if (!profile) throw new WorkflowPreflightError('视频模型未配置', { tool: 'video_generation', code: 'model_missing' });
         await context.beginToolInvocation(describeWorkflowToolRequest('video_generation', { prompt, referenceImages }));
         return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
@@ -972,7 +978,10 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       };
       const existing = await runtime.read(runId);
       if (scope() !== storageScope) throw new Error('账号已切换，任务创建已停止');
-      if (!existing) await runtime.create(initial);
+      if (!existing) {
+        await runtime.create(initial);
+        notifyTeam();
+      }
       if (scope() !== storageScope) throw new Error('账号已切换，任务创建已停止');
       if (initialBudget && !existing) {
         signal.throwIfAborted();
@@ -1341,6 +1350,27 @@ export async function listAgentTeamRuns(chatId?: string) {
   return runs.filter((item) => item.tasks[0]?.kind === 'team_plan' && (!chatId || item.run.chatId === chatId));
 }
 
+export async function listRemoteAgentTeamRuns(chatId: string) {
+  const auth = readAuthSnapshot();
+  if (auth.mode !== 'cloud' || !isCloudSyncEnabled()) return [];
+  const scope = currentWorkflowScope();
+  const localIds = new Set((await indexedDbWorkflowRepository.list(scope)).map((item) => item.run.id));
+  const remote = await appApi.listWorkflowCheckpoints(chatId);
+  return remote.items.filter((item) => !localIds.has(item.runId));
+}
+
+export async function importRemoteAgentTeamRun(chatId: string, runId: string) {
+  const auth = readAuthSnapshot();
+  if (auth.mode !== 'cloud' || !isCloudSyncEnabled()) throw new Error('请先启用云同步');
+  const scope = currentWorkflowScope();
+  const snapshot = await runWithConversationExecutionLock(scope, chatId, async () => {
+    if (currentWorkflowScope() !== scope) throw new Error('账号已切换，不能接管团队任务');
+    return pullNewWorkflowCheckpoint(scope, runId, chatId);
+  }, getWorkspaceSignal());
+  notifyTeam();
+  return snapshot;
+}
+
 export function isRecoverableAgentTeamRun(snapshot: WorkflowSnapshot) {
   return snapshot.run.status === 'paused'
     && !workflowGoalBlockReason(snapshot.run.goalSpec)
@@ -1351,7 +1381,7 @@ export function isRecoverableAgentTeamRun(snapshot: WorkflowSnapshot) {
     && snapshot.tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency' || task.status === 'waiting_external');
 }
 
-export async function runAgentTeam(params: { chatId: string; goal: string; runId?: string; maxModelCalls?: number; goalSpec?: WorkflowGoalSpec;
+export async function runAgentTeam(params: { chatId: string; goal: string; runId?: string; sourceMessageId?: string; maxModelCalls?: number; goalSpec?: WorkflowGoalSpec;
   initialBudget?: { limitAmount: string; billingUnit: string } }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
@@ -1360,7 +1390,7 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
   if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务执行');
   const originalScope = currentWorkflowScope();
   if (activeTeamRuns.has(params.runId || '')) throw new Error('团队任务正在执行');
-  const runId = params.runId || `team-${crypto.randomUUID()}`;
+  const runId = params.runId || (params.sourceMessageId ? `team-${params.sourceMessageId}` : `team-${crypto.randomUUID()}`);
   activeTeamRuns.add(runId);
   notifyTeam();
   try {
@@ -1368,9 +1398,24 @@ export async function runAgentTeam(params: { chatId: string; goal: string; runId
     return await scheduleBackgroundExecution(params.chatId, () => runWithConversationExecutionLock(originalScope, params.chatId, async (signal) => {
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队任务已暂停');
       const workflow = currentTeamWorkflow();
-      const result = params.runId ? await workflow.resume(runId, signal) : await workflow.start(runId, params.chatId, params.goal, true, signal, params.maxModelCalls, params.goalSpec, params.initialBudget);
+      const cloudCheckpoint = auth.mode === 'cloud' && isCloudSyncEnabled();
+      if (params.runId && !await workflow.read(runId)) {
+        if (!cloudCheckpoint) throw new Error('本机团队任务不存在');
+        await pullNewWorkflowCheckpoint(originalScope, runId, params.chatId);
+      }
+      if (cloudCheckpoint && params.runId) await assertWorkflowCheckpointCurrent(originalScope, runId, params.chatId);
+      let result: Awaited<ReturnType<typeof workflow.resume>> | Awaited<ReturnType<typeof workflow.start>>;
+      try {
+        result = params.runId ? await workflow.resume(runId, signal)
+          : await workflow.start(runId, params.chatId, params.goal, true, signal, params.maxModelCalls, params.goalSpec, params.initialBudget);
+      } finally {
+        if (cloudCheckpoint && currentWorkflowScope() === originalScope && await workflow.read(runId)) {
+          await pushWorkflowCheckpoint(originalScope, runId);
+        }
+      }
       if (currentWorkflowScope() !== originalScope || getWorkspaceSignal().aborted) throw new Error('账号已切换，团队交付已暂停');
       if (result.snapshot.run.status === 'completed') await workflow.publish(runId);
+      if (cloudCheckpoint) await pushWorkflowCheckpoint(originalScope, runId);
       return result;
     }, workspaceSignal), workspaceSignal, runId);
   } finally {
@@ -1396,13 +1441,27 @@ export function isAgentTeamRunActive(runId: string) { return activeTeamRuns.has(
 
 export function hasActiveAgentTeamRuns() { return activeTeamRuns.size > 0; }
 
+async function changeAgentTeamRun<T>(runId: string, change: () => Promise<T>): Promise<T> {
+  const scope = currentWorkflowScope();
+  const current = await indexedDbWorkflowRepository.read(scope, runId);
+  if (!current || current.tasks[0]?.kind !== 'team_plan') throw new Error('团队任务不存在');
+  const cloudCheckpoint = readAuthSnapshot().mode === 'cloud' && isCloudSyncEnabled();
+  if (!cloudCheckpoint) return change();
+  return runWithConversationExecutionLock(scope, current.run.chatId, async () => {
+    if (currentWorkflowScope() !== scope) throw new Error('账号已切换，任务修改已停止');
+    await assertWorkflowCheckpointCurrent(scope, runId, current.run.chatId);
+    try { return await change(); }
+    finally { await pushWorkflowCheckpoint(scope, runId); }
+  }, getWorkspaceSignal());
+}
+
 export async function pauseAgentTeamAfterCurrentBatch(runId: string) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
   const workflow = currentTeamWorkflow();
   const run = await workflow.read(runId);
   if (!run || run.tasks[0]?.kind !== 'team_plan') throw new Error('团队任务不存在');
-  const result = await workflow.requestPauseAfterCurrentBatch(runId);
+  const result = await changeAgentTeamRun(runId, () => workflow.requestPauseAfterCurrentBatch(runId));
   notifyTeam();
   return result;
 }
@@ -1410,7 +1469,7 @@ export async function pauseAgentTeamAfterCurrentBatch(runId: string) {
 export async function updateAgentTeamModelCallLimit(params: { runId: string; expectedPlanVersion: number; maxModelCalls?: number }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  const result = await currentTeamWorkflow().setModelCallLimit(params.runId, params.expectedPlanVersion, params.maxModelCalls);
+  const result = await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().setModelCallLimit(params.runId, params.expectedPlanVersion, params.maxModelCalls));
   notifyTeam();
   return result;
 }
@@ -1418,7 +1477,7 @@ export async function updateAgentTeamModelCallLimit(params: { runId: string; exp
 export async function updateAgentTeamDeadline(params: { runId: string; expectedPlanVersion: number; deadlineAt?: number }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  const result = await currentTeamWorkflow().setDeadline(params.runId, params.expectedPlanVersion, params.deadlineAt);
+  const result = await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().setDeadline(params.runId, params.expectedPlanVersion, params.deadlineAt));
   notifyTeam();
   return result;
 }
@@ -1427,21 +1486,21 @@ export async function updateAgentTeamPlatformBudget(params: { runId: string; exp
   limitAmount: string; billingUnit: string; expectedRevision: number }) {
   const auth = readAuthSnapshot();
   if (auth.mode !== 'cloud' || auth.user?.agentEntitled !== true) throw new Error('当前账号没有平台 Agent 权限');
-  try { return await currentTeamWorkflow().setPlatformBudget(params.runId, params.expectedPlanVersion, params); }
+  try { return await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().setPlatformBudget(params.runId, params.expectedPlanVersion, params)); }
   finally { notifyTeam(); }
 }
 
 export async function saveAgentTeamDeliveryCopy(params: { runId: string; expectedPlanVersion: number }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  try { return await currentTeamWorkflow().publish(params.runId, params.expectedPlanVersion); }
+  try { return await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().publish(params.runId, params.expectedPlanVersion)); }
   finally { notifyTeam(); }
 }
 
 export async function answerAgentTeamUserInput(params: { runId: string; taskId: string; expectedPlanVersion: number; answer: string }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  const result = await currentTeamWorkflow().answerUserInput(params.runId, params.taskId, params.expectedPlanVersion, params.answer);
+  const result = await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().answerUserInput(params.runId, params.taskId, params.expectedPlanVersion, params.answer));
   notifyTeam();
   return result;
 }
@@ -1449,7 +1508,7 @@ export async function answerAgentTeamUserInput(params: { runId: string; taskId: 
 export async function decideAgentTeamApproval(params: { runId: string; taskId: string; expectedPlanVersion: number; outcome: 'approved' | 'rejected' }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  const result = await currentTeamWorkflow().decideApproval(params.runId, params.taskId, params.expectedPlanVersion, params.outcome);
+  const result = await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().decideApproval(params.runId, params.taskId, params.expectedPlanVersion, params.outcome));
   notifyTeam();
   return result;
 }
@@ -1457,7 +1516,7 @@ export async function decideAgentTeamApproval(params: { runId: string; taskId: s
 export async function instructAgentTeamTask(params: { runId: string; taskId: string; expectedPlanVersion: number; instruction: string }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  const result = await currentTeamWorkflow().instructQueuedTask(params.runId, params.taskId, params.expectedPlanVersion, params.instruction);
+  const result = await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().instructQueuedTask(params.runId, params.taskId, params.expectedPlanVersion, params.instruction));
   notifyTeam();
   return result;
 }
@@ -1465,7 +1524,7 @@ export async function instructAgentTeamTask(params: { runId: string; taskId: str
 export async function delegateAgentTeamTask(params: { runId: string; expectedPlanVersion: number; request: string; targetTaskId?: string }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  const result = await currentTeamWorkflow().addRevisionRequest(params.runId, params.expectedPlanVersion, params.request, params.targetTaskId);
+  const result = await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().addRevisionRequest(params.runId, params.expectedPlanVersion, params.request, params.targetTaskId));
   notifyTeam();
   return result;
 }
@@ -1473,7 +1532,7 @@ export async function delegateAgentTeamTask(params: { runId: string; expectedPla
 export async function abandonAgentTeamReview(params: { runId: string; reviewId: string; expectedPlanVersion: number }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  const result = await currentTeamWorkflow().abandonUnknownReview(params.runId, params.reviewId, params.expectedPlanVersion);
+  const result = await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().abandonUnknownReview(params.runId, params.reviewId, params.expectedPlanVersion));
   notifyTeam();
   return result;
 }
@@ -1481,7 +1540,7 @@ export async function abandonAgentTeamReview(params: { runId: string; reviewId: 
 export async function retryAgentTeamReview(params: { runId: string; reviewId: string; expectedPlanVersion: number }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  const result = await currentTeamWorkflow().retryFailedReview(params.runId, params.reviewId, params.expectedPlanVersion);
+  const result = await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().retryFailedReview(params.runId, params.reviewId, params.expectedPlanVersion));
   notifyTeam();
   return result;
 }
@@ -1489,7 +1548,7 @@ export async function retryAgentTeamReview(params: { runId: string; reviewId: st
 export async function retryAgentTeamTask(params: { runId: string; taskId: string; expectedPlanVersion: number }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  const result = await currentTeamWorkflow().retryFailedTask(params.runId, params.taskId, params.expectedPlanVersion);
+  const result = await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().retryFailedTask(params.runId, params.taskId, params.expectedPlanVersion));
   notifyTeam();
   return result;
 }

@@ -86,6 +86,7 @@ type VipEntitlementForm = {
   maxCharacters: string;
   maxChats: string;
   maxGroupMembers: string;
+  maxBackgroundConversations: string;
   dailyAiGenerationLimit: string;
   batchGenerationLimit: string;
   officialProviderAccessText: string;
@@ -220,6 +221,7 @@ const DEFAULT_VIP_ENTITLEMENTS: Record<string, VipEntitlementForm> = {
     maxCharacters: '10',
     maxChats: '30',
     maxGroupMembers: '10',
+    maxBackgroundConversations: '1',
     dailyAiGenerationLimit: '3',
     batchGenerationLimit: '3',
     officialProviderAccessText: 'official-1',
@@ -245,6 +247,7 @@ const DEFAULT_VIP_ENTITLEMENTS: Record<string, VipEntitlementForm> = {
     maxCharacters: '50',
     maxChats: '200',
     maxGroupMembers: '15',
+    maxBackgroundConversations: '3',
     dailyAiGenerationLimit: '20',
     batchGenerationLimit: '10',
     officialProviderAccessText: 'official-1\nofficial-2',
@@ -270,6 +273,7 @@ const DEFAULT_VIP_ENTITLEMENTS: Record<string, VipEntitlementForm> = {
     maxCharacters: '500',
     maxChats: '2000',
     maxGroupMembers: '20',
+    maxBackgroundConversations: '5',
     dailyAiGenerationLimit: '100',
     batchGenerationLimit: '30',
     officialProviderAccessText: 'official-1\nofficial-2\nofficial-team',
@@ -295,6 +299,7 @@ const DEFAULT_VIP_ENTITLEMENTS: Record<string, VipEntitlementForm> = {
     maxCharacters: '500',
     maxChats: '2000',
     maxGroupMembers: '30',
+    maxBackgroundConversations: '10',
     dailyAiGenerationLimit: '100',
     batchGenerationLimit: '30',
     officialProviderAccessText: 'official-1\nofficial-2\nofficial-team\nofficial-4',
@@ -558,6 +563,7 @@ function toEntitlementForm(value: unknown, fallback: VipEntitlementForm): VipEnt
     maxCharacters: hasOwnRecordValue(record, 'maxCharacters') ? limitText(record.maxCharacters, fallback.maxCharacters) : fallback.maxCharacters,
     maxChats: hasOwnRecordValue(record, 'maxChats') ? limitText(record.maxChats, fallback.maxChats) : fallback.maxChats,
     maxGroupMembers: hasOwnRecordValue(record, 'maxGroupMembers') ? limitText(record.maxGroupMembers, fallback.maxGroupMembers) : fallback.maxGroupMembers,
+    maxBackgroundConversations: hasOwnRecordValue(record, 'maxBackgroundConversations') ? limitText(record.maxBackgroundConversations, fallback.maxBackgroundConversations) : fallback.maxBackgroundConversations,
     dailyAiGenerationLimit: hasOwnRecordValue(record, 'dailyAiGenerationLimit') ? limitText(record.dailyAiGenerationLimit, fallback.dailyAiGenerationLimit) : fallback.dailyAiGenerationLimit,
     batchGenerationLimit: hasOwnRecordValue(record, 'batchGenerationLimit') ? limitText(record.batchGenerationLimit, fallback.batchGenerationLimit) : fallback.batchGenerationLimit,
     officialProviderAccessText: providerAccess,
@@ -612,6 +618,7 @@ function buildEntitlementPayload(form: VipEntitlementForm, allowedProviderIds?: 
     maxCharacters: parseLimitValue(form.maxCharacters),
     maxChats: parseLimitValue(form.maxChats),
     maxGroupMembers: parseLimitValue(form.maxGroupMembers),
+    maxBackgroundConversations: Math.max(1, Math.min(10, toNumber(form.maxBackgroundConversations, 1))),
     dailyAiGenerationLimit: parseLimitValue(form.dailyAiGenerationLimit),
     batchGenerationLimit: parseLimitValue(form.batchGenerationLimit),
     officialProviderAccess: filterAllowedProviderAccess(parseProviderAccessText(form.officialProviderAccessText), allowedProviderIds),
@@ -897,6 +904,7 @@ function EntitlementEditor({
         <TextField label="角色上限" value={entitlement.maxCharacters} onChange={(event) => onEntitlementChange('maxCharacters', event.target.value)} fullWidth />
         <TextField label="聊天上限" value={entitlement.maxChats} onChange={(event) => onEntitlementChange('maxChats', event.target.value)} fullWidth />
         <TextField label="群成员上限" value={entitlement.maxGroupMembers} onChange={(event) => onEntitlementChange('maxGroupMembers', event.target.value)} fullWidth />
+        <TextField label="后台会话上限" type="number" slotProps={{ htmlInput: { min: 1, max: 10, step: 1 } }} value={entitlement.maxBackgroundConversations} onChange={(event) => onEntitlementChange('maxBackgroundConversations', event.target.value)} fullWidth />
         <TextField label="每日生成次数" value={entitlement.dailyAiGenerationLimit} onChange={(event) => onEntitlementChange('dailyAiGenerationLimit', event.target.value)} fullWidth />
         <TextField label="单次批量生成上限" value={entitlement.batchGenerationLimit} onChange={(event) => onEntitlementChange('batchGenerationLimit', event.target.value)} fullWidth />
         <TextField label="每日领取点数" value={entitlement.dailyPointGrant} onChange={(event) => onEntitlementChange('dailyPointGrant', event.target.value)} fullWidth />

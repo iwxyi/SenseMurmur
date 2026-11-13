@@ -13,6 +13,15 @@ vi.mock('./api', () => ({
   },
 }));
 
+vi.mock('../stores/storeSyncHelpers', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../stores/storeSyncHelpers')>();
+  return {
+    ...actual,
+    canAttemptOnlineSync: () => true,
+    getCloudSyncSkipDiagnostics: () => ({ reasons: [] }),
+  };
+});
+
 function storage() {
   const values = new Map<string, string>();
   return {
@@ -120,12 +129,49 @@ describe('chat execution lease', () => {
     flush.mockRestore();
   });
 
+  it('drains more than one sync batch before releasing the lease', async () => {
+    let flushCount = 0;
+    const flush = vi.spyOn(useMessageStore.getState(), 'flushPendingOperations').mockImplementation(async () => {
+      flushCount += 1;
+      useMessageStore.setState((state) => ({ pendingOperations: state.pendingOperations.slice(3) }));
+    });
+    await runWithChatExecutionLease('chat-many-writes', async () => {
+      const fence = getChatExecutionFence('chat-many-writes')!;
+      useMessageStore.setState({ pendingOperations: Array.from({ length: 7 }, (_, index) => ({
+        id: `message-${index}`, chatId: 'chat-many-writes', executionFence: fence, status: 'pending' as const,
+        attemptCount: 0, createdAt: Date.now(), kind: 'create' as const,
+      })) });
+    });
+    expect(flushCount).toBe(3);
+    expect(useMessageStore.getState().pendingOperations).toHaveLength(0);
+    flush.mockRestore();
+  });
+
+  it('continues draining when syncing one write replaces it with another', async () => {
+    let flushCount = 0;
+    const flush = vi.spyOn(useMessageStore.getState(), 'flushPendingOperations').mockImplementation(async () => {
+      flushCount += 1;
+      if (flushCount === 1) {
+        const fence = getChatExecutionFence('chat-replaced-write')!;
+        useMessageStore.setState({ pendingOperations: [{ id: 'replacement', chatId: 'chat-replaced-write', executionFence: fence,
+          status: 'pending', attemptCount: 0, createdAt: Date.now(), kind: 'create' }] });
+      } else useMessageStore.setState({ pendingOperations: [] });
+    });
+    await runWithChatExecutionLease('chat-replaced-write', async () => {
+      const fence = getChatExecutionFence('chat-replaced-write')!;
+      useMessageStore.setState({ pendingOperations: [{ id: 'original', chatId: 'chat-replaced-write', executionFence: fence,
+        status: 'pending', attemptCount: 0, createdAt: Date.now(), kind: 'create' }] });
+    });
+    expect(flushCount).toBe(2);
+    flush.mockRestore();
+  });
+
   it('keeps an unsynced fenced write visible and reports incomplete delivery', async () => {
     const flush = vi.spyOn(useMessageStore.getState(), 'flushPendingOperations').mockResolvedValue();
     await expect(runWithChatExecutionLease('chat-four', async () => {
       const fence = getChatExecutionFence('chat-four')!;
-      useMessageStore.setState({ pendingOperations: [{ id: 'message-test', chatId: 'chat-four', executionFence: fence, status: 'failed', attemptCount: 1, createdAt: Date.now(), kind: 'create' }] });
-    })).rejects.toThrow('仍有待同步结果');
+      useMessageStore.setState({ pendingOperations: [{ id: 'message-test', chatId: 'chat-four', executionFence: fence, status: 'failed', attemptCount: 1, lastError: 'network: server unavailable', createdAt: Date.now(), kind: 'create' }] });
+    })).rejects.toThrow('network: server unavailable');
     expect(useMessageStore.getState().pendingOperations).toHaveLength(1);
     expect(api.releaseChatExecutionLease).toHaveBeenCalledOnce();
     flush.mockRestore();

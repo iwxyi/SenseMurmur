@@ -300,6 +300,7 @@ export interface WorkflowTaskResult {
 export interface WorkflowExecutor {
   tracksModelInvocations?: boolean;
   tracksToolInvocations?: boolean;
+  checkpoint?(runId: string): Promise<void>;
   dispatchBlockReason?(snapshot: WorkflowSnapshot): string | undefined;
   approvalRequirement?(task: WorkflowTask, snapshot: WorkflowSnapshot): WorkflowApprovalRequirement | undefined;
   prepareApprovalRequirement?(task: WorkflowTask, snapshot: WorkflowSnapshot, requirement: WorkflowApprovalRequirement, signal: AbortSignal): Promise<WorkflowApprovalRequirement>;
@@ -336,6 +337,8 @@ export interface WorkflowRepository {
   transact<T>(scope: string, runId: string, update: (current: WorkflowSnapshot | null) => { snapshot: WorkflowSnapshot; value: T }): Promise<T>;
   exportCheckpoint(scope: string, runId: string): Promise<WorkflowRepositoryCheckpoint | null>;
   importCheckpoint(scope: string, checkpoint: WorkflowRepositoryCheckpoint): Promise<void>;
+  readCheckpointSync(scope: string, runId: string): Promise<{ revision: number; sha256: string } | null>;
+  saveCheckpointSync(scope: string, runId: string, state: { revision: number; sha256: string }): Promise<void>;
 }
 
 export interface WorkflowRepositoryCheckpoint {
@@ -353,6 +356,7 @@ const OUTBOX_STORE = 'outbox';
 const CONSUMER_STORE = 'outbox_consumers';
 const ATTEMPT_STORE = 'task_attempts';
 const REVISION_STORE = 'plan_revisions';
+const CHECKPOINT_SYNC_STORE = 'checkpoint_sync';
 const EVENT_RETENTION_PER_RUN = 256;
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -360,7 +364,7 @@ function openDb(): Promise<IDBDatabase> {
   if (typeof indexedDB === 'undefined') return Promise.reject(new Error('此设备不支持工作流持久化'));
   if (dbPromise) return dbPromise;
   const pending: Promise<IDBDatabase> = new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 5);
+    const request = indexedDB.open(DB_NAME, 6);
     request.onupgradeneeded = () => {
       const database = request.result;
       if (!database.objectStoreNames.contains(STORE)) database.createObjectStore(STORE);
@@ -369,6 +373,7 @@ function openDb(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains(CONSUMER_STORE)) database.createObjectStore(CONSUMER_STORE, { keyPath: 'key' });
       if (!database.objectStoreNames.contains(ATTEMPT_STORE)) database.createObjectStore(ATTEMPT_STORE);
       if (!database.objectStoreNames.contains(REVISION_STORE)) database.createObjectStore(REVISION_STORE);
+      if (!database.objectStoreNames.contains(CHECKPOINT_SYNC_STORE)) database.createObjectStore(CHECKPOINT_SYNC_STORE);
     };
     request.onsuccess = () => {
       const database = request.result;
@@ -440,6 +445,40 @@ export function currentWorkflowScope() {
 }
 
 export const indexedDbWorkflowRepository: WorkflowRepository = {
+  async readCheckpointSync(scope, runId) {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const request = db.transaction(CHECKPOINT_SYNC_STORE, 'readonly').objectStore(CHECKPOINT_SYNC_STORE).get(rowKey(scope, runId));
+      request.onsuccess = () => resolve(request.result ?? null);
+      request.onerror = () => reject(request.error || new Error('读取工作流同步游标失败'));
+    });
+  },
+  async saveCheckpointSync(scope, runId, state) {
+    if (!Number.isSafeInteger(state.revision) || state.revision < 1 || !/^[a-f0-9]{64}$/.test(state.sha256)) throw new Error('工作流同步游标无效');
+    const db = await openDb();
+    return new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([STORE, CHECKPOINT_SYNC_STORE], 'readwrite');
+      const request = tx.objectStore(STORE).get(rowKey(scope, runId));
+      request.onsuccess = () => {
+        if (!request.result) { tx.abort(); reject(new Error('工作流不存在')); return; }
+        const syncStore = tx.objectStore(CHECKPOINT_SYNC_STORE);
+        const currentRequest = syncStore.get(rowKey(scope, runId));
+        currentRequest.onsuccess = () => {
+          const current = currentRequest.result as { revision?: number; sha256?: string } | undefined;
+          if (current && (Number(current.revision) > state.revision
+            || (Number(current.revision) === state.revision && current.sha256 !== state.sha256))) {
+            tx.abort(); reject(new Error('工作流同步游标版本已变化')); return;
+          }
+          syncStore.put(state, rowKey(scope, runId));
+        };
+        currentRequest.onerror = () => { tx.abort(); reject(currentRequest.error || new Error('读取工作流同步游标失败')); };
+      };
+      request.onerror = () => { tx.abort(); reject(request.error || new Error('读取工作流失败')); };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('保存工作流同步游标失败'));
+      tx.onabort = () => reject(tx.error || new Error('工作流同步游标事务中止'));
+    });
+  },
   async exportCheckpoint(scope, runId) {
     const db = await openDb();
     return new Promise((resolve, reject) => {
@@ -1405,6 +1444,8 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                   ? { ...candidate, updatedAt: now, toolInvocation: { ...invocation, state: 'started', startedAt: now,
                     ...(description ? { request: description } : {}) } } : candidate) }, value: undefined };
               });
+              try { await executor.checkpoint?.(runId); }
+              catch (error) { throw new WorkflowPreflightError(error instanceof Error ? error.message : '工作流同步失败，调用未发出'); }
               signal.throwIfAborted();
             },
             async beginModelInvocation(request) {
@@ -1426,11 +1467,14 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                   ? { ...candidate, updatedAt: now, modelInvocation: { ...item.modelInvocation!, state: 'started', startedAt: now,
                     ...(description ? { request: description } : {}) } } : candidate) }, value: undefined };
               });
+              try { await executor.checkpoint?.(runId); }
+              catch (error) { throw new WorkflowPreflightError(error instanceof Error ? error.message : '工作流同步失败，调用未发出'); }
               signal.throwIfAborted();
               return { schemaVersion: 1, runId, taskId: task.id, attempt: task.attempt + 1, kind: 'model',
                 ...(snapshot.run.goalSpec?.platformBudget ? { budgetRevision: snapshot.run.goalSpec.platformBudget.revision } : {}) };
             },
           };
+          let resultCommitted = false;
           try {
             const result = isReady ? await executor.execute(task, signal, context) : await executor.inspectExternal!(task, signal);
             await mutate(storageScope, runId, (current) => {
@@ -1469,8 +1513,11 @@ export function createWorkflowRunRuntime(repository: WorkflowRepository, executo
                 }
               }
               return { snapshot: next, value: undefined }; });
+            resultCommitted = true;
+            await executor.checkpoint?.(runId);
             if ('status' in result && result.status === 'pending') inspectedExternalIds.add(task.id);
           } catch (error) {
+            if (resultCommitted) throw error;
             const admissionReason = isReady ? workflowAdmissionBlockReason(error) : undefined;
             await mutate(storageScope, runId, (current) => ({ snapshot: scope() !== storageScope || current.run.generation !== generation || current.run.status !== 'active' ? current : { ...current,
               run: admissionReason ? { ...current.run, pauseRequested: true, pauseReason: admissionReason, updatedAt: Date.now() } : current.run,

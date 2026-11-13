@@ -27,6 +27,7 @@ export interface AuthUserResponse {
   assistantArtifactCloudSyncEntitled?: boolean;
   aiProxyEntitled?: boolean;
   agentEntitled?: boolean;
+  maxBackgroundConversations?: number;
   aiSearchEntitled?: boolean;
   alapiDoutuEnabled?: boolean;
   marketAccessEntitled?: boolean;
@@ -110,6 +111,7 @@ export interface VipEntitlementInfo {
   maxCharacters: number | null;
   maxChats: number | null;
   maxGroupMembers: number | null;
+  maxBackgroundConversations: number;
   dailyAiGenerationLimit: number | null;
   batchGenerationLimit: number | null;
   officialProviderAccess: string[];

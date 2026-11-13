@@ -8,9 +8,14 @@ import type { Message } from '../types/message';
 import { assistantReplyRunId, listAssistantBackgroundReplies, recoverAssistantBackgroundReplies, resumeAssistantBackgroundReply, retryAssistantBackgroundReply, startAssistantBackgroundReply } from './assistantBackgroundReply';
 import { currentWorkflowScope, indexedDbWorkflowRepository } from './workflowRunRuntime';
 import { buildBranchStateWithHead } from './messageBranching';
+import { projectActiveBranchMessages } from './messageBranching';
 
 const reply = vi.hoisted(() => vi.fn());
+const decideRoute = vi.hoisted(() => vi.fn());
+const runTeam = vi.hoisted(() => vi.fn());
 vi.mock('./assistantChatFlow', () => ({ runAssistantChatReplyFlow: reply }));
+vi.mock('./assistantTeamIntent', () => ({ decideAssistantTaskRoute: decideRoute }));
+vi.mock('./agentTeamWorkflow', () => ({ runAgentTeam: runTeam }));
 
 const heldLocks = new Set<string>();
 
@@ -30,9 +35,85 @@ beforeEach(() => {
   vi.spyOn(useMessageStore.persist, 'hasHydrated').mockReturnValue(true);
   vi.spyOn(useSettingsStore.persist, 'hasHydrated').mockReturnValue(true);
   reply.mockReset();
+  decideRoute.mockReset().mockResolvedValue({ route: 'reply' });
+  runTeam.mockReset().mockResolvedValue({ snapshot: { run: { status: 'completed', id: 'team-run', chatId: '', goal: '', generation: 1, planVersion: 1, updatedAt: 1 }, tasks: [] } });
 });
 
 describe('assistant background reply', () => {
+  it('routes a multi-step chat request into one team run without a manual form', async () => {
+    const chatId = crypto.randomUUID();
+    const chat = { ...buildAssistantChatDraft({ agentAvailable: true }), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 1 };
+    const userMessage: Message = { id: crypto.randomUUID(), chatId, type: 'user', senderId: 'user', senderName: '用户',
+      content: '从调研到脚本再到制作视频，一口气完成', emotion: 0, timestamp: Date.now(), isDeleted: false };
+    useChatStore.setState({ chats: [chat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [userMessage], messageWindowsByChatId: {} });
+    decideRoute.mockResolvedValue({ route: 'team', goal: userMessage.content });
+    const first = await startAssistantBackgroundReply({ chatId, userMessageId: userMessage.id });
+    expect(first.snapshot.run.status).toBe('completed');
+    await vi.waitFor(() => expect(runTeam).toHaveBeenCalledWith(expect.objectContaining({ chatId, goal: userMessage.content, sourceMessageId: userMessage.id })));
+    const startMessages = useMessageStore.getState().messages.filter((message) => message.metadata?.assistantReplyToUserMessageId === userMessage.id);
+    expect(startMessages).toHaveLength(1);
+    expect(startMessages[0].content).toContain('后台执行');
+    expect(reply).not.toHaveBeenCalled();
+    expect(await listAssistantBackgroundReplies(chatId)).toEqual([]);
+    await resumeAssistantBackgroundReply(first.snapshot.run.id, 'resume');
+    await vi.waitFor(() => expect(runTeam).toHaveBeenCalledTimes(2));
+    expect(useMessageStore.getState().messages.filter((message) => message.metadata?.assistantReplyToUserMessageId === userMessage.id)).toHaveLength(1);
+    expect(decideRoute).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a readable assistant message when team planning fails on a missing video model', async () => {
+    const chatId = crypto.randomUUID();
+    const chat = { ...buildAssistantChatDraft({ agentAvailable: true }), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 1 };
+    const userMessage: Message = { id: crypto.randomUUID(), chatId, type: 'user', senderId: 'user', senderName: '用户',
+      content: '帮我完成一个短视频', emotion: 0, timestamp: Date.now(), isDeleted: false };
+    useChatStore.setState({ chats: [chat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [userMessage], messageWindowsByChatId: {} });
+    decideRoute.mockResolvedValue({ route: 'team', goal: userMessage.content });
+    runTeam.mockResolvedValue({ snapshot: { run: { id: 'team-failed', chatId, goal: userMessage.content, status: 'failed', generation: 1, planVersion: 1, updatedAt: Date.now() },
+      tasks: [{ id: 'plan', runId: 'team-failed', kind: 'team_plan', input: userMessage.content, dependsOn: [], status: 'failed', error: '当前未配置视频模型', attempt: 1, updatedAt: Date.now() }] } });
+    const started = await startAssistantBackgroundReply({ chatId, userMessageId: userMessage.id });
+    expect(started.snapshot.run.status).toBe('completed');
+    await vi.waitFor(() => expect(useMessageStore.getState().messages.some((message) => message.metadata?.assistantTeamFinal)).toBe(true));
+    const finalReply = useMessageStore.getState().messages.find((message) => message.metadata?.assistantTeamFinal);
+    expect(finalReply?.content).toContain('当前未配置视频模型');
+    expect(finalReply?.content).toContain('模型设置');
+    expect(finalReply?.content).toContain('工作台重试规划');
+  });
+
+  it('keeps a routed team start and failure on the edited message branch', async () => {
+    const chatId = crypto.randomUUID();
+    const oldUser: Message = { id: 'old-user', chatId, type: 'user', senderId: 'user', senderName: '用户',
+      content: '旧目标', emotion: 0, timestamp: 1, isDeleted: false,
+      metadata: { branching: { nodeId: 'old-user', parentNodeId: null, rootNodeId: 'old-user', sequence: 1 } } };
+    const revisedUser: Message = { ...oldUser, id: 'revised-user', content: '新目标', timestamp: 2,
+      metadata: { branching: { nodeId: 'revised-user', parentNodeId: null, rootNodeId: 'old-user', sequence: 2,
+        revisionOfNodeId: 'old-user' } } };
+    const chat = { ...buildAssistantChatDraft({ agentAvailable: true }), id: chatId, createdAt: 1, updatedAt: 2, lastMessageAt: 2,
+      messageBranchState: { enabled: true, activeBranchName: 'main', activeLeafNodeId: revisedUser.id,
+        refs: { main: { name: 'main', headNodeId: revisedUser.id, createdAt: 1, updatedAt: 2, version: 1 },
+          other: { name: 'other', headNodeId: oldUser.id, createdAt: 1, updatedAt: 2, version: 1 } } } };
+    useChatStore.setState({ chats: [chat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [oldUser, revisedUser], messageWindowsByChatId: {} });
+    decideRoute.mockResolvedValue({ route: 'team', goal: revisedUser.content });
+    runTeam.mockImplementation(async (params: { goalSpec?: { sourceBranch?: { headNodeId: string | null } } }) => ({
+      snapshot: { run: { id: 'team-revised-user', chatId, goal: revisedUser.content, goalSpec: params.goalSpec,
+        status: 'failed', generation: 1, planVersion: 1, updatedAt: Date.now() },
+      tasks: [{ id: 'plan', runId: 'team-revised-user', kind: 'team_plan', input: revisedUser.content,
+        dependsOn: [], status: 'failed', error: '当前未配置视频模型', attempt: 1, updatedAt: Date.now() }] },
+    }));
+    await startAssistantBackgroundReply({ chatId, userMessageId: revisedUser.id, expectedBranchLeafNodeId: revisedUser.id });
+    await vi.waitFor(() => expect(useMessageStore.getState().messages.some((message) => message.metadata?.assistantTeamFinal)).toBe(true));
+    const messages = useMessageStore.getState().messages.filter((message) => message.chatId === chatId);
+    const start = messages.find((message) => message.metadata?.branching?.nodeId === 'assistant-team-start-revised-user');
+    const failure = messages.find((message) => message.metadata?.branching?.nodeId === 'assistant-team-result-revised-user');
+    expect(start?.metadata?.branching?.parentNodeId).toBe(revisedUser.id);
+    expect(failure?.metadata?.branching?.parentNodeId).toBe(start?.metadata?.branching?.nodeId);
+    expect(runTeam.mock.calls.at(-1)?.[0].goalSpec.sourceBranch.headNodeId).toBe(revisedUser.id);
+    const selected = useChatStore.getState().chats.find((item) => item.id === chatId)!;
+    expect(projectActiveBranchMessages(selected, messages).map((message) => message.metadata?.branching?.nodeId)).toContain(failure?.metadata?.branching?.nodeId);
+  });
+
   it('coalesces simultaneous starts for the same user message', async () => {
     const chatId = crypto.randomUUID();
     const chat = { ...buildAssistantChatDraft(), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 1 };

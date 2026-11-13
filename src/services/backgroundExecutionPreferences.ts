@@ -1,9 +1,9 @@
 import { scopedStorageKey } from '../constants/brand';
 import { getLocalDataUserId } from './authStorageScope';
+import { useAuthStore } from '../stores/useAuthStore';
 
 const DEFAULT_MAX_ACTIVE_CONVERSATIONS = 3;
-const MIN_MAX_ACTIVE_CONVERSATIONS = 1;
-const MAX_MAX_ACTIVE_CONVERSATIONS = 3;
+const MIN_MAX_ACTIVE_CONVERSATIONS = 0;
 const listeners = new Set<() => void>();
 let memoryPreference: { userId: string; maxActiveConversations: number } | null = null;
 
@@ -11,26 +11,42 @@ function preferenceKey() {
   return scopedStorageKey(`background-execution:${getLocalDataUserId()}`);
 }
 
+export function getMaxBackgroundConversationsEntitled() {
+  const state = useAuthStore.getState();
+  const value = state.authMode === 'cloud' ? state.user?.maxBackgroundConversations : 1;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 ? value : 1;
+}
+
+function clampPreference(value: number) {
+  if (!Number.isSafeInteger(value) || value < MIN_MAX_ACTIVE_CONVERSATIONS) return MIN_MAX_ACTIVE_CONVERSATIONS;
+  return Math.min(getMaxBackgroundConversationsEntitled(), value);
+}
+
 export function getBackgroundExecutionPreferences() {
   const userId = getLocalDataUserId();
-  if (typeof localStorage === 'undefined') return { maxActiveConversations: memoryPreference?.userId === userId ? memoryPreference.maxActiveConversations : DEFAULT_MAX_ACTIVE_CONVERSATIONS };
+  if (typeof localStorage === 'undefined') return { maxActiveConversations: clampPreference(memoryPreference?.userId === userId ? memoryPreference.maxActiveConversations : DEFAULT_MAX_ACTIVE_CONVERSATIONS) };
   try {
     const parsed = JSON.parse(localStorage.getItem(preferenceKey()) || 'null') as { maxActiveConversations?: unknown } | null;
     const value = parsed?.maxActiveConversations;
     if (typeof value === 'number' && Number.isFinite(value)) {
-      return { maxActiveConversations: Math.max(MIN_MAX_ACTIVE_CONVERSATIONS, Math.min(MAX_MAX_ACTIVE_CONVERSATIONS, Math.floor(value))) };
+      return { maxActiveConversations: clampPreference(value) };
     }
   } catch {
     // Invalid local preferences use the current default.
   }
-  return { maxActiveConversations: DEFAULT_MAX_ACTIVE_CONVERSATIONS };
+  return { maxActiveConversations: clampPreference(DEFAULT_MAX_ACTIVE_CONVERSATIONS) };
 }
 
 export function setBackgroundExecutionMaxActiveConversations(value: number) {
-  const maxActiveConversations = Math.max(MIN_MAX_ACTIVE_CONVERSATIONS, Math.min(MAX_MAX_ACTIVE_CONVERSATIONS, Math.floor(value)));
+  const maxActiveConversations = clampPreference(value);
   memoryPreference = { userId: getLocalDataUserId(), maxActiveConversations };
   if (typeof localStorage !== 'undefined') localStorage.setItem(preferenceKey(), JSON.stringify({ maxActiveConversations }));
   listeners.forEach((listener) => listener());
+}
+
+export function canContinueConversationsInBackground() {
+  return typeof navigator !== 'undefined' && typeof navigator.locks?.request === 'function'
+    && getBackgroundExecutionPreferences().maxActiveConversations > 0;
 }
 
 export function subscribeBackgroundExecutionPreferences(listener: () => void) {
@@ -42,3 +58,9 @@ export function subscribeBackgroundExecutionPreferences(listener: () => void) {
   }
   return () => { listeners.delete(listener); };
 }
+
+useAuthStore.subscribe((state, previous) => {
+  if (state.authMode !== previous.authMode || state.user?.maxBackgroundConversations !== previous.user?.maxBackgroundConversations) {
+    listeners.forEach((listener) => listener());
+  }
+});

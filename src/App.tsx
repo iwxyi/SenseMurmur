@@ -356,20 +356,25 @@ function DataLoader({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!isAdminRoute && isWorkspaceReady && (isLoggedIn || authMode === 'local')) {
       void loadSettings();
-      void import('./services/assistantBackgroundReply').then(({ recoverAssistantBackgroundReplies }) => recoverAssistantBackgroundReplies()).catch((error) => {
-        console.error('[assistant-workflow:recovery-failed]', error);
-      });
-      void import('./services/directBackgroundReply').then(({ recoverDirectBackgroundReplies }) => recoverDirectBackgroundReplies()).catch((error) => {
-        console.error('[direct-workflow:recovery-failed]', error);
-      });
-      void import('./services/aiDirectBackgroundReply').then(({ recoverAiDirectBackgroundReplies }) => recoverAiDirectBackgroundReplies()).catch((error) => {
-        console.error('[ai-direct-workflow:recovery-failed]', error);
-      });
-      void import('./services/groupBackgroundConversation').then(({ recoverGroupBackgroundConversations }) => recoverGroupBackgroundConversations()).catch((error) => {
-        console.error('[group-workflow:recovery-failed]', error);
-      });
-      void import('./services/agentTeamWorkflow').then(({ recoverAgentTeamRuns }) => recoverAgentTeamRuns()).catch((error) => {
-        console.error('[agent-team:recovery-failed]', error);
+      void import('./services/backgroundExecutionPreferences').then(({ canContinueConversationsInBackground }) => {
+        if (!canContinueConversationsInBackground()) return;
+        void import('./services/assistantBackgroundReply').then(({ recoverAssistantBackgroundReplies }) => recoverAssistantBackgroundReplies()).catch((error) => {
+          console.error('[assistant-workflow:recovery-failed]', error);
+        });
+        void import('./services/directBackgroundReply').then(({ recoverDirectBackgroundReplies }) => recoverDirectBackgroundReplies()).catch((error) => {
+          console.error('[direct-workflow:recovery-failed]', error);
+        });
+        void import('./services/aiDirectBackgroundReply').then(({ recoverAiDirectBackgroundReplies }) => recoverAiDirectBackgroundReplies()).catch((error) => {
+          console.error('[ai-direct-workflow:recovery-failed]', error);
+        });
+        void import('./services/groupBackgroundConversation').then(({ recoverGroupBackgroundConversations }) => recoverGroupBackgroundConversations()).catch((error) => {
+          console.error('[group-workflow:recovery-failed]', error);
+        });
+        void import('./services/agentTeamWorkflow').then(({ recoverAgentTeamRuns }) => recoverAgentTeamRuns()).catch((error) => {
+          console.error('[agent-team:recovery-failed]', error);
+        });
+      }).catch((error) => {
+        console.error('[background-execution:capability-check-failed]', error);
       });
       void import('./services/backgroundVideoRecovery').then(({ recoverBackgroundVideoTasks }) => recoverBackgroundVideoTasks()).catch((error) => {
         console.error('[media-task:recovery-failed]', error);

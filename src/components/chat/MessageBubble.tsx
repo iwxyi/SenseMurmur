@@ -31,6 +31,7 @@ import type { AssistantHtmlInteractionPayload, AssistantHtmlRuntimeError } from 
 import { getNarrativeDisplayBlocks, hasNarrativeReaderBlocks, isNarrativeParagraphMessage, shouldUseCompactMediaBubble, shouldUseCompactMessageBubble } from './messageBubblePresentation';
 import { DefaultUserAvatarIcon, TopicGuideAvatarIcon } from '../common/IdentityIcons';
 import AssistantHtmlMessageBlock from '../../features/assistantHtml/AssistantHtmlMessageBlock';
+import ChatNoticeMessage from './ChatNoticeMessage';
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import { api } from '../../services/api';
 import { speechTextFromMessage, usesManagedSpeechProfile } from '../../services/speech';
@@ -568,6 +569,7 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
   const compactMediaBubble = !isFinalWithdrawn && shouldUseCompactMediaBubble(message);
   const showPendingTypingDots = (pending || message.isStreaming) && !message.content;
   const shouldRenderNarrativeReader = hasNarrativeReaderBlocks(narrativeParagraphBlocks);
+  if (message.metadata?.chatNotice) return <ChatNoticeMessage message={message} />;
   if (shouldRenderNarrativeReader || ((pending || message.isStreaming) && useNarrativeParagraph)) {
     const narrativeCharacters = characters.length ? characters : effectiveCharacter ? [effectiveCharacter] : [];
     const storyReaderFontFamily = chatAppearance.storyReader.fontFamily === 'serif'

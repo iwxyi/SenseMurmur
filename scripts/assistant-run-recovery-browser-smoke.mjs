@@ -114,7 +114,7 @@ try {
     }, isLoading: false });
     const scope = currentWorkflowScope();
     const database = await new Promise((resolve, reject) => {
-      const request = indexedDB.open('pneumata-workflow-runs', 5);
+      const request = indexedDB.open('pneumata-workflow-runs', 6);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });

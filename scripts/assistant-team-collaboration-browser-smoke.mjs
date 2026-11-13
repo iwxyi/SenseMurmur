@@ -101,7 +101,7 @@ try {
     } finally { window.fetch = originalBudgetBoundaryFetch; }
     window.__cleanupCollaborationFixture = async () => {
       const database = await new Promise((resolve, reject) => {
-        const request = indexedDB.open('pneumata-workflow-runs', 5);
+        const request = indexedDB.open('pneumata-workflow-runs', 6);
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
       });
@@ -768,7 +768,21 @@ try {
     container.id = 'assistant-team-smoke-root';
     document.body.append(container);
     window.__assistantTeamSmoke = { calls: [], resumed: [], limits: [], deadlines: [] };
-    const { default: ToolHistory } = await import('/src/components/chat/TeamTaskExecutionHistory.tsx');
+    const [{ default: ToolHistory }, { default: TeamProgressAside }] = await Promise.all([
+      import('/src/components/chat/TeamTaskExecutionHistory.tsx'),
+      import('/src/components/chat/ChatNoticeMessage.tsx'),
+    ]);
+    const progressContainer = document.createElement('div');
+    progressContainer.id = 'assistant-team-progress-smoke-root';
+    document.body.append(progressContainer);
+    const progressRoot = createRoot(progressContainer);
+    window.__assistantTeamSmoke.progressRoot = progressRoot;
+    progressRoot.render(React.createElement(TeamProgressAside, { message: {
+      id: 'progress-fixture', chatId: 'progress-fixture', type: 'system', senderId: 'narrator', senderName: '旁白',
+      content: '生成视频 · 进行中', emotion: 0, timestamp: now, isDeleted: false,
+      metadata: { chatNotice: { tone: 'working', progress: { completed: 2, total: 4 },
+        details: ['撰写剧本 · 已完成', '生成图片素材 · 已完成', '生成视频 · 进行中', '检查交付结果 · 排队中'] } },
+    } }));
     const historyContainer = document.createElement('div');
     historyContainer.id = 'assistant-tool-history-smoke-root';
     document.body.append(historyContainer);
@@ -779,8 +793,9 @@ try {
     const root = createRoot(container);
     window.__assistantTeamSmoke.root = root;
     root.render(React.createElement(Workbench, {
+      open: true, onClose: () => {},
       runs: [{ ...persistedRun, run: { ...persistedRun.run, deliveryStatus: 'pending', deliveryIssue: 'save_failed' } }, resumableRun, secondResumableRun, uncertainRun, recursiveRun, conflictRun, outputRun, questionRun, capabilityRun], canRun: true, isRunActive: () => false, onResume: () => {},
-      onResumeAll: async (items) => { window.__assistantTeamSmoke.resumed = items.map((item) => item.run.id); }, onCreate: () => {},
+      onResumeAll: async (items) => { window.__assistantTeamSmoke.resumed = items.map((item) => item.run.id); },
       onInstruct: async () => {}, onPause: async () => {},
       onAnswer: async (item, task, answer) => {
         window.fetch = questionFetch;
@@ -834,16 +849,24 @@ try {
     }));
     return true;
   })()`);
-  await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('#assistant-team-smoke-root button')).some((button) => button.textContent?.includes('工作台'))`), 'workbench mounted');
-  await cdp.evaluate(`Array.from(document.querySelectorAll('#assistant-team-smoke-root button')).find((button) => button.textContent?.includes('工作台')).click()`);
+  await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('[role="dialog"]'))`), 'workbench mounted');
   await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).some((button) => button.textContent?.includes('市场分析师'))`), 'child agent selector');
-  await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"] [role="alert"]')?.textContent.includes('交付尚未保存完成') && document.querySelector('[role="dialog"]').textContent.includes('交付需处理')`), 'pending delivery error visible');
+  await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"] [role="alert"]')?.textContent.includes('交付尚未保存完成') && document.querySelector('[role="dialog"]').textContent.includes('交付需要处理')`), 'pending delivery error visible');
   assert.equal(await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).some((button) => button.textContent === '检查交付')`), true);
   await waitFor(() => cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).some((button) => button.textContent?.includes('恢复所有可恢复任务 (2)'))`), 'bulk resume action');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent?.includes('恢复所有可恢复任务')).click()`);
   await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke?.resumed.length === 2`), 'recoverable runs resumed');
   const resumedIds = await cdp.evaluate(`window.__assistantTeamSmoke.resumed`);
   assert.deepEqual(resumedIds, ['browser-resume-run', 'browser-resume-run-2']);
+  await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('#assistant-team-progress-smoke-root [aria-label="聊天提示"]'))`), 'chat notice rendered');
+  assert.match(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root').textContent`), /生成视频 · 进行中.*2\/4/);
+  assert.doesNotMatch(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root').textContent`), /撰写剧本|检查交付结果/);
+  await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root button[aria-label="展开提示详情"]').click()`);
+  await waitFor(() => cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root').textContent.includes('撰写剧本 · 已完成')`), 'progress details expanded');
+  assert.match(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root').textContent`), /检查交付结果 · 排队中/);
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  assert.equal(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root').scrollWidth <= 390`), true);
+  await cdp.send('Emulation.clearDeviceMetricsOverride');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent?.includes('市场分析师')).click()`);
   await waitFor(() => cdp.evaluate(`Boolean(Array.from(document.querySelectorAll('[role="dialog"] label')).find((label) => label.textContent?.includes('与该子 Agent 继续协作')))`), 'child instruction input');
   assert.match(await cdp.evaluate(`document.querySelector('[role="dialog"]').textContent`), /可能影响 1 个步骤：研究市场竞争/);
@@ -1013,6 +1036,6 @@ try {
 } finally {
   await cdp.evaluate(`window.__usageCleanup?.()`).catch((error) => console.error('Usage fixture cleanup failed:', error));
   await cdp.send('Emulation.clearDeviceMetricsOverride');
-  await cdp.evaluate(`(async () => { window.__assistantTeamSmoke?.root?.unmount(); window.__assistantTeamSmoke?.historyRoot?.unmount(); document.querySelector('#assistant-team-smoke-root')?.remove(); document.querySelector('#assistant-tool-history-smoke-root')?.remove(); await window.__cleanupCollaborationFixture?.(); })()`).catch((error) => console.error('Fixture cleanup failed:', error));
+  await cdp.evaluate(`(async () => { window.__assistantTeamSmoke?.root?.unmount(); window.__assistantTeamSmoke?.historyRoot?.unmount(); window.__assistantTeamSmoke?.progressRoot?.unmount(); document.querySelector('#assistant-team-smoke-root')?.remove(); document.querySelector('#assistant-tool-history-smoke-root')?.remove(); document.querySelector('#assistant-team-progress-smoke-root')?.remove(); await window.__cleanupCollaborationFixture?.(); })()`).catch((error) => console.error('Fixture cleanup failed:', error));
   cdp.close();
 }

@@ -24,6 +24,7 @@ interface User {
   assistantArtifactCloudSyncEntitled?: boolean;
   aiProxyEntitled?: boolean;
   agentEntitled?: boolean;
+  maxBackgroundConversations?: number;
   aiSearchEntitled?: boolean;
   alapiDoutuEnabled?: boolean;
   marketAccessEntitled?: boolean;

@@ -7,6 +7,7 @@ import { listAiDirectBackgroundConversations, listGroupBackgroundConversations, 
 import { useChatStore } from '../stores/useChatStore';
 import { resolveSessionFamilyKey } from './sessionEngineKeys';
 import type { WorkflowSnapshot } from './workflowRunRuntime';
+import { canContinueConversationsInBackground } from './backgroundExecutionPreferences';
 
 export function isSafelyResumableWorkflow(snapshot: WorkflowSnapshot) {
   return snapshot.run.status === 'paused'
@@ -49,28 +50,28 @@ type RecoverableSnapshotLists = {
 
 function collectSafelyRecoverableRuns({ assistant, direct, aiDirect, group, aiDirectConversations, team }: RecoverableSnapshotLists, chats: ReturnType<typeof useChatStore.getState>['chats']) {
   return [
-    ...assistant.filter((snapshot) => isSafelyResumableWorkflow(snapshot)
+    ...assistant.filter((snapshot) => canContinueConversationsInBackground() && isSafelyResumableWorkflow(snapshot)
       && chats.some((chat) => chat.id === snapshot.run.chatId && chat.type === 'assistant' && chat.deletedAt == null))
       .map((snapshot) => ({ snapshot, start: () => resumeAssistantBackgroundReply(snapshot.run.id, `home-resume-${crypto.randomUUID()}`) })),
-    ...direct.filter((snapshot) => isSafelyResumableWorkflow(snapshot)
+    ...direct.filter((snapshot) => canContinueConversationsInBackground() && isSafelyResumableWorkflow(snapshot)
       && chats.some((chat) => chat.id === snapshot.run.chatId && chat.type === 'direct' && chat.deletedAt == null))
       .map((snapshot) => ({ snapshot, start: () => resumeDirectBackgroundReply(snapshot.run.id) })),
-    ...aiDirect.filter((snapshot) => isSafelyResumableWorkflow(snapshot)
+    ...aiDirect.filter((snapshot) => canContinueConversationsInBackground() && isSafelyResumableWorkflow(snapshot)
       && chats.some((chat) => chat.id === snapshot.run.chatId && chat.type === 'ai_direct' && chat.deletedAt == null))
       .map((snapshot) => ({ snapshot, start: () => resumeAiDirectBackgroundReply(snapshot.run.id) })),
-    ...team.filter((snapshot) => isSafelyResumableWorkflow(snapshot) && isRecoverableAgentTeamRun(snapshot)
+    ...team.filter((snapshot) => canContinueConversationsInBackground() && isSafelyResumableWorkflow(snapshot) && isRecoverableAgentTeamRun(snapshot)
       && chats.some((chat) => chat.id === snapshot.run.chatId && chat.type === 'assistant' && chat.deletedAt == null))
       .map((snapshot) => ({ snapshot, start: () => runAgentTeam({ chatId: snapshot.run.chatId, goal: snapshot.run.goal, runId: snapshot.run.id }) })),
     ...aiDirectConversations.filter((snapshot) => {
       const chat = chats.find((item) => item.id === snapshot.run.chatId);
-      return Boolean(chat?.type === 'ai_direct' && chat.deletedAt == null
+      return Boolean(canContinueConversationsInBackground() && chat?.type === 'ai_direct' && chat.deletedAt == null
         && snapshot.tasks.every((task) => task.kind === 'ai_direct_conversation_turn')
         && isSafelyResumableConversation(snapshot, chat));
     })
       .map((snapshot) => ({ snapshot, start: () => startAiDirectBackgroundConversation(snapshot.run.chatId) })),
     ...group.filter((snapshot) => {
       const chat = chats.find((item) => item.id === snapshot.run.chatId);
-      return Boolean(chat?.type === 'group' && isSafelyResumableConversation(snapshot, chat)
+      return Boolean(canContinueConversationsInBackground() && chat?.type === 'group' && isSafelyResumableConversation(snapshot, chat)
         && snapshot.tasks.every((task) => task.kind === 'group_conversation_turn'));
     }).map((snapshot) => ({ snapshot, start: () => startGroupBackgroundConversation(snapshot.run.chatId) })),
   ];

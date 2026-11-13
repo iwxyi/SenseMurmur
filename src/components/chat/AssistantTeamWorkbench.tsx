@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Stack, TextField, Typography } from '@mui/material';
+import { Alert, Accordion, AccordionDetails, AccordionSummary, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, Stack, TextField, Typography } from '@mui/material';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import type { WorkflowSnapshot, WorkflowTask } from '../../services/workflowRunRuntime';
 import { countWorkflowModelCalls, isRetryableTeamTask, summarizeWorkflowRun } from '../../services/workflowRunRuntime';
 import { validateAgentTeamPlan } from '../../services/agentTeamPlan';
@@ -17,12 +18,13 @@ import { pendingWorkflowApproval } from '../../services/workflowApproval';
 import { WORKFLOW_CAPABILITY_RECOVERY } from '../../services/workflowCapability';
 
 interface Props {
+  open: boolean;
+  onClose: () => void;
   runs: WorkflowSnapshot[];
   canRun: boolean;
   isRunActive: (runId: string) => boolean;
   onResume: (run: WorkflowSnapshot) => void;
   onResumeAll: (runs: WorkflowSnapshot[]) => Promise<void>;
-  onCreate: () => void;
   onInstruct: (run: WorkflowSnapshot, task: WorkflowTask, instruction: string) => Promise<void>;
   onAnswer: (run: WorkflowSnapshot, task: WorkflowTask, answer: string) => Promise<void>;
   onApproval: (run: WorkflowSnapshot, task: WorkflowTask, outcome: 'approved' | 'rejected') => Promise<void>;
@@ -62,8 +64,7 @@ function taskDetails(task: WorkflowTask) {
   };
 }
 
-export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onResume, onResumeAll, onCreate, onInstruct, onAnswer, onApproval, onPause, onUpdateModelCallLimit, onUpdateDeadline, onSaveDeliveryCopy, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterTaskRetry }: Props) {
-  const [open, setOpen] = useState(false);
+export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, isRunActive, onResume, onResumeAll, onInstruct, onAnswer, onApproval, onPause, onUpdateModelCallLimit, onUpdateDeadline, onSaveDeliveryCopy, onDelegate, onAbandonReview, onResumeAfterReviewRetry, onResumeAfterTaskRetry }: Props) {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [instruction, setInstruction] = useState('');
@@ -113,38 +114,57 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
   const canInstructSelectedTask = editable || canReviseSelectedTask;
   const revisionImpact = canReviseSelectedTask && task ? analyzeWorkflowRevisionImpact(run, task.id) : null;
   const resumableRuns = runs.filter(isRecoverableAgentTeamRun);
+  const failedPlanReason = failedPlan?.error || '规划失败，未能生成可执行的团队计划。';
 
   return <>
-    <Box role="status" sx={{ position: 'absolute', top: { xs: 'calc(66px + env(safe-area-inset-top, 0px))', sm: 58 }, left: 12, right: 12, zIndex: 5, display: 'flex', alignItems: 'center', gap: 1, px: 1.25, py: 0.5, borderRadius: 1.5, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider', boxShadow: 1, minWidth: 0 }}>
-      <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>{run.run.goal}</Typography>
-      <Chip size="small" color={blocked || deliveryNeedsAttention ? 'warning' : running ? 'primary' : 'default'} label={blocked || deliveryNeedsAttention ? '需处理' : running ? '运行中' : deliveryPending ? '待交付' : `${summary.completed.length}/${run.tasks.length} 步`} />
-      <Button size="small" onClick={() => setOpen(true)}>工作台</Button>
-    </Box>
-    <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="md" aria-labelledby="team-workbench-title">
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md" aria-labelledby="team-workbench-title">
       <DialogTitle id="team-workbench-title">团队工作台</DialogTitle>
-      <DialogContent dividers sx={{ display: 'grid', gap: 2, minHeight: 260 }}>
+      <DialogContent dividers sx={{ display: 'grid', alignContent: 'start', gap: 1.25, minHeight: 260 }}>
         {runs.length > 1 && <Stack direction="row" spacing={0.75} sx={{ overflowX: 'auto', pb: 0.5 }}>
           {runs.map((item, index) => <Chip key={item.run.id} size="small" clickable color={item.run.id === run.run.id ? 'primary' : 'default'} label={teamPlan(item)?.summary || `任务 ${index + 1}`} onClick={() => { setSelectedRunId(item.run.id); setSelectedTaskId(null); setReviewActionError(null); }} />)}
         </Stack>}
-        <Box>
-          <Typography variant="subtitle1" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{plan?.summary || run.run.goal}</Typography>
-          <Typography variant="body2" color="text.secondary">{run.run.pauseRequested ? '当前步骤完成后暂停' : running ? '运行中' : deliveryNeedsAttention ? '交付需处理' : deliveryPending ? '待交付' : run.run.status === 'completed' ? '已完成' : run.run.status === 'cancelled' ? '已取消' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '失败' : '等待执行'} · 已完成 {summary.completed.length}/{run.tasks.length} 步{run.run.maxModelCalls ? ` · 模型调用 ${countWorkflowModelCalls(run)}/${run.run.maxModelCalls}` : ''}</Typography>
+        <Box sx={{ display: 'grid', gap: 0.6 }}>
+          <Stack direction="row" spacing={0.8} sx={{ alignItems: 'center' }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>{run.run.pauseRequested ? '即将暂停' : running ? '正在执行' : deliveryNeedsAttention ? '交付需要处理' : deliveryPending ? '等待交付' : run.run.status === 'completed' ? '已完成' : run.run.status === 'cancelled' ? '已取消' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '执行失败' : '等待执行'}</Typography>
+            <Chip size="small" variant="outlined" label={`${summary.completed.length}/${run.tasks.filter((item) => item.status !== 'abandoned').length} 步`} />
+            {run.run.maxModelCalls ? <Chip size="small" variant="outlined" label={`模型调用 ${countWorkflowModelCalls(run)}/${run.run.maxModelCalls}`} /> : null}
+          </Stack>
           {run.run.pauseReason && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">{run.run.pauseReason}</Typography>}
           {run.run.goalSpec?.deadlineAt && <Typography variant="caption" color="text.secondary">截止时间：{new Date(run.run.goalSpec.deadlineAt).toLocaleString()}</Typography>}
           {run.run.deliveryIssue && run.run.status === 'completed' && <Typography role="alert" variant="body2" color="error.main">{workflowDeliveryIssueLabel(run.run.deliveryIssue)}</Typography>}
           {deliveryNeedsAttention && <TeamDeliveryConflictPanel key={`${run.run.id}:${run.run.planVersion}`} snapshot={run} canSave={canRun && !running} onSaveCopy={onSaveDeliveryCopy} />}
           {modelCallLimitReached && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">已达到模型调用上限。调整上限后可继续，已有结果会保留。</Typography>}
         </Box>
-        <TeamUsagePanel key={run.run.id} runId={run.run.id} />
-        <TeamBudgetPanel key={`budget:${run.run.id}`} runId={run.run.id} canEdit={canRun && !running && run.run.status === 'paused' && Boolean(run.run.goalSpec)}
-          onSave={(input) => updateAgentTeamPlatformBudget({ ...input, runId: run.run.id, expectedPlanVersion: run.run.planVersion })} />
+        {failedPlan && <Alert severity="error" action={canRun && !running ? <Button color="inherit" size="small" disabled={savingReviewAction} onClick={() => {
+          setSavingReviewAction(true);
+          setReviewActionRunId(run.run.id);
+          void onResumeAfterTaskRetry(run, failedPlan).then(() => setReviewActionError(null)).catch((error: unknown) => {
+            setReviewActionRunId(run.run.id);
+            setReviewActionError(error instanceof Error ? error.message : '重试规划失败');
+          }).finally(() => setSavingReviewAction(false));
+        }}>{failedPlan.kind === 'agent_delegation' ? '重试' : '重新规划'}</Button> : undefined} sx={{ py: 0.1, '& .MuiAlert-message': { minWidth: 0, overflowWrap: 'anywhere' }, '& .MuiAlert-action': { alignItems: 'center', pt: 0.25, pr: 0.5 } }}>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>{failedPlanReason}</Typography>
+          {failedPlan.capabilityIssue && <Typography variant="caption" sx={{ display: 'block', mt: 0.35 }}>{WORKFLOW_CAPABILITY_RECOVERY[failedPlan.capabilityIssue.code]}</Typography>}
+        </Alert>}
+        {reviewActionError && reviewActionRunId === run.run.id && <Typography role="alert" variant="caption" color="error.main">{reviewActionError}</Typography>}
+        {canRun && !running && run.run.status === 'paused' && run.run.goalSpec && <Accordion disableGutters elevation={0} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: '4px !important', '&:before': { display: 'none' } }}>
+          <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ minHeight: 40, '& .MuiAccordionSummary-content': { my: 0.75 } }}><Typography variant="body2">运行设置与费用</Typography></AccordionSummary>
+          <AccordionDetails sx={{ display: 'grid', gap: 1, pt: 0 }}>
+            <TeamUsagePanel key={run.run.id} runId={run.run.id} />
+            <TeamBudgetPanel key={`budget:${run.run.id}`} runId={run.run.id} canEdit={canRun && !running && run.run.status === 'paused' && Boolean(run.run.goalSpec)}
+              onSave={(input) => updateAgentTeamPlatformBudget({ ...input, runId: run.run.id, expectedPlanVersion: run.run.planVersion })} />
+          </AccordionDetails>
+        </Accordion>}
         {run.tasks.filter((item) => item.kind === 'agent_user_input' && item.status === 'waiting_user' && !pendingWorkflowApproval(item)).map((item) =>
           <TeamUserInputPanel key={`${run.run.id}:${item.id}:${run.run.planVersion}`} run={run} task={item}
             disabled={!canRun || running || !['active', 'paused'].includes(run.run.status)} onAnswer={onAnswer} />)}
         {['active', 'paused'].includes(run.run.status) && run.tasks.filter((item) => pendingWorkflowApproval(item)).map((item) =>
           <TeamApprovalPanel key={`${run.run.id}:${item.id}:${run.run.planVersion}`} run={run} task={item}
             disabled={!canRun || running} onDecide={onApproval} />)}
-        {canRun && !running && run.run.status === 'paused' && run.run.goalSpec && <Box sx={{ display: 'grid', gap: 1 }}>
+        {canRun && !running && run.run.status === 'paused' && run.run.goalSpec && <Accordion disableGutters elevation={0} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: '4px !important', '&:before': { display: 'none' } }}>
+          <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ minHeight: 40, '& .MuiAccordionSummary-content': { my: 0.75 } }}><Typography variant="body2">调整执行限制</Typography></AccordionSummary>
+          <AccordionDetails sx={{ display: 'grid', gap: 1, pt: 0 }}>
+          <Box sx={{ display: 'grid', gap: 1 }}>
           <TextField size="small" type="datetime-local" label="新的截止时间" value={deadline} onChange={(event) => { setDeadline(event.target.value); setDeadlineError(null); }} disabled={savingDeadline} slotProps={{ inputLabel: { shrink: true } }} helperText="留空并保存可取消截止时间。" />
           {deadlineError && <Typography role="alert" variant="caption" color="error.main">{deadlineError}</Typography>}
           <Button size="small" disabled={savingDeadline || Boolean(deadline && !Number.isFinite(new Date(deadline).getTime()))} onClick={() => {
@@ -154,7 +174,7 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
               .catch((error: unknown) => setDeadlineError(error instanceof Error ? error.message : '保存截止时间失败'))
               .finally(() => setSavingDeadline(false));
           }}>保存截止时间</Button>
-        </Box>}
+        </Box>
         {canRun && !running && run.run.status === 'paused' && <Box sx={{ display: 'grid', gap: 1 }}>
           <TextField size="small" type="number" label="新的模型调用总上限" value={modelCallLimit} onChange={(event) => { setModelCallLimit(event.target.value); setLimitError(null); }} disabled={savingLimit} helperText="留空表示不限制，保存后点击继续整个任务。" slotProps={{ htmlInput: { min: countWorkflowModelCalls(run) + 1, max: 1000, step: 1 } }} />
           {limitError && <Typography variant="caption" color="error.main">{limitError}</Typography>}
@@ -166,6 +186,8 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
               .finally(() => setSavingLimit(false));
           }}>保存调用上限</Button>
         </Box>}
+          </AccordionDetails>
+        </Accordion>}
         <Stack direction="row" spacing={0.75} sx={{ overflowX: 'auto', pb: 0.5 }}>
           <Chip size="small" clickable color={!task ? 'primary' : 'default'} label="总览与主 Agent" onClick={() => setSelectedTaskId(null)} />
           {childTasks.map((item, index) => <Chip key={item.id} size="small" clickable color={task?.id === item.id ? 'primary' : 'default'} label={`${taskDetails(item)?.role || `子 Agent ${index + 1}`} · ${taskStatus[item.status]}`} onClick={() => setSelectedTaskId(item.id)} />)}
@@ -211,7 +233,6 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           </Box>}
           {typeof task.output === 'string' && <Box sx={{ p: 1.5, borderRadius: 1, bgcolor: 'action.hover', maxHeight: 300, overflowY: 'auto' }}><Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{task.output}</Typography></Box>}
         </Box> : <Box sx={{ display: 'grid', gap: 1.25, overflowWrap: 'anywhere' }}>
-          <Typography variant="body2"><strong>目标</strong> {run.run.goal}</Typography>
           {plan?.finalAcceptance && <Typography variant="body2"><strong>最终验收</strong> {plan.finalAcceptance}</Typography>}
           {reviewResult && typeof reviewResult.reason === 'string' && <Typography variant="body2" color={reviewResult.complete === true ? 'text.secondary' : 'warning.main'}><strong>主 Agent 验收</strong> {reviewResult.reason}</Typography>}
           {summary.blocked.length > 0 && <Typography variant="body2" color="warning.main"><strong>需要处理</strong> {summary.blocked.map((item) => item.reason).join('；')}</Typography>}
@@ -239,18 +260,6 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
               }).finally(() => setSavingReviewAction(false));
             }}>重试主 Agent 验收</Button>
           </Box>}
-          {failedPlan && canRun && run.run.status === 'failed' && <Box sx={{ display: 'grid', gap: 0.75 }}>
-            <Typography variant="body2" color="text.secondary">{failedPlan.kind === 'agent_delegation' ? '委派步骤已明确失败。可以重试当前规划或汇总，已完成的下级交付会保留。' : '规划结果已明确失败。修正模型或目标后，可以只重试这轮规划；之前完成的步骤会保留。'}</Typography>
-            {reviewActionError && reviewActionRunId === run.run.id && <Typography variant="caption" color="error.main">{reviewActionError}</Typography>}
-            <Button size="small" variant="outlined" disabled={savingReviewAction} onClick={() => {
-              setSavingReviewAction(true);
-              setReviewActionRunId(run.run.id);
-              void onResumeAfterTaskRetry(run, failedPlan).then(() => setReviewActionError(null)).catch((error: unknown) => {
-                setReviewActionRunId(run.run.id);
-                setReviewActionError(error instanceof Error ? error.message : '重试规划失败');
-              }).finally(() => setSavingReviewAction(false));
-            }}>{failedPlan.kind === 'agent_delegation' ? failedPlan.expansion ? '重试委派汇总' : '重试下级规划' : '重试主 Agent 规划'}</Button>
-          </Box>}
           {pauseError && <Typography variant="body2" color="error.main">{pauseError}</Typography>}
           {canAddRevision && <Box sx={{ display: 'grid', gap: 1 }}>
             <TextField multiline minRows={2} fullWidth size="small" label="交给主 Agent 追加任务" value={delegateRequest} onChange={(event) => { setDelegateRequest(event.target.value); setDelegateError(null); }} slotProps={{ htmlInput: { maxLength: 4000 } }} disabled={savingDelegate} />
@@ -266,17 +275,16 @@ export default function AssistantTeamWorkbench({ runs, canRun, isRunActive, onRe
           </Box>)}
         </Box>}
       </DialogContent>
-      <DialogActions>
+      <DialogActions sx={{ flexWrap: 'wrap', gap: 0.5, justifyContent: 'flex-end' }}>
         {canRun && resumableRuns.length > 1 && <Button disabled={resumingAll} onClick={() => {
           setResumingAll(true);
           setResumeAllError(null);
           void onResumeAll(resumableRuns).catch((error: unknown) => setResumeAllError(error instanceof Error ? error.message : '恢复团队任务失败'))
             .finally(() => setResumingAll(false));
         }}>{resumingAll ? '正在恢复…' : `恢复所有可恢复任务 (${resumableRuns.length})`}</Button>}
-        {canRun && <Button onClick={() => { setOpen(false); onCreate(); }}>新建团队任务</Button>}
         {canRun && running && !run.run.pauseRequested && <Button onClick={() => { void onPause(run).then(() => setPauseError(null)).catch((error: unknown) => setPauseError(error instanceof Error ? error.message : '暂停任务失败')); }}>当前步骤完成后暂停</Button>}
         {canRun && !running && ((!blocked && run.run.status !== 'failed' && (!modelCallLimitReached || run.run.status === 'completed' || run.tasks.some((item) => item.status === 'waiting_external'))) || run.tasks.some((item) => (item.kind === 'agent_video' || item.kind === 'agent_image' || item.kind === 'agent_audio' || item.kind === 'agent_media_composition') && (item.status === 'failed' || item.status === 'result_unknown'))) && <Button onClick={() => onResume(run)}>{run.run.status === 'completed' ? '检查交付' : run.tasks.some((item) => item.kind === 'agent_media_composition' && (item.status === 'failed' || item.status === 'result_unknown')) ? '重试本地合成并继续' : blocked || modelCallLimitReached ? '核对媒体结果' : '继续整个任务'}</Button>}
-        <Button onClick={() => setOpen(false)}>关闭</Button>
+        <Button onClick={onClose}>关闭</Button>
       </DialogActions>
       {resumeAllError && <Typography role="alert" variant="caption" color="error.main" sx={{ px: 3, pb: 1 }}>{resumeAllError}</Typography>}
     </Dialog>
