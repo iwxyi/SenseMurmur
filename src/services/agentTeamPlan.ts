@@ -9,6 +9,7 @@ import { parseWorkflowApprovalRequirement, type WorkflowApprovalRequirement } fr
 import { parseTeamDelegationReview, reviewTeamDelegation, type DelegationGoal, type TeamDelegationReview } from './agentTeamDelegationReview';
 import { compileTeamRevisionPatch, parseTeamRevisionCompilation, type TeamRevisionBase, type TeamRevisionCompilation } from './agentTeamRevisionPatch';
 import { workflowJsonDigest } from './workflowToolRequest';
+import { TEAM_SPEECH_TEXT_LIMIT } from './teamSpeechLimit';
 
 export interface AgentTeamRole {
   schemaVersion?: 1;
@@ -163,7 +164,7 @@ export function validateAgentTeamPlan(raw: unknown): AgentTeamPlan {
       const rawSpeech = record(value.speech);
       if ((rawSpeech.text === undefined) === (rawSpeech.textTaskId === undefined)) throw new Error('配音必须指定正文或正文任务，且只能选择一种');
       speech = rawSpeech.text !== undefined
-        ? { text: requiredText(rawSpeech.text, '配音正文', 12_000) }
+        ? { text: requiredText(rawSpeech.text, '配音正文', TEAM_SPEECH_TEXT_LIMIT) }
         : { textTaskId: identifier(rawSpeech.textTaskId, '配音正文任务 ID') };
     }
     let deliverable: AgentTeamTask['deliverable'];
@@ -304,7 +305,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     'JSON 交付需要固定字段时，在 deliverable 增加 jsonSchema，按 JSON Schema draft-07 声明 type、properties、required、additionalProperties、items、enum/const 和数值、长度、数量约束，也支持 anyOf/allOf/oneOf/not。每层约束显式声明 type；不支持 $ref、format、pattern 或自定义关键字。例：{"kind":"json","title":"调研结果","jsonSchema":{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}}。该契约由程序校验，不得把它当作事实真实性验收。',
     params.delegation ? '另开放 delegate_task 委派工具。仅对确实需要执行时再拆分的复杂子目标使用，不要用它替代普通写作。执行该任务的岗位必须同时获准 delegate_task 和下级工作需要的工具。系统会规划下级任务、等待它们完成，再由父 Agent 汇总交付；下级权限只能缩小，共用总调用预算与并发。委派最多3层，不要重复祖先目标。需要向后续任务交付素材时，在委派任务声明 mediaOutput:"image"、"video" 或 "audio"，下级计划必须以根字段 resultTaskId 指定同类型的最终媒体任务，可继续指向同类型的委派任务。每次委派只交付一份主要媒体；需要多份素材时分别安排任务。后续图片/视频生成、图片/视频检查和合成按委派任务 ID 引用对应类型素材，系统解析实际已保存文件，不读取摘要中的 URL。未声明 mediaOutput 的委派只交付文字汇总。' : '本层不开放 delegate_task，直接安排具体工作，不得创建下级委派；若父任务要求媒体交付，仍须在计划根字段 resultTaskId 指定具体媒体任务。',
     params.videoInspection ? '另开放 video_inspection 视频抽帧检查工具。必须直接依赖唯一的 video_generation 或 media_composition 任务；系统读取该任务已保存的视频并按时间均匀抽取最多6帧，使用当前视觉模型检查实际画面。它只能判断抽样内容，不能检查音轨、逐帧流畅度或保证全部镜头正确。需要检查成片时在合成之后安排此任务；不能为了检查而重新生成视频。' : '当前设备或模型不支持视频抽帧检查，不得安排 video_inspection。',
-    params.speechGeneration ? '另开放 speech_generation 旁白配音工具，使用用户配置的 TTS 模型及默认音色。必须声明 speech:{"text":"需要逐字朗读的正文"} 且 dependsOn:[]，或先安排 text_generation 只撰写旁白正文，再声明 speech:{"textTaskId":"narration_script"} 且 dependsOn:["narration_script"]。二者只能选一。goal 描述制作目的，不能混入配音正文；系统只朗读 speech 指定内容，不朗读岗位说明或验收要求。请控制正文长度以适配视频时长，配音不能直接作为 video_generation 的输入，应交给 media_composition 叠加。' : '当前未配置 TTS 模型，不得安排 speech_generation 配音。',
+    params.speechGeneration ? `另开放 speech_generation 旁白配音工具，使用用户配置的 TTS 模型及默认音色。必须声明 speech:{"text":"需要逐字朗读的正文"} 且 dependsOn:[]，或先安排 text_generation 只撰写旁白正文，再声明 speech:{"textTaskId":"narration_script"} 且 dependsOn:["narration_script"]。二者只能选一。goal 描述制作目的，不能混入配音正文；系统只朗读 speech 指定内容，不朗读岗位说明或验收要求。单次配音正文最多 ${TEAM_SPEECH_TEXT_LIMIT} 字符，较长正文须拆成多个配音任务并在合成时按顺序使用。请控制正文长度以适配视频时长，配音不能直接作为 video_generation 的输入，应交给 media_composition 叠加。` : '当前未配置 TTS 模型，不得安排 speech_generation 配音。',
     params.mediaComposition ? '另开放 media_composition 本地音视频合成工具，可按顺序拼接、裁剪视频并叠加最多4条音乐或旁白音轨。它不是视频生成工具，不调用付费模型。合成任务必须声明 composition:{"clips":[{"taskId":"shot_a","startSeconds":0,"durationSeconds":5},{"taskId":"shot_b"}],"audioTracks":[{"taskId":"music","volume":0.7,"offsetSeconds":0,"loop":true}],"aspectRatio":"16:9","originalAudioVolume":0.3}。clips 必填且按播放顺序排列，引用的任务必须直接在 dependsOn 中，视频来源须为 video_generation 或 media_composition，音轨来源须为 audio_generation 或 speech_generation。其余参数均可省略，画面比例可选16:9、9:16、1:1，不裁切主体而用留边统一画幅；最长10分钟，素材合计不超过256MiB，输出720p级MP4。多个镜头先各自生成再交给合成任务；不要让 video_generation 直接依赖音视频。不得声称已视觉检查成片。' : '当前设备不支持本地音视频合成，不得安排 media_composition。',
     params.savedMedia?.length ? `可复用历史素材目录：${JSON.stringify(params.savedMedia)}。优先复用符合要求的素材，不重新生成。任务可增加 savedMedia:[{"alias":"old_clip","taskId":"目录中的原任务标识","kind":"video","attempt":1,"outputSha256":"目录中的完整摘要"}]，除 alias 外必须逐字复制目录字段。dependsOn 只列本次新计划任务，不列历史素材别名。media_composition 接收历史视频/音频，在 composition.clips/audioTracks 中使用 alias；image_generation、image_inspection、video_generation 仅接收历史图片，自动将全部 savedMedia 图片作为参考或检查输入；video_inspection 接收唯一历史视频。检查任务允许使用历史素材替代新计划内的媒体依赖。参考图仍受当前模型能力和数量限制，不支持参考图时不得使用历史图片生成。历史素材可与本次新生成素材混用。不能使用目录外素材、猜测任务标识或将摘要当文件地址。` : '本次没有授权复用的历史素材目录，不得声明 savedMedia。',
     params.savedText?.length ? `可复用历史文字交付目录：${JSON.stringify(params.savedText)}。text_generation、image_generation、video_generation、audio_generation、delegate_task 可声明 savedText:[{"alias":"original_script","taskId":"目录中的原任务标识","attempt":1,"outputSha256":"目录中的完整摘要"}]，除 alias 外逐字复制目录字段，最多8份；系统会按版本提供完整正文（每份最多12000字符），不要为读取原稿而重新创作。dependsOn 只列新计划任务，不列历史别名。speech_generation 可仅指定一份 savedText，并声明 speech:{"textTaskId":"original_script"} 与 dependsOn:[]，逐字朗读该正文；不得同时指定 literal text 或其他历史正文。别名不能与本计划任务或历史素材别名重名。目录摘要仅绑定当时文字记录，不保证其中事实已核实。` : '本次没有授权复用的历史文字目录，不得声明 savedText。',

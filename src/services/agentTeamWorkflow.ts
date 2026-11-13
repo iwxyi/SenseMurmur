@@ -30,6 +30,7 @@ import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReferenc
 import { inspectAgentTeamImages } from './agentTeamImageInspection';
 import { inspectAgentTeamAudioAttachment, queueAgentTeamAudio } from './agentTeamAudioTask';
 import { listAvailableModels, prepareAiMediaTask } from './aiClient';
+import { TEAM_SPEECH_TEXT_LIMIT } from './teamSpeechLimit';
 import type { WorkflowApprovalRequirement } from './workflowApproval';
 import { resolveVideoGenerationParameters } from './aiGenerationAdapter';
 import { canComposeTeamMedia, composeAgentTeamMedia, inspectAgentTeamComposition, teamMediaAttachment } from './agentTeamMediaComposition';
@@ -676,7 +677,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
             text = source.output;
           }
         }
-        if (!text?.trim() || text.length > 12_000) throw new WorkflowPreflightError('旁白正文必须为 1 到 12000 个字符');
+        if (!text?.trim() || text.length > TEAM_SPEECH_TEXT_LIMIT) throw new WorkflowPreflightError(`旁白正文必须为 1 到 ${TEAM_SPEECH_TEXT_LIMIT} 个字符，请拆分后再生成`);
         if (input.userInstruction) throw new WorkflowPreflightError('配音正文已确定，请通过追加任务修订正文后重新配音');
         const prompt = text.trim();
         const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'tts');

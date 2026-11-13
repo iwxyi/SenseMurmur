@@ -164,6 +164,8 @@ describe('agent team plan', () => {
     expect(() => validateAgentTeamPlan({ ...plan, tasks: [tasks[0], { ...tasks[1], speech: { text: '你好', textTaskId: 'research' } }] })).toThrow('只能选择一种');
     expect(() => validateAgentTeamPlan({ ...plan, tasks: [tasks[0], { ...tasks[1], speech: { text: '你好' } }] })).toThrow('唯一的文字正文任务');
     expect(() => validateAgentTeamPlan({ ...plan, tasks: [tasks[0], { ...tasks[1], speech: undefined }] })).toThrow('格式无效');
+    expect(() => validateAgentTeamPlan({ ...plan, tasks: [{ ...tasks[1], dependsOn: [], speech: { text: '字'.repeat(4_001) } }] })).toThrow('配音正文无效');
+    expect(validateAgentTeamPlan({ ...plan, tasks: [{ ...tasks[1], dependsOn: [], speech: { text: '字'.repeat(4_000) } }] }).tasks[0].speech?.text).toHaveLength(4_000);
   });
 
   it('accepts narration in composition audio tracks while rejecting it as video generation input', () => {

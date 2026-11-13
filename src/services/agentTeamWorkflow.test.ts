@@ -1220,6 +1220,19 @@ describe('agent team workflow', () => {
     expect(queueAgentTeamAudio).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ prompt: text, purpose: 'speech' }));
   });
 
+  it('rejects a generated narration script over the server limit before submitting speech', async () => {
+    const runId = crypto.randomUUID();
+    const role = { id: 'narrator', name: '旁白', responsibility: '朗读', method: '先写后配', acceptance: '可播放', allowedTools: ['text_generation', 'speech_generation'] };
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '配音', roles: [role], tasks: [
+      { id: 'script', roleId: role.id, goal: '写旁白', dependsOn: [], tool: 'text_generation', acceptance: '正文完整' },
+      { id: 'voice', roleId: role.id, goal: '朗读', dependsOn: ['script'], tool: 'speech_generation', speech: { textTaskId: 'script' }, acceptance: '可播放' },
+    ], finalAcceptance: '配音完成' })).mockResolvedValueOnce('字'.repeat(4_001));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'text-model' }, () => `speech-limit-${runId}`);
+    const result = await workflow.start(runId, 'chat', '生成旁白');
+    expect(result.snapshot.tasks.find((task) => task.id === 'voice')).toMatchObject({ status: 'failed', error: expect.stringContaining('4000') });
+    expect(queueAgentTeamAudio).not.toHaveBeenCalled();
+  });
+
   it('passes completed lyrics into a dependent music generation task', async () => {
     const runId = crypto.randomUUID();
     const chatId = `lyrics-${runId}`;
