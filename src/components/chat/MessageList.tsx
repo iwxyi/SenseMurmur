@@ -9,6 +9,8 @@ import EventMessageItem from './EventMessageItem';
 import type { EventRenderFlags } from './eventMessagePresentation';
 import type { NarrativeStoryChoiceOption } from './messageBubblePresentation';
 import SystemMessageItem from './SystemMessageItem';
+import ChatNoticeMessage from './ChatNoticeMessage';
+import ChatTimelineFrame from './ChatTimelineFrame';
 import { resolveCharacterOrDeleted } from '../../utils/deletedEntity';
 import type { ChatRenderItem } from './chatRenderModel';
 import { getContinuousAiMessageKeys, isNarrativeRevealAllowed } from './messageListPresentation';
@@ -181,7 +183,7 @@ function StoryChoicePanel({ options, onChoose, showDeveloperDetails = false, sub
   if (!options.length) return null;
   const isSubmitting = Boolean(submittingValue);
   return (
-    <Box data-message-id="story-choice-panel" data-message-type="story-choice" sx={{ px: { xs: 2, sm: 3 }, py: 0.75, width: '100%' }}>
+    <ChatTimelineFrame placement="center" messageId="story-choice-panel" messageType="story-choice" sx={{ px: { xs: 2, sm: 3 }, py: 0.75 }}>
       <Stack spacing={0.75} sx={{ width: '100%', maxWidth: maxContentWidth, mx: 'auto', px: { xs: 0.5, sm: 1 }, transition: 'gap 220ms ease' }}>
         <Typography variant="caption" color="text.secondary" sx={{ px: 0.5, fontWeight: 700, transition: 'opacity 180ms ease, max-height 220ms ease, margin 220ms ease', opacity: isSubmitting ? 0 : 1, maxHeight: isSubmitting ? 0 : 24, overflow: 'hidden' }}>
           {isSubmitting ? '已选择剧情走向' : '选择接下来的剧情走向'}
@@ -245,7 +247,7 @@ function StoryChoicePanel({ options, onChoose, showDeveloperDetails = false, sub
           </Box>
         ))}
       </Stack>
-    </Box>
+    </ChatTimelineFrame>
   );
 }
 
@@ -260,7 +262,7 @@ function StoryNodeProgressBar({ message }: { message: Message }) {
   if (!progress) return null;
   const maxContentWidth = chatAppearance.maxContentWidthUnlimited ? '100%' : chatAppearance.maxContentWidth;
   return (
-    <Box sx={{ px: { xs: 2, sm: 3 }, pt: 0.15, pb: 0.55, width: '100%' }}>
+    <ChatTimelineFrame placement="center" sx={{ px: { xs: 2, sm: 3 }, pt: 0.15, pb: 0.55 }}>
       <Stack direction="row" spacing={0.55} useFlexGap sx={{ flexWrap: 'wrap', maxWidth: maxContentWidth, mx: 'auto', px: { xs: 0.5, sm: 1 } }}>
         {progress.chips.map((chip) => (
           <Chip
@@ -277,7 +279,7 @@ function StoryNodeProgressBar({ message }: { message: Message }) {
           />
         ))}
       </Stack>
-    </Box>
+    </ChatTimelineFrame>
   );
 }
 
@@ -801,6 +803,9 @@ export default function MessageList({
     };
     if (item.renderKind === 'system') {
       return <Box key={item.key} {...anchorProps}><SystemMessageItem message={item.message} /></Box>;
+    }
+    if (item.renderKind === 'notice') {
+      return <Box key={item.key} {...anchorProps}><ChatNoticeMessage message={item.message} /></Box>;
     }
     if (item.renderKind === 'event') {
       return <Box key={item.key} {...anchorProps}><EventMessageItem message={item.message} members={characters} /></Box>;

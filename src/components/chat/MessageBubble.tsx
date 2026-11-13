@@ -31,7 +31,7 @@ import type { AssistantHtmlInteractionPayload, AssistantHtmlRuntimeError } from 
 import { getNarrativeDisplayBlocks, hasNarrativeReaderBlocks, isNarrativeParagraphMessage, shouldUseCompactMediaBubble, shouldUseCompactMessageBubble } from './messageBubblePresentation';
 import { DefaultUserAvatarIcon, TopicGuideAvatarIcon } from '../common/IdentityIcons';
 import AssistantHtmlMessageBlock from '../../features/assistantHtml/AssistantHtmlMessageBlock';
-import ChatNoticeMessage from './ChatNoticeMessage';
+import ChatTimelineFrame from './ChatTimelineFrame';
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import { api } from '../../services/api';
 import { speechTextFromMessage, usesManagedSpeechProfile } from '../../services/speech';
@@ -539,7 +539,6 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
       if (!avatarPressRef.current.fired) setAvatarMenuPosition({ mouseX: event.clientX, mouseY: event.clientY });
     },
   } : {};
-  const wrapperJustify = isUser ? 'flex-end' : 'flex-start';
   const normalizedCurrentUserAvatar = currentUser?.avatar?.trim() === '🍵' ? '' : currentUser?.avatar?.trim();
   const selfAvatarValue = isGuidanceBubble ? '' : (isPerspectiveSelf ? effectiveCharacter?.avatar?.trim() : (isManualSpeaker ? manualSpeaker?.avatar?.trim() : normalizedCurrentUserAvatar));
   const selfAvatarText = isGuidanceBubble ? message.senderName : ((isPerspectiveSelf ? effectiveCharacter?.name : (isManualSpeaker ? manualSpeaker?.actorName : currentUser?.nickname))?.trim() || message.senderName);
@@ -569,7 +568,6 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
   const compactMediaBubble = !isFinalWithdrawn && shouldUseCompactMediaBubble(message);
   const showPendingTypingDots = (pending || message.isStreaming) && !message.content;
   const shouldRenderNarrativeReader = hasNarrativeReaderBlocks(narrativeParagraphBlocks);
-  if (message.metadata?.chatNotice) return <ChatNoticeMessage message={message} />;
   if (shouldRenderNarrativeReader || ((pending || message.isStreaming) && useNarrativeParagraph)) {
     const narrativeCharacters = characters.length ? characters : effectiveCharacter ? [effectiveCharacter] : [];
     const storyReaderFontFamily = chatAppearance.storyReader.fontFamily === 'serif'
@@ -579,7 +577,7 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
         : undefined;
     return (
       <>
-        <Box data-message-id={message.id} data-message-type={message.type} sx={{ display: 'flex', justifyContent: 'center', px: { xs: 2, sm: 3 }, py: 1.1, width: '100%' }}>
+        <ChatTimelineFrame placement="center" messageId={message.id} messageType={message.type} sx={{ px: { xs: 2, sm: 3 }, py: 1.1 }}>
           <Box
             {...bubbleHandlers}
             sx={{
@@ -610,7 +608,7 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
           >
             {narrativeParagraphBlocks.length ? <NarrativeParagraphContent blocks={narrativeParagraphBlocks} characters={narrativeCharacters} showDeveloperDetails={developerMode} /> : <PendingTypingDots />}
           </Box>
-        </Box>
+        </ChatTimelineFrame>
         <Dialog open={viewerOpen} onClose={() => setViewerOpen(false)} maxWidth="sm" fullWidth>
           <DialogTitle>{displaySenderName}</DialogTitle>
           <DialogContent><NarrativeParagraphContent blocks={narrativeParagraphBlocks} characters={narrativeCharacters} /></DialogContent>
@@ -621,7 +619,9 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
 
   return (
     <Box sx={{ width: '100%', minWidth: 0, maxWidth: '100%' }}>
-      <Box data-message-id={message.id} data-message-type={message.type} aria-label={continuesPreviousSender ? `${displaySenderName} 的连续消息` : undefined} sx={{ display: 'flex', width: '100%', minWidth: 0, maxWidth: '100%', justifyContent: wrapperJustify, px: hidePrivateChatIdentity ? { xs: 2, sm: 3 } : 2, py: continuesPreviousSender ? 0.2 : 0.75, gap: hidePrivateChatIdentity ? 0 : 1.25, alignItems: 'flex-start' }}>
+      <ChatTimelineFrame placement={isUser ? 'right' : 'left'} messageId={message.id} messageType={message.type}
+        ariaLabel={continuesPreviousSender ? `${displaySenderName} 的连续消息` : undefined}
+        sx={{ px: hidePrivateChatIdentity ? { xs: 2, sm: 3 } : 2, py: continuesPreviousSender ? 0.2 : 0.75, gap: hidePrivateChatIdentity ? 0 : 1.25, alignItems: 'flex-start' }}>
         {!isUser && !hidePrivateChatIdentity ? (
           <Box {...roleAvatarHandlers}
             sx={{ cursor: message.type === 'ai' && !pending ? 'pointer' : 'default', flexShrink: 0, width: 38, userSelect: 'none', WebkitTouchCallout: 'none', '& img': { WebkitUserDrag: 'none' }, visibility: continuesPreviousSender ? 'hidden' : 'visible' }} aria-hidden={continuesPreviousSender}>
@@ -778,7 +778,7 @@ function MessageBubble({ message, continuesPreviousSender = false, character, ch
             )}
           </Box>
         ) : null}
-      </Box>
+      </ChatTimelineFrame>
 
       {interactiveHtmlArtifactRefs.length ? (
         <Box sx={{ display: 'flex', justifyContent: 'center', px: { xs: 2, sm: 3 }, pb: 1, width: '100%' }}>

@@ -67,7 +67,8 @@ try {
       return path;
     };
     const [reactModule, reactDomClient, { default: Workbench }] = await Promise.all([
-      import(dependencyUrl('react')), import(dependencyUrl('react-dom_client')), import('/src/components/chat/AssistantTeamWorkbench.tsx'),
+      import(dependencyUrl('react')), import(dependencyUrl('react-dom_client')),
+      import('/src/components/chat/AssistantTeamWorkbench.tsx'),
     ]);
     const React = reactModule.default || reactModule;
     const createRoot = reactDomClient.createRoot || reactDomClient.default?.createRoot;
@@ -768,21 +769,28 @@ try {
     container.id = 'assistant-team-smoke-root';
     document.body.append(container);
     window.__assistantTeamSmoke = { calls: [], resumed: [], limits: [], deadlines: [] };
-    const [{ default: ToolHistory }, { default: TeamProgressAside }] = await Promise.all([
+    const [{ default: ToolHistory }, { default: ChatMessageList }, { default: ChatTimelineFrame }] = await Promise.all([
       import('/src/components/chat/TeamTaskExecutionHistory.tsx'),
-      import('/src/components/chat/ChatNoticeMessage.tsx'),
+      import('/src/components/chat/MessageList.tsx'),
+      import('/src/components/chat/ChatTimelineFrame.tsx'),
     ]);
     const progressContainer = document.createElement('div');
     progressContainer.id = 'assistant-team-progress-smoke-root';
     document.body.append(progressContainer);
     const progressRoot = createRoot(progressContainer);
     window.__assistantTeamSmoke.progressRoot = progressRoot;
-    progressRoot.render(React.createElement(TeamProgressAside, { message: {
+    progressRoot.render(React.createElement(React.Fragment, null,
+      React.createElement(ChatMessageList, { characters: [], messages: [
+      { id: 'system-fixture', chatId: 'progress-fixture', type: 'system', senderId: 'system', senderName: '提示',
+        content: '普通系统提示', emotion: 0, timestamp: now - 1, isDeleted: false },
+      {
       id: 'progress-fixture', chatId: 'progress-fixture', type: 'system', senderId: 'narrator', senderName: '旁白',
       content: '生成视频 · 进行中', emotion: 0, timestamp: now, isDeleted: false,
       metadata: { chatNotice: { tone: 'working', progress: { completed: 2, total: 4 },
         details: ['撰写剧本 · 已完成', '生成图片素材 · 已完成', '生成视频 · 进行中', '检查交付结果 · 排队中'] } },
-    } }));
+    }] }),
+      React.createElement(ChatTimelineFrame, { placement: 'left', messageId: 'left-fixture' }, '左侧'),
+      React.createElement(ChatTimelineFrame, { placement: 'right', messageId: 'right-fixture' }, '右侧')));
     const historyContainer = document.createElement('div');
     historyContainer.id = 'assistant-tool-history-smoke-root';
     document.body.append(historyContainer);
@@ -859,6 +867,11 @@ try {
   const resumedIds = await cdp.evaluate(`window.__assistantTeamSmoke.resumed`);
   assert.deepEqual(resumedIds, ['browser-resume-run', 'browser-resume-run-2']);
   await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('#assistant-team-progress-smoke-root [aria-label="聊天提示"]'))`), 'chat notice rendered');
+  assert.equal(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root [data-message-id="left-fixture"]')?.dataset.timelinePlacement`), 'left');
+  assert.equal(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root [data-message-id="right-fixture"]')?.dataset.timelinePlacement`), 'right');
+  assert.equal(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root [data-message-id="system-fixture"][data-timeline-placement]')?.dataset.timelinePlacement`), 'center');
+  assert.equal(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root [data-message-id="progress-fixture"][data-timeline-placement]')?.dataset.timelinePlacement`), 'center');
+  assert.equal(await cdp.evaluate(`Boolean(document.querySelector('#assistant-team-progress-smoke-root [aria-label="正在执行"]'))`), true);
   assert.match(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root').textContent`), /生成视频 · 进行中.*2\/4/);
   assert.doesNotMatch(await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root').textContent`), /撰写剧本|检查交付结果/);
   await cdp.evaluate(`document.querySelector('#assistant-team-progress-smoke-root button[aria-label="展开提示详情"]').click()`);

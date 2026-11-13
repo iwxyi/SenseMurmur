@@ -1,22 +1,16 @@
 import type { Message } from '../../types/message';
 import { getMessageRenderIdentity, messagesShareIdentity } from '../../services/messageIdentity';
 import { parseRuntimeEvent } from '../../services/runtimeEventFactory';
-import { isNarrativeParagraphMessage } from './messageBubblePresentation';
+import { resolveChatTimelinePresentation, type ChatTimelinePresentation } from './chatTimelinePresentation';
 
-export type ChatRenderKind = 'bubble' | 'narrative' | 'system' | 'event';
+export type ChatRenderKind = 'bubble' | 'narrative' | 'system' | 'notice' | 'event';
 
 export interface ChatRenderItem {
   key: string;
   message: Message;
   pending: boolean;
   renderKind: ChatRenderKind;
-}
-
-function getChatRenderKind(message: Message): ChatRenderKind {
-  if (message.type === 'system') return 'system';
-  if (isNarrativeParagraphMessage(message)) return 'narrative';
-  if (message.type === 'event') return 'event';
-  return 'bubble';
+  presentation: ChatTimelinePresentation;
 }
 
 function getEventSourceMessageId(message: Message) {
@@ -44,11 +38,13 @@ export function buildChatRenderItems(messages: Message[]): ChatRenderItem[] {
     if (items.some((item) => messagesShareIdentity(item.message, message))) continue;
     const identity = `${message.chatId}:${getMessageRenderIdentity(message)}`;
 
+    const presentation = resolveChatTimelinePresentation(message);
     items.push({
       key: message.clientKey || identity,
       message,
       pending: Boolean(message.isStreaming),
-      renderKind: getChatRenderKind(message),
+      renderKind: presentation.kind === 'message' ? 'bubble' : presentation.kind,
+      presentation,
       order,
     });
   }
@@ -76,5 +72,6 @@ export function buildChatRenderItems(messages: Message[]): ChatRenderItem[] {
       message: item.message,
       pending: item.pending,
       renderKind: item.renderKind,
+      presentation: item.presentation,
     }));
 }

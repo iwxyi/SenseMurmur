@@ -4,6 +4,7 @@ import { useSettingsStore } from '../../stores/useSettingsStore';
 import type { DisplayTextMember } from '../../services/displayTextSanitizer';
 import { buildConflictEventMeta, buildEventDisplayText, buildMemoryDistillationMeta, buildMemoryReactivationMeta } from './messageBubbleEventHelpers';
 import { getRuntimeEventPayload, isConflictDeveloperEvent, shouldRenderEventMessage } from './eventMessagePresentation';
+import ChatTimelineFrame from './ChatTimelineFrame';
 
 function getMetricsKind(metrics: unknown) {
   return metrics && typeof metrics === 'object' && 'kind' in metrics && typeof (metrics as { kind?: unknown }).kind === 'string'
@@ -111,7 +112,8 @@ export default function EventMessageItem({ message, members = [] }: { message: M
   const payload: { eventType?: string; title?: string; summary?: string; pair?: string[]; metrics?: unknown } = getRuntimeEventPayload(message);
 
   return (
-    <Box data-message-id={message.id} data-message-type="event" sx={{ display: 'flex', justifyContent: 'center', py: 0.5, px: { xs: 1, sm: 2 }, width: '100%', minWidth: 0, pointerEvents: 'none' }}>
+    <ChatTimelineFrame placement="center" messageId={message.id} messageType="event"
+      sx={{ py: 0.5, px: { xs: 1, sm: 2 }, pointerEvents: 'none' }}>
       <Box sx={{
         maxWidth: 620,
         width: { xs: '100%', sm: 'fit-content' },
@@ -139,6 +141,6 @@ export default function EventMessageItem({ message, members = [] }: { message: M
         {payload.eventType === 'memory_distillation' ? renderMemoryDistillationMeta(payload, members) : null}
         {payload.eventType === 'memory_reactivation' ? renderMemoryReactivationMeta(payload, members) : null}
       </Box>
-    </Box>
+    </ChatTimelineFrame>
   );
 }

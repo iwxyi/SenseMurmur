@@ -28,15 +28,19 @@ describe('buildChatRenderItems', () => {
     expect(items.map((item) => item.pending)).toEqual([true, false]);
   });
 
-  it('classifies system, event, narrative, and regular bubble render kinds', () => {
+  it('classifies notices, system messages, events, narrative and both bubble sides', () => {
     const items = buildChatRenderItems([
+      message({ id: 'notice-1', type: 'system', senderId: 'system', senderName: '提示', content: '正在执行',
+        metadata: { chatNotice: { tone: 'working', details: ['步骤一'] } } }),
       message({ id: 'system-1', type: 'system', senderId: 'system', senderName: 'System', content: '系统提示' }),
       message({ id: 'event-1', type: 'event', senderId: 'system', senderName: 'System', content: '{"eventType":"relationship_shift","summary":"关系变化"}', timestamp: 2 }),
       message({ id: 'narrator-1', senderId: 'narrator', senderName: '旁白', content: '雨声落下。', timestamp: 3 }),
       message({ id: 'ai-1', senderId: 'character-1', senderName: 'Character', content: '你好', timestamp: 4 }),
+      message({ id: 'user-1', type: 'user', senderId: 'user', senderName: 'User', content: '你好', timestamp: 5 }),
     ]);
 
-    expect(items.map((item) => item.renderKind)).toEqual(['system', 'event', 'narrative', 'bubble']);
+    expect(items.map((item) => item.renderKind)).toEqual(['notice', 'system', 'event', 'narrative', 'bubble', 'bubble']);
+    expect(items.map((item) => item.presentation.placement)).toEqual(['center', 'center', 'center', 'center', 'left', 'right']);
   });
 
   it('renders narrative turn paragraph messages as narrative items', () => {
