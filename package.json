@@ -42,6 +42,7 @@
     "test:assistant-team-collaboration-browser-smoke": "node scripts/assistant-team-collaboration-browser-smoke.mjs",
     "test:assistant-team-delivery-browser-smoke": "node scripts/assistant-team-delivery-browser-smoke.mjs",
     "test:media-quote-browser-smoke": "node scripts/media-quote-browser-smoke.mjs",
+    "test:async-image-recovery-browser-smoke": "node scripts/async-image-recovery-browser-smoke.mjs",
     "test:assistant-team-composition-browser-smoke": "node scripts/assistant-team-composition-browser-smoke.mjs",
     "test:assistant-run-recovery-browser-smoke": "node scripts/assistant-run-recovery-browser-smoke.mjs",
     "test:background-execution-home-browser-smoke": "node scripts/background-execution-home-browser-smoke.mjs",

@@ -372,7 +372,7 @@ function DataLoader({ children }: { children: React.ReactNode }) {
         console.error('[agent-team:recovery-failed]', error);
       });
       void import('./services/backgroundVideoRecovery').then(({ recoverBackgroundVideoTasks }) => recoverBackgroundVideoTasks()).catch((error) => {
-        console.error('[video-task:recovery-failed]', error);
+        console.error('[media-task:recovery-failed]', error);
       });
     }
   }, [authMode, isAdminRoute, isLoggedIn, isWorkspaceReady, loadSettings]);
