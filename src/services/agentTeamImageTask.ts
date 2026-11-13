@@ -11,6 +11,7 @@ import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope'
 import { isLocalOnlyMediaMode, processRichMessageMedia } from './richMessageMedia';
 import { WorkflowPreflightError, type WorkflowTaskResult } from './workflowRunRuntime';
 import { inspectTeamMediaAdmission, recoverTeamMediaAdmission } from './agentTeamMediaAdmission';
+import type { PreparedMediaExecution } from './preparedMediaExecution';
 
 function teamImageMessage(runId: string, taskId: string): Message | null {
   const state = useMessageStore.getState();
@@ -39,7 +40,8 @@ export function inspectAgentTeamImageAttachment(runId: string, taskId: string) {
     ? { status: 'completed' as const, output: `图片已生成并保存在当前聊天附件。内容：${(attachment.promptText || attachment.altText).slice(0, 2000)}` }
     : { status: 'failed' as const, error: '图片已生成，但文件尚未保存到聊天' };
   if (attachment.status === 'failed') return { status: 'failed' as const, error: attachment.error || '图片生成失败' };
-  if (attachment.status === 'queued') return { status: 'queued' as const };
+  if (attachment.mediaTaskId) return { status: 'waiting_external' as const, externalTaskId: attachment.mediaTaskId };
+  if (attachment.status === 'queued' || (attachment.status === 'generating' && attachment.generationJobId)) return { status: 'queued' as const };
   return null;
 }
 
@@ -71,6 +73,7 @@ function waitForServerId(runId: string, taskId: string, signal: AbortSignal) {
 export async function queueAgentTeamImage(params: { runId: string; taskId: string; chatId: string; prompt: string; sourceBranch?: WorkflowGoalSpec['sourceBranch'];
   usageReference?: WorkflowUsageReference;
   profile?: AIModelProfile;
+  mediaExecution?: PreparedMediaExecution;
   referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
@@ -80,24 +83,41 @@ export async function queueAgentTeamImage(params: { runId: string; taskId: strin
   const chat = useChatStore.getState().chats.find((item) => item.id === params.chatId && item.type === 'assistant' && item.deletedAt == null);
   if (!chat) throw new WorkflowPreflightError('助手会话已删除');
   if (params.signal.aborted) throw new WorkflowPreflightError('团队任务已中断');
-  const existing = recoverTeamMediaAdmission(teamImageMessage(params.runId, params.taskId), 'image', params.usageReference);
+  const priorMessage = teamImageMessage(params.runId, params.taskId);
+  const rejectedBeforeSubmission = priorMessage?.metadata?.attachments?.some((item) => item.kind === 'image' && inspectTeamMediaAdmission(item));
+  const existing = recoverTeamMediaAdmission(priorMessage, 'image', params.usageReference);
   const prior = inspectAgentTeamImageAttachment(params.runId, params.taskId);
   if (prior?.status === 'completed') return { output: prior.output };
   if (prior?.status === 'failed') throw new WorkflowPreflightError(prior.error);
+  if (prior?.status === 'waiting_external') return { externalTaskId: prior.externalTaskId };
   if (existing && prior?.status !== 'queued') throw new Error('图片任务已开始提交，但结果尚未确认，请核对后继续');
   const profile = params.profile ?? getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image');
   if (!profile || profile.type !== 'image') throw new WorkflowPreflightError('图片模型未配置');
   const now = Date.now();
   const state = useMessageStore.getState();
   const known = [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])];
-  const message = existing || attachMessageToActiveBranch(teamConversationContext(chat, params), known, {
+  const executionFields = params.mediaExecution ? { executionQuoteId: params.mediaExecution.quote.id,
+    generationJobId: String(params.mediaExecution.request.client_request_key) } : {};
+  let message = existing || attachMessageToActiveBranch(teamConversationContext(chat, params), known, {
     id: `team-image-${params.runId}-${params.taskId}`, clientKey: `team-image-${params.runId}-${params.taskId}`, chatId: chat.id, type: 'ai' as const,
     senderId: 'assistant', senderName: '助手', content: '图片', emotion: 0, timestamp: now, isDeleted: false,
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, workflowUsage: params.usageReference, attachments: [{
       id: `team-image-${params.taskId}`, kind: 'image' as const, status: 'queued' as const,
-      altText: '团队生成图片', promptText: params.prompt, referenceImages: params.referenceImages, createdAt: now, updatedAt: now,
+      altText: '团队生成图片', promptText: params.prompt, referenceImages: params.referenceImages, createdAt: now, updatedAt: now, ...executionFields,
     }] },
   }) as Message;
+  const unsubmitted = existing?.metadata?.attachments?.find((item) => item.kind === 'image'
+    && item.status === 'queued' && !item.mediaTaskId && !item.generationJobId);
+  if (unsubmitted && (params.mediaExecution || rejectedBeforeSubmission)) {
+    message = { ...message, metadata: { ...message.metadata, workflowUsage: params.usageReference,
+      attachments: message.metadata?.attachments?.map((item) => item.id === unsubmitted.id ? {
+        ...item, promptText: params.prompt, referenceImages: params.referenceImages, updatedAt: now,
+        executionQuoteId: undefined, ...executionFields,
+      } : item) } };
+    state.upsertMessage(message);
+    state.queueMessageSync(message);
+    flushBufferedPersistenceWrites();
+  }
   if (!existing) {
     state.upsertMessage(message);
     state.queueMessageSync(message);
@@ -111,6 +131,7 @@ export async function queueAgentTeamImage(params: { runId: string; taskId: strin
     executionSignal: params.signal,
     upsertMessage: (next) => useMessageStore.getState().upsertMessage(next) });
   const result = inspectAgentTeamImageAttachment(params.runId, params.taskId);
+  if (result?.status === 'waiting_external') return { externalTaskId: result.externalTaskId };
   if (result?.status === 'completed') return { output: result.output };
   if (result?.status === 'failed') throw new WorkflowPreflightError(result.error);
   throw new Error('图片任务结果无法确认，请核对后继续');

@@ -6,14 +6,13 @@ import { processRichMessageMedia } from './richMessageMedia';
 import { readAuthSnapshot } from './authSnapshot';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
 import { getWorkspaceSignal } from './workspaceLifecycle';
+import { isRecoverableMediaAttachment } from './recoverableMediaTask';
 
 let recoveryWatcher: { signal: AbortSignal; unsubscribe: () => void } | null = null;
 const scheduledTasks = new Set<string>();
 
-function videoTaskKeys(message: Message) {
-  return (message.metadata?.attachments || []).filter((attachment) => (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation'))
-    && (attachment.status === 'generating' || (attachment.status === 'queued' && attachment.mediaTaskId))
-    && (attachment.mediaTaskId || attachment.generationJobId))
+function mediaTaskKeys(message: Message) {
+  return (message.metadata?.attachments || []).filter(isRecoverableMediaAttachment)
     .map((attachment) => `${message.id}:${attachment.id}:${attachment.mediaTaskId || attachment.generationJobId}`);
 }
 
@@ -43,12 +42,10 @@ export function findPendingVideoMessages(messages: Message[], activeChatIds: Set
   }
   return [...latest.values()].filter((message) => !message.isDeleted && activeChatIds.has(message.chatId)
     && (!requiresServerId || Boolean(message.serverId))
-    && (message.metadata?.attachments?.some((attachment) => (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation'))
-      && (attachment.status === 'generating' || (attachment.status === 'queued' && Boolean(attachment.mediaTaskId)))
-      && Boolean(attachment.mediaTaskId || attachment.generationJobId)) || false));
+    && (message.metadata?.attachments?.some(isRecoverableMediaAttachment) || false));
 }
 
-/** Reconcile submitting videos by their saved request key, then resume accepted tasks. */
+/** Reconcile submitted media by its saved request key, then resume accepted tasks. */
 export async function recoverBackgroundVideoTasks() {
   const workspaceSignal = getWorkspaceSignal();
   await Promise.all([
@@ -71,21 +68,19 @@ export async function recoverBackgroundVideoTasks() {
     ], activeChatIds, requiresServerId);
     let dispatched = 0;
     for (const message of messages) {
-      const keys = videoTaskKeys(message);
+      const keys = mediaTaskKeys(message);
       const fresh = keys.filter((key) => !scheduledTasks.has(key));
       if (!fresh.length) continue;
       fresh.forEach((key) => scheduledTasks.add(key));
       dispatched += fresh.length;
       void processRichMessageMedia({
         message,
-        attachmentIds: message.metadata?.attachments?.filter((attachment) => (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation'))
-          && (attachment.status === 'generating' || (attachment.status === 'queued' && Boolean(attachment.mediaTaskId)))
-          && (attachment.mediaTaskId || attachment.generationJobId)
+        attachmentIds: message.metadata?.attachments?.filter((attachment) => isRecoverableMediaAttachment(attachment)
           && fresh.includes(`${message.id}:${attachment.id}:${attachment.mediaTaskId || attachment.generationJobId}`)).map((attachment) => attachment.id),
         aiProfiles: useSettingsStore.getState().aiProfiles,
         upsertMessage: (next) => useMessageStore.getState().upsertMessage(next),
       }).catch((error) => {
-        console.error('[video-task:recovery-processing-failed]', error);
+        console.error('[media-task:recovery-processing-failed]', error);
       });
     }
     return dispatched;

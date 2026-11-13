@@ -1,4 +1,4 @@
-import { getUsablePreferredAIProfile, normalizeImageCapabilities, resolveAIModelInputCapabilities, type APIConfig } from '../types/settings';
+import { getUsablePreferredAIProfile, normalizeImageCapabilities, normalizeImageGenerationSize, resolveAIModelInputCapabilities, type APIConfig } from '../types/settings';
 import { generateWorkflowModelResponse as generateResponse } from './workflowModelResponse';
 import { directTeamMediaReferences, planAgentTeam, teamTaskMediaKind, validateAgentTeamPlan, type AgentTeamPlan, type AgentTeamTask } from './agentTeamPlan';
 import { assertTeamMediaOutput, resolveTeamDelegationMedia, resolveTeamMediaTask } from './agentTeamMediaReference';
@@ -277,6 +277,35 @@ function validateAvailableTeamTools(plan: AgentTeamPlan, capabilities: Awaited<R
   }
 }
 
+function teamImageRequest(task: WorkflowTask, input: TeamTaskInput, snapshot: WorkflowSnapshot, savedTextContent: string[]) {
+  const plan = snapshot.tasks.find((item) => item.id === (input.sourcePlanTaskId ?? 'plan'));
+  const sourcePlan = validateAgentTeamPlan(plan?.expansion?.context ?? plan?.output);
+  const imageTaskIds = directImageDependencies(input.task, new Map(sourcePlan.tasks.map((item) => [item.id, item])));
+  const imageProfile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image');
+  if (!imageProfile) throw new WorkflowPreflightError('图片模型未配置', { tool: 'image_generation', code: 'model_missing' });
+  const capabilities = normalizeImageCapabilities(imageProfile.imageCapabilities);
+  if (imageTaskIds.length && !capabilities.referenceImage) throw new WorkflowPreflightError('当前图片模型不支持参考图片', { tool: 'image_generation', code: 'model_unsupported' });
+  if (imageTaskIds.length > 1 && !capabilities.multiReferenceImage) throw new WorkflowPreflightError('当前图片模型只支持一张参考图片', { tool: 'image_generation', code: 'model_unsupported' });
+  const referenceImages = imageTaskIds.map((id) => {
+    const dependencyId = input.task.savedMedia?.find((media) => media.alias === id)?.taskId
+      ?? (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id);
+    const reference = teamImageReference(task.runId, resolveTeamMediaTask(snapshot, dependencyId, 'image'));
+    if (!reference) throw new WorkflowPreflightError('图片任务的参考图片文件尚未就绪');
+    return reference;
+  });
+  const upstream = input.task.dependsOn.filter((id) => !imageTaskIds.includes(id)).map((id) => {
+    const dependency = snapshot.tasks.find((item) => item.id === (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id));
+    if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('图片的上游脚本尚未就绪');
+    return dependency.output.slice(0, 12_000);
+  });
+  return { prompt: [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n'), referenceImages, imageProfile };
+}
+
+function teamImageParameters(profile: ReturnType<typeof getUsablePreferredAIProfile>, referenceImages: Array<{ url: string }>) {
+  return { resolution: normalizeImageGenerationSize(profile?.defaultImageSize),
+    ...(referenceImages.length ? { image_urls: referenceImages.map((item) => item.url) } : {}) };
+}
+
 function teamMusicPrompt(input: TeamTaskInput, snapshot: WorkflowSnapshot, savedTextContent: string[]) {
   const upstream = input.task.dependsOn.map((id) => {
     const dependencyId = input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id;
@@ -368,18 +397,21 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
     approvalRequirement,
     async prepareApprovalRequirement(task, snapshot, requirement, signal) {
       if (requirement.mediaExecution || !isTeamTaskInput(task.input)
-        || !['audio_generation', 'video_generation'].includes(task.input.task.tool || '')) return requirement;
+        || !['image_generation', 'audio_generation', 'video_generation'].includes(task.input.task.tool || '')) return requirement;
+      const image = task.input.task.tool === 'image_generation';
       const video = task.input.task.tool === 'video_generation';
-      const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, video ? 'video' : 'audio');
+      const profile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, image ? 'image' : video ? 'video' : 'audio');
       if (!profile || profile.provider !== 'official-ace') return requirement;
       if (task.input.task.savedText?.some((reference) => reference.artifact)) await ensureAssistantArtifactStoreHydrated();
       const savedText = resolveTeamSavedText(task.input.task, snapshot, task.input.contextTaskIds || [], useAssistantArtifactStore.getState().items);
       const content = savedText.map((entry) => entry.content);
-      const request = video ? await teamVideoRequest(task, task.input, snapshot, content) : { prompt: teamMusicPrompt(task.input, snapshot, content) };
+      const request = image ? teamImageRequest(task, task.input, snapshot, content)
+        : video ? await teamVideoRequest(task, task.input, snapshot, content) : { prompt: teamMusicPrompt(task.input, snapshot, content) };
       const mediaExecution = await prepareAiMediaTask({ profile, prompt: request.prompt, signal,
-        ...(video ? { parameters: resolveVideoGenerationParameters({ profile, ...request }) } : {}),
+        ...(image ? { parameters: teamImageParameters(profile, 'referenceImages' in request ? request.referenceImages : []) }
+          : video ? { parameters: resolveVideoGenerationParameters({ profile, ...request }) } : {}),
         clientRequestKey: workflowJsonDigest({ runId: task.runId, taskId: task.id, attempt: task.attempt + 1 }),
-        aiUsage: { type: video ? 'video_generation' : 'audio_generation', label: video ? '聊天视频生成' : '聊天音乐生成', scope: 'chat', resourceId: snapshot.run.chatId,
+        aiUsage: { type: image ? 'image_generation' : video ? 'video_generation' : 'audio_generation', label: image ? '聊天图片生成' : video ? '聊天视频生成' : '聊天音乐生成', scope: 'chat', resourceId: snapshot.run.chatId,
           workflow: { schemaVersion: 1, runId: task.runId, taskId: task.id, attempt: task.attempt + 1, kind: 'tool',
             ...(snapshot.run.goalSpec?.platformBudget ? { budgetRevision: snapshot.run.goalSpec.platformBudget.revision } : {}) } } });
       return { ...requirement, mediaExecution };
@@ -580,28 +612,16 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           }, signal });
       }
       if (selectedTool === 'image_generation') {
-        const imageTaskIds = directImageDependencies(input.task, new Map(plan.tasks.map((item) => [item.id, item])));
-        const imageProfile = getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'image');
-        if (!imageProfile) throw new WorkflowPreflightError('图片模型未配置', { tool: 'image_generation', code: 'model_missing' });
-        const imageCapabilities = normalizeImageCapabilities(imageProfile?.imageCapabilities);
-        if (imageTaskIds.length && (!imageProfile || !imageCapabilities.referenceImage)) throw new WorkflowPreflightError('当前图片模型不支持参考图片', { tool: 'image_generation', code: 'model_unsupported' });
-        if (imageTaskIds.length > 1 && !imageCapabilities.multiReferenceImage) throw new WorkflowPreflightError('当前图片模型只支持一张参考图片', { tool: 'image_generation', code: 'model_unsupported' });
-        const referenceImages = imageTaskIds.map((id) => {
-          const dependencyId = input.task.savedMedia?.find((media) => media.alias === id)?.taskId
-            ?? (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id);
-          const reference = teamImageReference(task.runId, resolveTeamMediaTask(snapshot, dependencyId, 'image'));
-          if (!reference) throw new WorkflowPreflightError('图片任务的参考图片文件尚未就绪');
-          return reference;
-        });
-        const upstream = input.task.dependsOn.filter((id) => !imageTaskIds.includes(id)).map((id) => {
-          const dependency = snapshot.tasks.find((item) => item.id === (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, id) : id));
-          if (!dependency || dependency.status !== 'completed' || typeof dependency.output !== 'string') throw new WorkflowPreflightError('图片的上游脚本尚未就绪');
-          return dependency.output.slice(0, 12_000);
-        });
-        const prompt = [input.task.goal, workflowGoalContext(snapshot.run.goalSpec), ...upstream, ...savedTextContent, input.userInstruction].filter(Boolean).join('\n\n');
+        const { prompt, referenceImages, imageProfile } = teamImageRequest(task, input, snapshot, savedTextContent);
+        const mediaExecution = task.approvals?.at(-1)?.mediaExecution;
+        if (mediaExecution && (mediaExecution.request.prompt !== prompt
+          || workflowJsonDigest(mediaExecution.request.image_urls ?? []) !== workflowJsonDigest(referenceImages.map((item) => item.url)))) {
+          throw new WorkflowPreflightError('图片素材或要求已改变，请重新确认审批');
+        }
         await context.beginToolInvocation(describeWorkflowToolRequest('image_generation', { prompt, referenceImages }));
         return queueAgentTeamImage({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
           profile: imageProfile,
+          mediaExecution,
           usageReference: context.usageReference,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           prompt, referenceImages, signal });
@@ -1499,6 +1519,7 @@ export async function recoverAgentTeamRuns() {
             const image = task.kind === 'agent_image' ? inspectAgentTeamImageAttachment(task.runId, task.id) : null;
             if (image?.status === 'queued') return 'admissionRejected' in image
               ? rejectWorkflowTaskAdmission(task, image.error) : { ...task, status: 'queued', updatedAt: Date.now() };
+            if (image?.status === 'waiting_external') return { ...task, status: 'waiting_external', externalTaskId: image.externalTaskId, updatedAt: Date.now() };
             if (image?.status === 'completed') return { ...task, status: 'completed', output: image.output, updatedAt: Date.now() };
             if (image?.status === 'failed') return { ...task, status: 'failed', error: image.error, updatedAt: Date.now() };
             const audio = task.kind === 'agent_audio' ? inspectAgentTeamAudioAttachment(task.runId, task.id) : null;

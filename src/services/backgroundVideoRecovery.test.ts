@@ -29,6 +29,12 @@ function musicMessage(id: string, taskId: string): Message {
     altText: '音乐', mediaTaskId: taskId, createdAt: 1, updatedAt: 1 }] } };
 }
 
+function imageMessage(id: string, taskId?: string): Message {
+  return { ...message(id, 'generating', taskId), metadata: { attachments: [{ id: `image-${id}`, kind: 'image', status: 'generating',
+    altText: '图片', executionQuoteId: 'approved-quote', mediaTaskId: taskId,
+    generationJobId: `request-${id}`, createdAt: 1, updatedAt: 1 }] } };
+}
+
 describe('background video recovery', () => {
   it('keeps an older generating video visible after cached chat eviction', () => {
     const pending = message('old-video', 'generating', 'task-old');
@@ -63,6 +69,16 @@ describe('background video recovery', () => {
     expect(findPendingVideoMessages(Object.values(persisted.messageWindowsByChatId).flatMap((window) => window.messages), new Set(['chat']), true))
       .toEqual([expect.objectContaining({ id: music.id })]);
   });
+  it('retains an approved async image in an older chat window', () => {
+    const image = imageMessage('old-image', 'image-task');
+    const messageWindowsByChatId = Object.fromEntries([
+      ['chat', { messages: [image], lastSyncedAt: 1, updatedAt: 1 }],
+      ...Array.from({ length: 13 }, (_, index) => [`recent-${index}`, { messages: [], lastSyncedAt: index + 2, updatedAt: index + 2 }] as const),
+    ]);
+    const persisted = __messageRuntimePersistenceForTests.buildPersistedMessageState({ messageWindowsByChatId, pendingOperations: [] });
+    expect(findPendingVideoMessages(Object.values(persisted.messageWindowsByChatId).flatMap((window) => window.messages), new Set(['chat']), true))
+      .toEqual([expect.objectContaining({ id: image.id })]);
+  });
   it('selects each accepted task once without restarting queued generation', () => {
     const accepted = message('accepted', 'generating', 'task-1');
     const submitting: Message = { ...message('submitting', 'generating'), metadata: { attachments: [{
@@ -79,6 +95,14 @@ describe('background video recovery', () => {
   it('includes accepted music tasks in the same reload recovery queue', () => {
     const music = musicMessage('music', 'music-task');
     expect(findPendingVideoMessages([music], new Set(['chat']), true)).toEqual([music]);
+  });
+  it('includes accepted and request-key-only async images without reviving ordinary queued images', () => {
+    const accepted = imageMessage('accepted-image', 'image-task');
+    const submitting = imageMessage('submitting-image');
+    const ordinary = { ...imageMessage('ordinary-image'), metadata: { attachments: [{
+      ...imageMessage('ordinary-image').metadata!.attachments![0], executionQuoteId: undefined, mediaTaskId: undefined,
+    }] } };
+    expect(findPendingVideoMessages([accepted, submitting, ordinary], new Set(['chat']), true)).toEqual([accepted, submitting]);
   });
 
   it('resumes a queued check for an already accepted video without submitting a new request', () => {

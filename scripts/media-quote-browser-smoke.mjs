@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 
 const baseUrl = process.env.PNEUMATA_CLIENT_URL || 'http://127.0.0.1:5173';
 const cdpUrl = process.env.PNEUMATA_CDP_URL || 'http://127.0.0.1:9222';
-const target = await (await fetch(`${cdpUrl}/json/new?${encodeURIComponent(baseUrl)}`, { method: 'PUT' })).json();
+const target = await (await fetch(`${cdpUrl}/json/new?about:blank`, { method: 'PUT' })).json();
 assert.ok(target.webSocketDebuggerUrl, 'Chrome must allow creating a test page');
 const socket = new WebSocket(target.webSocketDebuggerUrl);
 await new Promise((resolve, reject) => {

@@ -95,6 +95,14 @@ const generate = vi.mocked(generateResponse);
 afterEach(() => vi.unstubAllGlobals());
 
 beforeEach(() => {
+  vi.spyOn(appApi, 'quoteAiMedia').mockImplementation(async (request) => {
+    const model = String(request.model);
+    const now = Date.now();
+    return { schemaVersion: 1, id: 'a'.repeat(64), model,
+      modality: model.includes('banana') ? 'image' : model.includes('MiniMax') ? 'video' : 'audio',
+      requestSha256: 'b'.repeat(64), costQuoteId: 'c'.repeat(64), amount: '1.250000', unit: 'point',
+      kind: 'request_tariff', capturedAt: now, expiresAt: now + 300000, token: 'd'.repeat(64) };
+  });
   vi.stubGlobal('indexedDB', new IDBFactory());
   vi.stubGlobal('IDBKeyRange', IDBKeyRange);
   vi.stubGlobal('navigator', { locks: { request: async (_name: string, _options: unknown, callback?: (lock: object) => Promise<unknown>) => (callback || _options as (lock: object) => Promise<unknown>)({}) } });
@@ -119,16 +127,17 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
-  it.each(['audio_generation', 'video_generation'] as const)('quotes the final script and submits the persisted approval for %s', async (tool) => {
+  it.each(['image_generation', 'audio_generation', 'video_generation'] as const)('quotes the final script and submits the persisted approval for %s', async (tool) => {
     const runId = crypto.randomUUID(); const scope = `signed-media-${runId}`;
+    const image = tool === 'image_generation';
     const video = tool === 'video_generation';
-    const model = video ? 'MiniMax-H3' : 'fixture-music';
-    useSettingsStore.setState({ aiProfiles: [{ id: 'media', name: '媒体', type: video ? 'video' : 'audio', provider: 'official-ace',
+    const model = image ? 'nano-banana-2' : video ? 'MiniMax-H3' : 'fixture-music';
+    useSettingsStore.setState({ aiProfiles: [{ id: 'media', name: '媒体', type: image ? 'image' : video ? 'video' : 'audio', provider: 'official-ace',
       apiKey: '', baseUrl: '/api/ai', model, isDefault: true,
-      ...(video ? { videoDefaults: { aspectRatio: '9:16', resolution: '720p', duration: 6 } } : {}) }] });
+      ...(image ? { defaultImageSize: '2K' as const } : video ? { videoDefaults: { aspectRatio: '9:16', resolution: '720p', duration: 6 } } : {}) }] });
     const now = Date.now();
     const quote = vi.spyOn(appApi, 'quoteAiMedia').mockResolvedValue({ schemaVersion: 1, id: 'a'.repeat(64), model,
-      modality: video ? 'video' : 'audio', requestSha256: 'b'.repeat(64), costQuoteId: 'c'.repeat(64), amount: '1.250000', unit: 'point',
+      modality: image ? 'image' : video ? 'video' : 'audio', requestSha256: 'b'.repeat(64), costQuoteId: 'c'.repeat(64), amount: '1.250000', unit: 'point',
       kind: 'request_tariff', capturedAt: now, expiresAt: now + 300000, token: 'd'.repeat(64) });
     try {
       generate.mockResolvedValueOnce(JSON.stringify({ summary: '制作森林作品', roles: [{ id: 'maker', name: '创作者',
@@ -138,6 +147,7 @@ describe('agent team workflow', () => {
         .mockResolvedValueOnce('脚本正文：森林中的木琴与追逐。');
       vi.mocked(queueAgentTeamAudio).mockResolvedValue({ externalTaskId: 'accepted-music' });
       vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'accepted-video' });
+      vi.mocked(queueAgentTeamImage).mockResolvedValue({ externalTaskId: 'accepted-image' });
       const config = { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' };
       const goalSpec = { ...defaultWorkflowGoalSpec('制作森林作品'), approvalTools: [tool] };
       const pending = await createAgentTeamWorkflow(config, () => scope).start(runId, 'chat', '制作森林作品', false, undefined, undefined, goalSpec);
@@ -147,12 +157,13 @@ describe('agent team workflow', () => {
         resourceId: 'chat', workflow: { runId, taskId: 'media', attempt: 1, kind: 'tool' },
       } } });
       if (video) expect(proposal.mediaExecution?.request).toMatchObject({ aspect_ratio: '9:16', resolution: '720p', duration: 6 });
-      expect(queueAgentTeamAudio).not.toHaveBeenCalled(); expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+      if (image) expect(proposal.mediaExecution?.request).toMatchObject({ resolution: '2K' });
+      expect(queueAgentTeamAudio).not.toHaveBeenCalled(); expect(queueAgentTeamVideo).not.toHaveBeenCalled(); expect(queueAgentTeamImage).not.toHaveBeenCalled();
       const restored = createAgentTeamWorkflow(config, () => scope);
       await restored.decideApproval(runId, 'media', pending.snapshot.run.planVersion, 'approved');
       const submitted = await restored.resume(runId);
       expect(submitted.snapshot.tasks.find((task) => task.id === 'media')?.status).toBe('waiting_external');
-      const queue = video ? queueAgentTeamVideo : queueAgentTeamAudio;
+      const queue = image ? queueAgentTeamImage : video ? queueAgentTeamVideo : queueAgentTeamAudio;
       expect(queue).toHaveBeenCalledWith(expect.objectContaining({ mediaExecution: proposal.mediaExecution,
         prompt: proposal.mediaExecution!.request.prompt }));
       expect(quote).toHaveBeenCalledOnce();

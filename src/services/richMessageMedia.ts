@@ -21,6 +21,15 @@ import { currentWorkflowScope } from './workflowRunRuntime';
 import { getWorkspaceSignal } from './workspaceLifecycle';
 import { mergeMessages } from '../stores/messageStoreMerge';
 
+function isAsyncImageAttachment(attachment: MessageAttachment) {
+  return attachment.kind === 'image' && Boolean(attachment.executionQuoteId || attachment.mediaTaskId);
+}
+
+function isAsyncMediaAttachment(attachment: MessageAttachment) {
+  return isAsyncImageAttachment(attachment) || attachment.kind === 'video'
+    || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation');
+}
+
 function findProfile(profiles: AIModelProfile[], id?: string | null) {
   const profile = id ? profiles.find((item) => item.id === id) : null;
   return isAIProfileUsable(profile) ? profile : null;
@@ -364,7 +373,7 @@ function retryAttachmentMetadata(metadata: MessageMetadata | undefined, attachme
     ...target,
     status: 'queued',
     error: undefined,
-    mediaTaskId: reuseMediaTask && (target.kind === 'video' || (target.kind === 'audio' && target.audioPurpose === 'music_generation')) ? target.mediaTaskId : undefined,
+    mediaTaskId: reuseMediaTask && isAsyncMediaAttachment(target) ? target.mediaTaskId : undefined,
     assetId: undefined,
     url: undefined,
     thumbnailAssetId: undefined,
@@ -559,7 +568,9 @@ async function pollVideoTask(params: {
   });
 }
 
-async function pollMusicTask(params: { entry: RichMediaQueueEntry; message: Message; attachment: GenerativeAttachment; generationJobId: string; taskId: string }) {
+async function pollImageOrMusicTask(params: { entry: RichMediaQueueEntry; message: Message; attachment: GenerativeAttachment; generationJobId: string; taskId: string }) {
+  const kind = params.attachment.kind === 'image' ? 'image' : 'audio';
+  const label = kind === 'image' ? '图片' : '音乐';
   const task = await waitForAiMediaTask(params.taskId);
   params.entry.terminalTaskKnown = task.status === 'succeeded' || task.status === 'failed';
   return runWithMediaResultLease(params.message.chatId, params.message.serverId, async (signal) => {
@@ -568,24 +579,25 @@ async function pollMusicTask(params: { entry: RichMediaQueueEntry; message: Mess
   if (latestAttachment?.generationJobId !== params.generationJobId) return;
   if (task.status === 'failed') {
     const result = task.result && typeof task.result === 'object' && !Array.isArray(task.result) ? task.result as Record<string, unknown> : {};
-    const reason = typeof result.error === 'string' ? result.error : '音乐生成失败，服务端未返回可展示的失败原因。';
+    const reason = typeof result.error === 'string' ? result.error : `${label}生成失败，服务端未返回可展示的失败原因。`;
     throw new Error(reason);
   }
-  if (task.status !== 'succeeded') throw new Error('音乐任务未完成');
+  if (task.status !== 'succeeded') throw new Error(`${label}任务未完成`);
   let asset: { id?: string; url: string; mimeType: string; sizeBytes?: number; checksum?: string };
   try {
     asset = isLocalOnlyMediaMode()
-      ? await api.downloadAiMediaTaskContent(params.taskId, 'audio').then(async (blob) => ({ id: undefined, url: await blobToDataUrl(blob), mimeType: blob.type || 'audio/mpeg', sizeBytes: blob.size, checksum: undefined }))
+      ? await api.downloadAiMediaTaskContent(params.taskId, kind).then(async (blob) => ({ id: undefined, url: await blobToDataUrl(blob), mimeType: blob.type || (kind === 'image' ? 'image/png' : 'audio/mpeg'), sizeBytes: blob.size, checksum: undefined }))
       : await api.createMediaAssetFromAiTask({ chatId: latestMessage.chatId, messageId: latestMessage.serverId || latestMessage.id,
-        attachmentId: params.attachment.id, taskId: params.taskId, kind: 'audio', description: params.attachment.caption || params.attachment.altText,
+        attachmentId: params.attachment.id, taskId: params.taskId, kind, description: params.attachment.caption || params.attachment.altText,
         promptText: params.attachment.promptText }, { signal });
   } catch (error) {
-    throw new Error(`音乐已生成，但文件获取或保存失败：${error instanceof Error ? error.message : '网络请求失败'}`);
+    throw new Error(`${label}已生成，但文件获取或保存失败：${error instanceof Error ? error.message : '网络请求失败'}`);
   }
-  const durationMs = isLocalOnlyMediaMode() && asset.url.startsWith('data:') ? await getAudioDurationMs(asset.url) : undefined;
-  updateRichMediaMessage({ message: latestMessage, attachmentId: params.attachment.id,
+  const durationMs = kind === 'audio' && isLocalOnlyMediaMode() && asset.url.startsWith('data:') ? await getAudioDurationMs(asset.url) : undefined;
+  const saved = updateRichMediaMessage({ message: latestMessage, attachmentId: params.attachment.id,
     patch: { status: 'ready', error: undefined, mediaTaskId: undefined, assetId: asset.id, url: asset.url, mimeType: asset.mimeType,
       sizeBytes: asset.sizeBytes, checksum: asset.checksum, durationMs, generationJobId: params.generationJobId }, upsertMessage: params.entry.upsertMessage });
+  if (kind === 'image') await attachAssistantImageArtifact({ message: saved, attachmentId: params.attachment.id, upsertMessage: params.entry.upsertMessage });
   });
 }
 
@@ -639,7 +651,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
   });
 
   try {
-    if ((attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation')) && !attachment.mediaTaskId) {
+    if (isAsyncMediaAttachment(attachment) && !attachment.mediaTaskId) {
       flushBufferedPersistenceWrites();
       await persistVideoSubmissionKey(workingMessage);
     }
@@ -653,7 +665,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
       rememberRichMediaMessage(workingMessage);
       return;
     }
-    if (attachment.kind === 'image') {
+    if (attachment.kind === 'image' && !isAsyncImageAttachment(attachment)) {
       const profile = findGenerationProfile(entry.aiProfiles, 'image', entry.character?.modelProfileIds?.image);
       if (!profile || !attachment.promptText) throw new Error('图片模型未配置');
       const referenceCharacters = (attachment.referenceCharacterIds || [])
@@ -727,7 +739,9 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
       return;
     }
 
-    if (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation') {
+    if (isAsyncImageAttachment(attachment) || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation')) {
+      const image = attachment.kind === 'image';
+      const label = image ? '图片' : '音乐';
       let taskId = attachment.mediaTaskId;
       if (!taskId) {
         const clientRequestKey = attachment.generationJobId || generationJobId;
@@ -737,6 +751,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
         } catch (lookupError) {
           if (!(lookupError instanceof ApiError) || lookupError.status !== 404) throw lookupError;
           const approved = await readApprovedWorkflowMedia(workingMessage, attachment);
+          if (image && !approved) throw new Error('图片任务缺少有效的执行审批，请从任务工作台核对后继续');
           const profile = findGenerationProfile(entry.aiProfiles, 'audio');
           if (!profile && !approved) throw new Error('音频模型未配置');
           const task = approved ? await submitPreparedAiMediaTask(approved, { signal }) : await generateAudioWithAdapter({ profile: profile!, prompt: attachment.promptText || attachment.altText, signal,
@@ -744,19 +759,19 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
           taskId = task.task_id;
         }
       }
-      if (!taskId) throw new Error('音乐任务提交失败：未返回任务 ID');
+      if (!taskId) throw new Error(`${label}任务提交失败：未返回任务 ID`);
       workingMessage = updateRichMediaMessage({ message: workingMessage, attachmentId: attachment.id,
         patch: { status: 'generating', mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
       entry.taskId = taskId;
       entry.generationJobId = generationJobId;
       longRunningRichMediaEntriesById.set(entry.id, entry);
       publishRichMediaQueueSnapshot();
-      void pollMusicTask({ entry, message: workingMessage, attachment, generationJobId, taskId }).catch((error) => {
+      void pollImageOrMusicTask({ entry, message: workingMessage, attachment, generationJobId, taskId }).catch((error) => {
         const latestMessage = getLatestRichMediaMessage(entry.messageId, workingMessage);
         const latest = latestMessage.metadata?.attachments?.find((item) => item.id === attachment.id);
         if (latest?.generationJobId !== generationJobId) return;
-        const errorText = toMediaGenerationErrorText(error, 'audio');
-        richMediaGenerationErrors.set(entry.id, { id: entry.id, title: '聊天音乐生成', message: errorText, createdAt: Date.now() });
+        const errorText = toMediaGenerationErrorText(error, image ? 'image' : 'audio');
+        richMediaGenerationErrors.set(entry.id, { id: entry.id, title: `聊天${label}生成`, message: errorText, createdAt: Date.now() });
         publishRichMediaQueueSnapshot();
         if (shouldKeepSubmittedMediaPending(error, entry.terminalTaskKnown)) {
           updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id,
@@ -767,7 +782,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
         void runWithMediaResultLease(latestMessage.chatId, latestMessage.serverId, async () => {
           updateRichMediaMessage({ message: latestMessage, attachmentId: attachment.id,
             patch: { status: 'failed', error: errorText, mediaTaskId: taskId, generationJobId }, upsertMessage: entry.upsertMessage });
-        }).catch((commitError) => console.error('[rich-message-media:audio-failure-commit]', commitError));
+        }).catch((commitError) => console.error('[rich-message-media:async-media-failure-commit]', commitError));
       }).finally(() => {
         if (longRunningRichMediaEntriesById.get(entry.id) === entry) longRunningRichMediaEntriesById.delete(entry.id);
         releaseRichMediaMessageIfIdle(entry.messageId);
@@ -919,7 +934,7 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
     const latestAttachment = getLatestRichMediaMessage(messageId, workingMessage).metadata?.attachments?.find((item) => item.id === attachment.id);
     if (latestAttachment?.generationJobId !== generationJobId) return;
     const uncertainSubmission = isAbortError(error) && !entry.taskId
-      && (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation'));
+      && isAsyncMediaAttachment(attachment);
     reportRecoverableError({
       location: 'rich-message-media.process',
       error,
@@ -970,7 +985,7 @@ function pumpRichMediaQueue() {
       const attachment = latest.metadata?.attachments?.find((item) => item.id === entry.attachmentId);
       if (attachment && isRecoverableGenerativeAttachment(attachment)) {
         const uncertainSubmission = isAbortError(error) && !entry.taskId
-          && (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation'));
+          && isAsyncMediaAttachment(attachment);
         const errorText = uncertainSubmission
           ? '提交请求已中断，正在核对服务端是否已接收；确认前不会重新生成。'
           : toMediaGenerationErrorText(error, attachment.kind);
@@ -1162,7 +1177,7 @@ export async function retryRichMessageMedia(params: {
   if (!target || (target.status !== 'failed' && target.status !== 'queued' && target.status !== 'generating' && !(target.status === 'ready' && (!target.url || target.kind === 'sticker')))) return;
   const activePoll = longRunningRichMediaEntriesById.get(richMediaQueueEntryId(params.message.id, params.attachmentId));
   if (activePoll && target.mediaTaskId && activePoll.taskId === target.mediaTaskId) return;
-  const isAsyncTask = target.kind === 'video' || (target.kind === 'audio' && target.audioPurpose === 'music_generation');
+  const isAsyncTask = isAsyncMediaAttachment(target);
   if (isAsyncTask && target.status === 'generating' && target.mediaTaskId) {
     await processRichMessageMedia({ ...params, attachmentIds: [params.attachmentId], priority: 'next' });
     return;

@@ -1,6 +1,7 @@
 import type { Message, MessageAttachment, MessageMetadata } from '../types/message';
 import { buildMessageIdentityKeys, getMessageRenderIdentity, isLocalOnlyMessageId, messagesShareIdentity } from '../services/messageIdentity';
 import { compactMessageMetadata } from '../services/messageMetadataCompaction';
+import { isRecoverableMediaAttachment } from '../services/recoverableMediaTask';
 
 export const MAX_CACHED_MESSAGES_PER_CHAT = 1000;
 // Branch ancestry is graph context, not visible timeline. Retain a larger
@@ -253,10 +254,7 @@ export function trimMessagesWithBranchContext(messages: Message[]) {
 }
 
 export function hasRecoverableMediaTask(message: Message) {
-  return !message.isDeleted && Boolean(message.metadata?.attachments?.some((attachment) =>
-    (attachment.kind === 'video' || (attachment.kind === 'audio' && attachment.audioPurpose === 'music_generation'))
-    && ((attachment.status === 'generating' && (attachment.mediaTaskId || attachment.generationJobId))
-      || (attachment.status === 'queued' && attachment.mediaTaskId))));
+  return !message.isDeleted && Boolean(message.metadata?.attachments?.some(isRecoverableMediaAttachment));
 }
 
 export function trimActiveMessages(messages: Message[]) {

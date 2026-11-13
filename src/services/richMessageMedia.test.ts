@@ -214,7 +214,7 @@ describe('processRichMessageMedia', () => {
     vi.mocked(api.getAiMediaTaskByRequestKey).mockRejectedValue(new ApiError('任务不存在', { status: 404 }));
   });
 
-  it.each(['video', 'audio'] as const)('submits the approved %s capture without consulting a removed profile', async (kind) => {
+  it.each(['image', 'video', 'audio'] as const)('submits the approved %s capture without consulting a removed profile', async (kind) => {
     const quote = { schemaVersion: 1 as const, id: 'a'.repeat(64), model: 'approved-model', modality: kind,
       requestSha256: 'b'.repeat(64), costQuoteId: 'c'.repeat(64), amount: '1.250000', unit: 'credit',
       kind: 'request_tariff' as const, capturedAt: 1000, expiresAt: 301000, token: 'd'.repeat(64) };
@@ -235,13 +235,14 @@ describe('processRichMessageMedia', () => {
     expect(submitPreparedAiMediaTask).toHaveBeenCalledWith(prepared, { signal: executionSignal });
     expect(generateVideoWithAdapter).not.toHaveBeenCalled();
     expect(generateAudioWithAdapter).not.toHaveBeenCalled();
+    expect(generateImageWithAdapter).not.toHaveBeenCalled();
     expect(waitForAiMediaTask).toHaveBeenCalledWith('signed-task');
     polling.resolve({ task_id: 'signed-task', model: 'approved-model', status: 'failed', result: { error: '测试结束' },
       chargedAmount: 0, reservedAmount: 0, createdAt: 1, updatedAt: 2 });
     await waitForExpectation(() => expect(getRichMediaQueueSnapshot()).toHaveLength(0));
   });
 
-  it.each(['video', 'audio'] as const)('recovers an accepted signed %s without reapproval or resubmission', async (kind) => {
+  it.each(['image', 'video', 'audio'] as const)('recovers an accepted signed %s without reapproval or resubmission', async (kind) => {
     vi.mocked(api.getAiMediaTaskByRequestKey).mockResolvedValue({ task_id: 'already-accepted', model: 'removed-model', status: 'running',
       result: null, chargedAmount: null, reservedAmount: 1, createdAt: 1, updatedAt: 2 });
     const polling = deferred<Awaited<ReturnType<typeof waitForAiMediaTask>>>();
@@ -260,7 +261,7 @@ describe('processRichMessageMedia', () => {
     await waitForExpectation(() => expect(getRichMediaQueueSnapshot()).toHaveLength(0));
   });
 
-  it.each(['video', 'audio'] as const)('blocks an invalid signed %s without falling back to unsigned generation', async (kind) => {
+  it.each(['image', 'video', 'audio'] as const)('blocks an invalid signed %s without falling back to unsigned generation', async (kind) => {
     vi.mocked(readApprovedWorkflowMedia).mockRejectedValue(new Error('媒体执行审批已失效'));
     const updates: Message[] = [];
     const message = buildQueuedImageMessage({ metadata: { attachments: [{
@@ -273,6 +274,33 @@ describe('processRichMessageMedia', () => {
     expect(submitPreparedAiMediaTask).not.toHaveBeenCalled();
     expect(generateVideoWithAdapter).not.toHaveBeenCalled();
     expect(generateAudioWithAdapter).not.toHaveBeenCalled();
+    expect(generateImageWithAdapter).not.toHaveBeenCalled();
+  });
+
+  it('recovers a generated image file after download failure without generating it again', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    const completed = { task_id: 'image-task', model: 'image-model', status: 'succeeded' as const, result: {},
+      chargedAmount: 1, reservedAmount: 1, createdAt: 1, updatedAt: 2 };
+    vi.mocked(waitForAiMediaTask).mockResolvedValue(completed);
+    vi.mocked(api.getAiMediaTask).mockResolvedValue(completed);
+    vi.mocked(api.createMediaAssetFromAiTask).mockRejectedValueOnce(new Error('download interrupted'))
+      .mockResolvedValueOnce({ id: 'image-asset', url: '/uploads/image.png', mimeType: 'image/png', sizeBytes: 42 });
+    let latest = buildQueuedImageMessage({ serverId: 'server-image', metadata: { attachments: [{
+      id: 'image-1', kind: 'image', status: 'generating', promptText: '森林素材', altText: '森林',
+      executionQuoteId: 'expired-quote', generationJobId: 'original-key', mediaTaskId: 'image-task', createdAt: 1, updatedAt: 1,
+    }] } });
+    const upsertMessage = (next: Message) => { latest = next; };
+    await processRichMessageMedia({ message: latest, aiProfiles: [], upsertMessage });
+    await waitForExpectation(() => expect(latest.metadata?.attachments?.[0]).toMatchObject({ status: 'failed', mediaTaskId: 'image-task' }));
+    await waitForExpectation(() => expect(getRichMediaQueueSnapshot()).toHaveLength(0));
+    await retryRichMessageMedia({ message: latest, attachmentId: 'image-1', aiProfiles: [], upsertMessage });
+    await waitForExpectation(() => expect(latest.metadata?.attachments?.[0]).toMatchObject({ status: 'ready', url: '/uploads/image.png' }));
+    expect(api.createMediaAssetFromAiTask).toHaveBeenCalledTimes(2);
+    expect(api.createMediaAssetFromAiTask).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'image', taskId: 'image-task' }), expect.any(Object));
+    expect(submitPreparedAiMediaTask).not.toHaveBeenCalled();
+    expect(generateImageWithAdapter).not.toHaveBeenCalled();
+    expect(readApprovedWorkflowMedia).not.toHaveBeenCalled();
   });
 
   it('keeps the original workflow attempt on the managed narration request', async () => {
