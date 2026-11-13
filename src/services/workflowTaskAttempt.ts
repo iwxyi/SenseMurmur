@@ -16,6 +16,7 @@ export interface WorkflowTaskAttempt {
   finishedAt?: number;
   status: WorkflowTaskStatus;
   definitionSha256?: string;
+  dependencyOutputs?: Array<{ taskId: string; outputSha256: string }>;
   externalTaskId?: string;
   modelInvocation?: WorkflowModelInvocation;
   toolInvocation?: WorkflowToolInvocation;
@@ -39,6 +40,13 @@ export function parseWorkflowTaskAttempt(raw: unknown): WorkflowTaskAttempt {
   if (value.externalTaskId !== undefined && typeof value.externalTaskId !== 'string') throw new Error('任务执行记录外部关联无效');
   if (value.definitionSha256 !== undefined && (typeof value.definitionSha256 !== 'string'
     || !/^[a-f0-9]{64}$/.test(value.definitionSha256))) throw new Error('任务执行记录定义摘要无效');
+  if (value.dependencyOutputs !== undefined && (!Array.isArray(value.dependencyOutputs)
+    || value.dependencyOutputs.some((entry) => !entry || typeof entry !== 'object' || Array.isArray(entry)
+      || typeof entry.taskId !== 'string' || !entry.taskId
+      || typeof entry.outputSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(entry.outputSha256))
+    || new Set(value.dependencyOutputs.map((entry) => entry.taskId)).size !== value.dependencyOutputs.length)) {
+    throw new Error('任务执行记录依赖版本无效');
+  }
   const modelInvocation = value.modelInvocation === undefined ? undefined : parseWorkflowModelInvocation(value.modelInvocation);
   if (modelInvocation && (modelInvocation.runId !== value.runId || modelInvocation.taskId !== value.taskId || modelInvocation.attempt !== value.attempt)) throw new Error('任务执行记录调用关联无效');
   const toolInvocation = value.toolInvocation === undefined ? undefined : parseWorkflowToolInvocation(value.toolInvocation);
@@ -49,6 +57,7 @@ export function parseWorkflowTaskAttempt(raw: unknown): WorkflowTaskAttempt {
     attempt: value.attempt as number, generation: value.generation as number, planVersion: value.planVersion as number,
     startedAt: value.startedAt as number, updatedAt: value.updatedAt as number, status: value.status as WorkflowTaskStatus,
     ...(value.definitionSha256 === undefined ? {} : { definitionSha256: value.definitionSha256 as string }),
+    ...(value.dependencyOutputs === undefined ? {} : { dependencyOutputs: value.dependencyOutputs as WorkflowTaskAttempt['dependencyOutputs'] }),
     ...(value.finishedAt === undefined ? {} : { finishedAt: value.finishedAt as number }),
     ...(value.externalTaskId === undefined ? {} : { externalTaskId: value.externalTaskId as string }),
     ...(modelInvocation ? { modelInvocation } : {}),
@@ -57,8 +66,17 @@ export function parseWorkflowTaskAttempt(raw: unknown): WorkflowTaskAttempt {
 }
 
 export function claimedTaskAttempt(snapshot: WorkflowSnapshot, task: WorkflowTask): WorkflowTaskAttempt {
+  const dependencies = new Map(snapshot.tasks.map((candidate) => [candidate.id, candidate]));
+  const dependencyOutputs = task.dependsOn.map((taskId) => {
+    const source = dependencies.get(taskId);
+    if (!source || source.status !== 'completed') {
+      throw new Error('任务执行记录无法绑定未完成的依赖输出');
+    }
+    return { taskId, outputSha256: workflowJsonDigest({ status: source.status, output: source.output }) };
+  });
   return { schemaVersion: 1, runId: task.runId, taskId: task.id, kind: task.kind, attempt: task.attempt,
     definitionSha256: workflowTaskDefinitionDigest(task),
+    dependencyOutputs,
     generation: snapshot.run.generation, planVersion: snapshot.run.planVersion, status: 'running', startedAt: task.updatedAt, updatedAt: task.updatedAt,
     ...(task.modelInvocation ? { modelInvocation: task.modelInvocation } : {}),
     ...(task.toolInvocation ? { toolInvocation: task.toolInvocation } : {}) };

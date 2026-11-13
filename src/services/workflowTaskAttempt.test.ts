@@ -25,6 +25,25 @@ describe('task attempt contract', () => {
     expect(settleTaskAttempt(claimed, { ...source, status: 'completed' }).definitionSha256).toBe(claimed.definitionSha256);
     expect(() => parseWorkflowTaskAttempt({ ...claimed, definitionSha256: 'invalid' })).toThrow('定义摘要');
   });
+  it('binds the exact completed dependency output at claim time without storing its contents', () => {
+    const dependency: WorkflowTask = { ...task, id: 'source', input: null, output: { text: 'private upstream result' },
+      status: 'completed', attempt: 1 };
+    const target: WorkflowTask = { ...task, dependsOn: ['source'], status: 'running' };
+    const snapshot = { run: { id: 'run', chatId: 'chat', goal: 'goal', status: 'active' as const,
+      generation: 0, planVersion: 1, updatedAt: 30 }, tasks: [dependency, target] };
+    const claimed = claimedTaskAttempt(snapshot, target);
+    expect(claimed.dependencyOutputs).toEqual([{ taskId: 'source',
+      outputSha256: expect.stringMatching(/^[a-f0-9]{64}$/) }]);
+    expect(JSON.stringify(claimed)).not.toContain('private upstream result');
+    expect(parseWorkflowTaskAttempt(claimed)).toEqual(claimed);
+    expect(claimedTaskAttempt({ ...snapshot, tasks: [{ ...dependency, output: { text: 'changed' } }, target] }, target)
+      .dependencyOutputs).not.toEqual(claimed.dependencyOutputs);
+    expect(() => claimedTaskAttempt({ ...snapshot, tasks: [{ ...dependency, status: 'failed' }, target] }, target))
+      .toThrow('未完成的依赖输出');
+    expect(() => parseWorkflowTaskAttempt({ ...claimed, dependencyOutputs: [
+      ...claimed.dependencyOutputs!, claimed.dependencyOutputs![0],
+    ] })).toThrow('依赖版本');
+  });
   it('rejects unknown versions, invalid counters and inconsistent times', () => {
     expect(() => parseWorkflowTaskAttempt({ ...attempt, schemaVersion: 2 })).toThrow('版本');
     expect(() => parseWorkflowTaskAttempt({ ...attempt, attempt: 0 })).toThrow('代次');
