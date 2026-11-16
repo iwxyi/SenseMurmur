@@ -243,6 +243,26 @@ describe('agent team plan', () => {
     expect(plan.resultTaskId).toBe('film');
   });
 
+  it('asks the planner to repair an invalid composition source once before queueing work', async () => {
+    const role = { ...valid().roles[0], allowedTools: ['text_generation', 'image_generation', 'video_generation', 'media_composition'] };
+    const script = { id: 'script', roleId: role.id, goal: '写剧本', dependsOn: [], acceptance: '剧本完整', tool: 'text_generation' };
+    const image = { id: 'image', roleId: role.id, goal: '生成参考图', dependsOn: ['script'], acceptance: '画面可用', tool: 'image_generation' };
+    const shot = { id: 'shot', roleId: role.id, goal: '生成视频', dependsOn: ['script', 'image'], acceptance: '视频可播放', tool: 'video_generation' };
+    const film = { id: 'film', roleId: role.id, goal: '合成成片', dependsOn: ['image', 'shot'], acceptance: '成片可播放', tool: 'media_composition', composition: { clips: [{ taskId: 'image' }] } };
+    const invalid = { ...valid(), roles: [role], tasks: [script, image, shot, film], resultTaskId: 'film' };
+    const repaired = { ...invalid, tasks: [script, image, shot, { ...film, dependsOn: ['shot'], composition: { clips: [{ taskId: 'shot' }] } }] };
+    const params = { api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '剧本、图片、视频成片',
+      imageGeneration: true, videoGeneration: true, videoReferenceImages: true, mediaComposition: true };
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(invalid)).mockResolvedValueOnce(JSON.stringify(repaired));
+    expect((await planAgentTeam(params)).tasks[3].composition?.clips[0].taskId).toBe('shot');
+    expect(vi.mocked(generateResponse).mock.lastCall?.[2]).toMatchObject([
+      { role: 'user', content: params.goal }, { role: 'assistant', content: JSON.stringify(invalid) },
+      { role: 'user', content: expect.stringContaining('合成片段必须直接依赖视频生成或合成任务') },
+    ]);
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(invalid)).mockResolvedValueOnce(JSON.stringify(invalid));
+    await expect(planAgentTeam(params)).rejects.toThrow('合成片段必须直接依赖视频生成或合成任务');
+  });
+
   it('rejects unknown tools and missing role references', () => {
     const unknownTool = valid();
     unknownTool.roles[0].allowedTools = ['shell'];

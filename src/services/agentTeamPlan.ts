@@ -312,7 +312,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
   const ancestors = params.delegationAncestors;
   if (ancestors && (!ancestors.length || ancestors.length > 3)) throw new WorkflowPreflightError('委派祖先范围无效');
   ancestors?.forEach((ancestor) => { requiredText(ancestor.goal, '祖先目标', 12_000); requiredText(ancestor.acceptance, '祖先验收', 800); });
-  const raw = await generateResponse(params.api, [
+  const systemPrompt = [
     '你是通用任务的主 Agent。根据用户目标设计最小可行的团队与无环任务图。简单任务只用一个岗位。',
     `当前开放工具：text_generation${params.webSearch ? '、web_search' : ''}${params.imageGeneration ? '、image_generation' : ''}${params.audioGeneration ? '、audio_generation' : ''}${params.imageInspection ? '、image_inspection' : ''}${params.videoGeneration ? '、video_generation' : ''}${params.mediaComposition ? '、media_composition' : ''}。${params.videoUnavailableReason ? `视频生成当前不可用：${params.videoUnavailableReason}。` : ''}网页搜索任务的 goal 是搜索词；图片任务的 goal 是可生成的画面提示词，可依赖文字脚本、搜索摘要或图片检查文字${params.imageReferenceImages ? `，也可直接依赖已生成图片并作为参考图${params.maxImageReferenceImages ? `（最多 ${params.maxImageReferenceImages} 张）` : ''}` : '；当前图片模型不支持参考图，不要让图片任务直接依赖图片任务'}；音乐任务的 goal 是包含风格、情绪、乐器与可选歌词要求的音乐提示词，系统异步生成完整音频。用户要求明确歌词时，先用 text_generation 写歌词，再让 audio_generation 依赖歌词任务；系统会把歌词交付作为音乐提示词的一部分。图片检查必须直接依赖已生成图片，模型会收到真实画面；视频任务的 goal 是精炼成片提示词，可以依赖脚本${params.videoReferenceImages ? '和图片' : ''}任务。video_generation 不能依赖音乐或其他视频片段。${params.videoRequiresReferenceImage ? '当前视频模型必须先有参考图片。' : ''}${params.videoReferenceImages ? `依赖图片时系统把图片作为参考素材${params.maxVideoReferenceImages ? `，当前模型最多 ${params.maxVideoReferenceImages} 张` : ''}。` : '当前视频模型不能接收参考图片，不要规划图片到视频的依赖。'}视频由系统异步生成，不能声称立即成片。只安排确实必要的图像、音乐与视频生成，避免为验证或补充说明而反复生成同一媒体。不得承诺任意文件写入或代码执行；能力不足时在摘要说明。`,
     '岗位必须有具体职责、方法和可检查的验收标准；任务必须有唯一 ID、岗位归属、明确目标和依赖。不要用岗位名称冒充专业能力。',
@@ -320,7 +320,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     params.delegation ? '另开放 delegate_task 委派工具。仅对确实需要执行时再拆分的复杂子目标使用，不要用它替代普通写作。执行该任务的岗位必须同时获准 delegate_task 和下级工作需要的工具。系统会规划下级任务、等待它们完成，再由父 Agent 汇总交付；下级权限只能缩小，共用总调用预算与并发。委派最多3层，不要重复祖先目标。需要向后续任务交付素材时，在委派任务声明 mediaOutput:"image"、"video" 或 "audio"，下级计划必须以根字段 resultTaskId 指定同类型的最终媒体任务，可继续指向同类型的委派任务。每次委派只交付一份主要媒体；需要多份素材时分别安排任务。后续图片/视频生成、图片/视频检查和合成按委派任务 ID 引用对应类型素材，系统解析实际已保存文件，不读取摘要中的 URL。未声明 mediaOutput 的委派只交付文字汇总。' : '本层不开放 delegate_task，直接安排具体工作，不得创建下级委派；若父任务要求媒体交付，仍须在计划根字段 resultTaskId 指定具体媒体任务。',
     params.videoInspection ? '另开放 video_inspection 视频抽帧检查工具。必须直接依赖唯一的 video_generation 或 media_composition 任务；系统读取该任务已保存的视频并按时间均匀抽取最多6帧，使用当前视觉模型检查实际画面。它只能判断抽样内容，不能检查音轨、逐帧流畅度或保证全部镜头正确。需要检查成片时在合成之后安排此任务；不能为了检查而重新生成视频。' : '当前设备或模型不支持视频抽帧检查，不得安排 video_inspection。',
     params.speechGeneration ? `另开放 speech_generation 旁白配音工具，使用用户配置的 TTS 模型及默认音色。必须声明 speech:{"text":"需要逐字朗读的正文"} 且 dependsOn:[]，或先安排 text_generation 只撰写旁白正文，再声明 speech:{"textTaskId":"narration_script"} 且 dependsOn:["narration_script"]。二者只能选一。goal 描述制作目的，不能混入配音正文；系统只朗读 speech 指定内容，不朗读岗位说明或验收要求。单次配音正文最多 ${TEAM_SPEECH_TEXT_LIMIT} 字符，较长正文须拆成多个配音任务并在合成时按顺序使用。请控制正文长度以适配视频时长，配音不能直接作为 video_generation 的输入，应交给 media_composition 叠加。` : '当前未配置 TTS 模型，不得安排 speech_generation 配音。',
-    params.mediaComposition ? '另开放 media_composition 本地音视频合成工具，可按顺序拼接、裁剪视频并叠加最多4条音乐或旁白音轨。它不是视频生成工具，不调用付费模型。合成任务必须声明 composition:{"clips":[{"taskId":"shot_a","startSeconds":0,"durationSeconds":5},{"taskId":"shot_b"}],"audioTracks":[{"taskId":"music","volume":0.7,"offsetSeconds":0,"loop":true}],"aspectRatio":"16:9","originalAudioVolume":0.3}。clips 必填且按播放顺序排列，引用的任务必须直接在 dependsOn 中，视频来源须为 video_generation 或 media_composition，音轨来源须为 audio_generation 或 speech_generation。其余参数均可省略，画面比例可选16:9、9:16、1:1，不裁切主体而用留边统一画幅；最长10分钟，素材合计不超过256MiB，输出720p级MP4。多个镜头先各自生成再交给合成任务；不要让 video_generation 直接依赖音视频。不得声称已视觉检查成片。' : '当前设备不支持本地音视频合成，不得安排 media_composition。',
+    params.mediaComposition ? '另开放 media_composition 本地音视频合成工具，可按顺序拼接、裁剪视频并叠加最多4条音乐或旁白音轨。它不是视频生成工具，不调用付费模型。仅在需要拼接多个视频片段或叠加独立音轨时安排；单个视频生成结果可直接交付，无须合成。合成任务必须声明 composition:{"clips":[{"taskId":"shot_a","startSeconds":0,"durationSeconds":5},{"taskId":"shot_b"}],"audioTracks":[{"taskId":"music","volume":0.7,"offsetSeconds":0,"loop":true}],"aspectRatio":"16:9","originalAudioVolume":0.3}，同时 dependsOn 必须直接列出 shot_a、shot_b、music。shot_a 和 shot_b 必须是本计划中 tool 为 video_generation/media_composition 的任务，或声明 mediaOutput:"video" 的 delegate_task；图片任务只能作为视频生成的参考输入，不能列入 clips。音乐/配音任务只能列入 audioTracks，不能列入 clips。引用历史素材时 clips/audioTracks 使用 savedMedia 别名而非 dependsOn。画面比例可选16:9、9:16、1:1；最长10分钟，素材合计不超过256MiB，输出720p级MP4。不得声称已视觉检查成片。' : '当前设备不支持本地音视频合成，不得安排 media_composition。',
     params.savedMedia?.length ? `可复用历史素材目录：${JSON.stringify(params.savedMedia)}。优先复用符合要求的素材，不重新生成。任务可增加 savedMedia:[{"alias":"old_clip","taskId":"目录中的原任务标识","kind":"video","attempt":1,"outputSha256":"目录中的完整摘要"}]，除 alias 外必须逐字复制目录字段。dependsOn 只列本次新计划任务，不列历史素材别名。media_composition 接收历史视频/音频，在 composition.clips/audioTracks 中使用 alias；image_generation、image_inspection、video_generation 仅接收历史图片，自动将全部 savedMedia 图片作为参考或检查输入；video_inspection 接收唯一历史视频。检查任务允许使用历史素材替代新计划内的媒体依赖。参考图仍受当前模型能力和数量限制，不支持参考图时不得使用历史图片生成。历史素材可与本次新生成素材混用。不能使用目录外素材、猜测任务标识或将摘要当文件地址。` : '本次没有授权复用的历史素材目录，不得声明 savedMedia。',
     params.savedText?.length ? `可复用历史文字交付目录：${JSON.stringify(params.savedText)}。text_generation、image_generation、video_generation、audio_generation、delegate_task 可声明 savedText:[{"alias":"original_script","taskId":"目录中的原任务标识","attempt":1,"outputSha256":"目录中的完整摘要"}]，除 alias 外逐字复制目录字段，最多8份；系统会按版本提供完整正文（每份最多12000字符），不要为读取原稿而重新创作。dependsOn 只列新计划任务，不列历史别名。speech_generation 可仅指定一份 savedText，并声明 speech:{"textTaskId":"original_script"} 与 dependsOn:[]，逐字朗读该正文；不得同时指定 literal text 或其他历史正文。别名不能与本计划任务或历史素材别名重名。目录摘要仅绑定当时文字记录，不保证其中事实已核实。` : '本次没有授权复用的历史文字目录，不得声明 savedText。',
     params.savedText?.some((entry) => entry.artifact) ? '历史文字目录中带 artifact:{id,versionId,filePath?} 的条目对应用户当前选中的产物版本；filePath 表示该版本中的指定文本文件，不带 filePath 表示单正文。不带 artifact 的条目对应任务原始交付。用户要求使用修改后的稿件或项目文件时，优先选择相应 artifact 条目，完整复制 artifact 和摘要。同一来源每个文件最多选一份版本，可用不同 alias 引用多个文件；仍最多8份。系统固定读取所选版本，不会随产物后续编辑而自动切换；缺失或正文变化会明确报错。此入口不读取图片、音视频或 HTML 交互状态。' : '',
@@ -331,28 +331,44 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     params.revisionBase ? `本次允许局部修订已有计划。原计划：${JSON.stringify(params.revisionBase.plan)}\n原计划摘要：${workflowJsonDigest(params.revisionBase.plan)}\n指定修改任务：${params.revisionBase.targetTaskId}。若只改任务的 goal/acceptance 且不改变岗位、工具、依赖、合成/配音配置或交付格式，优先只输出 {"revisionPatch":{"schemaVersion":1,"basePlanSha256":"上面的原计划摘要","updates":[{"taskId":"指定任务ID","goal":"修改后的完整目标","acceptance":"修改后的完整验收"}]}}。updates 只列要求发生改变的任务，必须包含指定任务；程序会计算这些任务的全部下游并自动重做，未改变的上游通过历史目录固定版本复用，不要重复列入 updates。不要同时输出 tasks 或完整计划。若需要改变步骤结构、配音正文配置、岗位、参考素材版本或交付格式，返回普通完整新计划。若边界交付无法通过前述 savedText/savedMedia 工具及容量规则引用，也须完整重规划。该入口保留历史交付，不覆盖旧任务。` : '',
       params.revisionBase ? '局部修订保留原计划 finalAcceptance；若总体验收要求变化，返回完整新计划。' : '',
       params.revisionBase?.taskSources ? `原计划任务与本次授权历史目录的运行任务对应关系：${JSON.stringify(params.revisionBase.taskSources)}。revisionPatch.updates 使用原计划的局部任务 ID；边界交付由程序按此对应关系固定版本。` : '',
-    ].join('\n'), [{ role: 'user', content: goal + (context ? `\n${context}` : '') }], undefined, {
+    ].join('\n');
+  const userContent = goal + (context ? `\n${context}` : '');
+  const modelOptions = {
     responseFormat: 'json', maxTokens: 10_000, signal: params.signal, beforeModelRequest: params.beforeModelRequest,
     aiUsage: { type: 'assistant_chat', label: '团队任务规划', scope: 'chat', resourceId: params.chatId },
-  });
+  } as const;
+  let raw = await generateResponse(params.api, systemPrompt, [{ role: 'user', content: userContent }], undefined, modelOptions);
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new WorkflowPreflightError(`团队规划返回了无效 JSON：${error instanceof Error ? error.message : '解析失败'}`);
-  }
-  let plan: AgentTeamPlan;
-  try {
-    const patch = record(parsed).revisionPatch;
-    if (patch !== undefined && (!params.revisionBase || record(parsed).tasks !== undefined)) throw new Error('当前规划不允许局部修订或返回了冲突格式');
-    if (record(parsed).revisionCompilation !== undefined) throw new Error('局部重做记录只能由程序编译');
-    if (patch === undefined) plan = validateAgentTeamPlan(removeUnsupportedModelDeliverables(parsed));
-    else {
-      if (!params.revisionBase) throw new Error('当前规划不允许局部修订');
-      plan = validateAgentTeamPlan(compileTeamRevisionPatch(patch, params.revisionBase));
+  let plan: AgentTeamPlan | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new WorkflowPreflightError(`团队规划返回了无效 JSON：${error instanceof Error ? error.message : '解析失败'}`);
+    }
+    try {
+      const patch = record(parsed).revisionPatch;
+      if (patch !== undefined && (!params.revisionBase || record(parsed).tasks !== undefined)) throw new Error('当前规划不允许局部修订或返回了冲突格式');
+      if (record(parsed).revisionCompilation !== undefined) throw new Error('局部重做记录只能由程序编译');
+      if (patch === undefined) plan = validateAgentTeamPlan(removeUnsupportedModelDeliverables(parsed));
+      else {
+        if (!params.revisionBase) throw new Error('当前规划不允许局部修订');
+        plan = validateAgentTeamPlan(compileTeamRevisionPatch(patch, params.revisionBase));
+      }
+      break;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : '团队计划无效';
+      if (attempt > 0 || !['合成片段必须直接依赖视频生成或合成任务', '合成音轨必须直接依赖音乐生成或配音任务'].includes(reason)) {
+        throw new WorkflowPreflightError(reason);
+      }
+      raw = await generateResponse(params.api, systemPrompt, [
+        { role: 'user', content: userContent },
+        { role: 'assistant', content: raw },
+        { role: 'user', content: `上一个任务图未通过校验：${reason}。请根据同一目标重新输出完整计划。核对 composition 的每个 clips[].taskId：必须指向直接依赖的视频任务或已授权的历史视频别名；图片只是 video_generation 的参考图。核对 audioTracks 的音频来源。单个视频无需合成。不要省略用户要求的最终成片。` },
+      ], undefined, modelOptions);
     }
   }
-  catch (error) { throw new WorkflowPreflightError(error instanceof Error ? error.message : '团队计划无效'); }
+  if (!plan) throw new WorkflowPreflightError('团队计划无效');
   if (ancestors) {
     try {
       const review = reviewTeamDelegation(plan.tasks, ancestors, record(parsed).delegationChecks);
