@@ -1,6 +1,4 @@
-import { api } from './api';
-import { backendUrl } from './backendUrl';
-import { workspaceFetch } from './workspaceLifecycle';
+import { fetchMediaAssetContent } from './mediaAssetContent';
 
 const MAX_VIDEO_BYTES = 128 * 1024 * 1024;
 
@@ -17,7 +15,7 @@ async function inspectionSource(url: string, signal: AbortSignal): Promise<{ url
   }
   const local = url.startsWith('/uploads/media/');
   if (!local && !/^https:\/\//i.test(url) && !url.startsWith('blob:')) throw new Error('视频文件地址不可用于检查');
-  const response = local ? await api.fetchWithAuth(backendUrl(url), { signal }) : await workspaceFetch(url, { signal });
+  const response = await fetchMediaAssetContent(url, 'video', signal);
   if (!response.ok) throw new Error(`读取检查视频失败（HTTP ${response.status}）`);
   if (!response.body || Number(response.headers.get('content-length')) > MAX_VIDEO_BYTES) throw new Error('视频文件为空或超过 128 MiB 检查上限');
   const reader = response.body.getReader();

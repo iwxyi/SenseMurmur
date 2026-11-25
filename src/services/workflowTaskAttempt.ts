@@ -2,6 +2,7 @@ import type { WorkflowSnapshot, WorkflowTask, WorkflowTaskStatus } from './workf
 import { parseWorkflowModelInvocation, type WorkflowModelInvocation } from './workflowModelInvocation';
 import { parseWorkflowToolInvocation, type WorkflowToolInvocation } from './workflowToolInvocation';
 import { workflowJsonDigest } from './workflowToolRequest';
+import { redactAiDiagnosticText } from './aiDiagnosticText';
 
 export interface WorkflowTaskAttempt {
   schemaVersion: 1;
@@ -15,6 +16,7 @@ export interface WorkflowTaskAttempt {
   updatedAt: number;
   finishedAt?: number;
   status: WorkflowTaskStatus;
+  error?: string;
   definitionSha256?: string;
   dependencyOutputs?: Array<{ taskId: string; outputSha256: string }>;
   externalTaskId?: string;
@@ -38,6 +40,7 @@ export function parseWorkflowTaskAttempt(raw: unknown): WorkflowTaskAttempt {
       || Number(value.finishedAt) > Number(value.updatedAt)))) throw new Error('任务执行记录时间无效');
   if (!['queued', 'running', 'waiting_dependency', 'waiting_external', 'waiting_user', 'result_unknown', 'completed', 'failed', 'cancelled', 'abandoned'].includes(String(value.status))) throw new Error('任务执行记录状态无效');
   if (value.externalTaskId !== undefined && typeof value.externalTaskId !== 'string') throw new Error('任务执行记录外部关联无效');
+  if (value.error !== undefined && (typeof value.error !== 'string' || !value.error.trim() || value.error.length > 2000)) throw new Error('任务执行记录错误原因无效');
   if (value.definitionSha256 !== undefined && (typeof value.definitionSha256 !== 'string'
     || !/^[a-f0-9]{64}$/.test(value.definitionSha256))) throw new Error('任务执行记录定义摘要无效');
   if (value.dependencyOutputs !== undefined && (!Array.isArray(value.dependencyOutputs)
@@ -60,6 +63,7 @@ export function parseWorkflowTaskAttempt(raw: unknown): WorkflowTaskAttempt {
     ...(value.dependencyOutputs === undefined ? {} : { dependencyOutputs: value.dependencyOutputs as WorkflowTaskAttempt['dependencyOutputs'] }),
     ...(value.finishedAt === undefined ? {} : { finishedAt: value.finishedAt as number }),
     ...(value.externalTaskId === undefined ? {} : { externalTaskId: value.externalTaskId as string }),
+    ...(value.error === undefined ? {} : { error: value.error as string }),
     ...(modelInvocation ? { modelInvocation } : {}),
     ...(toolInvocation ? { toolInvocation } : {}),
   };
@@ -92,6 +96,7 @@ export function settleTaskAttempt(attempt: WorkflowTaskAttempt, task: WorkflowTa
   if (task.status === 'queued' || task.status === 'waiting_dependency') {
     if (task.modelInvocation?.state === 'rejected' || task.toolInvocation?.state === 'rejected') {
       return { ...attempt, status: 'failed', updatedAt: Math.max(task.updatedAt, attempt.updatedAt), finishedAt: task.updatedAt,
+        ...(task.error ? { error: redactAiDiagnosticText(task.error) } : {}),
         ...(task.modelInvocation ? { modelInvocation: task.modelInvocation } : {}),
         ...(task.toolInvocation ? { toolInvocation: task.toolInvocation } : {}) };
     }
@@ -111,10 +116,13 @@ export function settleTaskAttempt(attempt: WorkflowTaskAttempt, task: WorkflowTa
   }
   const updatedAt = Math.max(task.updatedAt, attempt.updatedAt);
   const terminal = ['completed', 'failed', 'cancelled', 'abandoned'].includes(task.status);
-  const { finishedAt: previousFinishedAt, ...activeAttempt } = attempt;
+  const { finishedAt: previousFinishedAt, error: previousError, ...activeAttempt } = attempt;
   void previousFinishedAt;
+  void previousError;
   return { ...activeAttempt, status: task.status, updatedAt,
     ...(terminal ? { finishedAt: updatedAt } : {}),
+    ...(task.error && (task.status === 'failed' || task.status === 'result_unknown')
+      ? { error: redactAiDiagnosticText(task.error) } : {}),
     ...(task.externalTaskId ? { externalTaskId: task.externalTaskId } : {}),
     ...(task.modelInvocation ? { modelInvocation: task.modelInvocation } : {}),
     ...(task.toolInvocation ? { toolInvocation: task.toolInvocation } : {}) };

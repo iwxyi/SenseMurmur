@@ -143,3 +143,10 @@ export function teamReviewLeafSources(snapshot: WorkflowSnapshot, task: Workflow
   visit(task);
   return [...result];
 }
+
+export function teamReviewCoversCompletedWork(snapshot: WorkflowSnapshot, review: WorkflowTask): boolean {
+  if (review.kind !== 'team_review' || review.status !== 'completed' || isPartialTeamReview(review)) return false;
+  const reviewed = new Set(teamReviewLeafSources(snapshot, review));
+  return snapshot.tasks.filter((task) => task.kind.startsWith('agent_') && task.status === 'completed')
+    .every((task) => reviewed.has(task.id));
+}

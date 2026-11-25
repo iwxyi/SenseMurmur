@@ -233,6 +233,9 @@ export default defineConfig(({ mode }) => {
 
   return {
     base: appBase,
+    // The local composition worker is lazy-loaded. Keep its ESM entry out of
+    // Vite's optimizer so an old dependency hash cannot block the first load.
+    optimizeDeps: { exclude: ['@ffmpeg/ffmpeg'] },
     server: {
       host: '0.0.0.0',
       port: 5173,

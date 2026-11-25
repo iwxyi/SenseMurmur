@@ -53,10 +53,25 @@ const page = pages.find((item) => item.type === 'page');
 if (!page) throw new Error('Start Chrome with a page and remote debugging enabled');
 const cdp = new Cdp(page.webSocketDebuggerUrl);
 await cdp.open();
+let originalAuthStorage;
 
 try {
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
+  originalAuthStorage = await cdp.evaluate(`(() => {
+    const snapshotKey = Object.keys(localStorage).find((key) => key.endsWith('auth-session')) || 'pneumata-auth-session';
+    return Object.fromEntries(['pneumata-auth-mode', 'pneumata-token', 'pneumata-user', 'pneumata-cloud-sync-enabled', snapshotKey]
+      .map((key) => [key, localStorage.getItem(key)]));
+  })()`);
+  const authSnapshotKey = Object.keys(originalAuthStorage).find((key) => key.endsWith('auth-session'));
+  await cdp.evaluate(`(() => {
+    const key = ${JSON.stringify(authSnapshotKey)};
+    localStorage.setItem(key, JSON.stringify({ version: 1, generation: crypto.randomUUID(), token: null, refreshToken: null, user: null, mode: 'local' }));
+    localStorage.setItem('pneumata-auth-mode', 'local');
+    localStorage.removeItem('pneumata-token');
+    localStorage.removeItem('pneumata-user');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '0');
+  })()`);
   await cdp.send('Page.navigate', { url: `${clientUrl}/chats` });
   await waitFor(() => cdp.evaluate(`Boolean(document.querySelector('#root')?.childElementCount)`), 'app mounted');
   await cdp.evaluate(`(async () => {
@@ -81,6 +96,7 @@ try {
     ] };
     const { createWorkflowRunRuntime, indexedDbWorkflowRepository, currentWorkflowScope, WorkflowPreflightError } = await import('/src/services/workflowRunRuntime.ts');
     const { defaultWorkflowGoalSpec } = await import('/src/services/workflowGoalSpec.ts');
+    const { matchesTeamJsonSchema } = await import('/src/services/agentTeamJsonSchema.ts');
     const { generateResponse, generateJsonResponse, generateImage } = await import('/src/services/aiClient.ts');
     const originalBudgetBoundaryFetch = window.fetch;
     let directBudgetRequests = 0;
@@ -101,6 +117,23 @@ try {
       if (directBudgetRequests !== 0) throw new Error('Budgeted direct request accessed the network');
     } finally { window.fetch = originalBudgetBoundaryFetch; }
     window.__cleanupCollaborationFixture = async () => {
+      const [{ useChatStore }, { useMessageStore }, { useAssistantArtifactStore }] = await Promise.all([
+        import('/src/stores/useChatStore.ts'), import('/src/stores/useMessageStore.ts'), import('/src/stores/useAssistantArtifactStore.ts'),
+      ]);
+      await Promise.all([
+        useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
+        useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
+        useAssistantArtifactStore.persist.hasHydrated() ? Promise.resolve() : useAssistantArtifactStore.persist.rehydrate(),
+      ]);
+      const fixtureChatIds = new Set(useChatStore.getState().chats
+        .filter((chat) => chat.id.startsWith('browser-collab-') && chat.id.endsWith('-chat')).map((chat) => chat.id));
+      useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => !fixtureChatIds.has(chat.id)) }));
+      useMessageStore.setState((state) => ({
+        messages: state.messages.filter((message) => !fixtureChatIds.has(message.chatId)),
+        messageWindowsByChatId: Object.fromEntries(Object.entries(state.messageWindowsByChatId)
+          .filter(([chatId]) => !fixtureChatIds.has(chatId))),
+      }));
+      useAssistantArtifactStore.setState((state) => ({ items: state.items.filter((item) => !fixtureChatIds.has(item.chatId)) }));
       const database = await new Promise((resolve, reject) => {
         const request = indexedDB.open('pneumata-workflow-runs', 6);
         request.onsuccess = () => resolve(request.result);
@@ -149,11 +182,26 @@ try {
       }
       return originalOutboxAck(...args);
     };
+    const originalConsoleError = console.error;
+    const recoveryErrors = [];
+    console.error = (...args) => {
+      if (String(args[0]).includes('agent-team:delivery-recovery-failed')) {
+        const error = args[1]?.error;
+        recoveryErrors.push(error?.stack || error?.message || String(error || args[0]));
+      }
+      originalConsoleError(...args);
+    };
     try {
       await recoverAgentTeamRuns();
-      if (!receiptInterrupted || (await indexedDbWorkflowRepository.read(outboxScope, outboxRunId)).run.deliveryStatus !== 'published'
-        || !(await originalOutboxList(outboxScope, outboxRunId, 'team-delivery')).length) throw new Error('Delivery was skipped or receipt acknowledged before publication');
+      const recoverySnapshot = await indexedDbWorkflowRepository.read(outboxScope, outboxRunId);
+      const pendingDeliveryEvents = await originalOutboxList(outboxScope, outboxRunId, 'team-delivery');
+      if (!receiptInterrupted || recoverySnapshot.run.deliveryStatus !== 'published' || !pendingDeliveryEvents.length) {
+        throw new Error('Delivery recovery invariant failed: receiptInterrupted=' + receiptInterrupted
+          + ', status=' + (recoverySnapshot.run.deliveryStatus || 'unset') + ', pendingEvents=' + pendingDeliveryEvents.length
+          + ', recoveryError=' + (recoveryErrors[0] || 'none'));
+      }
     } finally {
+      console.error = originalConsoleError;
       indexedDbWorkflowRepository.listOutboxEvents = originalOutboxList;
       indexedDbWorkflowRepository.acknowledgeOutboxEvents = originalOutboxAck;
     }
@@ -659,11 +707,64 @@ try {
           || done.tasks.find((item) => item.id === 'data').output !== '{"value":1}'
           || attempts.map((item) => item.status).join(',') !== 'failed,completed') throw new Error('Output retry lost history or repeated upstream');
         window.__assistantTeamSmoke.outputRetry = true;
+      } catch (error) {
+        window.__assistantTeamSmoke.outputRetryError = error instanceof Error ? error.message : String(error);
+        throw error;
       } finally {
         window.fetch = originalFetch;
         useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== outputChatId) }));
       }
     };
+    const roleContractRunId = 'browser-collab-role-contract-' + crypto.randomUUID();
+    const roleContractChatId = roleContractRunId + '-chat';
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: roleContractChatId, type: 'assistant',
+      name: '岗位契约闭环验证', memberIds: [], createdAt: now, updatedAt: now, deletedAt: null }] }));
+    const roleContractPlan = { summary: '结构化结论', roles: [{ schemaVersion: 1, contractVersion: 1,
+      id: 'analyst', name: '分析员', responsibility: '分析资料', method: '逐项核对', acceptance: '输出结论字段',
+      allowedTools: ['text_generation'],
+      inputSchema: { type: 'object', properties: { overallGoal: { type: 'string' }, taskGoal: { type: 'string' },
+        acceptance: { type: 'string' }, userInstruction: { type: ['string', 'null'] }, upstream: { type: 'array' }, savedText: { type: 'array' } },
+        required: ['overallGoal', 'taskGoal', 'acceptance', 'userInstruction', 'upstream', 'savedText'], additionalProperties: false },
+      outputSchema: { type: 'object', properties: { conclusion: { type: 'string' } },
+        required: ['conclusion'], additionalProperties: false } }],
+      tasks: [{ id: 'analyze', roleId: 'analyst', goal: '整理结论', dependsOn: [], acceptance: '结论可读' }], finalAcceptance: '结论已交付' };
+    const roleContractReplies = [JSON.stringify(roleContractPlan), '{"unexpected":"not saved"}', '{"conclusion":"已核对"}'];
+    let roleContractRequests = 0;
+    window.fetch = async (input, init) => {
+      if (!String(input).startsWith('https://delegation-smoke.invalid/')) return originalFetch(input, init);
+      const content = roleContractReplies[roleContractRequests++];
+      if (!content) throw new Error('Unexpected role contract model request');
+      return Response.json({ choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }] });
+    };
+    try {
+      const roleWorkflow = createAgentTeamWorkflow(config, currentWorkflowScope);
+      const invalidRoleOutput = (await roleWorkflow.start(roleContractRunId, roleContractChatId, '整理结论')).snapshot;
+      if (invalidRoleOutput.run.status !== 'failed' || roleContractRequests !== 2
+        || !invalidRoleOutput.tasks.find((task) => task.id === 'analyze').error.includes('输出不符合岗位契约字段要求')
+        || invalidRoleOutput.tasks.find((task) => task.id === 'analyze').output !== undefined) {
+        throw new Error('Role output schema did not block invalid content');
+      }
+      const failedRoleTask = invalidRoleOutput.tasks.find((task) => task.id === 'analyze');
+      const actualInput = failedRoleTask.input;
+      const savedRoleInput = { overallGoal: actualInput.goal, taskGoal: actualInput.task.goal, acceptance: actualInput.task.acceptance,
+        userInstruction: null, upstream: [], savedText: [] };
+      if (!actualInput.role.inputSchema || actualInput.role.contractVersion !== 1
+        || !matchesTeamJsonSchema(actualInput.role.inputSchema, savedRoleInput)) {
+        throw new Error('Versioned role input contract was not persisted');
+      }
+      await roleWorkflow.retryFailedTask(roleContractRunId, 'analyze', invalidRoleOutput.run.planVersion);
+      const repairedRoleOutput = (await roleWorkflow.resume(roleContractRunId)).snapshot;
+      const roleAttempts = await indexedDbWorkflowRepository.listTaskAttempts(currentWorkflowScope(), roleContractRunId, 'analyze');
+      if (repairedRoleOutput.run.status !== 'completed' || roleContractRequests !== 3
+        || roleAttempts.map((attempt) => attempt.status).join(',') !== 'failed,completed'
+        || repairedRoleOutput.tasks.find((task) => task.id === 'analyze').output !== '{"conclusion":"已核对"}') {
+        throw new Error('Role contract retry did not preserve failure history and complete with valid output');
+      }
+      window.__roleContractsVerified = true;
+    } finally {
+      window.fetch = originalFetch;
+      useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => chat.id !== roleContractChatId) }));
+    }
     const journalRunId = 'browser-collab-journal-' + crypto.randomUUID();
     await runtime.create({ ...run, run: { ...run.run, id: journalRunId, status: 'paused' },
       tasks: run.tasks.map((task) => ({ ...task, runId: journalRunId })) });
@@ -768,7 +869,7 @@ try {
     const container = document.createElement('div');
     container.id = 'assistant-team-smoke-root';
     document.body.append(container);
-    window.__assistantTeamSmoke = { calls: [], resumed: [], limits: [], deadlines: [] };
+    window.__assistantTeamSmoke = { calls: [], resumed: [], limits: [], deadlines: [], roleContracts: Boolean(window.__roleContractsVerified) };
     const [{ default: ToolHistory }, { default: ChatMessageList }, { default: ChatTimelineFrame }] = await Promise.all([
       import('/src/components/chat/TeamTaskExecutionHistory.tsx'),
       import('/src/components/chat/MessageList.tsx'),
@@ -823,6 +924,7 @@ try {
       onUpdateModelCallLimit: async (item, limit) => { window.__assistantTeamSmoke.limits.push({ runId: item.run.id, limit }); },
       onUpdateDeadline: async (item, deadlineAt) => { window.__assistantTeamSmoke.deadlines.push({ runId: item.run.id, deadlineAt }); },
       onSaveDeliveryCopy: async (item) => {
+        try {
         await conflictWorkflow.publish(item.run.id, item.run.planVersion);
         await createAgentTeamWorkflow(config, currentWorkflowScope).publish(item.run.id);
         const saved = await conflictWorkflow.read(item.run.id);
@@ -838,6 +940,10 @@ try {
           || chat.messageBranchState.refs.main.headNodeId !== copy.message.id
           || copy.message.metadata.branching.nodeId !== copy.message.id) throw new Error('Copy publication lost content or duplicated delivery');
         window.__assistantTeamSmoke.deliveryCopy = { artifacts: artifacts.length, messages: messages.length, published: true, sourcePreserved: true, decisions: saved.run.decisions.length };
+        } catch (error) {
+          window.__assistantTeamSmoke.deliveryCopyError = error instanceof Error ? error.message : String(error);
+          throw error;
+        }
       },
       onDelegate: async (...args) => {
         const [selected, request, targetTaskId] = args;
@@ -925,7 +1031,9 @@ try {
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '对照当前内容与候选交付').click()`);
   await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('用户保留的市场结论') && document.querySelector('[role="dialog"]').textContent.includes('候选交付')`), 'current and candidate content visible');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '保留现有内容，另存交付').click()`);
-  await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy?.published`), 'copy saved through workbench without overwriting original');
+  await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy?.published || Boolean(window.__assistantTeamSmoke.deliveryCopyError)`), 'copy saved through workbench without overwriting original');
+  const deliveryCopyError = await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopyError`);
+  if (deliveryCopyError) throw new Error(`Delivery copy failed: ${deliveryCopyError}`);
   assert.deepEqual(await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), { artifacts: 2, messages: 1, published: true, sourcePreserved: true, decisions: 1 });
   await cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root button').click()`);
   await waitFor(() => cdp.evaluate(`document.querySelector('#assistant-tool-history-smoke-root')?.textContent.includes('工具执行已完成')`), 'persisted tool history visible');
@@ -935,7 +1043,9 @@ try {
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent.includes('市场分析师 · 失败')).click()`);
   await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"]').textContent.includes('JSON 不符合已声明的字段契约')`), 'output validation error visible');
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] button')).find((button) => button.textContent === '重试该任务并继续').click()`);
-  await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.outputRetry === true`), 'failed JSON retried from workbench with preserved upstream');
+  await waitFor(() => cdp.evaluate(`window.__assistantTeamSmoke.outputRetry === true || Boolean(window.__assistantTeamSmoke.outputRetryError)`), 'failed JSON retried from workbench with preserved upstream');
+  const retryError = await cdp.evaluate(`window.__assistantTeamSmoke.outputRetryError`);
+  if (retryError) throw new Error(`JSON task retry failed: ${retryError}`);
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent === '能力恢复验证').click()`);
   await cdp.evaluate(`Array.from(document.querySelectorAll('[role="dialog"] [role="button"]')).find((button) => button.textContent.includes('市场分析师 · 失败')).click()`);
   await waitFor(() => cdp.evaluate(`document.querySelector('[role="dialog"] [role="status"]')?.textContent.includes('继续条件') && document.querySelector('[role="dialog"] [role="status"]').textContent.includes('配置对应类型的模型')`), 'persisted capability recovery condition visible');
@@ -1045,7 +1155,7 @@ try {
   assert.equal(await cdp.evaluate(`window.__usageCalls`), 2, 'Rendering and resizing must not poll fees');
   assert.equal(await cdp.evaluate(`window.__budgetCalls`), 1, 'Rendering and resizing must not poll budgets');
   await cdp.evaluate(`window.__usageCleanup()`);
-  console.log(JSON.stringify({ ok: true, capabilityRecovery: await cdp.evaluate(`window.__assistantTeamSmoke.capabilityRecovery`), userResponse: await cdp.evaluate(`window.__assistantTeamSmoke.userResponse`), outputContractRetry: true, exactSavedTextRecovery: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
+  console.log(JSON.stringify({ ok: true, capabilityRecovery: await cdp.evaluate(`window.__assistantTeamSmoke.capabilityRecovery`), userResponse: await cdp.evaluate(`window.__assistantTeamSmoke.userResponse`), outputContractRetry: true, roleContracts: await cdp.evaluate(`window.__assistantTeamSmoke.roleContracts`), exactSavedTextRecovery: true, toolHistory: true, deliveryCopy: await cdp.evaluate(`window.__assistantTeamSmoke.deliveryCopy`), deadlineRecovery: true, recursiveDelegation: true, sharedBudgetRecovery: true, recursiveModelRequests: 6, planRevisionJournal: true, revisionRollback: true, executionHistory: '第 1 次执行 · 已完成 · 计划 2', childRole: '市场分析师', resumedRunIds: resumedIds, revisionRequest: request }));
 } catch (error) {
   console.error(JSON.stringify({ browserErrors: cdp.errors }));
   throw error;
@@ -1053,5 +1163,12 @@ try {
   await cdp.evaluate(`window.__usageCleanup?.()`).catch((error) => console.error('Usage fixture cleanup failed:', error));
   await cdp.send('Emulation.clearDeviceMetricsOverride');
   await cdp.evaluate(`(async () => { window.__assistantTeamSmoke?.root?.unmount(); window.__assistantTeamSmoke?.historyRoot?.unmount(); window.__assistantTeamSmoke?.progressRoot?.unmount(); document.querySelector('#assistant-team-smoke-root')?.remove(); document.querySelector('#assistant-tool-history-smoke-root')?.remove(); document.querySelector('#assistant-team-progress-smoke-root')?.remove(); await window.__cleanupCollaborationFixture?.(); })()`).catch((error) => console.error('Fixture cleanup failed:', error));
+  if (originalAuthStorage) {
+    await cdp.evaluate(`(() => {
+      const saved = ${JSON.stringify(originalAuthStorage)};
+      for (const [key, value] of Object.entries(saved)) value === null ? localStorage.removeItem(key) : localStorage.setItem(key, value);
+    })()`).catch((error) => console.error('Auth storage restore failed:', error));
+    await cdp.send('Page.navigate', { url: `${clientUrl}/chats` }).catch((error) => console.error('Auth page restore failed:', error));
+  }
   cdp.close();
 }

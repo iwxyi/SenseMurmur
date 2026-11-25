@@ -415,6 +415,44 @@ describe('localToCloudBootstrap', () => {
     syncSettings.mockRestore();
   });
 
+  it('preserves an orphaned branch reference when the cloud confirms its parent is missing', async () => {
+    localStore.clear();
+    const { api } = await import('./api');
+    const getSyncChanges = vi.spyOn(api, 'getSyncChanges').mockImplementation(async ({ scope }) => ({
+      status: 'modified', scope, cursor: 'test', revision: 'test',
+      changes: scope === 'chats.summary' ? [{
+        entity: 'chat_summary', id: 'cloud-chat', updatedAt: 1, deletedAt: null,
+        patch: { id: 'cloud-chat', name: '本地会话', type: 'group', deletedAt: null },
+      }] : [],
+    }) as Awaited<ReturnType<typeof api.getSyncChanges>>);
+    const createMessage = vi.spyOn(api, 'createMessage')
+      .mockRejectedValueOnce(Object.assign(new Error('分支父消息尚未同步或已被删除'), { code: 'BRANCH_PARENT_NOT_FOUND' }))
+      .mockResolvedValueOnce({ id: 'cloud-message' } as Awaited<ReturnType<typeof api.createMessage>>);
+    try {
+      await bootstrap.bootstrapLocalDataToCloud(snapshot({
+        settingsShouldUpload: false,
+        chats: [chat('local-chat-orphan', '本地会话')],
+        messageWindowsByChatId: {
+          'local-chat-orphan': { messages: [{
+            id: 'child', chatId: 'local-chat-orphan', type: 'user', senderId: 'user', senderName: '用户',
+            content: '继续', emotion: 0, timestamp: 2, isDeleted: false,
+            metadata: { branching: { nodeId: 'child-node', parentNodeId: 'missing-parent', rootNodeId: 'missing-parent' } },
+          }] },
+        },
+      }));
+      expect(createMessage).toHaveBeenCalledTimes(2);
+      expect(createMessage).toHaveBeenLastCalledWith('cloud-chat', expect.objectContaining({
+        metadata: expect.objectContaining({ branching: expect.objectContaining({
+          nodeId: 'child-node', parentNodeId: null, rootNodeId: 'child-node', unresolvedParentNodeId: 'missing-parent',
+        }) }),
+      }));
+      const { readCloudSyncBootstrapStatus } = await import('./cloudSyncBootstrapStatus');
+      expect(readCloudSyncBootstrapStatus()).toMatchObject({ state: 'succeeded', orphanedBranchMessages: 1 });
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it('carries pending creates into the bootstrap reconcile plan', () => {
     const plan = bootstrap.createBootstrapReconcilePlan(
       snapshot({

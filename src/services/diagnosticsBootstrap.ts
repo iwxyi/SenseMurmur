@@ -151,7 +151,7 @@ function installDiagnosticsBootstrap() {
       export: () => {
         try {
           const entries = JSON.parse(localStorage.getItem('miragetea:developer-diagnostics-buffer') || '[]') as unknown[];
-          console.info('[developer-diagnostics] export', entries);
+          console.info(`[developer-diagnostics] ${entries.length} 条记录已返回；控制台仅显示摘要`);
           return entries;
         } catch {
           return [];

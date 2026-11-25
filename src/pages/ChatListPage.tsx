@@ -32,6 +32,8 @@ import { readPersistentUiValue, writePersistentUiValue } from '../utils/persiste
 import { motion, transition } from '../styles/motion';
 import { buildListGridSx } from '../styles/interaction';
 import { buildAssistantChatDraft } from '../services/chatDraftBuilder';
+import { readCloudSyncBootstrapStatus } from '../services/cloudSyncBootstrapStatus';
+import { getCloudSyncSkipDiagnostics } from '../stores/storeSyncHelpers';
 import { getLatestChatPreviewMessage, sanitizeChatLatestMessage } from '../services/chatLatestMessage';
 import { MIN_MEMBERS } from '../constants/defaults';
 import type { AICharacter } from '../types/character';
@@ -418,6 +420,13 @@ export default function ChatListPage() {
     : '创建单聊前，需要先在角色库中创建至少一个AI角色。也可以根据主题或故事批量生成角色。';
   const createAssistantChat = async () => {
     if (creatingAssistant) return;
+    if (getCloudSyncSkipDiagnostics().reasons.includes('account-bootstrap-pending')) {
+      const failure = readCloudSyncBootstrapStatus();
+      setAssistantDeleteError(failure?.state === 'failed' && failure.lastError
+        ? `云同步准备失败：${failure.lastError}。请在同步状态中核对后重试。`
+        : '云同步正在准备中，请稍后再创建助手会话。');
+      return;
+    }
     setCreatingAssistant(true);
     try {
       const auth = useAuthStore.getState();

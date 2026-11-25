@@ -572,6 +572,8 @@ async function uploadMessages(
 ) {
   assertWorkspaceActive(signal);
   const messages = collectMessagesForUpload(snapshot, chatIdMap, plan);
+  const localNodeIds = new Set(messages.flatMap((message) => [message.id, message.metadata?.branching?.nodeId].filter((id): id is string => Boolean(id))));
+  let orphanedBranchMessages = 0;
   for (const message of messages) {
     assertWorkspaceActive(signal);
     const cloudChatId = chatIdMap.get(message.chatId);
@@ -585,7 +587,7 @@ async function uploadMessages(
       });
       continue;
     }
-    await api.createMessage(cloudChatId, {
+    const payload = {
       type: message.type,
       senderId,
       senderName: message.senderName,
@@ -593,9 +595,31 @@ async function uploadMessages(
       metadata: mapJsonReferences(message.metadata, characterIdMap),
       emotion: message.emotion,
       timestamp: message.timestamp,
-    });
+    };
+    try {
+      await api.createMessage(cloudChatId, payload);
+    } catch (error) {
+      const parentNodeId = message.metadata?.branching?.parentNodeId;
+      if (!(error instanceof Error) || (error as { code?: string }).code !== 'BRANCH_PARENT_NOT_FOUND'
+        || !parentNodeId || localNodeIds.has(parentNodeId)) throw error;
+      const metadata = payload.metadata || {};
+      await api.createMessage(cloudChatId, {
+        ...payload,
+        metadata: {
+          ...metadata,
+          branching: {
+            ...metadata.branching,
+            parentNodeId: null,
+            rootNodeId: message.metadata?.branching?.nodeId || null,
+            unresolvedParentNodeId: parentNodeId,
+          },
+        },
+      });
+      orphanedBranchMessages += 1;
+    }
     assertWorkspaceActive(signal);
   }
+  return orphanedBranchMessages;
 }
 
 export async function bootstrapLocalDataToCloud(snapshot: LocalCloudBootstrapSnapshot, signal = getWorkspaceSignal()) {
@@ -654,10 +678,10 @@ export async function bootstrapLocalDataToCloud(snapshot: LocalCloudBootstrapSna
     }
     const characterIdMap = await uploadCharacters(plan, signal);
     const chatIdMap = await uploadChats(plan, characterIdMap, signal);
-    await uploadMessages(snapshot, chatIdMap, characterIdMap, plan, signal);
+    const orphanedBranchMessages = await uploadMessages(snapshot, chatIdMap, characterIdMap, plan, signal);
     assertWorkspaceActive(signal);
     confirmBootstrapCreateOperations(plan, characterIdMap, chatIdMap);
-    writeCloudSyncBootstrapStatus(buildBootstrapStatus('succeeded', plan));
+    writeCloudSyncBootstrapStatus({ ...buildBootstrapStatus('succeeded', plan), orphanedBranchMessages });
     console.info('[cloud-sync] bootstrap local data to cloud finished', {
       charactersUploaded: characterIdMap.size,
       chatsUploaded: chatIdMap.size,

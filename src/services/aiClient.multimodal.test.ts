@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { generateImage, generateResponse } from './aiClient';
+import { api } from './api';
 
 const fetchMock = globalThis.fetch;
 
@@ -74,6 +75,46 @@ describe('aiClient multimodal requests', () => {
     ]);
   });
 
+  it('loads local chat images through the authenticated media endpoint before sending them to a model', async () => {
+    const mediaRead = vi.spyOn(api, 'fetchWithAuth').mockResolvedValueOnce(new Response(
+      new Uint8Array([1, 2, 3]), { status: 200, headers: { 'Content-Type': 'image/png' } },
+    ));
+    const calls: RequestInit[] = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(init || {});
+      return new Response(JSON.stringify({ choices: [{ message: { content: '看到了图片' } }] }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    await generateResponse({ provider: 'openai', apiKey: 'k', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4.1' }, 'system', [{
+      role: 'user', content: '看这张图', attachments: [{ url: '/uploads/media/user/chat/eggs.png', mimeType: 'image/png' }],
+    }]);
+
+    expect(mediaRead).toHaveBeenCalledWith('/api/media-assets/content?url=%2Fuploads%2Fmedia%2Fuser%2Fchat%2Feggs.png', { signal: undefined });
+    const body = JSON.parse(String(calls[0]?.body || '{}'));
+    expect(body.messages[1].content[1]).toEqual({
+      type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' },
+    });
+    mediaRead.mockRestore();
+  });
+
+  it('fails clearly instead of silently dropping remote images unsupported by Anthropic image payloads', async () => {
+    let called = false;
+    globalThis.fetch = (async () => {
+      called = true;
+      return new Response(JSON.stringify({ content: [{ type: 'text', text: 'ok' }] }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    const failure = await generateResponse({ provider: 'anthropic', apiKey: 'k', baseUrl: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-0' }, 'system', [{
+      role: 'user', content: '看这张图', attachments: [{ url: 'https://example.test/image.png', mimeType: 'image/png' }],
+    }]).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ message: expect.stringContaining('图片附件未能转换为 Anthropic 支持的图片数据'), requestNotDispatched: true });
+    expect(called).toBe(false);
+  });
+
   it('shows the member generation limit instead of a generic permission error', async () => {
     globalThis.fetch = (async () => new Response(JSON.stringify({
       error: '今日 AI 生成次数已达当前会员上限',
@@ -85,6 +126,19 @@ describe('aiClient multimodal requests', () => {
       { provider: 'official-nanobanana', apiKey: '', baseUrl: '/api/ai', model: 'gemini-3-pro-image-preview' },
       { prompt: '一盏台灯' },
     )).rejects.toThrow('今日 AI 生成次数已达当前会员上限');
+  });
+
+  it('shows sanitized image provider diagnostics when the upstream rejects access', async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      error: '图片供应商认证或权限校验失败，请管理员检查服务配置',
+      code: 'AI_IMAGE_UPSTREAM_AUTH_FAILED',
+      detail: { upstreamStatus: 403, upstreamCode: 'permission_denied', upstreamMessage: 'Model access is disabled' },
+    }), { status: 502, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+
+    await expect(generateImage(
+      { provider: 'official-ace-nanobanana', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-pro' },
+      { prompt: 'a private prompt' },
+    )).rejects.toThrow('供应商反馈：permission_denied：Model access is disabled');
   });
 
   it.each([

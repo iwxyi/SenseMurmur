@@ -9,6 +9,22 @@ export interface MessageWindowLike {
   preserveBranchContext?: boolean;
 }
 
+export function pendingAgentTeamMediaMessages(chatId: string, sources: Message[]) {
+  const latest = new Map<string, Message>();
+  for (const message of sources) {
+    if (message.chatId !== chatId || message.isDeleted || !message.metadata?.agentTeamMedia) continue;
+    const attachment = message.metadata.attachments?.find((item) => item.kind === 'image');
+    if (!attachment || !['queued', 'generating', 'ready', 'failed'].includes(attachment.status)) continue;
+    const identity = getMessageRenderIdentity(message);
+    const previous = latest.get(identity);
+    const updatedAt = Math.max(0, ...message.metadata.attachments!.map((item) => item.updatedAt || 0));
+    const previousUpdatedAt = previous
+      ? Math.max(0, ...(previous.metadata?.attachments || []).map((item) => item.updatedAt || 0)) : -1;
+    if (!previous || updatedAt >= previousUpdatedAt) latest.set(identity, message);
+  }
+  return [...latest.values()].sort(compareByTimeline);
+}
+
 function shouldKeepExistingMessage(existing: Message, incoming: Message) {
   return Boolean(incoming.isStreaming && !existing.isStreaming && messagesShareIdentity(existing, incoming));
 }
@@ -215,5 +231,11 @@ export function projectCurrentChatMessages(params: {
   // Branch selection needs the complete retained cache, but rendering should
   // stay within the store's current paging window. Use the active window's
   // timestamp range as the stable viewport boundary after projection.
-  return branched.filter((message) => message.timestamp >= activeRange.min && message.timestamp <= activeRange.max);
+  return branched.filter((message) => {
+    if (message.timestamp >= activeRange.min && message.timestamp <= activeRange.max) return true;
+    // Team media placeholders are appended to the active branch after the
+    // current message window was captured. Keep that new branch tail visible
+    // while the window catches up, or its queued/generating bubble vanishes.
+    return message.timestamp > activeRange.max && Boolean(message.metadata?.agentTeamMedia);
+  });
 }

@@ -168,6 +168,34 @@ describe('useMessageStore', () => {
     expect(useMessageStore.getState().messageWindowsByChatId[chatId]?.messages.find((item) => item.id === child.id)?.metadata?.branching?.parentNodeId).toBe(parent.id);
   });
 
+  it('waits for a branch parent retry before submitting its child', async () => {
+    localStorage.setItem(storageKey('auth-mode'), 'cloud');
+    const { useAuthStore } = await import('./useAuthStore');
+    vi.stubGlobal('window', { setTimeout, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    vi.stubGlobal('navigator', { onLine: true });
+    const { useMessageStore } = await import('./useMessageStore');
+    const { api } = await import('../services/api');
+    useAuthStore.setState({ authMode: 'cloud', isLoggedIn: true, token: 'token' });
+    const chatId = 'retry-parent-chain';
+    const parent: Message = { ...buildMessage(2, chatId), metadata: { branching: { nodeId: 'parent-node', parentNodeId: null, sequence: 2 } } };
+    const child: Message = { ...buildMessage(3, chatId), metadata: { branching: { nodeId: 'child-node', parentNodeId: 'parent-node', sequence: 3 } } };
+    vi.mocked(api.createMessage).mockImplementation(async (_chatId, payload) => ({ id: payload.content === parent.content ? 'remote-parent' : 'remote-child' }));
+    const pending = [parent, child].map((message, index) => ({ id: `retry-chain-${index}`, kind: 'create' as const,
+      chatId, localMessageId: message.id, messageId: message.id, payload: message,
+      createdAt: Date.now(), attemptCount: 0, status: 'pending' as const,
+      retryAt: index === 0 ? Date.now() + 30_000 : 0 }));
+    useMessageStore.setState({ activeChatId: chatId, messages: [parent, child], pendingOperations: pending });
+
+    await useMessageStore.getState().flushPendingOperations();
+    expect(api.createMessage).not.toHaveBeenCalled();
+    expect(useMessageStore.getState().pendingOperations).toHaveLength(2);
+
+    useMessageStore.setState({ pendingOperations: useMessageStore.getState().pendingOperations.map((operation) => ({ ...operation, retryAt: 0 })) });
+    await useMessageStore.getState().flushPendingOperations();
+    expect(vi.mocked(api.createMessage).mock.calls.map(([, payload]) => payload.content)).toEqual([parent.content, child.content]);
+    expect(useMessageStore.getState().pendingOperations).toEqual([]);
+  });
+
   beforeEach(() => {
     vi.resetModules();
     getMessagesMock.mockReset();

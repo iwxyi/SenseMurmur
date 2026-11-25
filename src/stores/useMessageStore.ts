@@ -23,6 +23,7 @@ import { useSettingsStore } from './useSettingsStore';
 import { compactMessage, compactMessageMetadata } from '../services/messageMetadataCompaction';
 import { logDeveloperDiagnostic } from '../services/developerDiagnostics';
 import { buildMessageIdentityKeys } from '../services/messageIdentity';
+import { redactAiDiagnosticText } from '../services/aiDiagnosticText';
 import {
   type CachedMessageWindow,
   MAX_ACTIVE_MESSAGES_PER_CHAT,
@@ -472,6 +473,22 @@ function pendingMessageOperationPriority(operation: PendingMessageOperation) {
   return 1e15 - timestamp;
 }
 
+function pendingMessageParent(queue: PendingMessageOperation[], operation: PendingMessageOperation) {
+  if (operation.kind !== 'create') return undefined;
+  const parentNodeId = operation.payload?.metadata?.branching?.parentNodeId;
+  if (!parentNodeId) return undefined;
+  return queue.find((candidate) => candidate.kind === 'create' && candidate.chatId === operation.chatId
+    && candidate.id !== operation.id && (candidate.payload?.metadata?.branching?.nodeId === parentNodeId
+      || candidate.payload?.id === parentNodeId || candidate.payload?.clientKey === parentNodeId));
+}
+
+function runnableMessageOperations(queue: PendingMessageOperation[]) {
+  return queue.filter((operation) => {
+    const parent = pendingMessageParent(queue, operation);
+    return !parent;
+  });
+}
+
 function isTerminalMessageSyncError(classified: string) {
   if (/BRANCH_PARENT_NOT_FOUND|chat:create pending|CHAT_CREATE_PENDING/i.test(classified)) return false;
   return isTerminalSyncError(classified);
@@ -888,8 +905,9 @@ export const useMessageStore = create<MessageStore>()(
     (set, get) => {
       const flushPendingOperations = async () => {
         await mirrorLocalOutboxWorkerQueue('message', get().pendingOperations);
-        await runPendingOperationQueue<PendingMessageOperation>({
-          getOperations: () => filterCancelledSyncTasks(getMessageStorageKey(), get().pendingOperations),
+        const getOperations = () => runnableMessageOperations(filterCancelledSyncTasks(getMessageStorageKey(), get().pendingOperations));
+        const result = await runPendingOperationQueue<PendingMessageOperation>({
+          getOperations,
           canRun: canAttemptOnlineSync,
           retryDelays: MESSAGE_SYNC_DELAYS,
           isTerminalError: isTerminalMessageSyncError,
@@ -951,6 +969,9 @@ export const useMessageStore = create<MessageStore>()(
                 savedMessage = await api.createMessage(localMessage.chatId, messagePayloadForCloud(localMessage, `${operation.id}:recovered`, operation.executionFence));
               }
               const persistedMessage = mergeMessageServerConfirmation(localMessage, savedMessage);
+              if (localMessage.metadata?.agentTeamMedia) {
+                console.info('[message-sync:create-confirmed] 团队图片占位消息已由云端确认保存');
+              }
               set((current) => ({
                 ...localUpsertMessage(current, persistedMessage),
                 pendingOperations: removePendingMessageOperation(current.pendingOperations, operation.id),
@@ -967,6 +988,12 @@ export const useMessageStore = create<MessageStore>()(
             void completeLocalOutboxWorkerOperation('message', operation);
           },
           onFailure: (operation, _error, retry) => {
+            if (operation.kind === 'create' && operation.payload?.metadata?.agentTeamMedia) {
+              const category = retry.classified.split(':', 1)[0];
+              const reason = redactAiDiagnosticText(retry.classified.slice(retry.classified.indexOf(':') + 1).trim(), 500);
+              const retryText = retry.status === 'pending' ? `；${Math.max(0, retry.retryAt - Date.now())}ms 后重试` : '';
+              console.warn(`[message-sync:create-failed] 团队图片消息同步失败；类型=${category}；状态=${retry.status}；尝试=${retry.retryOperation.attemptCount}${retryText}；原因=${reason}`);
+            }
             const stillQueued = get().pendingOperations.some((item) => item.id === operation.id);
             if (stillQueued) {
               markLocalOutboxWorkerOperation(retry.retryOperation);
@@ -976,6 +1003,14 @@ export const useMessageStore = create<MessageStore>()(
           },
           scheduleNext: (delay) => messageSyncScheduler.schedule(flushPendingOperations, delay),
         });
+        if (!result.ran && canAttemptOnlineSync()) {
+          const now = Date.now();
+          const nextRetryAt = getOperations().filter((operation) => operation.status === 'pending')
+            .reduce((next, operation) => Math.min(next, operation.retryAt || now), Number.POSITIVE_INFINITY);
+          if (Number.isFinite(nextRetryAt) && nextRetryAt > now) {
+            messageSyncScheduler.schedule(flushPendingOperations, nextRetryAt - now);
+          }
+        }
       };
       const refreshCachedMessageWindows = async () => {
         await ensureMessageStoreHydrated();
@@ -1576,7 +1611,8 @@ export const useMessageStore = create<MessageStore>()(
         return { pendingOperations: state.pendingOperations.filter((operation) => !removedIds.has(operation.id)) };
       }),
       retryFailedOperations: () => set((state) => {
-        const pendingOperations = retryFailedOperations(state.pendingOperations, { includeTerminal: false });
+        const pendingOperations = retryFailedOperations(state.pendingOperations, { includeTerminal: false,
+          includeTerminalWhen: (error) => error.startsWith('ownership_conflict:') });
         if (pendingOperations === state.pendingOperations) return {};
         return { pendingOperations };
       }),

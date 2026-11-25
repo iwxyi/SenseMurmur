@@ -43,10 +43,13 @@ if (!page) throw new Error(`Open MirageTea in Chrome first: ${clientUrl}`);
 const cdp = new Cdp(page.webSocketDebuggerUrl);
 await cdp.open();
 let cleanupSource;
+let originalAuthStorage;
 
 try {
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
+  originalAuthStorage = await cdp.evaluate(`Object.fromEntries(['pneumata-auth-mode', 'pneumata-token', 'pneumata-user', 'pneumata-cloud-sync-enabled']
+    .map((key) => [key, localStorage.getItem(key)]))`);
   await cdp.send('Page.navigate', { url: `${clientUrl}/chats` });
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (await cdp.evaluate(`Boolean(document.querySelector('#root')?.childElementCount)`)) break;
@@ -70,6 +73,18 @@ try {
       useAssistantArtifactStore.persist.hasHydrated() ? undefined : useAssistantArtifactStore.persist.rehydrate(),
     ]);
     window.__cleanupDeliveryFixture = async () => {
+      const [{ useChatStore }, { useMessageStore }, { useAssistantArtifactStore }] = await Promise.all([
+        import('/src/stores/useChatStore.ts'), import('/src/stores/useMessageStore.ts'), import('/src/stores/useAssistantArtifactStore.ts'),
+      ]);
+      const fixtureChatIds = new Set(useChatStore.getState().chats
+        .filter((chat) => chat.id.startsWith('browser-team-chat-')).map((chat) => chat.id));
+      useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => !fixtureChatIds.has(chat.id)) }));
+      useMessageStore.setState((state) => ({
+        messages: state.messages.filter((message) => !fixtureChatIds.has(message.chatId)),
+        messageWindowsByChatId: Object.fromEntries(Object.entries(state.messageWindowsByChatId)
+          .filter(([chatId]) => !fixtureChatIds.has(chatId))),
+      }));
+      useAssistantArtifactStore.setState((state) => ({ items: state.items.filter((item) => !fixtureChatIds.has(item.chatId)) }));
       const database = await new Promise((resolve, reject) => {
         const request = indexedDB.open('pneumata-workflow-runs', 6);
         request.onsuccess = () => resolve(request.result);
@@ -370,5 +385,12 @@ try {
   console.log(JSON.stringify({ ok: true, ...result }));
 } finally {
   await cdp.evaluate('window.__cleanupDeliveryFixture?.()').catch((error) => console.error('Fixture cleanup failed:', error));
+  if (originalAuthStorage) {
+    await cdp.evaluate(`(() => {
+      const values = ${JSON.stringify(originalAuthStorage)};
+      for (const [key, value] of Object.entries(values)) value === null ? localStorage.removeItem(key) : localStorage.setItem(key, value);
+    })()`);
+    await cdp.send('Page.reload').catch(() => undefined);
+  }
   cdp.close();
 }

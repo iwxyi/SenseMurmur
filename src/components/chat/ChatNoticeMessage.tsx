@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { Box, CircularProgress, Collapse, IconButton, Stack, Typography } from '@mui/material';
+import { Box, Button, CircularProgress, Collapse, IconButton, Stack, Typography } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import type { Message } from '../../types/message';
 import ChatTimelineFrame from './ChatTimelineFrame';
 
-export default function ChatNoticeMessage({ message }: { message: Message }) {
+export default function ChatNoticeMessage({ message, onAction, actionPending = false, actionFeedback }: { message: Message; onAction?: (message: Message) => void | Promise<void>; actionPending?: boolean; actionFeedback?: { message: string; tone: 'info' | 'error' } }) {
   const [expanded, setExpanded] = useState(false);
   const notice = message.metadata?.chatNotice;
   if (!notice) return null;
@@ -21,6 +21,8 @@ export default function ChatNoticeMessage({ message }: { message: Message }) {
           {notice.progress.completed}/{notice.progress.total}
         </Typography> : null}
         {notice.tone === 'working' ? <CircularProgress size={13} thickness={5} aria-label="正在执行" sx={{ flexShrink: 0 }} /> : null}
+        {notice.action && onAction ? <Button size="small" disabled={actionPending} onClick={() => void onAction(message)}
+          sx={{ flexShrink: 0, minWidth: 0, px: 0.5, py: 0, fontSize: 11 }}>{actionPending ? '核对中…' : notice.action.label}</Button> : null}
         {details.length ? <IconButton size="small" aria-label={expanded ? '收起提示详情' : '展开提示详情'} aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)} sx={{ width: 24, height: 24, transform: expanded ? 'rotate(180deg)' : undefined }}>
           <ExpandMoreIcon fontSize="small" />
@@ -32,6 +34,9 @@ export default function ChatNoticeMessage({ message }: { message: Message }) {
             sx={{ lineHeight: 1.35, overflowWrap: 'anywhere' }}>{detail}</Typography>)}
         </Box>
       </Collapse> : null}
+      {actionFeedback ? <Typography role={actionFeedback.tone === 'error' ? 'alert' : 'status'} variant="caption"
+        color={actionFeedback.tone === 'error' ? 'error.main' : 'text.secondary'}
+        sx={{ display: 'block', pt: 0.5, overflowWrap: 'anywhere' }}>{actionFeedback.message}</Typography> : null}
     </Box>
     </Box>
   </ChatTimelineFrame>;

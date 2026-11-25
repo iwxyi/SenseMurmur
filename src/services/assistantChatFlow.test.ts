@@ -329,6 +329,65 @@ describe('assistantChatFlow media artifacts', () => {
     expect(generateResponseMock.mock.calls[0]?.[3]).toBeUndefined();
   });
 
+  it('uses the latest generated image when the user asks a visual follow-up', async () => {
+    const chat = assistantChat();
+    const generatedImage: Message = {
+      id: 'assistant-generated-image', chatId: chat.id, type: 'ai', senderId: 'assistant', senderName: '助手',
+      content: '为你生成一张图片。', emotion: 0, timestamp: 1001, isDeleted: false,
+      metadata: { attachments: [{ id: 'generated-eggs', kind: 'image', status: 'ready', altText: '篮子里有鸡蛋',
+        mimeType: 'image/png', url: 'data:image/png;base64,EGGS', createdAt: 1001, updatedAt: 1001 }] },
+    };
+    const followUp: Message = {
+      id: 'user-follow-up', chatId: chat.id, type: 'user', senderId: 'user', senderName: '我',
+      content: '你看看这是13个鸡蛋吗？', emotion: 0, timestamp: 1002, isDeleted: false,
+    };
+    generateResponseMock.mockResolvedValue(JSON.stringify({
+      content: '我数到图片里有13个鸡蛋。',
+      imageSummaries: [{ attachmentId: 'generated-eggs', summary: '篮子中有13个鸡蛋。' }],
+    }));
+    const upsertMessage = vi.fn();
+
+    await runAssistantChatReplyFlow({
+      api: { provider: 'openai', apiKey: 'k', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.4-mini' },
+      aiProfiles: [{ id: 'gpt-text', name: 'GPT', type: 'text', provider: 'openai', apiKey: 'k',
+        baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.4-mini', isDefault: true }],
+      chat, chatId: chat.id, currentMessages: [generatedImage, followUp], upsertMessage,
+      updateChat: vi.fn(async () => undefined),
+    });
+
+    const projected = generateResponseMock.mock.calls[0]?.[2] as Array<{
+      role: string; attachments?: Array<{ url: string; mimeType?: string }>;
+    }>;
+    expect(projected.find((message) => message.role === 'assistant')?.attachments)
+      .toEqual([{ url: 'data:image/png;base64,EGGS', mimeType: 'image/png' }]);
+    expect(upsertMessage).toHaveBeenCalledWith(expect.objectContaining({
+      id: generatedImage.id,
+      metadata: expect.objectContaining({ attachments: [expect.objectContaining({ semanticSummary: '篮子中有13个鸡蛋。' })] }),
+    }));
+  });
+
+  it('does not attach an old image to an unrelated assistant question', async () => {
+    const chat = assistantChat();
+    const image: Message = {
+      id: 'old-image', chatId: chat.id, type: 'user', senderId: 'user', senderName: '我', content: '请看这张图',
+      emotion: 0, timestamp: 1001, isDeleted: false,
+      metadata: { attachments: [{ id: 'old-image-attachment', kind: 'image', status: 'ready', altText: '旧图',
+        url: 'data:image/png;base64,OLD', createdAt: 1001, updatedAt: 1001 }] },
+    };
+    const userMessage: Message = { id: 'unrelated-question', chatId: chat.id, type: 'user', senderId: 'user',
+      senderName: '我', content: '东京现在几点？', emotion: 0, timestamp: 1002, isDeleted: false };
+    generateResponseMock.mockResolvedValue('东京时间需要查询当前时钟。');
+    await runAssistantChatReplyFlow({
+      api: { provider: 'openai', apiKey: 'k', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.4-mini' },
+      aiProfiles: [{ id: 'gpt-text', name: 'GPT', type: 'text', provider: 'openai', apiKey: 'k',
+        baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.4-mini', isDefault: true }],
+      chat, chatId: chat.id, currentMessages: [image, userMessage], upsertMessage: vi.fn(),
+      updateChat: vi.fn(async () => undefined),
+    });
+    const projected = generateResponseMock.mock.calls[0]?.[2] as Array<{ attachments?: unknown[] }>;
+    expect(projected.every((message) => !message.attachments?.length)).toBe(true);
+  });
+
   it('stores a lightweight semantic summary on uploaded images after a vision reply', async () => {
     const chat = assistantChat();
     const userMessage: Message = {
@@ -632,7 +691,7 @@ describe('assistantChatFlow media artifacts', () => {
       content: string;
       attachments?: Array<{ url: string; mimeType?: string }>;
     }>;
-    expect(systemPrompt).toContain('当前文本模型请求没有携带可视觉解析的图片输入');
+    expect(systemPrompt).toContain('本轮相关图片没有携带到当前文本模型请求中');
     expect(projected[0]?.content).toContain('[图片附件：捕获.PNG]');
     expect(projected[0]?.attachments).toBeUndefined();
     expect(upsertMessage).not.toHaveBeenCalledWith(expect.objectContaining({

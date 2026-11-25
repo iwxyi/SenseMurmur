@@ -135,6 +135,32 @@ describe('useAssistantArtifactStore', () => {
     expect(useAssistantArtifactStore.getState().items.find((item) => item.id === created.id)?.revision).toBe(7);
   });
 
+  it('reconciles a lost cloud response without writing an already saved workflow version twice', async () => {
+    const store = useAssistantArtifactStore.getState();
+    const [created] = store.commitPatchSet({
+      chatId: 'chat-a', messageId: 'workflow-output', timestamp: 100,
+      patches: [{ action: 'create', kind: 'document', title: '报告', content: '# 报告' }],
+    });
+    apiMocks.getAssistantArtifacts.mockResolvedValueOnce({ items: [] }).mockResolvedValueOnce({ items: [created] });
+    apiMocks.upsertAssistantArtifact.mockRejectedValueOnce(new Error('连接中断'));
+
+    await expect(store.confirmWorkflowArtifactsInCloud('chat-a', [created.id])).rejects.toThrow('连接中断');
+    await expect(store.confirmWorkflowArtifactsInCloud('chat-a', [created.id])).resolves.toBeUndefined();
+    expect(apiMocks.upsertAssistantArtifact).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a cloud conflict when the workflow version is absent from the write response', async () => {
+    const store = useAssistantArtifactStore.getState();
+    const [created] = store.commitPatchSet({
+      chatId: 'chat-a', messageId: 'workflow-output', timestamp: 100,
+      patches: [{ action: 'create', kind: 'document', title: '报告', content: '# 报告' }],
+    });
+    apiMocks.getAssistantArtifacts.mockResolvedValueOnce({ items: [] });
+    apiMocks.upsertAssistantArtifact.mockResolvedValueOnce({ accepted: false, item: { ...created, versions: [] } });
+    await expect(store.confirmWorkflowArtifactsInCloud('chat-a', [created.id])).rejects.toThrow('云端未确认保存产物版本');
+    expect(store.getArtifactsForChat('chat-a')[0].versions).toEqual(created.versions);
+  });
+
   it('refreshes cloud artifacts through sync changes with all versions', async () => {
     apiMocks.getSyncChanges.mockResolvedValueOnce({
       status: 'modified',

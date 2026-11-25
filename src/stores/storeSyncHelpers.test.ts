@@ -24,6 +24,12 @@ describe('storeSyncHelpers', () => {
     const failed = [{ id: 'stale-write', status: 'failed' as const, lastError: classified }];
     expect(helpers.retryFailedOperations(failed, { includeTerminal: false })).toBe(failed);
   });
+  it('allows an explicit recovery retry for released chat ownership conflicts', () => {
+    const failed = [{ id: 'ownership', status: 'failed' as const, attemptCount: 1,
+      lastError: 'ownership_conflict: 当前会话由另一设备运行，消息未提交' }];
+    expect(helpers.retryFailedOperations(failed, { includeTerminal: false,
+      includeTerminalWhen: (error) => error.startsWith('ownership_conflict:') })).toMatchObject([{ id: 'ownership', status: 'pending', lastError: undefined }]);
+  });
   it('tracks persistent retry and lock metadata for pending operations', () => {
     const operation = {
       id: 'op-1',

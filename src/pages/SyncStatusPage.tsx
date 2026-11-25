@@ -712,14 +712,17 @@ export default function SyncStatusPage() {
   };
 
   const canRetrySync = localOutboxItems.some((item) => item.scopeType !== 'artifact'
-    && item.status === 'failed' && !parseSyncErrorClassification(item.lastError).terminal);
+    && item.status === 'failed' && (!parseSyncErrorClassification(item.lastError).terminal
+      || (item.scopeType === 'message' && parseSyncErrorClassification(item.lastError).kind === 'ownership_conflict')));
   const retryableArtifactJobs = artifactStore.jobs.filter((job) => job.status === 'failed');
   const canRetryArtifacts = retryableArtifactJobs.length > 0 && hasUsableDefaultTextAI(settingsStore.aiProfiles);
   const canRetryPersistence = Boolean(persistenceHealth.latestFailure) && !isMaintainingPersistence;
   const canRetryAnything = canRetrySync || canRetryArtifacts || canRetryPersistence;
   const retryDisabledReason = canRetryAnything ? ''
     : localOutboxItems.some((item) => item.status === 'failed')
-      ? (isZh ? '这些失败项需要手动处理，无法直接重试' : 'These failures need manual resolution before retrying')
+      ? (localOutboxItems.some((item) => item.scopeType === 'message' && item.status === 'failed' && parseSyncErrorClassification(item.lastError).kind === 'ownership_conflict')
+        ? (isZh ? '运行权冲突可在另一设备结束任务后重试同步' : 'Retry after the other device releases the conversation')
+        : (isZh ? '这些失败项需要手动处理，无法直接重试' : 'These failures need manual resolution before retrying'))
       : retryableArtifactJobs.length > 0
         ? (isZh ? '请先配置可用的文本模型' : 'Configure an available text model first')
         : (isZh ? '没有可重试的任务' : 'No tasks to retry');
@@ -1100,7 +1103,11 @@ export default function SyncStatusPage() {
               <Chip size="small" label={isZh ? `已匹配聊天 ${bootstrapStatus.chatsAlreadyRemote}` : `Matched chats ${bootstrapStatus.chatsAlreadyRemote}`} variant="outlined" sx={compactChipSx} />
               <Chip size="small" label={isZh ? `待重放消息 ${bootstrapStatus.pendingMessageCreates}` : `Pending messages ${bootstrapStatus.pendingMessageCreates}`} variant="outlined" sx={compactChipSx} />
               <Chip size="small" label={isZh ? `同名冲突 ${bootstrapStatus.characterNameConflicts}` : `Name conflicts ${bootstrapStatus.characterNameConflicts}`} color={bootstrapStatus.characterNameConflicts > 0 ? 'warning' : 'default'} variant="outlined" sx={compactChipSx} />
+              {bootstrapStatus.orphanedBranchMessages ? <Chip size="small" label={isZh ? `父消息缺失 ${bootstrapStatus.orphanedBranchMessages}` : `Missing branch parents ${bootstrapStatus.orphanedBranchMessages}`} color="warning" variant="outlined" sx={compactChipSx} /> : null}
             </Stack>
+            {bootstrapStatus.orphanedBranchMessages ? <Typography variant="body2" color="warning.main">
+              {isZh ? '部分旧消息的分支父消息已不存在，已作为独立分支导入；原父节点标识保留在消息记录中。' : 'Some older messages had missing branch parents and were imported as independent branches. Their original parent references remain in the message records.'}
+            </Typography> : null}
             {(bootstrapStatus.characterNameConflictDetails || []).length > 0 ? (
               <Box sx={{ display: 'grid', gap: 1 }}>
                 <Typography variant="body2" color="warning.main" sx={{ fontWeight: 600 }}>

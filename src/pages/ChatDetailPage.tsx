@@ -77,9 +77,9 @@ import { buildStoryRoomOpeningPreview, type StoryRoomOpeningPreview } from '../s
 import { motion, prefersReducedMotion, transition } from '../styles/motion';
 import { attachMessageToActiveBranch, buildBranchStateWithHead, buildMessageBranchVersionInfoByMessageId, createMessageRevisionDraft, forkBranchState, getBranchRevisionGroup, getMessageBranchVersionInfo, isMessageBranchingEnabled, projectActiveBranchMessages, resolveMessageBranchNodes } from '../services/messageBranching';
 import { getLatestChatPreviewMessage } from '../services/chatLatestMessage';
-import { projectCurrentChatMessages, projectMergedChatMessages } from '../services/currentChatMessages';
+import { pendingAgentTeamMediaMessages, projectCurrentChatMessages, projectMergedChatMessages } from '../services/currentChatMessages';
 import { overlayTransientMessages, releaseConfirmedTransientMessages, removeTransientMessage, upsertTransientMessage } from '../services/transientMessageOverlay';
-import { assistantTeamProgressMessage } from '../services/assistantTeamProgress';
+import { assistantTeamProgressMessage, assistantTeamTaskOutputMessages } from '../services/assistantTeamProgress';
 import { resolveSessionFamilyKey } from '../services/sessionEngineKeys';
 import { isAssistantArtifactCloudSyncEnabled, setAssistantArtifactCloudSyncEnabled } from '../services/assistantArtifactCloudSyncPreference';
 import { hasRoomCapability } from '../services/capabilityRuntime';
@@ -723,6 +723,12 @@ function buildLocalInterceptionSummary(event: LocalInterceptionEvent) {
 type SidebarTabValue = 'session' | 'members' | 'narrative' | 'chapters' | 'clues' | 'roles' | 'world' | 'developer' | 'activities';
 const EMPTY_MESSAGES: never[] = [];
 
+function diagnosticMessageKey(value: string) {
+  let hash = 2166136261;
+  for (const character of value) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
 function buildBranchTopologySignature(messages: Message[]) {
   return messages.map((message) => {
     const branching = message.metadata?.branching;
@@ -860,6 +866,7 @@ export default function ChatDetailPage() {
   const isLoading = useMessageStore((state) => state.isLoading);
   const isLoadingOlder = useMessageStore((state) => state.isLoadingOlder);
   const isLoadingNewer = useMessageStore((state) => state.isLoadingNewer);
+  const teamImageProjectionTraceRef = useRef(new Map<string, string>());
   const { isRunning, isPaused, start, stop, pause, resume, setCurrentSpeaker, recordSpeak, resetAllCooldowns, loopToken } = useSchedulerStore();
   const api = useSettingsStore((s) => s.api);
   const aiProfiles = useSettingsStore((s) => s.aiProfiles);
@@ -948,6 +955,8 @@ export default function ChatDetailPage() {
   const [remoteTeamRuns, setRemoteTeamRuns] = useState<Array<{ runId: string; revision: number; sha256: string; updatedAt: number }>>([]);
   const [importingTeamRunId, setImportingTeamRunId] = useState<string | null>(null);
   const [teamWorkbenchOpen, setTeamWorkbenchOpen] = useState(false);
+  const [pendingTeamNoticeRunId, setPendingTeamNoticeRunId] = useState<string | null>(null);
+  const [teamNoticeActionFeedback, setTeamNoticeActionFeedback] = useState<{ runId: string; message: string; tone: 'info' | 'error' } | null>(null);
   const [teamProgressTick, setTeamProgressTick] = useState(0);
   useEffect(() => {
     if (!hasActiveAgentTeamRuns()) return;
@@ -984,12 +993,13 @@ export default function ChatDetailPage() {
       const supersededRunIds = new Set(runs.flatMap((run) => run.run.retryOfRunId ? [run.run.retryOfRunId] : []));
       const currentRuns = runs.filter((run) => !supersededRunIds.has(run.run.id));
       const uncertain = currentRuns.find((run) => run.tasks.some((task) => task.status === 'result_unknown'));
+      const uncertainTask = uncertain?.tasks.find((task) => task.status === 'result_unknown');
       const resumable = currentRuns.find((run) => run.run.status === 'paused' && run.tasks.some((task) => task.status === 'queued' || task.status === 'waiting_dependency') && !run.tasks.some((task) => task.status === 'result_unknown'));
       const failed = currentRuns.find((run) => run.run.status === 'failed' || run.tasks.some((task) => task.status === 'failed'));
       const failedTask = failed?.tasks.find((task) => task.status === 'failed');
       setAssistantBackgroundRetryRunId(uncertain?.run.id || failed?.run.id || null);
       setAssistantBackgroundRetryUncertain(Boolean(uncertain));
-      setAssistantBackgroundNotice(uncertain ? '上次助手请求已中断，结果与费用暂时无法确认。该请求不会自动重试。'
+      setAssistantBackgroundNotice(uncertain ? `上次助手请求已中断，结果与费用暂时无法确认${uncertainTask?.error ? `：${uncertainTask.error}` : '。该请求不会自动重试。'}`
         : failed ? `助手任务失败：${failedTask?.error || '请检查任务状态后重试。'}`
           : resumable ? '上次助手任务在发出请求前暂停，可继续执行。' : null);
       setAssistantBackgroundResumeRunId(resumable?.run.id || null);
@@ -1265,14 +1275,68 @@ export default function ChatDetailPage() {
         ? projectActiveBranchMessages(chat, currentChatAllMessages) : currentChatMessages;
       const visibleSourceMessageIds = new Set(branchMessages.flatMap((message) => [message.id, message.clientKey, message.metadata?.branching?.nodeId].filter((value): value is string => Boolean(value))));
       const progress = chat?.type === 'assistant' && id ? assistantTeamProgressMessage(id, teamRuns, visibleSourceMessageIds) : null;
+      const allMessageSources = [...messages, ...(rawCurrentMessageWindow?.messages || []), ...currentChatAllMessages];
+      const activeBranchIdentity = new Set(branchMessages.map((message) => message.id));
+      const teamMedia = id ? pendingAgentTeamMediaMessages(id, allMessageSources).filter((message) =>
+        !chat || !isMessageBranchingEnabled(chat) || activeBranchIdentity.has(message.id)
+          || Boolean(message.clientKey && branchMessages.some((candidate) => candidate.clientKey === message.clientKey))
+      ) : [];
+      const taskOutputs = chat?.type === 'assistant' && id
+        ? assistantTeamTaskOutputMessages(id, teamRuns.filter((snapshot) => snapshot.run.status !== 'completed'), visibleSourceMessageIds) : [];
       return overlayTransientMessages(currentChatMessages, [
         ...transientMessages,
         ...assistantBackgroundStreamingMessages.filter((message) => message.chatId === id),
+        ...taskOutputs,
+        ...teamMedia,
         ...(progress ? [progress] : []),
       ]);
     },
-    [chat, currentChatAllMessages, currentChatMessages, transientMessages, assistantBackgroundStreamingMessages, id, teamRuns],
+    [chat, currentChatAllMessages, currentChatMessages, transientMessages, assistantBackgroundStreamingMessages, id, teamRuns, messages, rawCurrentMessageWindow],
   );
+  useEffect(() => {
+    if (!id) return;
+    const allBranchMessages = chat && isMessageBranchingEnabled(chat)
+      ? projectActiveBranchMessages(chat, currentChatAllMessages) : currentChatMessages;
+    const storeIds = new Set(messages.map((message) => message.id));
+    const cachedIds = new Set((rawCurrentMessageWindow?.messages || []).map((message) => message.id));
+    const mergedIds = new Set(currentChatAllMessages.map((message) => message.id));
+    const projectedIds = new Set(currentChatMessages.map((message) => message.id));
+    const branchIds = new Set(allBranchMessages.map((message) => message.id));
+    const renderedIds = new Set(visibleChatMessages.map((message) => message.id));
+    const tracked = new Map<string, Message>();
+    for (const message of [...messages, ...(rawCurrentMessageWindow?.messages || []), ...currentChatAllMessages]) {
+      if (message.metadata?.agentTeamMedia && message.metadata.attachments?.some((attachment) => attachment.kind === 'image')) {
+        tracked.set(message.id, message);
+      }
+    }
+    const previous = teamImageProjectionTraceRef.current;
+    const next = new Map<string, string>();
+    for (const message of tracked.values()) {
+      const attachment = message.metadata?.attachments?.find((item) => item.kind === 'image');
+      const stages = {
+        store: storeIds.has(message.id), cached: cachedIds.has(message.id), merged: mergedIds.has(message.id),
+        projected: projectedIds.has(message.id), activeBranch: branchIds.has(message.id), rendered: renderedIds.has(message.id),
+      };
+      const signature = JSON.stringify({ ...stages, status: attachment?.status, hasUrl: Boolean(attachment?.url),
+        hasError: Boolean(attachment?.error), parentPresent: Boolean(message.metadata?.branching?.parentNodeId) });
+      const traceKey = `${id}:${message.id}`;
+      next.set(traceKey, signature);
+      if (previous.get(traceKey) === signature) continue;
+      const missingStage = !stages.store ? 'store' : !stages.cached ? 'cache' : !stages.merged ? 'merge' : !stages.projected
+        ? 'chat projection' : !stages.activeBranch ? 'active branch projection' : !stages.rendered ? 'render list' : undefined;
+      const teamMedia = message.metadata?.agentTeamMedia;
+      logDeveloperDiagnostic('agent-team:image-bubble-projection', {
+        messageKey: diagnosticMessageKey(teamMedia ? `${teamMedia.runId}:${teamMedia.taskId}` : message.clientKey || message.id), status: attachment?.status || 'missing', stages,
+        firstMissingStage: missingStage || null, attachmentHasUrl: Boolean(attachment?.url),
+        attachmentHasError: Boolean(attachment?.error), parentNodePresent: Boolean(message.metadata?.branching?.parentNodeId),
+      }, missingStage ? 'warn' : 'debug', 'team-media');
+    }
+    for (const messageId of previous.keys()) {
+      if (!messageId.startsWith(`${id}:`) || next.has(messageId)) continue;
+      logDeveloperDiagnostic('agent-team:image-bubble-removed-from-state', { messageKey: diagnosticMessageKey(messageId.slice(id.length + 1)) }, 'warn', 'team-media');
+    }
+    teamImageProjectionTraceRef.current = next;
+  }, [chat, currentChatAllMessages, currentChatMessages, id, messages, rawCurrentMessageWindow, visibleChatMessages]);
   useEffect(() => {
     setTransientMessages((current) => releaseConfirmedTransientMessages(current, currentChatMessages));
   }, [currentChatMessages]);
@@ -1386,8 +1450,9 @@ export default function ChatDetailPage() {
       hasMoreOlder: hasMore,
       hasMoreNewer,
       isLoading,
-    }, currentChatMessages.length <= 2 && currentChatAllMessages.length > 2 ? 'warn' : 'info', 'message-window');
-  }, [chat?.messageBranchState, currentChatAllMessages.length, currentChatMessages, hasMore, hasMoreNewer, id, isLoading, messages, rawCurrentMessageWindow?.activeLimit, rawCurrentMessageWindow?.messages?.length]);
+    }, !isLoading && !isMessageBranchingEnabled(chat) && currentChatAllMessages.length > 0 && currentChatMessages.length === 0
+      ? 'warn' : 'debug', 'message-window');
+  }, [chat, currentChatAllMessages.length, currentChatMessages, hasMore, hasMoreNewer, id, isLoading, messages, rawCurrentMessageWindow?.activeLimit, rawCurrentMessageWindow?.messages?.length]);
   const branchTopologySignature = useMemo(
     () => buildBranchTopologySignature(currentChatAllMessages),
     [currentChatAllMessages],
@@ -3205,7 +3270,7 @@ export default function ChatDetailPage() {
             if (result.summary.blocked.length) {
               const blockedTask = result.snapshot.tasks.find((task) => task.id === result.summary.blocked[0].taskId);
               throw new Error(blockedTask?.status === 'result_unknown'
-                ? '助手请求已中断，结果和费用暂时无法确认。为避免重复扣费，任务已暂停，请查看任务状态。'
+                ? `助手请求已中断，结果和费用暂时无法确认${blockedTask.error ? `：${blockedTask.error}` : '。为避免重复扣费，任务已暂停，请查看任务状态。'}`
                 : result.summary.blocked[0].reason);
             }
           } catch (error) {
@@ -4725,6 +4790,44 @@ export default function ChatDetailPage() {
             onAnalyzeMessage={analyzeMessage}
             onExpressionFeedback={handleExpressionFeedback}
             onRetryMedia={handleRetryMedia}
+            onNoticeAction={async (message) => {
+              const action = message.metadata?.chatNotice?.action;
+              if (action?.kind !== 'agent_team_reconcile' || pendingTeamNoticeRunId || chatInteractionDisabled) return;
+              const selected = teamRuns.find((entry) => entry.run.id === action.runId && entry.run.chatId === id);
+              if (!selected) { setTeamNoticeActionFeedback({ runId: action.runId, message: '团队任务记录尚未加载，请稍后再试', tone: 'error' }); return; }
+              setTeamNoticeActionFeedback(null);
+              setPendingTeamNoticeRunId(action.runId);
+              try {
+                const uncertainImageTask = selected.tasks.find((task) => task.kind === 'agent_image'
+                  && (task.status === 'failed' || task.status === 'result_unknown')
+                  && (task.error || '').includes('会话运行权已失效'));
+                const teamImage = uncertainImageTask ? [...useMessageStore.getState().messages,
+                  ...Object.values(useMessageStore.getState().messageWindowsByChatId).flatMap((window) => window.messages)]
+                  .find((entry) => entry.metadata?.agentTeamMedia?.runId === action.runId
+                    && entry.metadata.agentTeamMedia.taskId === uncertainImageTask.id && !entry.isDeleted) : undefined;
+                const failedImage = teamImage?.metadata?.attachments?.find((attachment) => attachment.kind === 'image'
+                  && attachment.status === 'failed' && (attachment.error || '').includes('会话运行权已失效'));
+                if (teamImage && failedImage) {
+                  const { retryRichMessageMedia } = await import('../services/richMessageMedia');
+                  await retryRichMessageMedia({ message: teamImage, attachmentId: failedImage.id, aiProfiles, messages: currentChatMessages,
+                    upsertMessage: upsertMessageStable });
+                  setTeamNoticeActionFeedback({ runId: action.runId,
+                    message: '已核对图片请求并启动恢复：服务端已有任务时会继续查询或取回结果。若确认原任务不存在，系统不会绕过原审批重新扣费；需要新生成时会在工作台要求重新确认。图片完成后将自动接续团队任务。', tone: 'info' });
+                  return;
+                }
+                const result = await runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id });
+                if (result.summary.blocked.length) {
+                  const reason = result.summary.blocked[0].reason;
+                  setTeamNoticeActionFeedback({ runId: action.runId, tone: 'error', message: reason === '会话运行权已失效，请重新恢复任务'
+                    ? '本次恢复仍被旧版通用运行权错误阻塞，记录没有具体原因；请检查图片附件状态。新的运行权请求若失败会显示失败阶段和服务端原因。'
+                    : reason });
+                }
+              } catch (error) {
+                setTeamNoticeActionFeedback({ runId: action.runId, message: error instanceof Error ? error.message : '核对团队任务失败，请查看工作台', tone: 'error' });
+              } finally { setPendingTeamNoticeRunId(null); }
+            }}
+            pendingNoticeActionRunId={pendingTeamNoticeRunId}
+            noticeActionFeedback={teamNoticeActionFeedback}
             onAddImagesToReference={handleAddImagesToReference}
             onCharacterAvatarClick={openCharacterPreview}
             onMentionCharacter={chatInteractionDisabled ? undefined : handleMentionCharacter}

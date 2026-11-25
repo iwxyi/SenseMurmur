@@ -56,6 +56,15 @@ try {
     return result.result?.value;
   };
   const cleanup = `async () => {
+    const [{ useChatStore }, { useMessageStore }] = await Promise.all([
+      import('/src/stores/useChatStore.ts'), import('/src/stores/useMessageStore.ts'),
+    ]);
+    const fixtureChatIds = new Set(useChatStore.getState().chats.filter((chat) => chat.id.startsWith('composition-chat-')).map((chat) => chat.id));
+    useChatStore.setState((state) => ({ chats: state.chats.filter((chat) => !fixtureChatIds.has(chat.id)) }));
+    useMessageStore.setState((state) => ({
+      messages: state.messages.filter((message) => !fixtureChatIds.has(message.chatId)),
+      messageWindowsByChatId: Object.fromEntries(Object.entries(state.messageWindowsByChatId).filter(([chatId]) => !fixtureChatIds.has(chatId))),
+    }));
     const database = await new Promise((resolve, reject) => {
       const request = indexedDB.open('pneumata-workflow-runs', 6);
       request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);

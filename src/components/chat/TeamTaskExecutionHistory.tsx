@@ -4,6 +4,7 @@ import { currentWorkflowScope, indexedDbWorkflowRepository, type WorkflowTaskSta
 import type { WorkflowTaskAttempt } from '../../services/workflowTaskAttempt';
 import type { WorkflowModelInvocation } from '../../services/workflowModelInvocation';
 import type { WorkflowToolInvocation } from '../../services/workflowToolInvocation';
+import { sanitizeUserFacingText } from '../../services/displayTextSanitizer';
 
 const invocationLabels: Record<WorkflowModelInvocation['state'], string> = {
   reserved: '等待调用模型', started: '模型请求已开始', succeeded: '模型请求已完成',
@@ -46,6 +47,9 @@ export default function TeamTaskExecutionHistory({ runId, taskId, updatedAt, sta
         <Typography variant="body2">第 {attempt.attempt} 次执行 · {statusLabels[attempt.status]} · 计划 {attempt.planVersion}</Typography>
         {attempt.modelInvocation && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{invocationLabels[attempt.modelInvocation.state]}</Typography>}
         {attempt.toolInvocation && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{toolInvocationLabels[attempt.toolInvocation.state]}</Typography>}
+        {attempt.error && <Typography variant="caption" color="error.main" sx={{ display: 'block', overflowWrap: 'anywhere' }}>
+          原因：{sanitizeUserFacingText(attempt.error)}
+        </Typography>}
         <Typography variant="caption" color="text.secondary">{new Date(attempt.startedAt).toLocaleString()}{attempt.finishedAt ? ` 至 ${new Date(attempt.finishedAt).toLocaleString()}` : ''}</Typography>
       </Box>)}
     </Box>}

@@ -5,6 +5,8 @@ import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReference } from './agentTeamImageTask';
 import { isLocalOnlyMediaMode, processRichMessageMedia } from './richMessageMedia';
+import { captureTeamSourceBranch } from './agentTeamConversation';
+import { projectCurrentChatMessages } from './currentChatMessages';
 
 vi.mock('./richMessageMedia', () => ({ processRichMessageMedia: vi.fn(), isLocalOnlyMediaMode: vi.fn(() => true) }));
 
@@ -29,6 +31,27 @@ beforeEach(() => {
 });
 
 describe('agent team image task', () => {
+  it('keeps a generated image visible on its conversation branch after status updates', async () => {
+    const parent: Message = { id: 'team-parent', chatId: 'team-image-chat', type: 'ai', senderId: 'assistant',
+      content: '开始制作', timestamp: 1, isDeleted: false,
+      metadata: { branching: { nodeId: 'team-parent', parentNodeId: null, sequence: 1 } } };
+    const chat = { ...useChatStore.getState().chats[0], messageBranchState: { enabled: true, activeBranchName: 'main',
+      activeLeafNodeId: parent.id, refs: { main: { name: 'main', headNodeId: parent.id, createdAt: 1, updatedAt: 1, version: 1 } } } };
+    useChatStore.setState({ chats: [chat] });
+    useMessageStore.setState({ messages: [parent] });
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
+      const currentChat = useChatStore.getState().chats[0];
+      expect(projectCurrentChatMessages({ chatId: message.chatId, chat: currentChat,
+        activeMessages: useMessageStore.getState().messages })).toContainEqual(expect.objectContaining({ id: message.id }));
+      upsertMessage({ ...message, serverId: 'server-image', metadata: { ...message.metadata,
+        attachments: message.metadata!.attachments!.map((item) => ({ ...item, status: 'ready',
+          url: '/uploads/image.png', updatedAt: Date.now() + 1 })) } });
+    });
+    await queueAgentTeamImage({ runId: 'run', taskId: 'shot', chatId: chat.id, prompt: '森林场景图',
+      sourceBranch: captureTeamSourceBranch(chat), signal: new AbortController().signal });
+    expect(projectCurrentChatMessages({ chatId: chat.id, chat: useChatStore.getState().chats[0],
+      activeMessages: useMessageStore.getState().messages })).toContainEqual(expect.objectContaining({ id: 'team-image-run-shot' }));
+  });
   it('keeps the approved model configuration when the current default changes', async () => {
     useSettingsStore.setState({ aiProfiles: [{ ...profile, model: 'different-model', defaultImageSize: '4K' }] });
     const approvedProfile = { ...profile, defaultImageSize: '2K' as const };
@@ -86,6 +109,97 @@ describe('agent team image task', () => {
     });
     await queueAgentTeamImage({ runId: 'run', taskId: 'shot', chatId: 'team-image-chat', prompt: '森林场景图', signal: new AbortController().signal });
     expect(useMessageStore.getState().messages.filter((message) => message.metadata?.agentTeamMedia?.runId === 'run')).toHaveLength(1);
+  });
+
+  it('requeues a failed image on the same chat message with revised prompt and a new attempt key', async () => {
+    const failed = imageMessage('failed');
+    failed.metadata!.attachments![0] = { ...failed.metadata!.attachments![0], error: 'content rejected', generationJobId: 'old-attempt' };
+    useMessageStore.setState({ messages: [failed] });
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
+      expect(message.metadata?.attachments?.[0]).toMatchObject({ status: 'queued', promptText: '森林竹蜻蜓场景', generationJobId: 'team-image-run-shot-2' });
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'ready', url: '/uploads/retry.png', updatedAt: Date.now() + 1,
+      })) } });
+    });
+    const result = await queueAgentTeamImage({ runId: 'run', taskId: 'shot', chatId: failed.chatId,
+      prompt: '森林竹蜻蜓场景', usageReference: { schemaVersion: 1, runId: 'run', taskId: 'shot', attempt: 2, kind: 'tool' },
+      signal: new AbortController().signal });
+    expect(result.output).toContain('森林竹蜻蜓场景');
+    expect(useMessageStore.getState().messages).toHaveLength(1);
+    expect(useMessageStore.getState().messages[0].metadata?.attachments?.[0]).toMatchObject({ status: 'ready', url: '/uploads/retry.png' });
+  });
+
+  it('actively drains the message outbox while waiting for the image placeholder', async () => {
+    vi.mocked(isLocalOnlyMediaMode).mockReturnValue(false);
+    const message = imageMessage('queued');
+    const originalChatFlush = useChatStore.getState().flushPendingOperations;
+    const originalMessageFlush = useMessageStore.getState().flushPendingOperations;
+    const chatFlush = vi.fn(async () => undefined);
+    const messageFlush = vi.fn(async () => {
+      useMessageStore.getState().upsertMessage({ ...message, serverId: 'remote-image-message' });
+    });
+    useChatStore.setState({ flushPendingOperations: chatFlush });
+    useMessageStore.setState({ messages: [message], flushPendingOperations: messageFlush });
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message: synced, upsertMessage }) => {
+      expect(synced.serverId).toBe('remote-image-message');
+      upsertMessage({ ...synced, metadata: { ...synced.metadata, attachments: synced.metadata!.attachments!.map((item) => ({
+        ...item, status: 'ready', url: '/uploads/image.png', updatedAt: 3,
+      })) } });
+    });
+    try {
+      await expect(queueAgentTeamImage({ runId: 'run', taskId: 'shot', chatId: message.chatId,
+        prompt: '森林场景图', signal: new AbortController().signal })).resolves.toMatchObject({ output: expect.any(String) });
+      expect(chatFlush).toHaveBeenCalled();
+      expect(messageFlush).toHaveBeenCalled();
+      expect(processRichMessageMedia).toHaveBeenCalledOnce();
+    } finally {
+      useChatStore.setState({ flushPendingOperations: originalChatFlush });
+      useMessageStore.setState({ flushPendingOperations: originalMessageFlush });
+    }
+  });
+
+  it('reports a terminal parent sync error instead of waiting for the generic timeout', async () => {
+    vi.mocked(isLocalOnlyMediaMode).mockReturnValue(false);
+    const message = imageMessage('queued');
+    const parent: Message = { id: 'branch-parent', chatId: message.chatId, type: 'ai', senderId: 'assistant', senderName: '助手',
+      content: '前一条消息', emotion: 0, timestamp: 0, isDeleted: false,
+      metadata: { branching: { nodeId: 'parent-node', parentNodeId: null, sequence: 1 } } };
+    useMessageStore.setState({ messages: [parent, message], pendingOperations: [
+      { id: 'parent-sync', kind: 'create', chatId: parent.chatId, localMessageId: parent.id, messageId: parent.id, payload: parent,
+        createdAt: 1, attemptCount: 5, status: 'failed', lastError: '账号无权访问该会话' },
+    ] });
+    useMessageStore.setState({ messages: [{ ...message, metadata: { ...message.metadata,
+      branching: { nodeId: message.id, parentNodeId: 'parent-node', sequence: 2 } } }] });
+
+    await expect(queueAgentTeamImage({ runId: 'run', taskId: 'shot', chatId: message.chatId, prompt: '森林场景图', signal: new AbortController().signal }))
+      .rejects.toThrow('图片占位消息的分支父消息同步失败：账号无权访问该会话');
+    expect(processRichMessageMedia).not.toHaveBeenCalled();
+  });
+
+  it('includes the pending outbox error when placeholder synchronization times out', async () => {
+    vi.useFakeTimers();
+    vi.mocked(isLocalOnlyMediaMode).mockReturnValue(false);
+    const message = imageMessage('queued');
+    const originalChatFlush = useChatStore.getState().flushPendingOperations;
+    const originalMessageFlush = useMessageStore.getState().flushPendingOperations;
+    useChatStore.setState({ flushPendingOperations: vi.fn(async () => undefined) });
+    useMessageStore.setState({ messages: [message], flushPendingOperations: vi.fn(async () => undefined), pendingOperations: [{
+      id: 'image-pending', kind: 'create', chatId: message.chatId, localMessageId: message.id, messageId: message.id,
+      payload: message, createdAt: 1, attemptCount: 2, status: 'pending', retryAt: Date.now() + 120_000,
+      lastError: 'network: 分支父消息尚未完成云端同步',
+    }] });
+    try {
+      const result = queueAgentTeamImage({ runId: 'run', taskId: 'shot', chatId: message.chatId,
+        prompt: '森林场景图', signal: new AbortController().signal });
+      const assertion = expect(result).rejects.toThrow('最近错误：network: 分支父消息尚未完成云端同步');
+      await vi.advanceTimersByTimeAsync(60_000);
+      await assertion;
+      expect(processRichMessageMedia).not.toHaveBeenCalled();
+    } finally {
+      useChatStore.setState({ flushPendingOperations: originalChatFlush });
+      useMessageStore.setState({ flushPendingOperations: originalMessageFlush });
+      vi.useRealTimers();
+    }
   });
 
   it('blocks missing image files and carries the saved failure reason', () => {

@@ -10,6 +10,7 @@ import type { WorkflowGoalSpec } from './workflowGoalSpec';
 import { processRichMessageMedia } from './richMessageMedia';
 import { WorkflowPreflightError } from './workflowRunRuntime';
 import { inspectTeamMediaAdmission, recoverTeamMediaAdmission } from './agentTeamMediaAdmission';
+import { waitForMessageCloudConfirmation } from './messageCloudConfirmation';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { isLocalOnlyMediaMode } from './richMessageMedia';
 import type { WorkflowTaskResult } from './workflowRunRuntime';
@@ -43,32 +44,7 @@ export function inspectAgentTeamVideoAttachment(runId: string, taskId: string) {
   return null;
 }
 
-function waitForVideoState(runId: string, taskId: string, signal: AbortSignal, predicate: (message: Message) => boolean, timeoutMs: number) {
-  return new Promise<Message>((resolve, reject) => {
-    let finished = false;
-    const finish = (message?: Message, error?: Error) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      unsubscribe();
-      signal.removeEventListener('abort', onAbort);
-      if (error) reject(error);
-      else if (message) resolve(message);
-    };
-    const inspect = () => {
-      const message = teamVideoMessage(runId, taskId);
-      if (message && predicate(message)) finish(message);
-    };
-    const onAbort = () => finish(undefined, new Error('视频任务等待已中断'));
-    const unsubscribe = useMessageStore.subscribe(inspect);
-    const timer = setTimeout(() => finish(undefined, new Error('视频任务状态等待超时，请核对后继续')), timeoutMs);
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (signal.aborted) onAbort();
-    else inspect();
-  });
-}
-
-export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; profile?: AIModelProfile; mediaExecution?: PreparedMediaExecution; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; signal: AbortSignal }): Promise<WorkflowTaskResult> {
+export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; profile?: AIModelProfile; mediaExecution?: PreparedMediaExecution; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; durationSeconds?: number; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -82,10 +58,14 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
   const existing = recoverTeamMediaAdmission(priorMessage, 'video', params.usageReference);
   if (existing) {
     const result = inspectAgentTeamVideoAttachment(params.runId, params.taskId);
+    const retryableFailure = existing.metadata?.attachments?.some((item) => item.kind === 'video'
+      && item.status === 'failed' && !item.admissionRejection);
     if (result?.status === 'waiting_external') return { externalTaskId: result.externalTaskId };
     if (result?.status === 'completed') return { output: result.output };
-    if (result?.status === 'failed') throw new WorkflowPreflightError(result.error);
-    if (result?.status !== 'queued') throw new Error('视频任务已开始提交，但结果尚未确认，请核对后继续');
+    if (result?.status === 'failed' && !retryableFailure) throw new WorkflowPreflightError(result.error);
+    if (result?.status !== 'queued' && !(result?.status === 'failed' && retryableFailure)) {
+      throw new Error('视频任务已开始提交，但结果尚未确认，请核对后继续');
+    }
   }
   const profile = params.profile ?? getUsablePreferredAIProfile(useSettingsStore.getState().aiProfiles, 'video');
   if (profile && profile.type !== 'video') throw new WorkflowPreflightError('视频模型类型不符');
@@ -108,10 +88,30 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, workflowUsage: params.usageReference,
       attachments: [{ id: `team-video-${params.taskId}`, kind: 'video' as const, status: 'queued' as const,
         altText: '团队生成视频', promptText: params.prompt, aspectRatio: profile?.videoDefaults?.aspectRatio,
-        referenceImages: params.referenceImages, createdAt: now, updatedAt: now, ...executionFields }] },
+        referenceImages: params.referenceImages, videoDuration: params.durationSeconds,
+        videoResolution: profile?.videoDefaults?.resolution, createdAt: now, updatedAt: now, ...executionFields }] },
   }) as Message;
   const unsubmitted = existing?.metadata?.attachments?.find((item) => item.kind === 'video'
     && item.status === 'queued' && !item.mediaTaskId && !item.generationJobId);
+  const failedAttachment = existing?.metadata?.attachments?.find((item) => item.kind === 'video'
+    && item.status === 'failed' && !item.admissionRejection);
+  if (failedAttachment) {
+    const attemptKey = params.usageReference
+      ? `team-video-${params.runId}-${params.taskId}-${params.usageReference.attempt}`
+      : `team-video-${params.runId}-${params.taskId}-${now}`;
+    message = { ...message, metadata: { ...message.metadata, workflowUsage: params.usageReference,
+      attachments: message.metadata?.attachments?.map((item) => item.id === failedAttachment.id ? {
+        ...item, status: 'queued', error: undefined, mediaTaskId: undefined, executionQuoteId: undefined,
+        generationJobId: attemptKey, promptText: params.prompt, referenceImages: params.referenceImages,
+        videoDuration: params.durationSeconds ?? item.videoDuration,
+        aspectRatio: item.aspectRatio ?? profile?.videoDefaults?.aspectRatio,
+        videoResolution: profile?.videoDefaults?.resolution ?? item.videoResolution,
+        updatedAt: now, ...executionFields,
+      } : item) } };
+    state.upsertMessage(message);
+    state.queueMessageSync(message);
+    flushBufferedPersistenceWrites();
+  }
   if (unsubmitted && (params.mediaExecution || rejectedBeforeSubmission)) {
     message = { ...message, metadata: { ...message.metadata, workflowUsage: params.usageReference,
       attachments: message.metadata?.attachments?.map((item) => item.id === unsubmitted.id ? {
@@ -128,8 +128,14 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
     await advanceTeamConversation(message, params.sourceBranch);
     flushBufferedPersistenceWrites();
   }
-  const synced = isLocalOnlyMediaMode() ? message : await waitForVideoState(params.runId, params.taskId, params.signal,
-    (current) => Boolean(current.serverId), 60_000);
+  let synced = message;
+  if (!isLocalOnlyMediaMode()) {
+    try {
+      synced = await waitForMessageCloudConfirmation({ chatId: message.chatId, messageId: message.id, signal: params.signal });
+    } catch (error) {
+      throw new WorkflowPreflightError(error instanceof Error ? error.message : '视频占位消息未能同步，未提交生成请求');
+    }
+  }
   if (params.signal.aborted) throw new Error('视频任务已中断，提交结果需要核对');
   await processRichMessageMedia({ message: synced, aiProfiles: profile ? [profile] : [],
     sharesConversationLease: true,

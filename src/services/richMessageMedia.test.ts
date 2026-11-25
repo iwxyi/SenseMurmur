@@ -13,6 +13,7 @@ import { runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
 
 vi.mock('./chatExecutionLease', () => ({
   assertChatExecutionLease: vi.fn(),
+  refreshChatExecutionLeaseBeforeWrite: vi.fn(async () => undefined),
   runWithChatExecutionLeaseWhenAvailable: vi.fn(async (_chatId: string, work: (signal: AbortSignal) => Promise<void>) => work(new AbortController().signal)),
 }));
 vi.mock('./chatExecutionFence', () => ({ getChatExecutionFence: vi.fn(() => ({ ownerId: 'test-owner', generation: 1 })) }));
@@ -140,6 +141,21 @@ async function waitForExpectation(assertion: () => void) {
 }
 
 describe('processRichMessageMedia', () => {
+  it('does not submit a team image when its generating state is rejected by cloud sync', async () => {
+    localStorage.setItem('pneumata-auth-mode', 'cloud');
+    localStorage.setItem('pneumata-cloud-sync-enabled', '1');
+    vi.mocked(api.updateMessageMetadata).mockRejectedValueOnce(new Error('会话运行权已失效'));
+    const message = buildQueuedImageMessage({ serverId: 'server-team-image', metadata: {
+      agentTeamMedia: { runId: 'team-run', taskId: 'frame' },
+      attachments: [{ id: 'image-1', kind: 'image', status: 'queued', promptText: '雨夜追逐', altText: '关键帧', createdAt: 1, updatedAt: 1 }],
+    } });
+    await expect(processRichMessageMedia({ message, aiProfiles: [imageProfile], sharesConversationLease: true,
+      executionSignal: new AbortController().signal, upsertMessage: vi.fn() })).rejects.toMatchObject({
+      message: expect.stringContaining('生成请求未发送：会话运行权已失效'), requestNotDispatched: true,
+    });
+    expect(generateImageWithAdapter).not.toHaveBeenCalled();
+  });
+
   it('does not submit shared team media after the workflow lease signal is aborted', async () => {
     const controller = new AbortController();
     controller.abort(new DOMException('lease lost', 'AbortError'));
@@ -562,7 +578,12 @@ describe('processRichMessageMedia', () => {
     localStorage.setItem('pneumata-cloud-sync-enabled', '1');
     vi.mocked(waitForAiMediaTask).mockResolvedValue({
       task_id: 'video-task', model: 'video-model', status: 'failed',
-      result: { error: 'ACE 任务生成失败：上游返回 HTTP 400，错误码 INVALID_DURATION' },
+      result: { error: 'ACE 任务生成失败：错误码 bad_request，视频输入参数无效', diagnostic: {
+        model: 'doubao-seedance-2-0-fast-260128', endpoint: 'POST /seedance/videos', requestId: 'a1b2c3d4e5f6',
+        fields: ['async', 'content', 'duration', 'model', 'ratio', 'resolution'],
+        values: { ratio: '16:9', resolution: '720p', duration: 15, async: true }, promptCharacters: 642, imageCount: 0,
+        allowedValues: { ratio: ['16:9', '9:16'], resolution: ['480p', '720p'] }, durationConstraints: { minimum: 4, maximum: 15 },
+      } },
       chargedAmount: 0, reservedAmount: 1, createdAt: 1, updatedAt: 2,
     });
     const message = buildQueuedImageMessage({ serverId: 'server-video', metadata: { attachments: [{
@@ -572,10 +593,10 @@ describe('processRichMessageMedia', () => {
     const upserts: Message[] = [];
     await processRichMessageMedia({ message, aiProfiles: [], upsertMessage: (next) => upserts.push(next) });
     await waitForExpectation(() => expect(upserts.at(-1)?.metadata?.attachments?.[0]).toMatchObject({
-      status: 'failed', error: 'ACE 任务生成失败：上游返回 HTTP 400，错误码 INVALID_DURATION',
+      status: 'failed', error: 'ACE 任务生成失败：错误码 bad_request，视频输入参数无效。请求诊断：模型 doubao-seedance-2-0-fast-260128；接口 POST /seedance/videos；实际参数 async, content, duration, model, ratio, resolution；比例 16:9；分辨率 720p；时长 15 秒；异步 true；提示词 642 字符；参考图 0 张；比例可选值 16:9/9:16；分辨率可选值 480p/720p；模型时长范围 4-15 秒；请求标识 a1b2c3d4e5f6。',
     }));
     await waitForExpectation(() => expect(api.updateMessageMetadata).toHaveBeenCalledWith('server-video', expect.objectContaining({
-      attachments: [expect.objectContaining({ status: 'failed', error: 'ACE 任务生成失败：上游返回 HTTP 400，错误码 INVALID_DURATION' })],
+      attachments: [expect.objectContaining({ status: 'failed', error: expect.stringContaining('请求诊断：模型 doubao-seedance-2-0-fast-260128') })],
     }), 'chat-1'));
   });
 

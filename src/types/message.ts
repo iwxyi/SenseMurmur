@@ -280,9 +280,11 @@ export interface MessageMetadata {
     tone: 'info' | 'working' | 'success' | 'warning' | 'error';
     details?: string[];
     progress?: { completed: number; total: number };
+    action?: { kind: 'agent_team_reconcile'; runId: string; label: string };
   };
   groupTurnTaskId?: string;
   agentTeamMedia?: { runId: string; taskId: string };
+  agentTeamTaskOutput?: { runId: string; taskId: string; label: string };
   workflowUsage?: import('./workflowUsage').WorkflowUsageReference;
   mentions?: CharacterMention[];
   conversationUpdate?: import('./conversationContinuity').ConversationUpdate;
@@ -339,6 +341,7 @@ export interface MessageMetadata {
   branching?: {
     nodeId?: string;
     parentNodeId?: string | null;
+    unresolvedParentNodeId?: string | null;
     rootNodeId?: string | null;
     sequence?: number;
     revisionOfNodeId?: string | null;

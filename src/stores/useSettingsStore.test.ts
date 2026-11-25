@@ -110,4 +110,47 @@ describe('useSettingsStore', () => {
     await useSettingsStore.getState().loadSettings();
     expect(useSettingsStore.getState().chatReplyPreferences).toEqual({ mode: 'custom', text: '语气克制，保留细节。' });
   });
+
+  it('keeps a newly configured video profile when a stale cloud read arrives before saving', async () => {
+    const { useSettingsStore } = await import('./useSettingsStore');
+    const oldProfiles = useSettingsStore.getState().aiProfiles;
+    useSettingsStore.getState().addAIProfile();
+    const added = useSettingsStore.getState().aiProfiles.at(-1)!;
+    useSettingsStore.getState().updateAIProfile(added.id, {
+      type: 'video', provider: 'official-ace', baseUrl: '/api/ai', model: 'doubao-seedance-2-0-fast-260128',
+    });
+    expect(useSettingsStore.getState().settingsDirty).toBe(true);
+    apiMocks.getSyncChanges.mockResolvedValueOnce({ status: 'modified', changes: [] });
+    apiMocks.getSettings.mockResolvedValueOnce({ aiProfiles: oldProfiles });
+    await useSettingsStore.getState().loadSettings();
+    expect(useSettingsStore.getState().aiProfiles.find((profile) => profile.id === added.id)).toMatchObject({
+      type: 'video', model: 'doubao-seedance-2-0-fast-260128',
+    });
+    expect(apiMocks.updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      aiProfiles: expect.arrayContaining([expect.objectContaining({ id: added.id, type: 'video' })]),
+    }));
+    const storageName = useSettingsStore.persist.getOptions().name!;
+    const persisted = await useSettingsStore.persist.getOptions().storage?.getItem(storageName);
+    expect(persisted?.state.aiProfiles?.find((profile) => profile.id === added.id)?.type).toBe('video');
+  });
+
+  it('resumes a pending video profile save after rehydration before reading older cloud settings', async () => {
+    const { useSettingsStore } = await import('./useSettingsStore');
+    useSettingsStore.getState().addAIProfile();
+    const added = useSettingsStore.getState().aiProfiles.at(-1)!;
+    useSettingsStore.getState().updateAIProfile(added.id, {
+      type: 'video', provider: 'official-ace', baseUrl: '/api/ai', model: 'MiniMax-H3',
+    });
+    const storageName = useSettingsStore.persist.getOptions().name!;
+    const persisted = await useSettingsStore.persist.getOptions().storage?.getItem(storageName);
+    if (persisted) await useSettingsStore.persist.getOptions().storage?.setItem(storageName, persisted);
+    await useSettingsStore.persist.rehydrate();
+    expect(useSettingsStore.getState().settingsDirty).toBe(true);
+    await useSettingsStore.getState().loadSettings();
+    expect(apiMocks.getSettings).not.toHaveBeenCalled();
+    expect(apiMocks.updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      aiProfiles: expect.arrayContaining([expect.objectContaining({ id: added.id, type: 'video', model: 'MiniMax-H3' })]),
+    }));
+    expect(useSettingsStore.getState().settingsDirty).toBe(false);
+  });
 });

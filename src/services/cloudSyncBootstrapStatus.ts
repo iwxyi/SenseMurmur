@@ -21,6 +21,7 @@ export interface CloudSyncBootstrapStatus {
   pendingCharacterCreates: number;
   pendingChatCreates: number;
   pendingMessageCreates: number;
+  orphanedBranchMessages?: number;
   characterNameConflictDetails?: CloudSyncBootstrapCharacterNameConflictDetail[];
   characterNameConflictDetailOverflow?: number;
   lastError?: string | null;

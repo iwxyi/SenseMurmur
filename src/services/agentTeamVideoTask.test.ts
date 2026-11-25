@@ -116,6 +116,42 @@ describe('agent team video task', () => {
     expect(useMessageStore.getState().messages[0].metadata?.attachments?.[0]?.aspectRatio).toBe('16:9');
   });
 
+  it('keeps the team shot duration instead of falling back to the profile default', async () => {
+    useSettingsStore.setState({ aiProfiles: [{ ...videoProfile, videoDefaults: { aspectRatio: '16:9', resolution: '480p', duration: 15 } }] });
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
+      expect(message.metadata?.attachments?.[0]).toMatchObject({ videoDuration: 4, videoResolution: '480p', aspectRatio: '16:9' });
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'generating', mediaTaskId: 'four-second-task', updatedAt: item.updatedAt + 1,
+      })) } });
+    });
+    await queueAgentTeamVideo({ runId: 'duration-run', taskId: 'shot', chatId: 'team-video-chat', prompt: '森林追逐',
+      durationSeconds: 4, signal: new AbortController().signal });
+  });
+
+  it('requeues a definitively failed attachment with the corrected shot duration', async () => {
+    const failed: Message = { id: 'failed-video', chatId: 'team-video-chat', type: 'ai', senderId: 'assistant', senderName: '助手',
+      content: '视频', emotion: 0, timestamp: 1, isDeleted: false,
+      metadata: { agentTeamMedia: { runId: 'retry-run', taskId: 'shot' }, attachments: [{
+        id: 'failed-attachment', kind: 'video', status: 'failed', altText: '视频', promptText: '旧提示词',
+        mediaTaskId: 'failed-upstream-task', videoDuration: 15, aspectRatio: '9:16', error: '视频输入参数无效', createdAt: 1, updatedAt: 2,
+      }] } };
+    useMessageStore.setState({ messages: [failed] });
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
+      expect(message.metadata?.attachments?.[0]).toMatchObject({
+        status: 'queued', videoDuration: 4, aspectRatio: '9:16', promptText: '修正后的提示词', generationJobId: 'team-video-retry-run-shot-2',
+      });
+      expect(message.metadata?.attachments?.[0]?.mediaTaskId).toBeUndefined();
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'generating', mediaTaskId: 'retry-upstream-task', updatedAt: item.updatedAt + 1,
+      })) } });
+    });
+    const result = await queueAgentTeamVideo({ runId: 'retry-run', taskId: 'shot', chatId: 'team-video-chat',
+      prompt: '修正后的提示词', durationSeconds: 4,
+      usageReference: { schemaVersion: 1, runId: 'retry-run', taskId: 'shot', attempt: 2, kind: 'tool' },
+      signal: new AbortController().signal });
+    expect(result).toEqual({ externalTaskId: 'retry-upstream-task' });
+  });
+
   it('passes the saved failure reason to the team run', () => {
     const message: Message = { id: 'video', chatId: 'team-video-chat', type: 'ai', senderId: 'assistant', senderName: '助手', content: '', emotion: 0,
       timestamp: 1, isDeleted: false, metadata: { agentTeamMedia: { runId: 'failed-run', taskId: 'shot' }, attachments: [{

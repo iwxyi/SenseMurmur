@@ -446,6 +446,12 @@ export const useSettingsStore = create<SettingsStore>()(
           return;
         }
         try {
+          // A local edit may have survived a reload before the debounced cloud write ran.
+          // Save it before accepting a cached scope or an older cloud snapshot.
+          if (get().settingsDirty) {
+            await get().syncCurrentSettingsToServer();
+            return;
+          }
           const hasLocalSettings = get()._loaded || get().lastSyncedAt > 0;
           if (hasLocalSettings && settingsSyncScopes.isFresh(SETTINGS_ACCOUNT_SCOPE)) {
             set(markSettingsLoadedIdle);
@@ -582,9 +588,9 @@ export const useSettingsStore = create<SettingsStore>()(
           const nextProfiles = [...state.aiProfiles];
           nextProfiles[0] = { ...nextProfiles[0], ...nextApi, id: nextProfiles[0].id || 'default' };
           const next = { ...(syncState({ ...state, api: nextApi, aiProfiles: nextProfiles }) as SettingsStore), lastSyncedAt: Date.now() };
-          syncToServer(buildSettingsPayload(next), set);
           return next;
         });
+        syncToServer(buildSettingsPayload(get()), set);
       },
 
       updateAIProfile: (id, config) => {
@@ -615,9 +621,9 @@ export const useSettingsStore = create<SettingsStore>()(
             return profile;
           });
           const next = { ...(syncState({ ...state, aiProfiles: nextProfiles }) as SettingsStore), lastSyncedAt: Date.now() };
-          syncToServer(buildSettingsPayload(next), set);
           return next;
         });
+        syncToServer(buildSettingsPayload(get()), set);
       },
 
       addAIProfile: () => {
@@ -629,9 +635,9 @@ export const useSettingsStore = create<SettingsStore>()(
           }
           const nextProfiles = [...state.aiProfiles, nextProfile];
           const next = { ...(syncState({ ...state, aiProfiles: nextProfiles }) as SettingsStore), lastSyncedAt: Date.now() };
-          syncToServer(buildSettingsPayload(next), set);
           return next;
         });
+        syncToServer(buildSettingsPayload(get()), set);
       },
 
       removeAIProfile: (id) => {
@@ -639,9 +645,9 @@ export const useSettingsStore = create<SettingsStore>()(
           const filtered = state.aiProfiles.filter((profile) => profile.id !== id);
           const nextProfiles = filtered.length > 0 ? filtered : [DEFAULT_AI_PROFILE];
           const next = { ...(syncState({ ...state, aiProfiles: nextProfiles }) as SettingsStore), lastSyncedAt: Date.now() };
-          syncToServer(buildSettingsPayload(next), set);
           return next;
         });
+        syncToServer(buildSettingsPayload(get()), set);
       },
 
       setDeveloperMode: (developerMode) => {
@@ -992,6 +998,9 @@ export const useSettingsStore = create<SettingsStore>()(
           set((state) => ({ ...state, syncStatus: 'idle', syncError: null }));
           return;
         }
+        if (syncTimer) clearTimeout(syncTimer);
+        syncTimer = null;
+        pendingSettingsSyncData = null;
         const current = useSettingsStore.getState();
         await api.updateSettings(buildSettingsPayload(current));
         set((state) => ({ ...state, settingsDirty: false, syncStatus: 'saved', syncError: null, lastSyncedAt: Date.now() }));

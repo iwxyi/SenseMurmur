@@ -3,7 +3,7 @@ import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
 import classWorkerURL from '../workers/mediaComposition.worker?worker&url';
 import type { MediaCompositionPlan } from './mediaCompositionPlan';
-import { workspaceFetch } from './workspaceLifecycle';
+import { fetchMediaAssetContent } from './mediaAssetContent';
 
 const MAX_INPUT_BYTES = 256 * 1024 * 1024;
 
@@ -11,8 +11,8 @@ export function canComposeMediaLocally() {
   return typeof Worker !== 'undefined' && typeof WebAssembly !== 'undefined' && Boolean(globalThis.navigator?.locks?.request);
 }
 
-export async function readCompositionMedia(url: string, signal: AbortSignal, maxBytes: number): Promise<Uint8Array> {
-  const response = await workspaceFetch(url, { signal });
+export async function readCompositionMedia(url: string, signal: AbortSignal, maxBytes: number, kind: 'video' | 'audio'): Promise<Uint8Array> {
+  const response = await fetchMediaAssetContent(url, kind, signal);
   if (!response.ok) throw new Error(`读取合成素材失败 (${response.status})`);
   if (Number(response.headers.get('content-length')) > maxBytes) throw new Error('合成素材超过本机处理容量，请减少片段或降低清晰度');
   if (!response.body) throw new Error('合成素材没有可读取的内容');
@@ -68,12 +68,14 @@ export async function composeLocalMedia(params: {
         classWorkerURL: new URL(classWorkerURL, document.baseURI).href });
       const files = new Map<string, { file: string; probe: Probe }>();
       let totalBytes = 0;
-      const ids = new Set([...params.plan.clips.map((clip) => clip.taskId), ...(params.plan.audioTracks || []).map((track) => track.taskId)]);
-      for (const id of ids) {
+      const sources = new Map<string, 'video' | 'audio'>();
+      for (const clip of params.plan.clips) sources.set(clip.taskId, 'video');
+      for (const track of params.plan.audioTracks ?? []) sources.set(track.taskId, 'audio');
+      for (const [id, kind] of sources) {
         const url = params.sources.get(id);
         if (!url) throw new Error('合成素材文件尚未就绪');
-        params.onProgress?.(`正在读取素材 ${files.size + 1}/${ids.size}`);
-        const bytes = await readCompositionMedia(url, params.signal, MAX_INPUT_BYTES - totalBytes);
+        params.onProgress?.(`正在读取素材 ${files.size + 1}/${sources.size}`);
+        const bytes = await readCompositionMedia(url, params.signal, MAX_INPUT_BYTES - totalBytes, kind);
         totalBytes += bytes.byteLength;
         const file = `input_${files.size}`;
         await ffmpeg.writeFile(file, bytes);

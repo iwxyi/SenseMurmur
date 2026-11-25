@@ -34,15 +34,12 @@ import { motion, transition } from '../styles/motion';
 import { formatAiAmount } from '../utils/aiPoints';
 import { compareModelVersionsDescending } from '../utils/modelOrder';
 import { assertMultimediaGenerationPermission } from '../services/multimediaPermission';
+import { getDirectSpeechProviderOptions, providerSupportsType, resolveLegacyOfficialProviderKey, resolveSelectableProviderKey, type AIProviderOption } from './aiModelProviderSelection';
 
 type AiBalanceView =
   | { status: 'idle' | 'loading' }
   | { status: 'guest' | 'unassigned' | 'error' }
   | { status: 'ready'; points: number; currencyUnit?: string };
-
-type AIProviderOption = AIProviderCatalogEntry & {
-  unavailableReason?: string;
-};
 
 type ModelDropdownOption = {
   value: string;
@@ -746,14 +743,6 @@ function resolveOfficialBackendProvider(provider: string) {
   return provider === 'official' ? 'official-2' : provider;
 }
 
-function resolveLegacyOfficialProviderKey(provider: string) {
-  if (provider === 'official' || provider === 'official-moacode') return 'official-2';
-  if (provider === 'official-deepseek') return 'official-1';
-  if (provider === 'official-moacode-team') return 'official-team';
-  if (provider === 'official-gpt') return 'official-4';
-  return provider;
-}
-
 function buildOnlineOfficialProviderOption(provider: OfficialAiProviderInfo): (AIProviderOption & { sortOrder: number }) | null {
   if (!provider.officialProvider?.trim()) return null;
   const providerKey = provider.officialProvider.trim() as AIProvider;
@@ -768,9 +757,6 @@ function buildOnlineOfficialProviderOption(provider: OfficialAiProviderInfo): (A
     family: provider.family || '官方模型',
     defaults: {
       text: fallbackDefault,
-      image: fallbackDefault,
-      video: fallbackDefault,
-      audio: fallbackDefault,
       document: fallbackDefault,
     },
     popularModels: {
@@ -828,29 +814,6 @@ function getProviderDefaultsFromOptions(provider: AIProvider, type: AIModelType,
   const entry = providerOptions.find((item) => item.key === provider) || getProviderCatalogEntry(provider);
   const catalogType = type === 'tts' || type === 'stt' ? 'audio' : type;
   return entry.defaults[catalogType] || { baseUrl: '', model: '' };
-}
-
-function providerSupportsType(option: AIProviderOption, type: AIModelType) {
-  const catalogType = type === 'tts' || type === 'stt' ? 'audio' : type;
-  const defaults = option.defaults[catalogType];
-  const popularModels = option.popularModels[catalogType] || [];
-  return Boolean(defaults?.model || popularModels.length);
-}
-
-function resolveSelectableProviderKey(provider: string, type: AIModelType, providerOptions: AIProviderOption[] = getProvidersForType(type)) {
-  const catalogType = type === 'tts' || type === 'stt' ? 'audio' : type;
-  const exactProvider = providerOptions.find((item) => item.key === provider);
-  if (exactProvider?.defaults[catalogType]) return exactProvider.key;
-  if (isOfficialProviderKey(provider)) {
-    const legacyProvider = resolveLegacyOfficialProviderKey(provider);
-    const mappedProvider = providerOptions.find((item) => item.key === legacyProvider);
-    if (mappedProvider?.defaults[type]) return mappedProvider.key;
-  }
-  const catalogProvider = getProviderCatalogEntry(provider as AIProvider);
-  if (catalogProvider.defaults[catalogType]) return catalogProvider.key;
-  return providerOptions.find((item) => item.key === catalogProvider.key)?.key
-    || providerOptions[0]?.key
-    || catalogProvider.key;
 }
 
 export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {}) {
@@ -979,8 +942,7 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
     // Keep its selectable providers isolated so text-model official entries can
     // never leak into a TTS/STT model dropdown.
     if (type === 'tts' || type === 'stt') {
-      const directOptions = getProvidersForType(type)
-        .filter((item) => !isOfficialProviderKey(item.key))
+      const directOptions = getDirectSpeechProviderOptions(type)
         .map((item) => ({ ...item, family: i18n.language.startsWith('zh') ? '自定义' : 'Custom' }));
       return [...managedSpeechOptions, ...directOptions];
     }
@@ -1511,6 +1473,7 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
                       ? modelOptions.find((option) => option.value === profile.model)?.videoOptions
                       : undefined;
                     const isAceVideoProvider = activeType === 'video' && ['official-acedata', 'official-ace'].includes(String(profile.provider));
+                    const isSeedanceMini = isAceVideoProvider && profile.model === 'doubao-seedance-2-0-mini-260615';
                     return (
                       <>
                   <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
@@ -1544,6 +1507,13 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
                             }
                             const nextProviderOptions = getProviderOptionsForType(type, profile.provider);
                             const nextProvider = resolveSelectableProviderKey(profile.provider, type, nextProviderOptions);
+                            const selectableProvider = nextProviderOptions.find((item) => item.key === nextProvider);
+                            if (!selectableProvider || !providerSupportsType(selectableProvider, type) || selectableProvider.unavailableReason) {
+                              setSnackbar({ open: true, severity: 'error', message: i18n.language.startsWith('zh')
+                                ? '当前类型没有可用服务商，请检查后台配置或账号权限'
+                                : 'No available provider for this type. Check backend setup or account access.' });
+                              return;
+                            }
                             const nextDefaults = getProviderDefaultsFromOptions(nextProvider, type, nextProviderOptions);
                             setFetchedModelKeys((prev) => {
                               const next = { ...prev };
@@ -1566,6 +1536,11 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
                               inputCapabilities: type === 'text' ? inferTextInputCapabilities(nextProvider, nextDefaults.model) : undefined,
                               advancedOptions: type === 'text' ? normalizeAIModelAdvancedOptions(nextProvider, nextDefaults.model, profile.advancedOptions) : undefined,
                             });
+                            if (nextProvider !== selectedProviderKey) {
+                              setSnackbar({ open: true, severity: 'success', message: i18n.language.startsWith('zh')
+                                ? `原服务商不支持${modelTypeLabels[type]}，已切换为 ${selectableProvider.label}`
+                                : `Previous provider does not support ${modelTypeLabels[type]}; switched to ${selectableProvider.label}.` });
+                            }
                           }}
                         >
                           <MenuItem value="text">{modelTypeLabels.text}</MenuItem>
@@ -1929,6 +1904,13 @@ export function AIModelsPanel({ embedded = false }: { embedded?: boolean } = {})
                           sx={fieldSx()}
                         />
                       </Box>
+                      {isSeedanceMini ? (
+                        <Typography variant="caption" color="warning.main">
+                          {i18n.language.startsWith('zh')
+                            ? '实机验证：Seedance Mini 的 480p 生成成功，720p 返回 bad_request。参数不会自动修改；建议将默认分辨率设为 480p。'
+                            : 'Live test: Seedance Mini succeeded at 480p and returned bad_request at 720p. Parameters are not changed automatically; 480p is recommended.'}
+                        </Typography>
+                      ) : null}
                       {!selectedVideoOptions && isAceVideoProvider ? (
                         <Typography variant="caption" color="text.secondary">
                           {i18n.language.startsWith('zh') ? '拉取模型列表后显示该模型支持的参数。' : 'Fetch models to see supported parameters.'}

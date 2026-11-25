@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
-import { planAgentTeam, validateAgentTeamPlan } from './agentTeamPlan';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { planAgentTeam, validateAgentRoleInput, validateAgentRoleOutput, validateAgentTeamPlan } from './agentTeamPlan';
 import { generateResponse } from './aiClient';
 
 vi.mock('./aiClient', () => ({ generateResponse: vi.fn() }));
+beforeEach(() => vi.mocked(generateResponse).mockReset());
 
 const valid = () => ({
   summary: '先研究，再写报告',
@@ -15,6 +16,88 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('treats the visible plan as the next executable stage in rolling mode', async () => {
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(valid()));
+    await planAgentTeam({ api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '完成复杂目标', rolling: true });
+    const prompt = vi.mocked(generateResponse).mock.calls.at(-1)?.[1] || '';
+    expect(prompt).toContain('持续规划');
+    expect(prompt).toContain('只列当前有充分依据');
+    expect(prompt).toContain('主 Agent 会读取真实产物');
+  });
+  it('tells the planner to add audio generation only when the user asks for audio', async () => {
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(valid()));
+    await planAgentTeam({ api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '生成一段视频', mediaComposition: true });
+    const prompt = vi.mocked(generateResponse).mock.calls.at(-1)?.[1] || '';
+    expect(prompt).toContain('只有用户明确要求生成音乐、伴奏或配音时才安排');
+    expect(prompt).toContain('不得因为视频制作习惯');
+    expect(prompt).toContain('只生成一个视频且不需要后期处理时，必须直接交付');
+    expect(prompt).toContain('视频生成模型可能已生成原生音频');
+    expect(prompt).toContain('导演级创作要求');
+    expect(prompt).toContain('角色走位和动作节拍');
+    expect(prompt).toContain('每条关键帧提示词重复视觉连续性基准');
+    expect(prompt).toContain('完整成片提示词必须放在同一任务的 videoPrompt 字段');
+    expect(prompt).toContain('不得期待运行时截断或拼接');
+    expect(prompt).toContain('视频生成提示词：');
+    expect(prompt).toContain('多张关键帧必须拆成多个 image_generation 任务');
+    expect(prompt).toContain('每个任务只含对应的一条提示词');
+    expect(prompt).toContain('上游正文供规划参考，系统不会自动拼入图片请求');
+    expect(prompt).toContain('工具清单、岗位权限及工作流控制说明属于内部信息');
+  });
+
+  it('carries the verified single-clip duration workaround into the generated task plan', async () => {
+    const candidate = { ...valid(), roles: [{ ...valid().roles[0], allowedTools: ['video_generation'] }],
+      tasks: [{ id: 'shot', roleId: 'researcher', goal: '生成追逐镜头', videoPrompt: '雨夜后巷中机器猫奔跑，恐龙从后方追近。', dependsOn: [], tool: 'video_generation', videoDurationSeconds: 4, acceptance: '4秒镜头' }] };
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify({ ...candidate, tasks: [{ ...candidate.tasks[0], videoPrompt: undefined }] }))
+      .mockResolvedValueOnce(JSON.stringify(candidate));
+    const plan = await planAgentTeam({ api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '制作15秒短片',
+      videoGeneration: true, mediaComposition: true, videoExecutionNote: '4秒成功，5秒被拒绝' });
+    expect(plan.tasks[0].videoDurationSeconds).toBe(4);
+    expect(plan.tasks[0].videoPrompt).toBe('雨夜后巷中机器猫奔跑，恐龙从后方追近。');
+    expect(generateResponse).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(generateResponse).mock.lastCall?.[1]).toContain('视频生成任务可通过 videoDurationSeconds');
+    expect(vi.mocked(generateResponse).mock.lastCall?.[1]).toContain('4秒成功，5秒被拒绝');
+  });
+
+  it('normalizes serial video dependencies into independent clips and direct composition inputs', async () => {
+    const role = { id: 'editor', name: '剪辑师', responsibility: '制作视频', method: '逐段生成并合成', acceptance: '成片可播放',
+      allowedTools: ['video_generation', 'media_composition'] };
+    const candidate = { summary: '生成独立片段后合成', roles: [role], finalAcceptance: '成片可播放', resultTaskId: 'film', tasks: [
+      { id: 'shot_a', roleId: role.id, goal: '生成追逐开场', videoPrompt: '雨夜街巷中霸王龙冲入画面，机器猫开始奔跑。', tool: 'video_generation', videoDurationSeconds: 4, dependsOn: [], acceptance: '片段可播放' },
+      { id: 'shot_b', roleId: role.id, goal: '生成追逐结尾', videoPrompt: '同一雨夜街巷中恐龙滑倒，机器猫冲出巷口。', tool: 'video_generation', videoDurationSeconds: 4, dependsOn: ['shot_a'], acceptance: '片段可播放' },
+      { id: 'film', roleId: role.id, goal: '合成15秒成片', tool: 'media_composition', dependsOn: ['shot_b'],
+        composition: { clips: [{ taskId: 'shot_a', durationSeconds: 4 }, { taskId: 'shot_b', durationSeconds: 3 }], aspectRatio: '16:9' }, acceptance: '可播放' },
+    ] };
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+    const plan = await planAgentTeam({ api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '制作视频',
+      videoGeneration: true, mediaComposition: true, videoExecutionNote: '片段须独立生成' });
+    expect(plan.tasks[1].dependsOn).toEqual([]);
+    expect(plan.tasks[2].dependsOn).toEqual(['shot_b', 'shot_a']);
+    expect(plan.tasks[2].composition?.clips.map((clip) => clip.taskId)).toEqual(['shot_a', 'shot_b']);
+  });
+
+  it('limits per-task duration to video-generation tasks and integer seconds', () => {
+    const video = { ...valid().tasks[0], tool: 'video_generation', videoDurationSeconds: 4 };
+    const role = { ...valid().roles[0], allowedTools: ['video_generation'] };
+    expect(validateAgentTeamPlan({ ...valid(), roles: [role], tasks: [video] }).tasks[0].videoDurationSeconds).toBe(4);
+    for (const invalid of [0, 4.5, 121, '4']) {
+      expect(() => validateAgentTeamPlan({ ...valid(), roles: [role], tasks: [{ ...video, videoDurationSeconds: invalid }] })).toThrow('视频片段时长');
+    }
+    expect(() => validateAgentTeamPlan({ ...valid(), tasks: [{ ...valid().tasks[0], videoDurationSeconds: 4 }] })).toThrow('视频片段时长');
+  });
+
+  it('retries planning when the videoPrompt field is missing or malformed', async () => {
+    const role = { ...valid().roles[0], allowedTools: ['video_generation'] };
+    const invalid = { ...valid(), roles: [role], tasks: [{ id: 'shot', roleId: role.id, goal: '制作镜头', tool: 'video_generation', dependsOn: [], acceptance: '可播放' }] };
+    const corrected = { ...invalid, tasks: [{ ...invalid.tasks[0], videoPrompt: '雨夜街巷，机器猫奔跑，恐龙追赶，3D动画电影风格。' }] };
+    vi.mocked(generateResponse).mockResolvedValueOnce('{invalid-json').mockResolvedValueOnce(JSON.stringify(corrected));
+
+    const plan = await planAgentTeam({ api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '生成追逐视频', videoGeneration: true,
+      maxVideoPromptLength: 1000 });
+
+    expect(plan.tasks[0].videoPrompt).toBe(corrected.tasks[0].videoPrompt);
+    expect(generateResponse).toHaveBeenCalledTimes(2);
+  });
+
   it('persists semantic scope evidence only after validating every delegated goal', async () => {
     const candidate = { ...valid(), roles: [{ ...valid().roles[0], allowedTools: ['delegate_task', 'text_generation'] }],
       tasks: [{ ...valid().tasks[0], tool: 'delegate_task' }],
@@ -104,6 +187,7 @@ describe('agent team plan', () => {
     for (const tool of ['image_generation', 'video_generation'] as const) {
       const candidate = { ...valid(), roles: [{ ...valid().roles[0], allowedTools: [tool] }],
         tasks: [{ id: 'edit', roleId: 'researcher', goal: '复用旧图', acceptance: '有效', tool, dependsOn: [],
+          ...(tool === 'video_generation' ? { videoPrompt: '雨夜街巷中恐龙追赶机器猫。' } : {}),
           savedMedia: sources.map((source, index) => ({ ...source, alias: `old_${index}` })) }] };
       vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
       await expect(planAgentTeam({ ...params, imageGeneration: true, videoGeneration: true })).rejects.toThrow('不支持参考图片');
@@ -145,7 +229,7 @@ describe('agent team plan', () => {
   it('requires video inspection to read one direct saved video source', async () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['video_generation', 'video_inspection'];
-    const shot = { ...plan.tasks[0], tool: 'video_generation' };
+    const shot = { ...plan.tasks[0], tool: 'video_generation', videoPrompt: '森林中恐龙追赶机器猫。' };
     const inspect = { ...plan.tasks[1], tool: 'video_inspection' };
     const candidate = { ...plan, tasks: [shot, inspect] };
     expect(validateAgentTeamPlan(candidate).tasks[1].tool).toBe('video_inspection');
@@ -200,14 +284,34 @@ describe('agent team plan', () => {
 
   it('migrates legacy plans and roles in memory while rejecting unknown contract versions', () => {
     const legacy = validateAgentTeamPlan(valid());
-    expect(legacy).toMatchObject({ schemaVersion: 1, roles: [{ schemaVersion: 1 }], tasks: [{ schemaVersion: 1 }, { schemaVersion: 1 }] });
+    expect(legacy).toMatchObject({ schemaVersion: 1, roles: [{ schemaVersion: 1, contractVersion: 1 }], tasks: [{ schemaVersion: 1 }, { schemaVersion: 1 }] });
     expect(() => validateAgentTeamPlan({ ...valid(), schemaVersion: 2 })).toThrow('团队计划版本不受支持');
     const unsupportedRole = valid();
     unsupportedRole.roles[0] = { ...unsupportedRole.roles[0], schemaVersion: 2 } as typeof unsupportedRole.roles[number];
     expect(() => validateAgentTeamPlan(unsupportedRole)).toThrow('岗位契约版本不受支持');
+    unsupportedRole.roles[0] = { ...valid().roles[0], contractVersion: 2 } as typeof unsupportedRole.roles[number];
+    expect(() => validateAgentTeamPlan(unsupportedRole)).toThrow('岗位实例契约版本不受支持');
     const unsupportedTask = valid();
     Object.assign(unsupportedTask.tasks[0], { schemaVersion: 2 });
     expect(() => validateAgentTeamPlan(unsupportedTask)).toThrow('任务契约版本不受支持');
+  });
+
+  it('validates versioned role input and output schemas at the contract boundary', () => {
+    const candidate = valid();
+    candidate.roles[0] = { ...candidate.roles[0], inputSchema: {
+      type: 'object', properties: { taskGoal: { type: 'string' }, upstream: { type: 'array', items: { type: 'object' } } },
+      required: ['taskGoal', 'upstream'], additionalProperties: false,
+    }, outputSchema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false } };
+    const role = validateAgentTeamPlan(candidate).roles[0];
+    expect(role.contractVersion).toBe(1);
+    validateAgentRoleInput(role, { taskGoal: '分析需求', upstream: [] });
+    expect(() => validateAgentRoleInput(role, { taskGoal: 3, upstream: [] })).toThrow('不符合岗位契约字段要求');
+    expect(validateAgentRoleOutput(role, '{"answer":"完成"}')).toBe('{"answer":"完成"}');
+    expect(() => validateAgentRoleOutput(role, '```json\n{"answer":"完成"}\n```')).toThrow('要求纯 JSON');
+    expect(() => validateAgentRoleOutput(role, '{"private":"do-not-leak"}')).toThrow('不符合岗位契约字段要求');
+    expect(() => validateAgentTeamPlan({ ...candidate, tasks: [
+      { ...candidate.tasks[0], tool: 'image_generation' },
+    ], roles: [{ ...candidate.roles[0], allowedTools: ['image_generation'] }] })).toThrow('只适用于文本与委派任务');
   });
 
   it('validates optional typed deliverables and preserves legacy tasks without one', () => {
@@ -233,7 +337,7 @@ describe('agent team plan', () => {
     const candidate = { ...valid(), roles: [role], tasks: [
       { id: 'script', roleId: role.id, goal: '写 15 秒剧本', dependsOn: [], acceptance: '含分镜', tool: 'text_generation', deliverable: { kind: 'document', title: '剧本' } },
       { id: 'image', roleId: role.id, goal: '生成角色素材', dependsOn: ['script'], acceptance: '图片可用', tool: 'image_generation', deliverable: { kind: 'json', title: '图片素材' } },
-      { id: 'film', roleId: role.id, goal: '生成视频', dependsOn: ['script', 'image'], acceptance: '视频可播放', tool: 'video_generation', deliverable: { kind: 'table', title: '成片' } },
+      { id: 'film', roleId: role.id, goal: '生成视频', videoPrompt: '森林中恐龙追赶机器猫。', dependsOn: ['script', 'image'], acceptance: '视频可播放', tool: 'video_generation', deliverable: { kind: 'table', title: '成片' } },
     ], resultTaskId: 'film' };
     expect(() => validateAgentTeamPlan(candidate)).toThrow('文字产物只可由文本或委派任务交付');
     vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
@@ -243,30 +347,58 @@ describe('agent team plan', () => {
     expect(plan.resultTaskId).toBe('film');
   });
 
-  it('asks the planner to repair an invalid composition source once before queueing work', async () => {
+  it('repairs a unique invalid composition source without issuing a second model request', async () => {
+    vi.mocked(generateResponse).mockClear();
     const role = { ...valid().roles[0], allowedTools: ['text_generation', 'image_generation', 'video_generation', 'media_composition'] };
     const script = { id: 'script', roleId: role.id, goal: '写剧本', dependsOn: [], acceptance: '剧本完整', tool: 'text_generation' };
     const image = { id: 'image', roleId: role.id, goal: '生成参考图', dependsOn: ['script'], acceptance: '画面可用', tool: 'image_generation' };
-    const shot = { id: 'shot', roleId: role.id, goal: '生成视频', dependsOn: ['script', 'image'], acceptance: '视频可播放', tool: 'video_generation' };
+    const shot = { id: 'shot', roleId: role.id, goal: '生成视频', videoPrompt: '森林中恐龙追赶机器猫。', dependsOn: ['script', 'image'], acceptance: '视频可播放', tool: 'video_generation' };
     const film = { id: 'film', roleId: role.id, goal: '合成成片', dependsOn: ['image', 'shot'], acceptance: '成片可播放', tool: 'media_composition', composition: { clips: [{ taskId: 'image' }] } };
     const invalid = { ...valid(), roles: [role], tasks: [script, image, shot, film], resultTaskId: 'film' };
     const repaired = { ...invalid, tasks: [script, image, shot, { ...film, dependsOn: ['shot'], composition: { clips: [{ taskId: 'shot' }] } }] };
     const params = { api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '剧本、图片、视频成片',
       imageGeneration: true, videoGeneration: true, videoReferenceImages: true, mediaComposition: true };
-    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(invalid)).mockResolvedValueOnce(JSON.stringify(repaired));
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(invalid));
     expect((await planAgentTeam(params)).tasks[3].composition?.clips[0].taskId).toBe('shot');
-    expect(vi.mocked(generateResponse).mock.lastCall?.[2]).toMatchObject([
-      { role: 'user', content: params.goal }, { role: 'assistant', content: JSON.stringify(invalid) },
-      { role: 'user', content: expect.stringContaining('合成片段必须直接依赖视频生成或合成任务') },
-    ]);
-    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(invalid)).mockResolvedValueOnce(JSON.stringify(invalid));
+    expect(generateResponse).toHaveBeenCalledTimes(1);
+    const alternateShot = { ...shot, id: 'alternate_shot' };
+    const invalidAlternate = { ...invalid, tasks: [script, image, shot, alternateShot,
+      { ...film, dependsOn: ['shot', 'alternate_shot', 'image'], composition: { clips: [{ taskId: 'image' }] } }] };
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(invalidAlternate)).mockResolvedValueOnce(JSON.stringify(invalidAlternate));
     await expect(planAgentTeam(params)).rejects.toThrow('合成片段必须直接依赖视频生成或合成任务');
+  });
+
+  it('aligns task tool declarations with their role without issuing a second model request', async () => {
+    vi.mocked(generateResponse).mockClear();
+    const invalid = { ...valid(), tasks: [{ ...valid().tasks[0], tool: 'image_generation' }] };
+    const params = { api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '生成一张参考图', imageGeneration: true };
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(invalid));
+    const plan = await planAgentTeam(params);
+    expect(plan.tasks[0].tool).toBe('image_generation');
+    expect(plan.roles[0].allowedTools).toContain('image_generation');
+    expect(generateResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairs an unknown role tool identifier once and reports the exact identifier if repair fails', async () => {
+    const invalid = { ...valid(), roles: [{ ...valid().roles[0], allowedTools: ['text_generation', 'shell'] }] };
+    const params = { api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '写剧本' };
+    vi.mocked(generateResponse).mockReset()
+      .mockResolvedValueOnce(JSON.stringify(invalid))
+      .mockResolvedValueOnce(JSON.stringify(valid()));
+
+    const plan = await planAgentTeam(params);
+    expect(plan.roles[0]?.allowedTools).toEqual(['text_generation']);
+    expect(generateResponse).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(generateResponse).mock.calls[1]?.[2]?.[0]?.content).toContain('shell');
+
+    vi.mocked(generateResponse).mockReset().mockResolvedValueOnce(JSON.stringify(invalid)).mockResolvedValueOnce(JSON.stringify(invalid));
+    await expect(planAgentTeam(params)).rejects.toThrow('岗位“研究员”申请了工具目录外的标识：“shell”');
   });
 
   it('rejects unknown tools and missing role references', () => {
     const unknownTool = valid();
     unknownTool.roles[0].allowedTools = ['shell'];
-    expect(() => validateAgentTeamPlan(unknownTool)).toThrow('不可用工具');
+    expect(() => validateAgentTeamPlan(unknownTool)).toThrow('岗位“研究员”申请了工具目录外的标识：“shell”');
     const missingRole = valid();
     missingRole.tasks[0].roleId = 'ghost';
     expect(() => validateAgentTeamPlan(missingRole)).toThrow('不存在的岗位');
@@ -278,16 +410,16 @@ describe('agent team plan', () => {
     plan.tasks[0] = { ...plan.tasks[0], tool: 'web_search' } as typeof plan.tasks[0];
     expect(validateAgentTeamPlan(plan).tasks[0].tool).toBe('web_search');
     plan.roles[0].allowedTools = ['text_generation'];
-    expect(() => validateAgentTeamPlan(plan)).toThrow('未获授权');
+    expect(() => validateAgentTeamPlan(plan)).toThrow('团队计划内部工具不一致');
   });
 
   it('accepts video only when the role declares the tool', () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['text_generation', 'video_generation'];
-    plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation' } as typeof plan.tasks[1];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation', videoPrompt: '森林中恐龙追赶机器猫。' } as typeof plan.tasks[1];
     expect(validateAgentTeamPlan(plan).tasks[1].tool).toBe('video_generation');
     plan.roles[0].allowedTools = ['text_generation'];
-    expect(() => validateAgentTeamPlan(plan)).toThrow('未获授权');
+    expect(() => validateAgentTeamPlan(plan)).toThrow('团队计划内部工具不一致');
   });
 
   it('accepts music generation only when the role declares the tool', () => {
@@ -296,7 +428,7 @@ describe('agent team plan', () => {
     plan.tasks[0] = { ...plan.tasks[0], tool: 'audio_generation' } as typeof plan.tasks[0];
     expect(validateAgentTeamPlan(plan).tasks[0].tool).toBe('audio_generation');
     plan.roles[0].allowedTools = ['text_generation'];
-    expect(() => validateAgentTeamPlan(plan)).toThrow('未获授权');
+    expect(() => validateAgentTeamPlan(plan)).toThrow('团队计划内部工具不一致');
   });
 
   it('rejects a media dependency that the music adapter cannot consume', () => {
@@ -351,11 +483,11 @@ describe('agent team plan', () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['audio_generation', 'video_generation'];
     plan.tasks[0] = { ...plan.tasks[0], tool: 'audio_generation' } as typeof plan.tasks[0];
-    plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation' } as typeof plan.tasks[1];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation', videoPrompt: '树林中恐龙追赶机器猫。' } as typeof plan.tasks[1];
     expect(() => validateAgentTeamPlan(plan)).toThrow('不能接收已生成的音乐或视频片段');
     plan.roles[0].allowedTools.push('text_generation');
-    plan.tasks[1] = { ...plan.tasks[1], tool: 'text_generation' } as typeof plan.tasks[1];
-    plan.tasks.push({ id: 'video', roleId: 'researcher', goal: '生成成片', dependsOn: ['report'], tool: 'video_generation', acceptance: '视频含音乐' });
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'text_generation', videoPrompt: undefined } as typeof plan.tasks[1];
+    plan.tasks.push({ id: 'video', roleId: 'researcher', goal: '生成成片', videoPrompt: '树林中恐龙追赶机器猫。', dependsOn: ['report'], tool: 'video_generation', acceptance: '视频含音乐' });
     expect(() => validateAgentTeamPlan(plan)).toThrow('不能接收已生成的音乐或视频片段');
   });
 
@@ -363,7 +495,7 @@ describe('agent team plan', () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['video_generation'];
     plan.tasks[0] = { ...plan.tasks[0], tool: 'video_generation' } as typeof plan.tasks[0];
-    plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation' } as typeof plan.tasks[1];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation', videoPrompt: '树林中恐龙追赶机器猫。' } as typeof plan.tasks[1];
     expect(() => validateAgentTeamPlan(plan)).toThrow('不能接收已生成的音乐或视频片段');
   });
 
@@ -381,7 +513,7 @@ describe('agent team plan', () => {
     const plan = valid();
     plan.roles[0].allowedTools = ['image_generation', 'video_generation'];
     plan.tasks[0] = { ...plan.tasks[0], tool: 'image_generation' } as typeof plan.tasks[0];
-    plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation' } as typeof plan.tasks[1];
+    plan.tasks[1] = { ...plan.tasks[1], tool: 'video_generation', videoPrompt: '森林中恐龙追赶机器猫。' } as typeof plan.tasks[1];
     vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(plan));
     await expect(planAgentTeam({ api: { provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'gpt' },
       goal: '先生成图片再制作视频', imageGeneration: true, videoGeneration: true, videoReferenceImages: false }))

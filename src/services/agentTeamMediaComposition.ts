@@ -8,14 +8,21 @@ import type { WorkflowGoalSpec } from './workflowGoalSpec';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { WorkflowPreflightError } from './workflowRunRuntime';
 import { assertChatExecutionLease } from './chatExecutionLease';
+import { waitForMessageCloudConfirmation } from './messageCloudConfirmation';
+import { isLocalOnlyMediaMode, uploadLocalMessageMediaToCloud } from './richMessageMedia';
+import { ApiError } from './api';
+
+function teamMediaMessages() {
+  const state = useMessageStore.getState();
+  return [...state.messages, ...Object.values(state.messageWindowsByChatId).flatMap((window) => window.messages)];
+}
 
 export function canComposeTeamMedia() {
   return typeof Worker !== 'undefined' && typeof WebAssembly !== 'undefined' && Boolean(globalThis.navigator?.locks?.request);
 }
 
 export function teamMediaAttachment(runId: string, taskId: string): MessageAttachment | undefined {
-  const state = useMessageStore.getState();
-  return [...state.messages, ...Object.values(state.messageWindowsByChatId).flatMap((window) => window.messages)]
+  return teamMediaMessages()
     .filter((message) => !message.isDeleted && message.metadata?.agentTeamMedia?.runId === runId && message.metadata.agentTeamMedia.taskId === taskId)
     .flatMap((message) => message.metadata?.attachments || [])
     .filter((attachment) => attachment.status === 'ready' && attachment.url && (attachment.kind === 'video' || attachment.kind === 'audio'))
@@ -27,12 +34,47 @@ export function inspectAgentTeamComposition(runId: string, taskId: string) {
   return attachment?.kind === 'video' ? { status: 'completed' as const, output: `视频已在本机完成合成并保存在当前聊天附件。${attachment.semanticSummary || ''}` } : null;
 }
 
+// A cloud message is created first while its inline video stays in local storage.
+// The existing bytes can then be published under the same message and attachment.
+export async function syncAgentTeamCompositionToCloud(runId: string, taskId: string, signal: AbortSignal) {
+  if (isLocalOnlyMediaMode()) return;
+  const local = teamMediaMessages().find((message) => !message.isDeleted
+    && message.metadata?.agentTeamMedia?.runId === runId && message.metadata.agentTeamMedia.taskId === taskId
+    && message.metadata?.attachments?.some((attachment) => attachment.kind === 'video' && attachment.status === 'ready'
+      && attachment.url?.startsWith('data:video/')));
+  if (!local) return;
+  signal.throwIfAborted();
+  assertChatExecutionLease(local.chatId);
+  const cloud = await waitForMessageCloudConfirmation({ chatId: local.chatId, messageId: local.id, signal });
+  signal.throwIfAborted();
+  const metadata = await uploadLocalMessageMediaToCloud({ localMessage: local, cloudMessage: cloud, signal });
+  useMessageStore.getState().upsertMessage({ ...local, ...cloud, metadata }, { replaceAttachments: true });
+  flushBufferedPersistenceWrites();
+}
+
+async function completedCompositionOutput(runId: string, taskId: string, output: string, signal: AbortSignal) {
+  try {
+    await syncAgentTeamCompositionToCloud(runId, taskId, signal);
+    return output;
+  } catch (error) {
+    signal.throwIfAborted();
+    const code = error instanceof ApiError && error.code ? error.code : undefined;
+    const reason = code === 'CLOUD_STORAGE_QUOTA_EXCEEDED' ? '云端存储容量不足'
+      : code === 'CLOUD_FILE_TOO_LARGE' ? '成片超过云端单文件大小限制'
+        : code === 'CLOUD_STORAGE_NOT_ENTITLED' ? '当前账号没有云端文件存储权限'
+          : code ? `云端保存失败（${code}）` : '云端保存未确认';
+    return `${output}\n${reason}。成片可在本机播放，可以重新同步已有文件。`;
+  }
+}
+
 export async function composeAgentTeamMedia(params: {
   runId: string; taskId: string; chatId: string; plan: MediaCompositionPlan; sourceBranch?: WorkflowGoalSpec['sourceBranch'];
   resolveTaskId: (id: string) => string; signal: AbortSignal;
 }) {
   const existing = inspectAgentTeamComposition(params.runId, params.taskId);
-  if (existing) return { output: existing.output };
+  if (existing) {
+    return { output: await completedCompositionOutput(params.runId, params.taskId, existing.output, params.signal) };
+  }
   const chat = useChatStore.getState().chats.find((item) => item.id === params.chatId && item.type === 'assistant' && item.deletedAt == null);
   if (!chat) throw new WorkflowPreflightError('助手会话已删除');
   params.signal.throwIfAborted();
@@ -73,5 +115,6 @@ export async function composeAgentTeamMedia(params: {
   state.queueMessageSync(message);
   await advanceTeamConversation(message, params.sourceBranch);
   flushBufferedPersistenceWrites();
-  return { output: `视频已在本机完成合成并保存在当前聊天附件。${semanticSummary}` };
+  return { output: await completedCompositionOutput(params.runId, params.taskId,
+    `视频已在本机完成合成并保存在当前聊天附件。${semanticSummary}`, params.signal) };
 }

@@ -92,6 +92,9 @@ interface MessageListProps {
   onAnalyzeMessage?: (message: Message) => void;
   onExpressionFeedback?: (message: Message, kind: ExpressionFeedbackKind) => void;
   onRetryMedia?: (message: Message, attachmentId: string) => void | Promise<void>;
+  onNoticeAction?: (message: Message) => void | Promise<void>;
+  pendingNoticeActionRunId?: string | null;
+  noticeActionFeedback?: { runId: string; message: string; tone: 'info' | 'error' } | null;
   onAddImagesToReference?: (message: Message, attachments: MessageAttachment[]) => void;
   onCharacterAvatarClick?: (character: import('../../services/markdownCharacterMentions').MentionCharacter, anchorEl: HTMLElement) => void;
   onMentionCharacter?: (character: AICharacter) => void;
@@ -523,6 +526,9 @@ export default function MessageList({
   onAnalyzeMessage,
   onExpressionFeedback,
   onRetryMedia,
+  onNoticeAction,
+  pendingNoticeActionRunId,
+  noticeActionFeedback,
   onAddImagesToReference,
   onCharacterAvatarClick,
   onMentionCharacter,
@@ -612,7 +618,7 @@ export default function MessageList({
       isLoadingNewer,
       hasMoreOlder: hasMore,
       hasMoreNewer,
-    }, messages.length <= 2 && renderItems.length <= 2 ? 'warn' : 'info', 'message-window');
+    }, 'debug', 'message-window');
   }, [hasMore, hasMoreNewer, isLoadingNewer, isLoadingOlder, messages, renderItems]);
   const chatAppearance = useSettingsStore((state) => state.chatAppearance);
   const customBubbleStyles = useSettingsStore((state) => state.customBubbleStyles);
@@ -805,7 +811,10 @@ export default function MessageList({
       return <Box key={item.key} {...anchorProps}><SystemMessageItem message={item.message} /></Box>;
     }
     if (item.renderKind === 'notice') {
-      return <Box key={item.key} {...anchorProps}><ChatNoticeMessage message={item.message} /></Box>;
+      return <Box key={item.key} {...anchorProps}><ChatNoticeMessage message={item.message} onAction={onNoticeAction}
+        actionPending={Boolean(pendingNoticeActionRunId && pendingNoticeActionRunId === item.message.metadata?.chatNotice?.action?.runId)}
+        actionFeedback={noticeActionFeedback && noticeActionFeedback.runId === item.message.metadata?.chatNotice?.action?.runId
+          ? { message: noticeActionFeedback.message, tone: noticeActionFeedback.tone } : undefined} /></Box>;
     }
     if (item.renderKind === 'event') {
       return <Box key={item.key} {...anchorProps}><EventMessageItem message={item.message} members={characters} /></Box>;
@@ -879,7 +888,7 @@ export default function MessageList({
       );
     }
     return <Box key={item.key} {...anchorProps}>{renderBubble(item.sourceItem)}</Box>;
-  }, [characters, chatAppearance.storyReader.fontSize, chatAppearance.storyReader.lineHeight, contentMaxWidth, customBubbleStyles, developerMode, narrativeRevealMessageKeys, onCharacterAvatarClick, onChooseStoryChoice, onNarrativeRevealComplete, renderBubble, storyChoiceOptions, storyChoiceSubmittingValue, storyReaderFontFamily, storyRevealMode]);
+  }, [characters, chatAppearance.storyReader.fontSize, chatAppearance.storyReader.lineHeight, contentMaxWidth, customBubbleStyles, developerMode, narrativeRevealMessageKeys, noticeActionFeedback, onCharacterAvatarClick, onChooseStoryChoice, onNarrativeRevealComplete, onNoticeAction, pendingNoticeActionRunId, renderBubble, storyChoiceOptions, storyChoiceSubmittingValue, storyReaderFontFamily, storyRevealMode]);
 
   const topStatusText = useMemo(() => {
     if (messages.length === 0) return null;

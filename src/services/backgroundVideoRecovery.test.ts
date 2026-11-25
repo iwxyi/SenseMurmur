@@ -4,11 +4,11 @@ import { findPendingVideoMessages, recoverBackgroundVideoTasks } from './backgro
 import { useChatStore } from '../stores/useChatStore';
 import { __messageRuntimePersistenceForTests, useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
-import { processRichMessageMedia } from './richMessageMedia';
+import { getRichMediaQueueSnapshot, processRichMessageMedia } from './richMessageMedia';
 import { readAuthSnapshot } from './authSnapshot';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
 
-vi.mock('./richMessageMedia', () => ({ processRichMessageMedia: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('./richMessageMedia', () => ({ processRichMessageMedia: vi.fn().mockResolvedValue(undefined), getRichMediaQueueSnapshot: vi.fn(() => []) }));
 vi.mock('./authSnapshot', async (importOriginal) => ({
   ...await importOriginal<typeof import('./authSnapshot')>(),
   readAuthSnapshot: vi.fn(() => ({ mode: 'cloud' })),
@@ -226,6 +226,37 @@ describe('background video recovery', () => {
     await vi.waitFor(() => expect(processRichMessageMedia).toHaveBeenCalledWith(expect.objectContaining({
       message: submitting, attachmentIds: ['video-request-key'],
     })));
+  });
+
+  it('rechecks the same accepted task after polling stops without dispatching an active poll twice', async () => {
+    vi.mocked(processRichMessageMedia).mockClear();
+    vi.mocked(getRichMediaQueueSnapshot).mockReturnValue([]);
+    vi.mocked(readAuthSnapshot).mockReturnValue({ mode: 'cloud' } as ReturnType<typeof readAuthSnapshot>);
+    vi.mocked(isCloudSyncEnabled).mockReturnValue(true);
+    vi.spyOn(useChatStore.persist, 'hasHydrated').mockReturnValue(true);
+    vi.spyOn(useMessageStore.persist, 'hasHydrated').mockReturnValue(true);
+    vi.spyOn(useSettingsStore.persist, 'hasHydrated').mockReturnValue(true);
+    useChatStore.setState({ chats: [{ id: 'chat', deletedAt: null } as ReturnType<typeof useChatStore.getState>['chats'][number]] });
+    const pending = message('retry-original', 'generating', 'task-original');
+    useMessageStore.setState({ messages: [pending], messageWindowsByChatId: {} });
+    await recoverBackgroundVideoTasks();
+    await vi.waitFor(() => expect(processRichMessageMedia).toHaveBeenCalledTimes(1));
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 61_000);
+    try {
+      vi.mocked(getRichMediaQueueSnapshot).mockReturnValue([{ messageId: pending.id, attachmentId: `video-${pending.id}`,
+        kind: 'video', lane: 'video', status: 'generating', position: 1, total: 1 }]);
+      useMessageStore.setState({ messages: [{ ...pending }] });
+      await Promise.resolve();
+      expect(processRichMessageMedia).toHaveBeenCalledTimes(1);
+      vi.mocked(getRichMediaQueueSnapshot).mockReturnValue([]);
+      useMessageStore.setState({ messages: [{ ...pending }] });
+      await vi.waitFor(() => expect(processRichMessageMedia).toHaveBeenCalledTimes(2));
+      expect(vi.mocked(processRichMessageMedia).mock.calls[1][0].message.metadata?.attachments?.[0].mediaTaskId).toBe('task-original');
+    } finally {
+      clock.mockRestore();
+      vi.mocked(getRichMediaQueueSnapshot).mockReturnValue([]);
+    }
   });
 
 });

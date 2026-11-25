@@ -355,7 +355,7 @@ function DataLoader({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!isAdminRoute && isWorkspaceReady && (isLoggedIn || authMode === 'local')) {
-      void loadSettings();
+      const settingsReady = loadSettings();
       void import('./services/backgroundExecutionPreferences').then(({ canContinueConversationsInBackground }) => {
         if (!canContinueConversationsInBackground()) return;
         void import('./services/assistantBackgroundReply').then(({ recoverAssistantBackgroundReplies }) => recoverAssistantBackgroundReplies()).catch((error) => {
@@ -370,7 +370,7 @@ function DataLoader({ children }: { children: React.ReactNode }) {
         void import('./services/groupBackgroundConversation').then(({ recoverGroupBackgroundConversations }) => recoverGroupBackgroundConversations()).catch((error) => {
           console.error('[group-workflow:recovery-failed]', error);
         });
-        void import('./services/agentTeamWorkflow').then(({ recoverAgentTeamRuns }) => recoverAgentTeamRuns()).catch((error) => {
+        void settingsReady.then(() => import('./services/agentTeamWorkflow')).then(({ recoverAgentTeamRuns }) => recoverAgentTeamRuns()).catch((error) => {
           console.error('[agent-team:recovery-failed]', error);
         });
       }).catch((error) => {

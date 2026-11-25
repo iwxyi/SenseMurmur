@@ -1,5 +1,6 @@
 import type { GroupChat, MessageBranchState } from '../types/chat';
 import type { Message, MessageMetadata } from '../types/message';
+import { formatDeveloperDiagnosticLine } from './developerDiagnostics';
 
 export interface ResolvedBranchingNode {
   message: Message;
@@ -310,7 +311,7 @@ export function projectActiveBranchMessages(
     if (!missingParentLogKeys.has(logKey)) {
       missingParentLogKeys.add(logKey);
       if (missingParentLogKeys.size > 200) missingParentLogKeys.delete(missingParentLogKeys.values().next().value as string);
-      console.error('[message-branch:projection-fallback]', {
+      const diagnostic = {
         reason: failure, loadedMessages: visible.length, ancestorMessages: path.length,
         fallbackMessages: fallback.length, excludedAlternatives: excluded.size,
         head: headId.slice(-12), missingNode: cursor?.slice(-12) || null,
@@ -322,7 +323,8 @@ export function projectActiveBranchMessages(
           timestamp: node.message.timestamp, onActivePath: pathIds.has(node.nodeId),
           excluded: excluded.has(node.nodeId), revisionOf: node.revisionOfMessageId?.slice(-12) || null,
         })),
-      });
+      };
+      console.error(formatDeveloperDiagnosticLine('message-branch:projection-fallback', new Date().toISOString(), 'error', diagnostic));
     }
     return fallback;
   }

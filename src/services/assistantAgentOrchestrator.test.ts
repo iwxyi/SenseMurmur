@@ -1008,15 +1008,15 @@ describe('assistantAgentOrchestrator validation', () => {
     expect(error).toMatchObject({ name: 'AssistantAgentFormatError' });
     expect(error).not.toHaveProperty('rawResponse');
     expect(JSON.stringify(error)).not.toContain('sensitive malformed response');
-    expect(errorLog).toHaveBeenCalledWith(event, expect.objectContaining({
-      stage,
-      parserError: expect.any(String),
-      responseLength: raw.length,
-      response: expect.stringContaining('[REDACTED]'),
-    }));
+    const diagnosticLine = errorLog.mock.calls.find((call) => String(call[0]).startsWith(event))?.[0];
+    expect(typeof diagnosticLine).toBe('string');
+    expect(String(diagnosticLine)).toContain(`stage=${stage}`);
+    expect(String(diagnosticLine)).toContain(`responseLength=${raw.length}`);
+    expect(String(diagnosticLine)).toContain('parserError=');
+    expect(String(diagnosticLine)).toContain('[REDACTED]');
+    expect(String(diagnosticLine)).toContain('AI原始回复:');
     expect(JSON.stringify(errorLog.mock.calls)).not.toContain('private-token');
-    const details = errorLog.mock.calls.find((call) => call[0] === event)?.[1] as { parserError: string };
-    expect(details.parserError.length).toBeGreaterThan(0);
+    expect(String(diagnosticLine).length).toBeGreaterThan(raw.length);
     errorLog.mockRestore();
   });
 });

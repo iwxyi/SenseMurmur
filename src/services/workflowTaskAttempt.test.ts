@@ -55,6 +55,16 @@ describe('task attempt contract', () => {
     expect(settleTaskAttempt(attempt, { ...task, status: 'waiting_dependency' })).toEqual(attempt);
   });
 
+  it('keeps a failed attempt reason after retry and clears it if that attempt later succeeds', () => {
+    const failed = settleTaskAttempt(attempt, { ...task, status: 'failed',
+      error: '图片被拒绝；authorization: Bearer secret-value' });
+    expect(failed.error).toContain('图片被拒绝');
+    expect(failed.error).not.toContain('secret-value');
+    expect(parseWorkflowTaskAttempt(failed).error).toBe(failed.error);
+    expect(settleTaskAttempt(failed, { ...task, status: 'queued', error: undefined }).error).toBe(failed.error);
+    expect(settleTaskAttempt(failed, { ...task, status: 'completed', error: undefined }).error).toBeUndefined();
+  });
+
   it('closes the interrupted local question attempt before safely re-queueing it', () => {
     const { finishedAt, ...running } = attempt;
     void finishedAt;

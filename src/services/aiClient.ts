@@ -24,6 +24,7 @@ type OpenAICompatibleMessageContent = string | Array<
 >;
 type MaybeTypedConfig = APIConfig & Partial<Pick<AIModelProfile, 'type'>>;
 type JSONValue = string | number | boolean | null | JSONValue[] | { [key: string]: JSONValue };
+type AiRequestPreflightError = Error & { requestNotDispatched: true };
 export type AiUsageType =
   | 'assistant_chat'
   | 'direct_chat'
@@ -75,6 +76,10 @@ export type GenerateResponseOptions = {
 const DEFAULT_MAX_TEXT_INPUT_CHARS = 600_000;
 const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 4 * 60 * 1000;
 const INLINE_IMAGE_DATA_URL_PATTERN = /data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]{1024,}/i;
+
+function createAiRequestPreflightError(message: string): AiRequestPreflightError {
+  return Object.assign(new Error(message), { requestNotDispatched: true as const });
+}
 
 function isLegacyOfficialProvider(provider: APIConfig['provider']) {
   return provider === 'official' || String(provider).startsWith('official-');
@@ -513,7 +518,7 @@ function buildAnthropicContent(message: ChatMessage) {
   const textParts = message.content ? [{ type: 'text', text: message.content }] : [];
   const imageParts = (message.attachments || []).flatMap((attachment) => {
     const data = splitDataUrl(attachment.url);
-    if (!data) return [];
+    if (!data) throw createAiRequestPreflightError('图片附件未能转换为 Anthropic 支持的图片数据，已停止发送请求');
     return [{
       type: 'image',
       source: {
@@ -531,7 +536,7 @@ function buildGeminiParts(message: ChatMessage) {
   const textParts = message.content ? [{ text: message.content }] : [];
   const imageParts = (message.attachments || []).flatMap((attachment) => {
     const data = splitDataUrl(attachment.url);
-    if (!data) return [];
+    if (!data) throw createAiRequestPreflightError('图片附件未能转换为 Gemini 支持的图片数据，已停止发送请求');
     return [{
       inlineData: {
         mimeType: attachment.mimeType || data.mimeType,
@@ -541,6 +546,37 @@ function buildGeminiParts(message: ChatMessage) {
   });
   const parts = [...textParts, ...imageParts];
   return parts.length ? parts : [{ text: '' }];
+}
+
+async function materializeLocalChatImages(messages: ChatMessage[], signal?: AbortSignal): Promise<ChatMessage[]> {
+  return Promise.all(messages.map(async (message) => {
+    if (!message.attachments?.length) return message;
+    const attachments = await Promise.all(message.attachments.map(async (attachment) => {
+      if (!/^\/(?:uploads\/media|media)\//.test(attachment.url)) return attachment;
+      signal?.throwIfAborted();
+      let response: Response;
+      try {
+        response = await api.fetchWithAuth(backendUrl(`/api/media-assets/content?url=${encodeURIComponent(attachment.url)}`), { signal });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw createAiRequestPreflightError(`读取聊天图片失败（${attachment.url.startsWith('/uploads/media/') ? '后端媒体文件' : '本地媒体文件'}）：${reason}`);
+      }
+      try {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const blob = await response.blob();
+        if (!blob.type.startsWith('image/')) throw new Error(`媒体服务返回了非图片内容（${blob.type || '未知类型'}）`);
+        if (blob.size > 8 * 1024 * 1024) throw new Error('图片超过 8 MB 的视觉输入限制');
+        signal?.throwIfAborted();
+        const mimeType = attachment.mimeType || blob.type || 'image/png';
+        const data = await blobToBase64(blob);
+        return { ...attachment, url: `data:${mimeType};base64,${data}`, mimeType };
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw createAiRequestPreflightError(`读取聊天图片失败：${reason}`);
+      }
+    }));
+    return { ...message, attachments };
+  }));
 }
 
 function buildQwenContent(message: ChatMessage) {
@@ -714,6 +750,9 @@ export interface AiRequestDiagnostic {
   status: number;
   statusText: string;
   upstreamStatus?: number;
+  upstreamCode?: string;
+  upstreamMessage?: string;
+  upstreamRequestId?: string;
   code?: string;
   detail?: unknown;
   error?: string;
@@ -742,6 +781,12 @@ function parseAiErrorDiagnostic(rawBody: string, response: Response): AiRequestD
     if (detail && typeof detail === 'object' && 'upstreamStatus' in detail && typeof detail.upstreamStatus === 'number') {
       diagnostic.upstreamStatus = detail.upstreamStatus;
     }
+    if (detail && typeof detail === 'object') {
+      const fields = detail as Record<string, unknown>;
+      if (typeof fields.upstreamCode === 'string') diagnostic.upstreamCode = fields.upstreamCode;
+      if (typeof fields.upstreamMessage === 'string') diagnostic.upstreamMessage = fields.upstreamMessage;
+      if (typeof fields.upstreamRequestId === 'string') diagnostic.upstreamRequestId = fields.upstreamRequestId;
+    }
   } catch {
     diagnostic.detail = body;
   }
@@ -757,6 +802,7 @@ async function createPublicAiRequestError(response: Response, fallbackPrefix: st
     AI_IMAGE_SERVICE_UNCONFIGURED: '图片服务的模型或价格配置不完整，请管理员检查配置。',
     AI_IMAGE_COUNT_UNSUPPORTED: '当前图片模型每次请求仅支持一张图片。',
     AI_IMAGE_UPSTREAM_AUTH_FAILED: '图片供应商认证或权限校验失败，请管理员检查服务配置。',
+    AI_IMAGE_UPSTREAM_CONTENT_REJECTED: '图片提示词被服务商内容审核拒绝，请调整画面描述后重试。',
     AI_IMAGE_UPSTREAM_BALANCE_INSUFFICIENT: '图片供应商账户余额不足，请管理员检查供应商额度。',
     AI_IMAGE_UPSTREAM_RATE_LIMITED: '图片供应商请求限流，请稍后重试。',
     AI_IMAGE_UPSTREAM_INVALID_REQUEST: '图片供应商拒绝了生成参数，请检查模型、图片尺寸和参考图。',
@@ -802,7 +848,12 @@ async function createPublicAiRequestError(response: Response, fallbackPrefix: st
     504: 'AI 上游网关等待超时，请稍后重试。',
   };
   let message: string;
-  if (diagnostic.code && imageErrorMessages[diagnostic.code]) message = imageErrorMessages[diagnostic.code];
+  if (diagnostic.code && imageErrorMessages[diagnostic.code]) {
+    message = imageErrorMessages[diagnostic.code];
+    const upstreamReason = [diagnostic.upstreamCode, diagnostic.upstreamMessage]
+      .filter((value): value is string => Boolean(value)).join('：');
+    if (upstreamReason) message += ` 供应商反馈：${upstreamReason}`;
+  }
   else if (response.status === 401) message = 'AI 服务认证已失效，请重新登录后重试。';
   else if (diagnostic.code && knownBusinessErrorMessages[diagnostic.code]) message = diagnostic.error || knownBusinessErrorMessages[diagnostic.code];
   else if (response.status === 402) message = diagnostic.error || 'AI 点数不足，暂时无法继续生成。';
@@ -1722,16 +1773,17 @@ export const generateResponse = async (
   const effectiveSystemPrompt = effectiveOptions.responseFormat === 'json'
     ? `${systemPrompt}\n\nReturn exactly one valid json object. Do not wrap it in markdown.`
     : systemPrompt;
-  assertTextInputWithinBudget(effectiveSystemPrompt, messages, effectiveOptions);
+  const preparedMessages = await materializeLocalChatImages(messages, effectiveOptions.signal);
+  assertTextInputWithinBudget(effectiveSystemPrompt, preparedMessages, effectiveOptions);
   return withTextRequestDeadline(config, effectiveOptions, async (timedOptions) => {
     if (usesOfficialProxy(config)) {
-      return generateOfficialResponse(config, effectiveSystemPrompt, messages, onChunk, timedOptions);
+      return generateOfficialResponse(config, effectiveSystemPrompt, preparedMessages, onChunk, timedOptions);
     }
     if (isOpenAICompatibleEndpoint(config)) {
-      return generateOpenAICompatibleResponse(config, effectiveSystemPrompt, messages, onChunk, timedOptions);
+      return generateOpenAICompatibleResponse(config, effectiveSystemPrompt, preparedMessages, onChunk, timedOptions);
     }
     const handler = providerHandlers[config.provider] || generateOpenAICompatibleResponse;
-    return handler(config, effectiveSystemPrompt, messages, onChunk, timedOptions);
+    return handler(config, effectiveSystemPrompt, preparedMessages, onChunk, timedOptions);
   });
 };
 

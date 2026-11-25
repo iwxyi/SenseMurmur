@@ -70,7 +70,7 @@ export function parseWorkflowGoalSpec(raw: unknown): WorkflowGoalSpec {
   if (execution.location !== 'client' || execution.recovery !== 'safe_steps_only') throw new Error('目标契约仅支持客户端执行与安全步骤恢复');
   if (!Number.isSafeInteger(execution.maxConcurrentTasks) || Number(execution.maxConcurrentTasks) < 1 || Number(execution.maxConcurrentTasks) > 3
     || !Number.isSafeInteger(execution.maxAutomaticReviewRounds) || Number(execution.maxAutomaticReviewRounds) < 0
-    || Number(execution.maxAutomaticReviewRounds) > 3) throw new Error('目标契约执行上限无效');
+    || Number(execution.maxAutomaticReviewRounds) > 24) throw new Error('目标契约执行上限无效');
   return { schemaVersion: 1, objective: value.objective, constraints, acceptance, allowedTools: allowedTools as WorkflowTool[],
     ...(approvalTools === undefined ? {} : { approvalTools: approvalTools as WorkflowTool[] }),
     ...(preferences === undefined ? {} : { preferences }),
@@ -84,7 +84,7 @@ export function parseWorkflowGoalSpec(raw: unknown): WorkflowGoalSpec {
 
 export function defaultWorkflowGoalSpec(objective: string): WorkflowGoalSpec {
   return parseWorkflowGoalSpec({ schemaVersion: 1, objective, constraints: [], acceptance: [], allowedTools: [...WORKFLOW_TOOLS],
-    execution: { location: 'client', recovery: 'safe_steps_only', maxConcurrentTasks: 3, maxAutomaticReviewRounds: 3 } });
+    execution: { location: 'client', recovery: 'safe_steps_only', maxConcurrentTasks: 3, maxAutomaticReviewRounds: 12 } });
 }
 
 export function workflowGoalContext(spec?: WorkflowGoalSpec): string {

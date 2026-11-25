@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AUTH_SNAPSHOT_KEY } from './authSnapshot';
 import { api, ApiError } from './api';
 import { getChatExecutionFence } from './chatExecutionFence';
-import { assertChatExecutionLease, runWithChatExecutionLease, runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
+import { assertChatExecutionLease, refreshChatExecutionLeaseBeforeWrite, runWithChatExecutionLease, runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useChatStore } from '../stores/useChatStore';
 
@@ -75,11 +75,27 @@ describe('chat execution lease', () => {
     await vi.waitFor(() => expect(getChatExecutionFence('chat-two')).toBeDefined());
     await vi.advanceTimersByTimeAsync(15_000);
     expect(leaseSignal?.aborted).toBe(true);
-    expect(leaseSignal?.reason).toMatchObject({ name: 'AbortError', message: 'lease lost' });
+    expect(leaseSignal?.reason).toMatchObject({ name: 'AbortError', message: '会话运行权续期请求失败：lease lost。当前步骤结果尚未确认，请核对后继续' });
     expect(() => assertChatExecutionLease('chat-two')).toThrow('lease lost');
     finish();
     await expect(running).rejects.toThrow('lease lost');
     expect(getChatExecutionFence('chat-two')).toBeUndefined();
+  });
+
+  it('renews a delayed lease before saving after the page resumes', async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const running = runWithChatExecutionLease('chat-delayed', async () => {
+      await pending;
+      await refreshChatExecutionLeaseBeforeWrite('chat-delayed');
+      return 'saved';
+    });
+    await vi.waitFor(() => expect(getChatExecutionFence('chat-delayed')).toBeDefined());
+    vi.setSystemTime(Date.now() + 60_000);
+    finish();
+    await expect(running).resolves.toBe('saved');
+    expect(api.renewChatExecutionLease).toHaveBeenCalledOnce();
+    expect(api.renewChatExecutionLease).toHaveBeenCalledWith('chat-delayed', expect.objectContaining({ generation: 1 }));
   });
 
   it('forwards cancellation to the protected work', async () => {
@@ -174,6 +190,16 @@ describe('chat execution lease', () => {
     })).rejects.toThrow('network: server unavailable');
     expect(useMessageStore.getState().pendingOperations).toHaveLength(1);
     expect(api.releaseChatExecutionLease).toHaveBeenCalledOnce();
+    flush.mockRestore();
+  });
+
+  it('reports the pending operation state when no sync error has been recorded yet', async () => {
+    const flush = vi.spyOn(useMessageStore.getState(), 'flushPendingOperations').mockResolvedValue();
+    await expect(runWithChatExecutionLease('chat-pending-state', async () => {
+      const fence = getChatExecutionFence('chat-pending-state')!;
+      useMessageStore.setState({ pendingOperations: [{ id: 'message-test', chatId: 'chat-pending-state', executionFence: fence,
+        status: 'syncing', attemptCount: 2, createdAt: Date.now(), kind: 'create', targetLabel: '团队任务消息' }] });
+    })).rejects.toThrow('未确认操作：create「团队任务消息」（syncing，尝试 2）');
     flush.mockRestore();
   });
 

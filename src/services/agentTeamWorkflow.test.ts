@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { generateResponse, listAvailableModels } from './aiClient';
-import { buildAgentTeamTaskRevisionRequest, createAgentTeamWorkflow, isRecoverableAgentTeamRun, recoverAgentTeamRuns } from './agentTeamWorkflow';
+import { buildAgentTeamTaskRevisionRequest, canAutomaticallyRecoverAgentTeamRun, createAgentTeamWorkflow, describeAgentTeamRunFailure, isRecoverableAgentTeamRun, recoverAgentTeamRuns } from './agentTeamWorkflow';
 import { currentWorkflowScope, indexedDbWorkflowRepository, type WorkflowSnapshot } from './workflowRunRuntime';
 import { workflowToolInvocationId, workflowToolOperationKey } from './workflowToolInvocation';
 import { useChatStore } from '../stores/useChatStore';
@@ -26,13 +26,22 @@ import { parseTeamReviewInput, teamReviewLeafSources, TEAM_REVIEW_EVIDENCE_LIMIT
 import { workflowJsonDigest } from './workflowToolRequest';
 import { validateAgentTeamPlan } from './agentTeamPlan';
 
-vi.mock('./agentTeamMediaComposition', () => ({ canComposeTeamMedia: () => true, composeAgentTeamMedia: vi.fn(), inspectAgentTeamComposition: vi.fn(), teamMediaAttachment: vi.fn() }));
+vi.mock('./agentTeamMediaComposition', () => ({
+  canComposeTeamMedia: () => true, composeAgentTeamMedia: vi.fn(), inspectAgentTeamComposition: vi.fn(),
+  syncAgentTeamCompositionToCloud: vi.fn(), teamMediaAttachment: vi.fn(),
+}));
 vi.mock('./agentTeamVideoInspection', () => ({ inspectAgentTeamVideo: vi.fn() }));
 
 vi.mock('./agentTeamImageInspection', () => ({ inspectAgentTeamImages: vi.fn() }));
 vi.mock('./agentTeamAudioTask', () => ({ inspectAgentTeamAudioAttachment: vi.fn(), queueAgentTeamAudio: vi.fn() }));
 
 describe('agent team child collaboration', () => {
+  it('reports the failed recovery stage and the server diagnostic instead of a generic retry message', () => {
+    expect(describeAgentTeamRunFailure('核对云端任务进度', Object.assign(new Error('远端工作流已有不同进度'), { code: 'WORKFLOW_CHECKPOINT_CONFLICT' })))
+      .toBe('团队任务未能继续（核对云端任务进度，错误码 WORKFLOW_CHECKPOINT_CONFLICT）：远端工作流已有不同进度');
+    expect(describeAgentTeamRunFailure('等待会话运行权', Object.assign(new Error('会话运行权已失效，请重新恢复任务'), { code: 'CHAT_EXECUTION_LEASE_LOST' })))
+      .toContain('服务端仅返回旧版通用错误');
+  });
   it('selects only paused runs with work that can resume without guessing an unknown result', () => {
     const base: WorkflowSnapshot = {
       run: { id: 'run', chatId: 'chat', goal: 'goal', status: 'paused', generation: 1, planVersion: 1, planOpen: true, updatedAt: 1 },
@@ -47,6 +56,28 @@ describe('agent team child collaboration', () => {
     expect(isRecoverableAgentTeamRun({ ...base, tasks: [{ ...base.tasks[0], status: 'result_unknown' }] })).toBe(false);
     expect(isRecoverableAgentTeamRun({ ...base, tasks: [{ ...base.tasks[0], status: 'waiting_user' }] })).toBe(false);
     expect(isRecoverableAgentTeamRun({ ...base, run: { ...base.run, status: 'completed' } })).toBe(false);
+  });
+
+  it('automatically resumes only a definite, bounded failure in an automatic run', () => {
+    const base: WorkflowSnapshot = { run: { id: 'run', chatId: 'chat', goal: '做短片', status: 'failed',
+      generation: 1, planVersion: 1, autoReview: true, updatedAt: 1 }, tasks: [
+      { id: 'image', runId: 'run', kind: 'agent_image', input: {}, dependsOn: [], status: 'failed', attempt: 1,
+        error: '图片提示词被服务商内容审核拒绝', updatedAt: 1 },
+    ] };
+    expect(canAutomaticallyRecoverAgentTeamRun(base)).toBe(true);
+    expect(canAutomaticallyRecoverAgentTeamRun({ ...base, tasks: [base.tasks[0],
+      { ...base.tasks[0], id: 'video', kind: 'agent_video', error: '视频服务商拒绝输入' }] })).toBe(true);
+    expect(canAutomaticallyRecoverAgentTeamRun({ ...base, tasks: [{ ...base.tasks[0], kind: 'agent_text', error: '文本模型调用失败' }] })).toBe(true);
+    expect(canAutomaticallyRecoverAgentTeamRun({ ...base, run: { ...base.run, autoReview: false } })).toBe(false);
+    expect(canAutomaticallyRecoverAgentTeamRun({ ...base, tasks: [{ ...base.tasks[0], status: 'result_unknown' }] })).toBe(false);
+    expect(canAutomaticallyRecoverAgentTeamRun({ ...base, tasks: [{ ...base.tasks[0], attempt: 3 }] })).toBe(false);
+    expect(canAutomaticallyRecoverAgentTeamRun({ ...base, tasks: [base.tasks[0], ...Array.from({ length: 4 }, (_, index) => ({
+      ...base.tasks[0], id: `recovery_other_${index}`, kind: 'team_recovery' as const, status: 'completed' as const,
+      output: { action: 'stop', reason: '上游反复拒绝' },
+    }))] })).toBe(false);
+    expect(canAutomaticallyRecoverAgentTeamRun({ ...base, tasks: [...base.tasks,
+      { ...base.tasks[0], id: 'recovery_image_1', kind: 'team_recovery', status: 'completed',
+        output: { action: 'stop', reason: '需调整目标' } }] })).toBe(false);
   });
 
   it('turns a completed child instruction into a role-scoped main-agent revision request', () => {
@@ -80,6 +111,7 @@ vi.mock('./agentTeamVideoTask', () => ({
 vi.mock('./agentTeamImageTask', () => ({
   inspectAgentTeamImageAttachment: vi.fn(),
   queueAgentTeamImage: vi.fn(),
+  teamImageMessagePrompt: vi.fn(),
   teamImageReference: vi.fn(),
 }));
 
@@ -127,6 +159,119 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('does not expand a completed run when background recovery sees a stale snapshot', async () => {
+    const runId = `completed-recovery-${crypto.randomUUID()}`;
+    const scope = `completed-recovery-${runId}`;
+    const now = Date.now();
+    const plan = { summary: '短片', roles: [{ id: 'writer', name: '编剧', responsibility: '写剧本', method: '分镜',
+      acceptance: '有剧本', allowedTools: ['text_generation'] }],
+    tasks: [{ id: 'script', roleId: 'writer', goal: '写剧本', dependsOn: [], acceptance: '有正文' }], finalAcceptance: '剧本完整' };
+    await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
+      run: { id: runId, chatId: 'chat', goal: '制作短片', status: 'completed', generation: 1,
+        planVersion: 1, planOpen: false, autoReview: true, updatedAt: now },
+      tasks: [{ id: 'plan', runId, kind: 'team_plan', input: '制作短片', output: plan,
+        dependsOn: [], status: 'completed', attempt: 1, updatedAt: now }],
+    }, value: undefined }));
+
+    const result = await createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope).resume(runId);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks).toHaveLength(1);
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it('enforces a role output schema before completing or delivering task output', async () => {
+    const runId = `team-role-output-${crypto.randomUUID()}`;
+    const scope = 'team-role-output-contract-test';
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '结构化结论', roles: [{ id: 'analyst', name: '分析员',
+      responsibility: '分析资料', method: '逐项核对', acceptance: '返回结论字段', allowedTools: ['text_generation'],
+      outputSchema: { type: 'object', properties: { conclusion: { type: 'string' } }, required: ['conclusion'], additionalProperties: false } }],
+      tasks: [{ id: 'analyze', roleId: 'analyst', goal: '整理结论', dependsOn: [], acceptance: '结论可读' }], finalAcceptance: '结论已交付' }))
+      .mockResolvedValueOnce('{"unexpected":"must not be saved"}');
+    const result = await createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope)
+      .start(runId, 'chat', '整理结论');
+    expect(result.snapshot.run.status).toBe('failed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'analyze')?.error).toContain('输出不符合岗位契约字段要求');
+    expect(result.snapshot.tasks.find((task) => task.id === 'analyze')?.output).toBeUndefined();
+    expect(result.snapshot.tasks.find((task) => task.id === 'analyze')?.error).not.toContain('must not be saved');
+    expect(generate.mock.calls[1][4]).toMatchObject({ responseFormat: 'json' });
+  });
+
+  it('blocks a model call when its real input does not satisfy the role input schema', async () => {
+    const runId = `team-role-input-${crypto.randomUUID()}`;
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '输入受限', roles: [{ id: 'writer', name: '作者',
+      responsibility: '撰写报告', method: '整理资料', acceptance: '报告可读', allowedTools: ['text_generation'],
+      inputSchema: { type: 'object', properties: { requiredByRole: { type: 'string' } }, required: ['requiredByRole'], additionalProperties: false } }],
+      tasks: [{ id: 'write', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '报告可读' }], finalAcceptance: '报告可读' }));
+    const result = await createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-role-input-contract-test')
+      .start(runId, 'chat', '写报告');
+    expect(result.snapshot.run.status).toBe('failed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'write')?.error).toContain('任务输入不符合岗位契约字段要求');
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it('automatically asks the main agent to replan a definite execution failure in the same run', async () => {
+    const runId = `team-${crypto.randomUUID()}`;
+    const scope = `automatic-replan-${runId}`;
+    const plan = {
+      summary: '先研究，再总结',
+      roles: [{ id: 'writer', name: '研究员', responsibility: '研究主题', method: '整理资料', acceptance: '有结论', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'research', roleId: 'writer', goal: '生成合法数字数据', dependsOn: [], acceptance: '返回 value 数字',
+        deliverable: { kind: 'json', title: '数据', jsonSchema: { type: 'object', required: ['value'], properties: { value: { type: 'number' } } } } }],
+      finalAcceptance: '交付研究结论',
+    };
+    generate.mockResolvedValueOnce(JSON.stringify(plan))
+      .mockResolvedValueOnce('{"value":"不是数字"}')
+      .mockResolvedValueOnce(JSON.stringify({ action: 'stop', reason: '当前没有可用的替代文本模型' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const result = await workflow.start(runId, 'chat', '研究主题并交付结论', true);
+    expect(result.snapshot.run.status).toBe('failed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'research')).toMatchObject({ status: 'failed' });
+    expect(result.snapshot.tasks.find((task) => task.kind === 'team_recovery')).toMatchObject({
+      status: 'completed', output: { action: 'stop', reason: '当前没有可用的替代文本模型' },
+    });
+    expect(generate).toHaveBeenCalledTimes(3);
+    expect(generate.mock.calls[2][1]).toContain('失败恢复决策者');
+  });
+
+  it('executes a replacement stage after failure replan and continues final acceptance', async () => {
+    const runId = `team-${crypto.randomUUID()}`;
+    const scope = `automatic-replan-execute-${runId}`;
+    useChatStore.setState((state) => ({ chats: state.chats.map((chat) => chat.id === 'chat'
+      ? { ...chat, messageBranchState: { ...chat.messageBranchState, enabled: false } } : chat) }));
+    const originalPlan = {
+      summary: '生成结构化数据',
+      roles: [{ id: 'analyst', name: '分析员', responsibility: '整理数据', method: '验证字段', acceptance: '数值字段有效', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'data', roleId: 'analyst', goal: '返回合法数据', dependsOn: [], acceptance: 'value 是数字',
+        deliverable: { kind: 'json', title: '数据', jsonSchema: { type: 'object', required: ['value'], properties: { value: { type: 'number' } } } } }],
+      finalAcceptance: '数据有效',
+    };
+    const replacementPlan = {
+      summary: '改用受约束格式生成数据',
+      roles: [{ id: 'writer', name: '数据撰写员', responsibility: '生成数据', method: '按字段契约输出', acceptance: '内容可解析', allowedTools: ['text_generation'] }],
+      tasks: [{ id: 'replacement', roleId: 'writer', goal: '输出 value 为 2 的 JSON 对象', dependsOn: [], acceptance: '返回合法 JSON' }],
+      finalAcceptance: '返回数据对象',
+    };
+    generate.mockResolvedValueOnce(JSON.stringify(originalPlan))
+      .mockResolvedValueOnce('{"value":"不是数字"}')
+      .mockResolvedValueOnce(JSON.stringify({ action: 'replan', request: '改用新的文本生成任务输出 value 为数字的 JSON 对象，并验证后交付', reason: '原输出未满足 JSON 字段类型契约' }))
+      .mockResolvedValueOnce(JSON.stringify(replacementPlan))
+      .mockResolvedValueOnce('{"value":2}')
+      .mockResolvedValueOnce(JSON.stringify({ complete: true, reason: '新阶段已返回合法 JSON 数据' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const result = await workflow.start(runId, 'chat', '生成 value 为数字的数据并交付', true);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'data')).toMatchObject({ status: 'abandoned' });
+    expect(result.snapshot.tasks.find((task) => task.id === 'replan_data_1')).toMatchObject({ kind: 'team_plan_revision', status: 'completed' });
+    expect(result.snapshot.tasks.find((task) => task.id === 'replan_data_1_replacement')).toMatchObject({ status: 'completed', output: '{"value":2}' });
+    expect(result.snapshot.tasks.find((task) => task.id === 'recovery_data_1')).toMatchObject({
+      status: 'completed', output: { action: 'replan', reason: '原输出未满足 JSON 字段类型契约' },
+    });
+    expect(result.snapshot.tasks.some((task) => task.kind === 'team_review' && task.status === 'completed')).toBe(true);
+    const delivered = await workflow.publish(runId);
+    expect(delivered.versions.at(-1)?.content).toContain('{"value":2}');
+    expect(delivered.versions.at(-1)?.content).not.toContain('不是数字');
+  });
+
   it.each(['image_generation', 'audio_generation', 'video_generation'] as const)('quotes the final script and submits the persisted approval for %s', async (tool) => {
     const runId = crypto.randomUUID(); const scope = `signed-media-${runId}`;
     const image = tool === 'image_generation';
@@ -143,7 +288,7 @@ describe('agent team workflow', () => {
       generate.mockResolvedValueOnce(JSON.stringify({ summary: '制作森林作品', roles: [{ id: 'maker', name: '创作者',
         responsibility: '制作', method: '先写脚本再制作', acceptance: '可播放', allowedTools: ['text_generation', tool] }],
         tasks: [{ id: 'script', roleId: 'maker', goal: '写森林脚本', tool: 'text_generation', dependsOn: [], acceptance: '有正文' },
-          { id: 'media', roleId: 'maker', goal: '根据脚本制作', tool, dependsOn: ['script'], acceptance: '有文件' }], finalAcceptance: '可播放' }))
+          { id: 'media', roleId: 'maker', goal: image ? '雨夜森林中，蓝白机器猫抱着铜锣烧奔跑，霸王龙从后方追来，青蓝月光与暖色轮廓光，3D动画电影风格。' : '根据脚本制作', ...(video ? { videoPrompt: '脚本正文：森林中的木琴与追逐。', videoDurationSeconds: 4 } : {}), tool, dependsOn: ['script'], acceptance: '有文件' }], finalAcceptance: '可播放' }))
         .mockResolvedValueOnce('脚本正文：森林中的木琴与追逐。');
       vi.mocked(queueAgentTeamAudio).mockResolvedValue({ externalTaskId: 'accepted-music' });
       vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'accepted-video' });
@@ -152,11 +297,14 @@ describe('agent team workflow', () => {
       const goalSpec = { ...defaultWorkflowGoalSpec('制作森林作品'), approvalTools: [tool] };
       const pending = await createAgentTeamWorkflow(config, () => scope).start(runId, 'chat', '制作森林作品', false, undefined, undefined, goalSpec);
       const proposal = pending.snapshot.tasks.find((task) => task.id === 'media')!.approvals!.at(-1)!;
-      expect(proposal.mediaExecution?.request.prompt).toContain('脚本正文：森林中的木琴与追逐。');
+      if (image) {
+        expect(proposal.mediaExecution?.request.prompt).toContain('蓝白机器猫抱着铜锣烧奔跑');
+        expect(proposal.mediaExecution?.request.prompt).not.toContain('脚本正文：森林中的木琴与追逐。');
+      } else expect(proposal.mediaExecution?.request.prompt).toContain('脚本正文：森林中的木琴与追逐。');
       expect(proposal.mediaExecution?.request).toMatchObject({ model, client_request_key: expect.any(String), metadata: { aiUsage: {
         resourceId: 'chat', workflow: { runId, taskId: 'media', attempt: 1, kind: 'tool' },
       } } });
-      if (video) expect(proposal.mediaExecution?.request).toMatchObject({ aspect_ratio: '9:16', resolution: '720p', duration: 6 });
+      if (video) expect(proposal.mediaExecution?.request).toMatchObject({ aspect_ratio: '9:16', resolution: '720p', duration: 4 });
       if (image) expect(proposal.mediaExecution?.request).toMatchObject({ resolution: '2K' });
       expect(queueAgentTeamAudio).not.toHaveBeenCalled(); expect(queueAgentTeamVideo).not.toHaveBeenCalled(); expect(queueAgentTeamImage).not.toHaveBeenCalled();
       const restored = createAgentTeamWorkflow(config, () => scope);
@@ -541,6 +689,7 @@ describe('agent team workflow', () => {
     expect(savedText).toHaveLength(1);
     generate.mockResolvedValueOnce(JSON.stringify({ summary: '复用正文', finalAcceptance: '准确', roles: [{ ...role, allowedTools: tool === 'delegate_task' ? [tool, 'text_generation'] : [tool] }],
       tasks: [{ id: 'reuse', roleId: role.id, goal: '按原稿制作', tool, acceptance: '准确', dependsOn: [],
+        ...(tool === 'video_generation' ? { videoPrompt: '夜雨巷道中机器猫抱着铜锣烧奔跑，恐龙追近，电影动画风格。' } : {}),
         savedText,
         ...(tool === 'speech_generation' ? { speech: { textTaskId: 'original' } } : {}) }] }));
     if (tool === 'delegate_task') generate.mockResolvedValueOnce(JSON.stringify({ summary: '下级复用', finalAcceptance: '准确', roles: [role],
@@ -567,8 +716,13 @@ describe('agent team workflow', () => {
       const priorEvidence = JSON.parse(delegationGoal.split('已有交付：')[1].split('\n')[0]);
       expect(priorEvidence[0]).toMatchObject({ output: original.slice(0, 600), outputCharacters: original.length, truncated: true });
     }
-    if (tool === 'image_generation') expect(queueAgentTeamImage).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(expectedText) }));
-    if (tool === 'video_generation') expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(expectedText) }));
+    if (tool === 'image_generation') expect(queueAgentTeamImage).toHaveBeenCalledWith(expect.objectContaining({ prompt: '按原稿制作' }));
+    if (tool === 'video_generation') {
+      const prompt = vi.mocked(queueAgentTeamVideo).mock.calls[0][0].prompt;
+      expect([...prompt].length).toBeLessThanOrEqual(1000);
+      expect(prompt).toBe('夜雨巷道中机器猫抱着铜锣烧奔跑，恐龙追近，电影动画风格。');
+      expect(prompt).not.toContain('项目说明不应当作为所选文件正文');
+    }
     if (tool === 'audio_generation') expect(queueAgentTeamAudio).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining(expectedText) }));
     if (tool === 'speech_generation') expect(queueAgentTeamAudio).toHaveBeenCalledWith(expect.objectContaining({ prompt: expectedText, purpose: 'speech' }));
     await createAgentTeamWorkflow(config, () => scope).resume(runId);
@@ -591,7 +745,7 @@ describe('agent team workflow', () => {
     const video = tool === 'video_inspection';
     const sourceTool = video ? 'video_generation' : 'image_generation';
     const role = { id: 'editor', name: '编辑', responsibility: '修改', method: '复用', acceptance: '有效', allowedTools: [sourceTool] };
-    const sourceTask = { id: 'source', roleId: role.id, goal: '素材', acceptance: '已保存', dependsOn: [], tool: sourceTool };
+    const sourceTask = { id: 'source', roleId: role.id, goal: '素材', ...(video ? { videoPrompt: '森林中机器猫奔跑，恐龙追赶。' } : {}), acceptance: '已保存', dependsOn: [], tool: sourceTool };
     const snapshot: WorkflowSnapshot = {
       run: { id: runId, chatId: 'chat', goal: '修改素材', status: 'completed', generation: 1, planVersion: 2, planOpen: false, updatedAt: now },
       tasks: [
@@ -601,7 +755,7 @@ describe('agent team workflow', () => {
     };
     await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot, value: undefined }));
     generate.mockResolvedValueOnce(JSON.stringify({ summary: '复用', finalAcceptance: '修改完成', roles: [{ ...role, allowedTools: [tool] }],
-      tasks: [{ id: 'edit', roleId: role.id, goal: '编辑或检查已有素材', tool, acceptance: '完成', dependsOn: [],
+      tasks: [{ id: 'edit', roleId: role.id, goal: '编辑或检查已有素材', ...(tool === 'video_generation' ? { videoPrompt: '森林中机器猫奔跑，恐龙追赶。' } : {}), tool, acceptance: '完成', dependsOn: [],
         savedMedia: listTeamSavedMedia(snapshot, ['source']).map((media) => ({ ...media, alias: 'original' })) }] }));
     const reference = { url: 'data:image/png;base64,saved', mimeType: 'image/png' };
     vi.mocked(teamImageReference).mockReturnValue(reference);
@@ -683,7 +837,7 @@ describe('agent team workflow', () => {
     const now = Date.now();
     const role = { id: 'director', name: '导演', responsibility: '制作', method: '剪辑', acceptance: '成片', allowedTools: ['video_generation', 'audio_generation'] };
     const tasks = [
-      { id: 'shot', roleId: role.id, goal: '拍摄', dependsOn: [], tool: 'video_generation', acceptance: '可播放' },
+      { id: 'shot', roleId: role.id, goal: '拍摄', videoPrompt: '森林中恐龙追赶机器猫。', dependsOn: [], tool: 'video_generation', acceptance: '可播放' },
       { id: 'music', roleId: role.id, goal: '伴奏', dependsOn: [], tool: 'audio_generation', acceptance: '可播放' },
     ];
     const snapshot: WorkflowSnapshot = {
@@ -726,7 +880,7 @@ describe('agent team workflow', () => {
     const plan = validateAgentTeamPlan({ summary: '短片', finalAcceptance: '可播放',
       roles: [{ id: 'maker', name: '制作', responsibility: '制作', method: '剪辑', acceptance: '可播放', allowedTools: ['video_generation', 'audio_generation', 'media_composition'] }],
       tasks: [
-        { id: 'shot', roleId: 'maker', tool: 'video_generation', goal: '镜头', acceptance: '可播放', dependsOn: [] },
+        { id: 'shot', roleId: 'maker', tool: 'video_generation', goal: '镜头', videoPrompt: '雨夜街巷中机器猫奔跑，恐龙追近。', acceptance: '可播放', dependsOn: [] },
         { id: 'music', roleId: 'maker', tool: 'audio_generation', goal: '伴奏', acceptance: '可播放', dependsOn: [] },
         { id: 'film', roleId: 'maker', tool: 'media_composition', goal: '合成短片', acceptance: '可播放', dependsOn: ['shot', 'music'],
           composition: { clips: [{ taskId: 'shot' }], audioTracks: [{ taskId: 'music' }] } },
@@ -800,7 +954,7 @@ describe('agent team workflow', () => {
     const scope = `export-${runId}`;
     const role = { id: 'artist', name: '创作者', responsibility: '制作', method: '先图后视频', acceptance: '可播放', allowedTools: ['delegate_task', 'image_generation', 'video_generation'] };
     const image = { id: 'art', roleId: role.id, goal: '制作角色素材', tool: 'delegate_task', mediaOutput: 'image', dependsOn: [], acceptance: '图片' };
-    const shot = { id: 'shot', roleId: role.id, goal: '让角色奔跑', tool: 'video_generation', dependsOn: ['art'], acceptance: '视频' };
+    const shot = { id: 'shot', roleId: role.id, goal: '让角色奔跑', videoPrompt: '森林中机器猫奔跑，恐龙追赶。', tool: 'video_generation', dependsOn: ['art'], acceptance: '视频' };
     const frame = { ...image, id: 'frame', tool: 'image_generation', mediaOutput: undefined };
     const makePlan = (tasks: unknown[], extra = {}) => JSON.stringify({ summary: '制作', roles: [role], tasks, finalAcceptance: '可播放', ...extra });
     useSettingsStore.setState({ aiProfiles: [
@@ -824,7 +978,7 @@ describe('agent team workflow', () => {
     const resumed = await createAgentTeamWorkflow(config, () => scope).resume(runId);
     expect(resumed.snapshot.tasks.find((task) => task.id === 'art')?.status).toBe('completed');
     expect(resumed.snapshot.tasks.find((task) => task.id === 'shot')?.status).toBe('waiting_external');
-    expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ referenceImages: [reference], prompt: expect.stringContaining('角色参考图已经完成') }));
+    expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ referenceImages: [reference], prompt: '森林中机器猫奔跑，恐龙追赶。' }));
     expect(queueAgentTeamImage).toHaveBeenCalledTimes(1);
     await createAgentTeamWorkflow(config, () => scope).resume(runId);
     expect(queueAgentTeamVideo).toHaveBeenCalledTimes(1);
@@ -1064,7 +1218,7 @@ describe('agent team workflow', () => {
     useSettingsStore.setState({ aiProfiles: [{ id: 'vision', name: '视觉', type: 'text', provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o', isDefault: true }] });
     const role = { id: 'reviewer', name: '检查员', responsibility: '检查视频', method: '抽帧', acceptance: '实际画面', allowedTools: ['video_generation', 'video_inspection'] };
     const tasks = [
-      { id: 'shot', roleId: role.id, goal: '生成', acceptance: '视频可播放', dependsOn: [], tool: 'video_generation' },
+      { id: 'shot', roleId: role.id, goal: '生成', videoPrompt: '森林中恐龙追赶机器猫。', acceptance: '视频可播放', dependsOn: [], tool: 'video_generation' },
       { id: 'inspect', roleId: role.id, goal: '检查', acceptance: '有角色', dependsOn: ['shot'], tool: 'video_inspection' },
     ];
     await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
@@ -1097,7 +1251,7 @@ describe('agent team workflow', () => {
     const now = Date.now();
     const role = { id: 'director', name: '导演', responsibility: '制作', method: '剪辑', acceptance: '成片', allowedTools: ['video_generation', 'media_composition'] };
     const tasks = [
-      { id: 'shot', roleId: role.id, goal: '拍摄', dependsOn: [], tool: 'video_generation', acceptance: '可播放' },
+      { id: 'shot', roleId: role.id, goal: '拍摄', videoPrompt: '森林中恐龙追赶机器猫。', dependsOn: [], tool: 'video_generation', acceptance: '可播放' },
       { id: 'film', roleId: role.id, goal: '合成', dependsOn: ['shot'], tool: 'media_composition', acceptance: '可播放', composition: { clips: [{ taskId: 'shot' }] } },
     ];
     const plan = { roles: [role], tasks, summary: '短片', finalAcceptance: '成片' };
@@ -1164,19 +1318,27 @@ describe('agent team workflow', () => {
       { id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true,
         imageCapabilities: { textToImage: true, referenceImage: true, multiReferenceImage: false, seed: false, negativePrompt: false } },
     ] });
+    const script = '全片发生在雨夜后巷。镜头一、镜头二、镜头三的完整关键帧提示词和剧情说明不得直接提交给单张图片生成。';
+    const scenePrompt = '雨夜后巷，绿色自动贩卖机旁积水映出粉青霓虹，机器猫抱着铜锣烧从左向右奔跑，霸王龙在远处巷口追来，低机位广角中远景，暖黄轮廓光与青蓝环境光，3D动画电影质感。';
+    const characterPrompt = '雨夜后巷的绿色自动贩卖机前，机器猫抱着铜锣烧急停并伸手按下出货键，霸王龙从右侧扑空，保持同一角色外观和霓虹光线，中近景斜构图，3D动画电影质感。';
     generate.mockResolvedValueOnce(JSON.stringify({ summary: '连续画面', roles: [
-      { id: 'artist', name: '画师', responsibility: '绘制场景', method: '先画场景再画角色', acceptance: '两张图', allowedTools: ['image_generation'] },
+      { id: 'artist', name: '画师', responsibility: '编写剧本并逐张绘制画面', method: '先整理剧本，再分别编写每张图片的完整提示词', acceptance: '两张图', allowedTools: ['text_generation', 'image_generation'] },
     ], tasks: [
-      { id: 'scene', roleId: 'artist', goal: '画森林', dependsOn: [], tool: 'image_generation', acceptance: '森林图' },
-      { id: 'character', roleId: 'artist', goal: '在森林中画角色', dependsOn: ['scene'], tool: 'image_generation', acceptance: '角色图' },
+      { id: 'script', roleId: 'artist', goal: '写出连续的雨夜后巷追逐剧本和镜头信息', dependsOn: [], tool: 'text_generation', acceptance: '剧情和空间关系完整' },
+      { id: 'scene', roleId: 'artist', goal: scenePrompt, dependsOn: ['script'], tool: 'image_generation', acceptance: '开场图' },
+      { id: 'character', roleId: 'artist', goal: characterPrompt, dependsOn: ['scene'], tool: 'image_generation', acceptance: '急停图' },
     ], finalAcceptance: '两张图已保存' }));
+    generate.mockResolvedValueOnce(script);
     vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已保存' });
     vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/user/chat/scene.png', mimeType: 'image/png', label: '场景图' });
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'text-model' }, () => `image-chain-scope-${runId}`);
     const result = await workflow.start(runId, chatId, '画森林，然后在同一场景画角色');
     expect(result.snapshot.run.status).toBe('completed');
+    expect(queueAgentTeamImage).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'scene', prompt: scenePrompt, referenceImages: [] }));
     expect(queueAgentTeamImage).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'character',
+      prompt: characterPrompt,
       referenceImages: [{ url: '/uploads/media/user/chat/scene.png', mimeType: 'image/png', label: '场景图' }] }));
+    expect(vi.mocked(queueAgentTeamImage).mock.calls.map(([request]) => request.prompt).join('\n')).not.toContain(script);
   });
 
   it('rejects planning for a deleted assistant chat before calling the model', async () => {
@@ -1275,6 +1437,29 @@ describe('agent team workflow', () => {
     expect(inspectAgentTeamImages).toHaveBeenCalledWith(expect.objectContaining({ references: [{ url: '/uploads/media/forest.png', mimeType: 'image/png' }] }));
     expect(generate.mock.calls[1][2][0].content).toContain('实际画面有森林，无角色');
   });
+  it('passes an upstream script to image inspection through image dependencies', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `continuity-inspection-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true },
+      { id: 'vision', name: '视觉文字', type: 'text', provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o', isDefault: true },
+    ] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '连续短片', roles: [
+      { id: 'director', name: '导演', responsibility: '创作', method: '先写后画再检查', acceptance: '画面一致', allowedTools: ['text_generation', 'image_generation', 'image_inspection'] },
+    ], tasks: [
+      { id: 'script', roleId: 'director', goal: '写场景剧本', dependsOn: [], tool: 'text_generation', acceptance: '场景明确' },
+      { id: 'frame', roleId: 'director', goal: '画关键帧', dependsOn: ['script'], tool: 'image_generation', acceptance: '角色清楚' },
+      { id: 'inspect', roleId: 'director', goal: '核对关键帧', dependsOn: ['frame'], tool: 'image_inspection', acceptance: '场景一致' },
+    ], finalAcceptance: '场景一致' })).mockResolvedValueOnce('剧本：全部镜头都在绿意庭院。');
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已保存' });
+    vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/garden.png', mimeType: 'image/png' });
+    vi.mocked(inspectAgentTeamImages).mockImplementation(async (params) => { await params.beforeModelRequest?.(); return '实际画面在庭院'; });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'gpt-4o' }, () => `continuity-scope-${runId}`);
+    const result = await workflow.start(runId, chatId, '在同一庭院制作连续画面');
+    expect(result.snapshot.tasks.find((item) => item.id === 'inspect')).toMatchObject({ status: 'completed' });
+    expect(inspectAgentTeamImages).toHaveBeenCalledWith(expect.objectContaining({ sourceText: expect.stringContaining('全部镜头都在绿意庭院') }));
+  });
   it('uses image inspection observations in a dependent video prompt', async () => {
     const runId = crypto.randomUUID();
     const chatId = `inspection-video-${runId}`;
@@ -1288,7 +1473,7 @@ describe('agent team workflow', () => {
       tasks: [
         { id: 'scene', roleId: 'director', goal: '画森林', dependsOn: [], tool: 'image_generation', acceptance: '森林图' },
         { id: 'inspect', roleId: 'director', goal: '检查场景', dependsOn: ['scene'], tool: 'image_inspection', acceptance: '有森林' },
-        { id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: ['inspect'], tool: 'video_generation', acceptance: '可播放' },
+        { id: 'shot', roleId: 'director', goal: '生成视频', videoPrompt: '实际画面是森林，但光线偏暗；恐龙追赶机器猫。', dependsOn: ['inspect'], tool: 'video_generation', acceptance: '可播放', videoDurationSeconds: 4 },
       ], finalAcceptance: '短片可播放' }));
     vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已保存' });
     vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/forest.png', mimeType: 'image/png' });
@@ -1301,6 +1486,7 @@ describe('agent team workflow', () => {
     expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({
       prompt: expect.stringContaining('实际画面是森林，但光线偏暗'),
       referenceImages: [{ url: '/uploads/media/forest.png', mimeType: 'image/png' }],
+      durationSeconds: 4,
     }));
   });
   it('automatically reviews delivery, delegates one missing step, and does not repeat it on resume', async () => {
@@ -1374,7 +1560,7 @@ describe('agent team workflow', () => {
     const inspectionTool = kind === 'image' ? 'image_inspection' : 'video_inspection';
     const plan = { summary: '制作与检查', roles: [{ id: 'director', name: '导演', responsibility: '制作并检查角色', method: '生成后检查', acceptance: '角色蓝色', allowedTools: [generationTool, inspectionTool] }],
       tasks: [
-        { id: 'media', roleId: 'director', goal: '制作蓝色角色', dependsOn: [], tool: generationTool, acceptance: '角色蓝色' },
+        { id: 'media', roleId: 'director', goal: '制作蓝色角色', ...(kind === 'video' ? { videoPrompt: '蓝色角色在明亮场景中清晰出现，固定镜头。' } : {}), dependsOn: [], tool: generationTool, acceptance: '角色蓝色' },
         { id: 'inspect', roleId: 'director', goal: '检查角色颜色', dependsOn: ['media'], tool: inspectionTool, acceptance: '确认蓝色' },
       ], finalAcceptance: '角色始终为蓝色' };
     useSettingsStore.setState({ aiProfiles: [
@@ -1451,7 +1637,7 @@ describe('agent team workflow', () => {
     useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
     useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
     const basePlan = { summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '生成视频', method: '生成', acceptance: '成片', allowedTools: ['video_generation'] }],
-      tasks: [{ id: 'shot', roleId: 'director', goal: '生成短片', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' };
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成短片', videoPrompt: '森林中恐龙追赶机器猫。', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' };
     const extraPlan = { summary: '补充', roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理', acceptance: '成稿', allowedTools: ['text_generation'] }],
       tasks: [{ id: 'note', roleId: 'writer', goal: '补充说明', dependsOn: [], acceptance: '有说明' }], finalAcceptance: '完整' };
     const now = Date.now();
@@ -1506,7 +1692,7 @@ describe('agent team workflow', () => {
     useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
     useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
     generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '制作视频', method: '生成', acceptance: '可播放', allowedTools: ['video_generation'] }],
-      tasks: [{ id: 'shot', roleId: 'director', goal: '生成短片', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '短片可播放' }));
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成短片', videoPrompt: '森林中恐龙追赶机器猫。', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '短片可播放' }));
     vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'saved-video-task' });
     vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'saved-video-task' });
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-review-video-test');
@@ -1543,6 +1729,27 @@ describe('agent team workflow', () => {
     expect(finished.snapshot.tasks.filter((task) => task.kind === 'team_review')).toHaveLength(1);
     expect(generate).toHaveBeenCalledTimes(3);
   });
+  it('uses real first-stage output to plan and execute the next stage', async () => {
+    const runId = crypto.randomUUID();
+    const scope = `rolling-plan-${runId}`;
+    const role = { id: 'writer', name: '作者', responsibility: '整理材料', method: '核对内容', acceptance: '有可读文字', allowedTools: ['text_generation'] };
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '先整理事实', roles: [role],
+      tasks: [{ id: 'outline', roleId: 'writer', goal: '整理事实', dependsOn: [], acceptance: '有事实清单' }], finalAcceptance: '交付完整报告' }))
+      .mockResolvedValueOnce('事实清单：A')
+      .mockResolvedValueOnce(JSON.stringify({ complete: false, reason: '已有事实清单，但缺报告', nextRequest: '根据已完成事实清单写报告' }))
+      .mockResolvedValueOnce(JSON.stringify({ summary: '根据事实写报告', roles: [role],
+        tasks: [{ id: 'report', roleId: 'writer', goal: '写完整报告', dependsOn: [], acceptance: '覆盖事实清单' }], finalAcceptance: '交付完整报告' }))
+      .mockResolvedValueOnce('报告正文：基于事实清单 A')
+      .mockResolvedValueOnce(JSON.stringify({ complete: true, reason: '报告已交付' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => scope);
+    const result = await workflow.start(runId, 'chat', '交付完整报告', true);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'outline')?.output).toBe('事实清单：A');
+    expect(result.snapshot.tasks.find((task) => task.id === 'auto_delegate_1_report')?.output).toBe('报告正文：基于事实清单 A');
+    expect(generate.mock.calls[0][1]).toContain('持续规划');
+    expect(generate.mock.calls[3][2][0].content).toContain('事实清单：A');
+    expect(generate).toHaveBeenCalledTimes(6);
+  });
   it('runs a text team when the configured video model directory is unavailable', async () => {
     const runId = crypto.randomUUID();
     useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'missing-video', isDefault: true }] });
@@ -1559,7 +1766,7 @@ describe('agent team workflow', () => {
     const runId = crypto.randomUUID();
     useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'removed-video', isDefault: true }] });
     generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '生成视频', method: '生成', acceptance: '成片', allowedTools: ['video_generation'] }],
-      tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' }));
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', videoPrompt: '森林中恐龙追赶机器猫。', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' }));
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-removed-video-test');
     const result = await workflow.start(runId, 'chat', '生成短片');
     expect(result.snapshot.tasks[0].status).toBe('failed');
@@ -1573,7 +1780,7 @@ describe('agent team workflow', () => {
     expect(retry.run.status).toBe('paused');
     expect(retry.tasks[0].capabilityIssue).toBeUndefined();
     generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '生成视频', method: '生成', acceptance: '成片', allowedTools: ['video_generation'] }],
-      tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' }));
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', videoPrompt: '森林中恐龙追赶机器猫。', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' }));
     vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'restored-video' });
     vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'restored-video' });
     const resumed = await workflow.resume(runId);
@@ -1601,6 +1808,8 @@ describe('agent team workflow', () => {
   });
   it('keeps unmet acceptance blocked and lets the user replace the block with an explicit task', async () => {
     const runId = crypto.randomUUID();
+    const spec = defaultWorkflowGoalSpec('完成复杂目标');
+    spec.execution.maxAutomaticReviewRounds = 3;
     const plan = { summary: '研究', roles: [{ id: 'writer', name: '写作者', responsibility: '研究', method: '整理', acceptance: '有结论', allowedTools: ['text_generation'] }],
       tasks: [{ id: 'research', roleId: 'writer', goal: '研究问题', dependsOn: [], acceptance: '有结论' }], finalAcceptance: '完整交付' };
     generate.mockResolvedValueOnce(JSON.stringify(plan)).mockResolvedValueOnce('阶段结论');
@@ -1609,7 +1818,7 @@ describe('agent team workflow', () => {
       if (round < 2) generate.mockResolvedValueOnce(JSON.stringify({ ...plan, tasks: [{ ...plan.tasks[0], id: `extra_${round + 1}` }] })).mockResolvedValueOnce(`补做结果 ${round + 1}`);
     }
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-auto-block-test');
-    const blocked = await workflow.start(runId, 'chat', '完成复杂目标', true);
+    const blocked = await workflow.start(runId, 'chat', '完成复杂目标', true, undefined, undefined, spec);
     expect(blocked.snapshot.run.status).toBe('paused');
     expect(blocked.snapshot.tasks.find((task) => task.id === 'review_needs_user')?.status).toBe('waiting_user');
     const calls = generate.mock.calls.length;
@@ -1630,7 +1839,7 @@ describe('agent team workflow', () => {
     generate.mockResolvedValueOnce(JSON.stringify({ summary: '制作短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '先画后拍', acceptance: '成片', allowedTools: ['image_generation', 'video_generation'] }],
       tasks: [
         { id: 'scene', roleId: 'director', goal: '黄昏森林场景图', dependsOn: [], tool: 'image_generation', acceptance: '有图片' },
-        { id: 'shot', roleId: 'director', goal: '森林追逐视频', dependsOn: ['scene'], tool: 'video_generation', acceptance: '可播放' },
+        { id: 'shot', roleId: 'director', goal: '森林追逐视频', videoPrompt: '黄昏森林中恐龙追逐机器猫，镜头向右跟拍。', dependsOn: ['scene'], tool: 'video_generation', acceptance: '可播放' },
       ], finalAcceptance: '成片可播放' }));
     vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已生成并保存在当前聊天附件' });
     vi.mocked(teamImageReference).mockReturnValue({ url: 'https://example.test/scene.png', mimeType: 'image/png', label: '场景图' });
@@ -1653,7 +1862,7 @@ describe('agent team workflow', () => {
       tasks: [
         { id: 'scene', roleId: 'director', goal: '场景图', dependsOn: [], tool: 'image_generation', acceptance: '有图片' },
         { id: 'script', roleId: 'director', goal: '写镜头脚本', dependsOn: ['scene'], tool: 'text_generation', acceptance: '有脚本' },
-        { id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: ['script'], tool: 'video_generation', acceptance: '可播放' },
+        { id: 'shot', roleId: 'director', goal: '生成视频', videoPrompt: '雨夜街巷中恐龙追赶机器猫，镜头向右跟拍。', dependsOn: ['script'], tool: 'video_generation', acceptance: '可播放' },
       ], finalAcceptance: '视频可播放' })).mockResolvedValueOnce('镜头脚本');
     vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '场景图已保存' });
     vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/scene.png', mimeType: 'image/png', label: '场景图' });
@@ -1664,7 +1873,7 @@ describe('agent team workflow', () => {
     expect(result.snapshot.tasks.find((task) => task.id === 'shot')?.status).toBe('waiting_external');
     expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ referenceImages: [{ url: '/uploads/media/scene.png', mimeType: 'image/png', label: '场景图' }] }));
   });
-  it('passes an upstream script through an image dependency to the video prompt', async () => {
+  it('uses the structured videoPrompt and never replaces it with an upstream script', async () => {
     const runId = crypto.randomUUID();
     const chatId = `script-image-video-${runId}`;
     useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
@@ -1676,7 +1885,7 @@ describe('agent team workflow', () => {
       tasks: [
         { id: 'script', roleId: 'director', goal: '写镜头脚本', dependsOn: [], tool: 'text_generation', acceptance: '有脚本' },
         { id: 'scene', roleId: 'director', goal: '画关键帧', dependsOn: ['script'], tool: 'image_generation', acceptance: '有图片' },
-        { id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: ['scene'], tool: 'video_generation', acceptance: '可播放' },
+        { id: 'shot', roleId: 'director', goal: '生成视频', videoPrompt: '雨夜街巷中恐龙追赶机器猫，镜头向右跟拍。', dependsOn: ['scene'], tool: 'video_generation', acceptance: '可播放' },
       ], finalAcceptance: '视频可播放' })).mockResolvedValueOnce('黄昏森林中恐龙追逐机器猫，镜头向右跟拍');
     vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '关键帧已保存' });
     vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/frame.png', mimeType: 'image/png', label: '关键帧' });
@@ -1686,7 +1895,7 @@ describe('agent team workflow', () => {
     const result = await workflow.start(runId, chatId, '先写脚本再画图并生成视频');
     expect(result.snapshot.tasks.find((task) => task.id === 'shot')?.status).toBe('waiting_external');
     expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({
-      prompt: expect.stringContaining('黄昏森林中恐龙追逐机器猫，镜头向右跟拍'),
+      prompt: '雨夜街巷中恐龙追赶机器猫，镜头向右跟拍。',
       referenceImages: [{ url: '/uploads/media/frame.png', mimeType: 'image/png', label: '关键帧' }],
     }));
   });
@@ -1703,7 +1912,7 @@ describe('agent team workflow', () => {
       tasks: [
         { id: 'scene_a', roleId: 'director', goal: '场景图', dependsOn: [], tool: 'image_generation', acceptance: '有图片' },
         { id: 'scene_b', roleId: 'director', goal: '角色图', dependsOn: [], tool: 'image_generation', acceptance: '有图片' },
-        { id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: ['scene_a', 'scene_b'], tool: 'video_generation', acceptance: '可播放' },
+        { id: 'shot', roleId: 'director', goal: '生成视频', videoPrompt: '雨夜街巷中恐龙追赶机器猫，镜头向右跟拍。', dependsOn: ['scene_a', 'scene_b'], tool: 'video_generation', acceptance: '可播放' },
       ], finalAcceptance: '可播放' }));
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-single-reference-test');
     const result = await workflow.start(runId, chatId, '用两张图生成视频');
@@ -1719,12 +1928,40 @@ describe('agent team workflow', () => {
     useSettingsStore.setState({ aiProfiles: [{ id: 'video', name: '视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'minimax-i2v', isDefault: true }] });
     vi.mocked(listAvailableModels).mockResolvedValueOnce([{ id: 'minimax-i2v', label: '图生视频', raw: { aceVideoOptions: { acceptsReferenceImages: true, requiresReferenceImage: true, maxReferenceImages: 1 } } }]);
     generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '生成', acceptance: '成片', allowedTools: ['video_generation'] }],
-      tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' }));
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', videoPrompt: '森林中恐龙追赶机器猫。', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '可播放' }));
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-image-required-test');
     const result = await workflow.start(runId, chatId, '生成视频');
     expect(result.snapshot.tasks[0].status).toBe('failed');
     expect(result.snapshot.tasks[0].error).toContain('必须提供参考图片');
     expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+  });
+  it('passes generated image references when the selected video model advertises support', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `seedance-fast-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [
+      { id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true },
+      { id: 'fast', name: 'Seedance Fast', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'doubao-seedance-2-0-fast-260128', isDefault: true },
+    ] });
+    vi.mocked(listAvailableModels).mockResolvedValue([{ id: 'doubao-seedance-2-0-fast-260128', label: 'Seedance Fast', raw: {
+      aceVideoOptions: { acceptsReferenceImages: true, maxReferenceImages: 9, aspectRatios: ['16:9', '9:16'], resolutions: ['480p', '720p'], requiredResolution: true, duration: { min: 4, max: 15, required: true } },
+    } }]);
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '森林短片', roles: [{ id: 'director', name: '导演', responsibility: '制作短片', method: '用图片参考', acceptance: '风格一致', allowedTools: ['image_generation', 'video_generation'] }],
+      tasks: [
+        { id: 'frame', roleId: 'director', goal: '生成森林关键帧', dependsOn: [], tool: 'image_generation', acceptance: '图片完整' },
+        { id: 'video', roleId: 'director', goal: '以关键帧为参考生成5秒视频', videoPrompt: '森林中机器猫奔跑，恐龙从后方追近。', videoDurationSeconds: 5, dependsOn: ['frame'], tool: 'video_generation', acceptance: '视频可播放' },
+      ], finalAcceptance: '视频可播放' }));
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已生成' });
+    vi.mocked(teamImageReference).mockReturnValue({ url: '/uploads/media/frame.png', mimeType: 'image/png', label: '关键帧' });
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'fast-task' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'fast-task' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `fast-scope-${runId}`);
+    const result = await workflow.start(runId, chatId, '制作森林短片');
+    expect(result.snapshot.tasks.find((task) => task.id === 'video')?.status).toBe('waiting_external');
+    expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({
+      referenceImages: [{ url: '/uploads/media/frame.png', mimeType: 'image/png', label: '关键帧' }],
+    }));
+    expect(queueAgentTeamVideo.mock.calls[0][0].durationSeconds).toBe(5);
   });
   it('waits for a submitted video and runs dependent writing only after the attachment is ready', async () => {
     const runId = crypto.randomUUID();
@@ -1734,7 +1971,7 @@ describe('agent team workflow', () => {
     generate.mockResolvedValueOnce(JSON.stringify({
       summary: '制作短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '按脚本拍摄', acceptance: '可播放', allowedTools: ['video_generation', 'text_generation'] }],
       tasks: [
-        { id: 'shot', roleId: 'director', goal: '森林里的追逐镜头', dependsOn: [], tool: 'video_generation', acceptance: '视频可播放' },
+        { id: 'shot', roleId: 'director', goal: '森林里的追逐镜头', videoPrompt: '森林里恐龙追逐机器猫，低机位跟拍。', dependsOn: [], tool: 'video_generation', acceptance: '视频可播放' },
         { id: 'summary', roleId: 'director', goal: '总结成片', dependsOn: ['shot'], tool: 'text_generation', acceptance: '简短总结' },
       ], finalAcceptance: '成片和摘要',
     })).mockResolvedValueOnce('视频制作完成');
@@ -1759,7 +1996,7 @@ describe('agent team workflow', () => {
     useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
     const role = { id: 'director', name: '导演', responsibility: '拍摄', method: '拆分', acceptance: '成片', allowedTools: ['delegate_task', 'video_generation', 'text_generation'] };
     generate.mockResolvedValueOnce(JSON.stringify({ summary: '短片', roles: [role], tasks: [{ id: 'film', roleId: role.id, goal: '制作短片', tool: 'delegate_task', dependsOn: [], acceptance: '成片' }], finalAcceptance: '可播放' }))
-      .mockResolvedValueOnce(JSON.stringify({ summary: '镜头', roles: [{ ...role, allowedTools: ['video_generation'] }], tasks: [{ id: 'shot', roleId: role.id, goal: '森林追逐', tool: 'video_generation', dependsOn: [], acceptance: '视频' }], finalAcceptance: '视频' }))
+      .mockResolvedValueOnce(JSON.stringify({ summary: '镜头', roles: [{ ...role, allowedTools: ['video_generation'] }], tasks: [{ id: 'shot', roleId: role.id, goal: '森林追逐', videoPrompt: '森林中恐龙追逐机器猫。', tool: 'video_generation', dependsOn: [], acceptance: '视频' }], finalAcceptance: '视频' }))
       .mockResolvedValueOnce('下级已交付视频');
     vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'delegated-video-task' });
     vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'delegated-video-task' });
@@ -1775,7 +2012,7 @@ describe('agent team workflow', () => {
     expect(queueAgentTeamVideo).toHaveBeenCalledTimes(1);
   });
 
-  it('passes a completed script into the video prompt', async () => {
+  it('does not append a completed script to the structured video prompt', async () => {
     const runId = crypto.randomUUID();
     const chatId = `script-video-${runId}`;
     useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
@@ -1784,7 +2021,7 @@ describe('agent team workflow', () => {
       summary: '制作短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '按脚本拍摄', acceptance: '可播放', allowedTools: ['text_generation', 'video_generation'] }],
       tasks: [
         { id: 'script', roleId: 'director', goal: '写追逐脚本', dependsOn: [], tool: 'text_generation', acceptance: '脚本完成' },
-        { id: 'shot', roleId: 'director', goal: '生成追逐视频', dependsOn: ['script'], tool: 'video_generation', acceptance: '视频可播放' },
+        { id: 'shot', roleId: 'director', goal: '生成追逐视频', videoPrompt: '恐龙从树林冲出，猫骑着飞行器逃离。', dependsOn: ['script'], tool: 'video_generation', acceptance: '视频可播放' },
       ], finalAcceptance: '成片',
     })).mockResolvedValueOnce('恐龙从树林冲出，猫骑着飞行器逃离');
     vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'task-script' });
@@ -1792,7 +2029,133 @@ describe('agent team workflow', () => {
     const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'team-script-video-test');
     const pending = await workflow.start(runId, chatId, '制作追逐短片');
     expect(pending.snapshot.tasks.map((task) => task.status)).toEqual(['completed', 'completed', 'waiting_external']);
-    expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ prompt: expect.stringContaining('恐龙从树林冲出，猫骑着飞行器逃离') }));
+    expect(queueAgentTeamVideo).toHaveBeenCalledWith(expect.objectContaining({ prompt: '恐龙从树林冲出，猫骑着飞行器逃离。' }));
+  });
+
+  it('keeps workflow authorization context out of media prompts', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `media-prompt-surface-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
+    generate.mockResolvedValueOnce(JSON.stringify({
+      summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '拍摄', acceptance: '可播放', allowedTools: ['text_generation', 'video_generation'] }],
+      tasks: [{ id: 'shot', roleId: 'director', goal: '制作黄昏森林追逐短片', videoPrompt: '黄昏森林中恐龙追逐机器猫，镜头向右跟拍。', dependsOn: [], tool: 'video_generation', acceptance: '视频可播放' }], finalAcceptance: '成片',
+    }));
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'surface-task' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'surface-task' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'media-prompt-surface-test');
+    await workflow.start(runId, chatId, '制作追逐短片');
+    const prompt = vi.mocked(queueAgentTeamVideo).mock.calls[0][0].prompt;
+    expect(prompt).toBe('黄昏森林中恐龙追逐机器猫，镜头向右跟拍。');
+    expect(prompt).not.toContain('本次任务授权工具');
+    expect(prompt).not.toContain('岗位授权及当前模型能力');
+  });
+
+  it('rejects a task that bundles several image prompts before calling the image provider', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `multi-image-prompt-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'image', name: '图片', type: 'image', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'nano-banana-2', isDefault: true }] });
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '三张关键帧', roles: [{ id: 'artist', name: '画师', responsibility: '生成关键帧', method: '按剧本绘制', acceptance: '三个镜头', allowedTools: ['image_generation'] }],
+      tasks: [{ id: 'frames', roleId: 'artist', goal: '按三条关键帧提示词生成三张镜头图片：镜头一机器猫奔跑；镜头二急停；镜头三恐龙撞护栏。', dependsOn: [], tool: 'image_generation', acceptance: '三张图' }], finalAcceptance: '三张图' }));
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `multi-image-prompt-scope-${runId}`);
+    const result = await workflow.start(runId, chatId, '生成三张关键帧');
+    expect(result.snapshot.tasks.find((item) => item.id === 'frames')).toMatchObject({
+      status: 'failed', error: expect.stringContaining('每个 image_generation 任务只能生成一张图片'),
+    });
+    expect(queueAgentTeamImage).not.toHaveBeenCalled();
+  });
+
+  it.each(['image_generation', 'video_generation'] as const)('rejects Agent workflow metadata inside a %s prompt before media quoting', async (tool) => {
+    vi.mocked(appApi.quoteAiMedia).mockClear();
+    const runId = crypto.randomUUID();
+    const chatId = `workflow-metadata-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    const image = tool === 'image_generation';
+    useSettingsStore.setState({ aiProfiles: [{ id: 'media', name: '媒体', type: image ? 'image' : 'video', provider: 'official-ace',
+      apiKey: '', baseUrl: '/api/ai', model: image ? 'nano-banana-2' : 'MiniMax-H3', isDefault: true }] });
+    const prompt = `雨夜后巷中的机器猫与恐龙，霓虹倒影，3D动画电影风格。\n\n用户明确约束：未另行指定\n本次任务授权工具：text_generation、${tool}\n岗位授权及当前模型能力仍须分别满足；不得自行扩权。`;
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '媒体素材', roles: [{ id: 'maker', name: '制作', responsibility: '制作画面', method: '按提示词生成', acceptance: '有媒体', allowedTools: [tool] }],
+      tasks: [{ id: 'media', roleId: 'maker', goal: image ? prompt : '生成雨夜后巷画面', ...(image ? {} : { videoPrompt: prompt }), tool, dependsOn: [], acceptance: '媒体已保存' }], finalAcceptance: '媒体已保存' }));
+    vi.mocked(queueAgentTeamImage).mockResolvedValue({ output: '图片已保存' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `workflow-metadata-scope-${runId}`);
+    const result = await workflow.start(runId, chatId, '制作媒体素材', false);
+    expect(result.snapshot.tasks.find((item) => item.id === 'media')).toMatchObject({ status: 'failed',
+      error: expect.stringContaining('提示词混入了 Agent 工作流或岗位授权说明') });
+    expect(appApi.quoteAiMedia).not.toHaveBeenCalled();
+    expect(queueAgentTeamImage).not.toHaveBeenCalled();
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+  });
+
+  it('rejects a procedural video task before charging the video provider', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `procedural-video-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'MiniMax-H3', isDefault: true }] });
+    const invalidPlan = JSON.stringify({
+      summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '拍摄', acceptance: '可播放', allowedTools: ['video_generation'] }],
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成15秒完整视频', dependsOn: [], tool: 'video_generation', acceptance: '视频可播放' }], finalAcceptance: '成片',
+    });
+    generate.mockResolvedValueOnce(invalidPlan).mockResolvedValueOnce(invalidPlan);
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'procedural-video-test');
+    const result = await workflow.start(runId, chatId, '制作短片');
+    expect(result.snapshot.run.status).toBe('failed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'plan')?.error).toContain('缺少结构化 videoPrompt');
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+  });
+
+  it('rejects an oversized structured videoPrompt rather than silently truncating it', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `long-script-video-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'doubao-seedance-2-0-fast-260128', isDefault: true }] });
+    vi.mocked(listAvailableModels).mockResolvedValueOnce([{ id: 'doubao-seedance-2-0-fast-260128', label: 'Seedance Fast', raw: { aceVideoOptions: {
+      promptMaxLength: 1000, acceptsReferenceImages: false, maxReferenceImages: 0,
+      resolutions: ['480p', '720p'], requiredResolution: true, duration: { min: 4, max: 15, required: true },
+    } } }]);
+    const oversizedPrompt = '超长视频提示词。'.repeat(145);
+    const invalidPlan = JSON.stringify({
+      summary: '制作短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '按脚本拍摄', acceptance: '可播放', allowedTools: ['text_generation', 'video_generation'] }],
+      tasks: [
+        { id: 'script', roleId: 'director', goal: '写追逐脚本', dependsOn: [], tool: 'text_generation', acceptance: '脚本完成' },
+        { id: 'shot', roleId: 'director', goal: '生成视频', videoPrompt: oversizedPrompt, dependsOn: ['script'], tool: 'video_generation', acceptance: '视频可播放' },
+      ], finalAcceptance: '成片',
+    });
+    generate.mockResolvedValueOnce(invalidPlan).mockResolvedValueOnce(invalidPlan);
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => 'long-script-video-test');
+    const result = await workflow.start(runId, chatId, '制作短片');
+    expect(result.snapshot.run.status).toBe('failed');
+    expect(result.snapshot.tasks.find((task) => task.id === 'plan')?.error).toContain('超过当前模型 1000 字符上限');
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(queueAgentTeamVideo).not.toHaveBeenCalled();
+  });
+
+  it('does not read serialized prompt fields from the script output', async () => {
+    const runId = crypto.randomUUID();
+    const chatId = `video-prompt-shot-leak-${runId}`;
+    useChatStore.setState((state) => ({ chats: [...state.chats, { id: chatId, type: 'assistant', deletedAt: null } as (typeof state.chats)[number]] }));
+    useSettingsStore.setState({ aiProfiles: [{ id: 'test-video', name: '测试视频', type: 'video', provider: 'official-ace', apiKey: '', baseUrl: '/api/ai', model: 'doubao-seedance-2-0-fast-260128', isDefault: true }] });
+    vi.mocked(listAvailableModels).mockResolvedValueOnce([{ id: 'doubao-seedance-2-0-fast-260128', label: 'Seedance Fast', raw: { aceVideoOptions: {
+      promptMaxLength: 1000, acceptsReferenceImages: false, maxReferenceImages: 0,
+      resolutions: ['480p', '720p'], requiredResolution: true, duration: { min: 4, max: 15, required: true },
+    } } }]);
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '分镜短片', roles: [{ id: 'director', name: '导演', responsibility: '制作视频', method: '按分镜生成', acceptance: '可播放', allowedTools: ['text_generation', 'video_generation'] }],
+      tasks: [
+        { id: 'shot2_video', roleId: 'director', goal: '生成镜头2的5秒视频', videoPrompt: '雨夜后巷里机器猫贴墙闪避，恐龙从后方追近。', dependsOn: ['script'], tool: 'video_generation', acceptance: '镜头二视频可播放' },
+        { id: 'script', roleId: 'director', goal: '撰写视频生成提示词', dependsOn: [], tool: 'text_generation', acceptance: '包含镜头二提示词' },
+      ], finalAcceptance: '可播放' }));
+    generate.mockResolvedValueOnce('视频生成提示词：雨夜后巷里机器猫贴墙闪避，恐龙从后方追近。\\",\\"shot3\\":\\"镜头三：恐龙撞上护栏。');
+    vi.mocked(queueAgentTeamVideo).mockResolvedValue({ externalTaskId: 'shot2-video-task' });
+    vi.mocked(inspectAgentTeamVideoAttachment).mockReturnValue({ status: 'waiting_external', externalTaskId: 'shot2-video-task' });
+    const workflow = createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `video-prompt-shot-leak-${runId}`);
+
+    const result = await workflow.start(runId, chatId, '生成15秒追逐视频');
+
+    const request = vi.mocked(queueAgentTeamVideo).mock.calls[0]?.[0];
+    expect(request?.prompt).toBe('雨夜后巷里机器猫贴墙闪避，恐龙从后方追近。');
+    expect(request?.prompt).not.toContain('镜头三：恐龙撞上护栏');
+    expect(result.snapshot.tasks.find((task) => task.id === 'shot2_video')?.status).toBe('waiting_external');
+    expect(queueAgentTeamVideo).toHaveBeenCalledTimes(1);
   });
 
   it('continues a failed run after its video attachment was retried successfully', async () => {
@@ -1803,7 +2166,7 @@ describe('agent team workflow', () => {
     generate.mockResolvedValueOnce(JSON.stringify({
       summary: '制作短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '拍摄', acceptance: '成片', allowedTools: ['video_generation', 'text_generation'] }],
       tasks: [
-        { id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: [], tool: 'video_generation', acceptance: '可播放' },
+        { id: 'shot', roleId: 'director', goal: '生成视频', videoPrompt: '森林中恐龙追赶机器猫。', dependsOn: [], tool: 'video_generation', acceptance: '可播放' },
         { id: 'summary', roleId: 'director', goal: '总结视频', dependsOn: ['shot'], tool: 'text_generation', acceptance: '有总结' },
       ], finalAcceptance: '可播放',
     })).mockResolvedValueOnce('视频已交付');
@@ -1823,7 +2186,7 @@ describe('agent team workflow', () => {
     const scope = 'team-unknown-video-test';
     const now = Date.now();
     const plan = { summary: '短片', roles: [{ id: 'director', name: '导演', responsibility: '制作', method: '拍摄', acceptance: '成片', allowedTools: ['video_generation'] }],
-      tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '成片' };
+      tasks: [{ id: 'shot', roleId: 'director', goal: '生成视频', videoPrompt: '森林中恐龙追赶机器猫。', dependsOn: [], tool: 'video_generation', acceptance: '可播放' }], finalAcceptance: '成片' };
     await indexedDbWorkflowRepository.transact(scope, runId, () => ({ snapshot: {
       run: { id: runId, chatId: 'chat', goal: '生成短片', status: 'paused', generation: 1, planVersion: 1, planOpen: false, updatedAt: now },
       tasks: [
@@ -2519,13 +2882,14 @@ describe('agent team workflow', () => {
     expect(generate).toHaveBeenCalledTimes(10);
     const latest = (await next.read(runId))!;
     const oldRequest = await next.addRevisionRequest(runId, latest.run.planVersion, '改动旧资料', 'source');
-    await next.setModelCallLimit(runId, oldRequest.run.planVersion, 11);
-    generate.mockResolvedValueOnce(JSON.stringify({ revisionPatch: { schemaVersion: 1, basePlanSha256: workflowJsonDigest(rootPlan),
-      updates: [{ taskId: 'source', goal: '改动旧资料', acceptance: '更新资料' }] } }));
+    await next.setModelCallLimit(runId, oldRequest.run.planVersion, 12);
+    const stalePatch = JSON.stringify({ revisionPatch: { schemaVersion: 1, basePlanSha256: workflowJsonDigest(rootPlan),
+      updates: [{ taskId: 'source', goal: '改动旧资料', acceptance: '更新资料' }] } });
+    generate.mockResolvedValueOnce(stalePatch).mockResolvedValueOnce(stalePatch);
     const stale = await createAgentTeamWorkflow(config, () => scope).resume(runId);
     expect(stale.snapshot.run.status).toBe('failed');
     expect(stale.snapshot.tasks.find((task) => task.id === 'delegate_3')?.error).toContain('不允许局部修订');
-    expect(generate).toHaveBeenCalledTimes(11);
+    expect(generate).toHaveBeenCalledTimes(12);
   });
 
   it('reopens a completed run for delegation and updates its existing delivery version', async () => {

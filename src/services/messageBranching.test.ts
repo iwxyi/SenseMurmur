@@ -69,7 +69,9 @@ describe('messageBranching v2', () => {
       const messages = [message('severed-ai', 'ai', null, 1), message('severed-user', 'user', null, 2), message('severed-reply', 'ai', null, 3)];
       const current = chat({ messageBranchState: buildBranchStateWithHead({ enabled: true }, 'severed-reply') });
       expect(projectActiveBranchMessages(current, messages).map((item) => item.id)).toEqual(messages.map((item) => item.id));
-      expect(error).toHaveBeenCalledWith('[message-branch:projection-fallback]', expect.objectContaining({ reason: 'disconnected-history', fallbackMessages: 3 }));
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('[dev:message-branch:projection-fallback] error'));
+      expect(error.mock.calls[0]?.[0]).toContain('reason=disconnected-history');
+      expect(error.mock.calls[0]?.[0]).toContain('fallbackMessages=3');
     } finally { error.mockRestore(); }
   });
 

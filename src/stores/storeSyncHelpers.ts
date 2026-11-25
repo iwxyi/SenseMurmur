@@ -350,9 +350,11 @@ export function recoverInterruptedOperations<T extends { status: 'pending' | 'sy
     : item);
 }
 
-export function retryFailedOperations<T extends { status: 'pending' | 'syncing' | 'failed'; lastError?: string; retryAt?: number; lockedAt?: number }>(queue: T[] = [], options: { includeTerminal?: boolean } = {}) {
+export function retryFailedOperations<T extends { status: 'pending' | 'syncing' | 'failed'; lastError?: string; retryAt?: number; lockedAt?: number }>(queue: T[] = [], options: { includeTerminal?: boolean; includeTerminalWhen?: (lastError: string) => boolean } = {}) {
   let changed = false;
-  const nextQueue = queue.map((item) => item.status === 'failed' && (options.includeTerminal !== false || !parseSyncErrorClassification(item.lastError).terminal)
+  const nextQueue = queue.map((item) => item.status === 'failed' && (options.includeTerminal !== false
+    || !parseSyncErrorClassification(item.lastError).terminal
+    || options.includeTerminalWhen?.(item.lastError || ''))
     ? {
       ...item,
       status: 'pending' as const,

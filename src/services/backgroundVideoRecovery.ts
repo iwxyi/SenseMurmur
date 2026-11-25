@@ -2,14 +2,15 @@ import type { Message } from '../types/message';
 import { useChatStore } from '../stores/useChatStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
-import { processRichMessageMedia } from './richMessageMedia';
+import { getRichMediaQueueSnapshot, processRichMessageMedia } from './richMessageMedia';
 import { readAuthSnapshot } from './authSnapshot';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
 import { getWorkspaceSignal } from './workspaceLifecycle';
 import { isRecoverableMediaAttachment } from './recoverableMediaTask';
 
+const RECOVERY_RECHECK_MS = 60_000;
 let recoveryWatcher: { signal: AbortSignal; unsubscribe: () => void } | null = null;
-const scheduledTasks = new Set<string>();
+const scheduledTasks = new Map<string, number>();
 
 function mediaTaskKeys(message: Message) {
   return (message.metadata?.attachments || []).filter(isRecoverableMediaAttachment)
@@ -66,12 +67,18 @@ export async function recoverBackgroundVideoTasks() {
       ...state.messages,
       ...Object.values(state.messageWindowsByChatId).flatMap((window) => window.messages),
     ], activeChatIds, requiresServerId);
+    const active = new Set(getRichMediaQueueSnapshot().map((entry) => `${entry.messageId}:${entry.attachmentId}`));
+    const now = Date.now();
     let dispatched = 0;
     for (const message of messages) {
       const keys = mediaTaskKeys(message);
-      const fresh = keys.filter((key) => !scheduledTasks.has(key));
+      const fresh = keys.filter((key) => {
+        const lastScheduled = scheduledTasks.get(key);
+        return ![...active].some((entryKey) => key.startsWith(`${entryKey}:`))
+          && (lastScheduled === undefined || now - lastScheduled >= RECOVERY_RECHECK_MS);
+      });
       if (!fresh.length) continue;
-      fresh.forEach((key) => scheduledTasks.add(key));
+      fresh.forEach((key) => scheduledTasks.set(key, now));
       dispatched += fresh.length;
       void processRichMessageMedia({
         message,
@@ -92,7 +99,9 @@ export async function recoverBackgroundVideoTasks() {
     pending = true;
     queueMicrotask(() => { pending = false; scan(); });
   });
+  const timer = setInterval(scan, RECOVERY_RECHECK_MS);
   const cleanup = () => {
+    clearInterval(timer);
     unsubscribe();
     workspaceSignal.removeEventListener('abort', cleanup);
     if (recoveryWatcher?.signal === workspaceSignal) recoveryWatcher = null;

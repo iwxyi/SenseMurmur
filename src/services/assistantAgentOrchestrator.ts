@@ -97,15 +97,9 @@ function safeJsonParse(value: string): unknown {
     const positionMatch = parseError.match(/position\s+(\d+)/i);
     const lineMatch = parseError.match(/line\s+(\d+)/i);
     const columnMatch = parseError.match(/column\s+(\d+)/i);
-    console.error('[assistant-agent:invalid-json]', {
-      stage: 'json-parse',
-      parserError: redactAiDiagnosticText(parseError),
-      responseLength: value.length,
-      position: positionMatch ? Number(positionMatch[1]) : undefined,
-      line: lineMatch ? Number(lineMatch[1]) : undefined,
-      column: columnMatch ? Number(columnMatch[1]) : undefined,
-      response: redactAiDiagnosticText(value, Infinity),
-    });
+    console.error(`[assistant-agent:invalid-json] stage=json-parse parserError=${redactAiDiagnosticText(parseError)} responseLength=${value.length}`
+      + `${positionMatch ? ` position=${positionMatch[1]}` : ''}${lineMatch ? ` line=${lineMatch[1]}` : ''}${columnMatch ? ` column=${columnMatch[1]}` : ''}`
+      + `\nAI原始回复:\n${redactAiDiagnosticText(value, Infinity)}`);
     throw new AssistantAgentFormatError();
   }
 }
@@ -1207,13 +1201,9 @@ export async function writeAssistantAgentPatchSet(params: {
     parsed = parseAssistantAgentWriterOutput(raw, safeJsonParse);
   } catch (error) {
     if (error instanceof AssistantAgentFormatError) throw error;
-    console.error('[assistant-agent:invalid-writer-output]', {
-      stage: 'writer-protocol',
-      parserError: redactAiDiagnosticText(error instanceof Error ? error.message : String(error)),
-      errorName: error instanceof Error ? error.name : 'UnknownError',
-      responseLength: raw.length,
-      response: redactAiDiagnosticText(raw, Infinity),
-    });
+    console.error(`[assistant-agent:invalid-writer-output] stage=writer-protocol errorName=${error instanceof Error ? error.name : 'UnknownError'}`
+      + ` parserError=${redactAiDiagnosticText(error instanceof Error ? error.message : String(error))} responseLength=${raw.length}`
+      + `\nAI原始回复:\n${redactAiDiagnosticText(raw, Infinity)}`);
     throw new AssistantAgentFormatError();
   }
   return validateAssistantAgentPatchSet({

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildTeamReviewTasks, isPartialTeamReview, parseTeamReviewInput, preserveTeamReviewDefects,
-  selectTeamReviewEvidence, selectTeamReviewSummaries, teamReviewLeafSources, TEAM_REVIEW_EVIDENCE_LIMIT } from './agentTeamReviewEvidence';
+  selectTeamReviewEvidence, selectTeamReviewSummaries, teamReviewCoversCompletedWork, teamReviewLeafSources, TEAM_REVIEW_EVIDENCE_LIMIT } from './agentTeamReviewEvidence';
 import { prepareWorkflowReviewRecord } from './workflowReviewRecord';
 import type { WorkflowSnapshot, WorkflowTask } from './workflowRunRuntime';
 
@@ -30,6 +30,15 @@ describe('bounded team review evidence', () => {
     const tasks = buildTeamReviewTasks(snapshot, 'review_1', ['text_0'], 1);
     expect(tasks).toHaveLength(1);
     expect(tasks[0]).toMatchObject({ id: 'review_1', input: { sourceTaskIds: ['text_0'] }, dependsOn: ['text_0'] });
+  });
+
+  it('requires a new global review when a completed run gains more work', () => {
+    const snapshot = fixture();
+    const reviews = buildTeamReviewTasks(snapshot, 'review_1', ['text_0'], 1);
+    finishReviews(snapshot, reviews);
+    expect(teamReviewCoversCompletedWork(snapshot, reviews[0])).toBe(true);
+    snapshot.tasks.push({ ...snapshot.tasks[0], id: 'text_1' });
+    expect(teamReviewCoversCompletedWork(snapshot, reviews[0])).toBe(false);
   });
 
   it.each([40, 400])('reviews all %i sources in bounded persisted layers without omitting early work', (count) => {

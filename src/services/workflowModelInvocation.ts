@@ -1,6 +1,6 @@
 import { parseWorkflowModelRequest, type WorkflowModelRequest } from './workflowModelRequest';
 
-export const WORKFLOW_MODEL_TASK_KINDS = ['team_plan', 'team_plan_revision', 'team_review', 'agent_text', 'agent_delegation', 'agent_image_inspection', 'agent_video_inspection'] as const;
+export const WORKFLOW_MODEL_TASK_KINDS = ['team_plan', 'team_plan_revision', 'team_recovery', 'team_review', 'agent_text', 'agent_delegation', 'agent_image_inspection', 'agent_video_inspection'] as const;
 
 export interface WorkflowModelInvocation {
   schemaVersion: 1;
@@ -13,6 +13,7 @@ export interface WorkflowModelInvocation {
   startedAt?: number;
   finishedAt?: number;
   request?: WorkflowModelRequest;
+  requests?: WorkflowModelRequest[];
 }
 
 export function workflowModelInvocationId(runId: string, taskId: string, attempt: number) {
@@ -39,9 +40,14 @@ export function parseWorkflowModelInvocation(raw: unknown): WorkflowModelInvocat
   if (notStarted !== (value.startedAt === undefined) || terminal !== (value.finishedAt !== undefined)) throw new Error('模型调用状态与时间不一致');
   const request = value.request === undefined ? undefined : parseWorkflowModelRequest(value.request);
   if (request && notStarted) throw new Error('未开始的模型调用不能包含请求摘要');
+  const requests = value.requests === undefined ? undefined : Array.isArray(value.requests)
+    ? value.requests.map(parseWorkflowModelRequest) : (() => { throw new Error('模型请求记录列表无效'); })();
+  if (requests && (notStarted || !requests.length || (request && JSON.stringify(requests[0]) !== JSON.stringify(request)))) {
+    throw new Error('模型请求记录列表与调用摘要不一致');
+  }
   return { schemaVersion: 1, id: value.id as string, runId: value.runId, taskId: value.taskId, attempt: Number(value.attempt),
     state: value.state as WorkflowModelInvocation['state'], reservedAt: Number(value.reservedAt),
     ...(value.startedAt === undefined ? {} : { startedAt: Number(value.startedAt) }),
     ...(value.finishedAt === undefined ? {} : { finishedAt: Number(value.finishedAt) }),
-    ...(request ? { request } : {}) };
+    ...(request ? { request } : {}), ...(requests ? { requests } : {}) };
 }

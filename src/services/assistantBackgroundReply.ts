@@ -15,9 +15,12 @@ import { runWithConversationExecutionLock } from './conversationExecutionLock';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { decideAssistantTaskRoute } from './assistantTeamIntent';
 import { readAuthSnapshot } from './authSnapshot';
+import { isCloudSyncEnabled } from './cloudSyncPreference';
+import { waitForMessageCloudConfirmation } from './messageCloudConfirmation';
 import { resolveChatAgentCapabilities } from './chatAgentCapabilities';
 import { assistantTeamFailureReply } from './assistantTeamProgress';
 import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
+import { ChatExecutionLeaseOwnedError } from './chatExecutionLease';
 
 interface AssistantReplyInput {
   chatId: string;
@@ -305,24 +308,30 @@ async function continueRoutedTeamReply(result: WorkflowSnapshot) {
   const known = projectMergedChatMessages({ chatId: result.run.chatId,
     activeMessages: messageStore.messages.filter((message) => message.chatId === result.run.chatId),
     cachedWindow: messageStore.messageWindowsByChatId[result.run.chatId] });
-  if (!known.some((message) => message.clientKey === messageId || message.metadata?.assistantReplyToUserMessageId === output.userMessageId)) {
-    const chat = useChatStore.getState().chats.find((item) => item.id === result.run.chatId);
-    if (!chat || chat.deletedAt != null) throw new Error('助手会话已删除，无法启动团队任务');
-    const userMessage = known.find((message) => message.id === output.userMessageId);
-    if (!userMessage || userMessage.isDeleted) throw new Error('原始用户消息已删除，无法启动团队任务');
-    const draft = attachMessageToActiveBranch(teamConversationContext(chat, { sourceBranch }), known, {
-      id: messageId, clientKey: messageId, chatId: result.run.chatId, type: 'ai', senderId: 'assistant', senderName: '助手',
-      content: '我会根据目标组织所需的步骤和协作角色。任务已交给后台执行，进度可在团队工作台查看。',
-      emotion: 0, timestamp: Math.max(Date.now(), userMessage.timestamp + 1), isDeleted: false,
-      metadata: { format: 'markdown', assistant: { mode: 'general' }, assistantReplyToUserMessageId: userMessage.id,
-        assistantReplyRunId: result.run.id },
-    });
-    const created = await persistLocalFirstMessage({ message: draft, upsertMessage: (message) => useMessageStore.getState().upsertMessage(message),
-      localMessageIdentitySalt: messageId, timestamp: draft.timestamp });
-    if (chat.messageBranchState?.enabled) await advanceTeamConversation(created, sourceBranch);
-    await useChatStore.getState().updateChat(chat.id, { lastMessageAt: created.timestamp, latestMessage: created });
-  }
   try {
+    let startMessage = known.find((message) => message.clientKey === messageId || message.metadata?.assistantReplyToUserMessageId === output.userMessageId);
+    let shouldAdvanceBranch = false;
+    if (!startMessage) {
+      const chat = useChatStore.getState().chats.find((item) => item.id === result.run.chatId);
+      if (!chat || chat.deletedAt != null) throw new Error('助手会话已删除，无法启动团队任务');
+      const userMessage = known.find((message) => message.id === output.userMessageId);
+      if (!userMessage || userMessage.isDeleted) throw new Error('原始用户消息已删除，无法启动团队任务');
+      const draft = attachMessageToActiveBranch(teamConversationContext(chat, { sourceBranch }), known, {
+        id: messageId, clientKey: messageId, chatId: result.run.chatId, type: 'ai', senderId: 'assistant', senderName: '助手',
+        content: '我会根据目标组织所需的步骤和协作角色。任务已交给后台执行，进度可在团队工作台查看。',
+        emotion: 0, timestamp: Math.max(Date.now(), userMessage.timestamp + 1), isDeleted: false,
+        metadata: { format: 'markdown', assistant: { mode: 'general' }, assistantReplyToUserMessageId: userMessage.id,
+          assistantReplyRunId: result.run.id },
+      });
+      startMessage = await persistLocalFirstMessage({ message: draft, upsertMessage: (message) => useMessageStore.getState().upsertMessage(message),
+        localMessageIdentitySalt: messageId, timestamp: draft.timestamp });
+      shouldAdvanceBranch = chat.messageBranchState?.enabled === true;
+    }
+    if (startMessage && readAuthSnapshot().mode === 'cloud' && isCloudSyncEnabled()) {
+      startMessage = await waitForMessageCloudConfirmation({ chatId: result.run.chatId, messageId: startMessage.id });
+    }
+    if (shouldAdvanceBranch && startMessage) await advanceTeamConversation(startMessage, sourceBranch);
+    if (startMessage) await useChatStore.getState().updateChat(result.run.chatId, { lastMessageAt: startMessage.timestamp, latestMessage: startMessage });
     const teamResult = await runAgentTeam({ chatId: result.run.chatId, goal: output.goal, sourceMessageId: output.userMessageId,
       ...(sourceBranch ? { goalSpec: { ...defaultWorkflowGoalSpec(output.goal), sourceBranch } } : {}) });
     if (teamResult.snapshot.run.status === 'failed') {
@@ -331,6 +340,11 @@ async function continueRoutedTeamReply(result: WorkflowSnapshot) {
         failedTask?.error || '团队规划失败，未能生成可执行的计划。');
     }
   } catch (error) {
+    const teamRun = await indexedDbWorkflowRepository.read(currentWorkflowScope(), `team-${output.userMessageId}`);
+    if (teamRun?.tasks.some((task) => task.status === 'failed' || task.status === 'result_unknown')) {
+      console.error('[assistant-team:run-failed]', error);
+      return;
+    }
     await persistRoutedTeamFailure(result, output.userMessageId, error instanceof Error ? error.message : '团队任务启动失败', sourceBranch);
     throw error;
   }
@@ -394,7 +408,11 @@ export async function recoverAssistantBackgroundReplies() {
     const existing = await indexedDbWorkflowRepository.read(currentWorkflowScope(), teamId);
     if (existing) continue;
     try { await continueRoutedTeamReply(item); }
-    catch (error) { console.error('[assistant-team:recovery-start-failed]', error); }
+    catch (error) {
+      if (error instanceof ChatExecutionLeaseOwnedError) {
+        console.info('[assistant-team:recovery-deferred] 此会话已有运行者，恢复启动稍后重试');
+      } else console.error('[assistant-team:recovery-start-failed]', error);
+    }
   }
   return recovered.map((item) => ({ ...item, summary: summarizeWorkflowRun(item) }));
 }

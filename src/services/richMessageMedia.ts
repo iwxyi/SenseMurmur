@@ -10,12 +10,13 @@ import { readAuthSnapshot } from './authSnapshot';
 import { logRecoverableError, reportRecoverableError } from './diagnostics';
 import { assertWorkflowBudgetChannel, workflowAdmissionRejection } from './workflowAdmission';
 import { redactAiDiagnosticValue } from './aiDiagnosticText';
+import { formatAceMediaFailure } from './aceMediaFailure';
 import { isCloudSyncEnabled } from './cloudSyncPreference';
 import { synthesizeSpeech, usesManagedSpeechProfile } from './speech';
 import { useAuthStore } from '../stores/useAuthStore';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { conversationExecutionLockName } from './conversationExecutionLock';
-import { assertChatExecutionLease, runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
+import { assertChatExecutionLease, refreshChatExecutionLeaseBeforeWrite, runWithChatExecutionLeaseWhenAvailable } from './chatExecutionLease';
 import { getChatExecutionFence } from './chatExecutionFence';
 import { currentWorkflowScope } from './workflowRunRuntime';
 import { getWorkspaceSignal } from './workspaceLifecycle';
@@ -326,7 +327,8 @@ async function persistVideoSubmissionKey(message: Message) {
   const previous = richMediaMetadataWritesByMessageId.get(serverId);
   const pending = (previous || Promise.resolve()).then(() => {
     const current = getLatestRichMediaMessage(message.id, message);
-    return api.updateMessageMetadata(serverId, current.metadata, current.chatId).then(() => undefined);
+    return refreshChatExecutionLeaseBeforeWrite(current.chatId)
+      .then(() => api.updateMessageMetadata(serverId, current.metadata, current.chatId)).then(() => undefined);
   });
   richMediaMetadataWritesByMessageId.set(serverId, pending);
   try {
@@ -350,18 +352,23 @@ function persistRichMessageMetadata(message: Message, metadata: MessageMetadata,
   const previous = richMediaMetadataWritesByMessageId.get(serverId);
   const write = () => {
     const current = getLatestRichMediaMessage(message.id, message);
-    return api.updateMessageMetadata(serverId, current.metadata || metadata, current.chatId).then(() => undefined).catch((error) => {
-    logRecoverableError({
-      location,
-      error,
-      extra: { messageId: message.id, serverId, attachmentId },
-    });
+    return refreshChatExecutionLeaseBeforeWrite(current.chatId)
+      .then(() => api.updateMessageMetadata(serverId, current.metadata || metadata, current.chatId)).then(() => undefined).catch((error) => {
+      logRecoverableError({
+        location,
+        error,
+        extra: { messageId: message.id, serverId, attachmentId },
+      });
+      if (current.metadata?.agentTeamMedia) throw error;
     });
   };
-  const pending = previous ? previous.then(write) : write();
+  const pending = previous ? previous.catch(() => undefined).then(write) : write();
   richMediaMetadataWritesByMessageId.set(serverId, pending);
-  void pending.finally(() => {
+  const clear = () => {
     if (richMediaMetadataWritesByMessageId.get(serverId) === pending) richMediaMetadataWritesByMessageId.delete(serverId);
+  };
+  void pending.then(clear, () => {
+    if (!message.metadata?.agentTeamMedia) clear();
   });
 }
 
@@ -535,10 +542,11 @@ async function pollVideoTask(params: {
     const result = task.result && typeof task.result === 'object' && !Array.isArray(task.result)
       ? task.result as Record<string, unknown> : {};
     console.error('[rich-message-media:video-task-failed]', { result: redactAiDiagnosticValue(task.result) });
-    const reason = typeof result.error === 'string' ? result.error.trim() : '';
-    const safeSubmissionReason = /^ACE 任务生成失败：ACE 请求失败 \([45]\d\d\)(：ACE 上游可用余额不足)?(，?错误码 [A-Za-z][A-Za-z0-9_.-]{0,63})?(，类型 [A-Za-z][A-Za-z0-9_.-]{0,63})?(，参数 [A-Za-z][A-Za-z0-9_.[\]-]{0,79})?$/.test(reason);
-    throw new Error(safeSubmissionReason || /^ACE 任务生成失败：(上游返回 HTTP [45]\d\d(，错误码 [A-Za-z][A-Za-z0-9_.-]{0,63})?(，参数 [A-Za-z][A-Za-z0-9_.[\]-]{0,79})?(，视频输入参数无效)?(，任务已取消)?|错误码 [A-Za-z][A-Za-z0-9_.-]{0,63}(，参数 [A-Za-z][A-Za-z0-9_.[\]-]{0,79})?(，视频输入参数无效)?(，任务已取消)?|任务已取消|上游任务失败，未提供错误码或状态码)$/.test(reason)
-      ? reason : '视频生成失败，服务端未返回可展示的失败原因。');
+    const baseReason = typeof result.error === 'string' ? result.error.trim() : '';
+    const safeReason = /^ACE 任务生成失败：ACE 请求失败 \([45]\d\d\)(：ACE 上游可用余额不足)?(，?错误码 [A-Za-z][A-Za-z0-9_.-]{0,63})?(，类型 [A-Za-z][A-Za-z0-9_.-]{0,63})?(，参数 [A-Za-z][A-Za-z0-9_.[\]-]{0,79})?$/.test(baseReason)
+      || /^ACE 任务生成失败：(上游返回 HTTP [45]\d\d(，错误码 [A-Za-z][A-Za-z0-9_.-]{0,63})?(，参数 [A-Za-z][A-Za-z0-9_.[\]-]{0,79})?(，视频输入参数无效)?(，任务已取消)?|错误码 [A-Za-z][A-Za-z0-9_.-]{0,63}(，参数 [A-Za-z][A-Za-z0-9_.[\]-]{0,79})?(，视频输入参数无效)?(，任务已取消)?|任务已取消|上游任务失败，未提供错误码或状态码)$/.test(baseReason);
+    const reason = safeReason ? formatAceMediaFailure(baseReason, result.diagnostic) : '';
+    throw new Error(reason || '视频生成失败，服务端未返回可展示的失败原因。');
   }
   if (task.status === 'succeeded') {
       let asset: { id?: string; url: string; mimeType: string; sizeBytes?: number; checksum?: string };
@@ -650,6 +658,14 @@ async function runRichMediaQueueEntry(entry: RichMediaQueueEntry, signal?: Abort
     persistMetadata: attachment.kind !== 'video',
   });
 
+  if (entry.sharesConversationLease && attachment.kind !== 'video' && workingMessage.serverId) {
+    try {
+      await richMediaMetadataWritesByMessageId.get(workingMessage.serverId);
+    } catch (error) {
+      throw Object.assign(new Error(`媒体生成前状态未能保存，生成请求未发送：${error instanceof Error ? error.message : '云端同步失败'}`, { cause: error }),
+        { requestNotDispatched: true });
+    }
+  }
   try {
     if (isAsyncMediaAttachment(attachment) && !attachment.mediaTaskId) {
       flushBufferedPersistenceWrites();
@@ -1237,12 +1253,14 @@ export function scrubLocalMediaUrlsForCloud(message: Message) {
 export async function uploadLocalMessageMediaToCloud(params: {
   localMessage: Message;
   cloudMessage: Message;
+  signal?: AbortSignal;
 }) {
   const attachments = params.localMessage.metadata?.attachments || [];
   if (!attachments.length) return params.cloudMessage.metadata;
   let nextMetadata = params.cloudMessage.metadata || scrubLocalMediaUrlsForCloud(params.localMessage);
   for (const attachment of attachments) {
     if (attachment.status !== 'ready' || !attachment.url?.startsWith('data:')) continue;
+    params.signal?.throwIfAborted();
     const asset = await api.createMediaAsset({
       chatId: params.cloudMessage.chatId,
       messageId: params.cloudMessage.serverId || params.cloudMessage.id,
@@ -1252,7 +1270,7 @@ export async function uploadLocalMessageMediaToCloud(params: {
       description: attachment.caption || attachment.altText,
       promptText: attachment.promptText,
       sourceType: `chat-${attachment.kind}`,
-    });
+    }, { signal: params.signal });
     nextMetadata = updateAttachment(nextMetadata, attachment.id, {
       status: 'ready',
       assetId: asset.id,
@@ -1262,6 +1280,7 @@ export async function uploadLocalMessageMediaToCloud(params: {
       checksum: asset.checksum,
     });
   }
+  params.signal?.throwIfAborted();
   await api.updateMessageMetadata(params.cloudMessage.serverId || params.cloudMessage.id, nextMetadata, params.cloudMessage.chatId);
   return nextMetadata;
 }

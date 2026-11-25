@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, reconcileWorkflowTaskInvocation, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowExecutionContext, type WorkflowSnapshot, type WorkflowTask } from './workflowRunRuntime';
+import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, isRetryableTeamTask, reconcileWorkflowTaskInvocation, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowExecutionContext, type WorkflowSnapshot, type WorkflowTask } from './workflowRunRuntime';
 import { workflowModelInvocationId } from './workflowModelInvocation';
 import { defaultWorkflowGoalSpec } from './workflowGoalSpec';
 import { workflowToolInvocationId, workflowToolOperationKey } from './workflowToolInvocation';
@@ -29,6 +29,14 @@ beforeAll(async () => {
   db.close();
 });
 
+describe('workflow task retry eligibility', () => {
+  it('allows retrying a definitively failed video task', () => {
+    const task = { ...snapshot('retry-video').tasks[0], kind: 'agent_video', status: 'failed' } as WorkflowTask;
+    expect(isRetryableTeamTask(task)).toBe(true);
+    expect(isRetryableTeamTask({ ...task, status: 'result_unknown' })).toBe(false);
+  });
+});
+
 function snapshot(id: string): WorkflowSnapshot {
   return {
     run: { id, chatId: 'chat', goal: '制作短片', status: 'active', generation: 0, planVersion: 1, updatedAt: 1 },
@@ -46,6 +54,199 @@ beforeEach(() => {
 });
 
 describe('workflow run runtime', () => {
+  it('continues a failed goal by archiving definite failures and retaining completed media', async () => {
+    const id = crypto.randomUUID();
+    const initial = snapshot(id);
+    initial.run.status = 'failed';
+    initial.tasks = [
+      { id: 'plan', runId: id, kind: 'team_plan', input: '短片', output: '{}', dependsOn: [], status: 'completed', attempt: 1, updatedAt: 1 },
+      { id: 'shot1', runId: id, kind: 'agent_video', input: {}, output: '已保存镜头1', dependsOn: ['plan'], status: 'completed', attempt: 1, updatedAt: 1 },
+      { id: 'shot2', runId: id, kind: 'agent_video', input: {}, error: '服务商失败', dependsOn: ['plan'], status: 'failed', attempt: 1, updatedAt: 1 },
+      { id: 'film', runId: id, kind: 'agent_media_composition', input: {}, dependsOn: ['shot1', 'shot2'], status: 'waiting_dependency', attempt: 0, updatedAt: 1 },
+    ];
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => `continue-${id}`);
+    await runtime.create(initial);
+    const continued = await runtime.continueFailedRun(id, 1, '补齐镜头并合成短片');
+    expect(continued.run.status).toBe('paused');
+    expect(continued.tasks.find((task) => task.id === 'shot1')).toMatchObject({ status: 'completed', output: '已保存镜头1' });
+    expect(continued.tasks.find((task) => task.id === 'shot2')).toMatchObject({ status: 'abandoned', error: '服务商失败' });
+    expect(continued.tasks.find((task) => task.id === 'film')?.status).toBe('abandoned');
+    expect(continued.tasks.at(-1)).toMatchObject({ kind: 'team_plan_revision', dependsOn: ['shot1'],
+      input: { request: '补齐镜头并合成短片', sourceTaskIds: ['shot1'] } });
+  });
+
+  it('settles sibling work before reporting a result checkpoint failure', async () => {
+    const id = crypto.randomUUID();
+    const initial = snapshot(id);
+    initial.tasks[1] = { ...initial.tasks[1], dependsOn: [], status: 'queued' };
+    const scope = `parallel-checkpoint-${id}`;
+    const failure = new Error('checkpoint failed');
+    let releaseSibling!: () => void;
+    let reportCheckpoint!: () => void;
+    const sibling = new Promise<void>((resolve) => { releaseSibling = resolve; });
+    const checkpointFailed = new Promise<void>((resolve) => { reportCheckpoint = resolve; });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+      execute: async (task) => {
+        if (task.id === 'video') await sibling;
+        return { output: task.id };
+      },
+      checkpoint: vi.fn().mockImplementationOnce(async () => {
+        reportCheckpoint();
+        throw failure;
+      }),
+    }, () => scope, 2);
+    await runtime.create(initial);
+    let siblingStatusAtRejection: string | undefined;
+    const result = runtime.resume(id).catch(async (error: unknown) => {
+      siblingStatusAtRejection = (await runtime.read(id))?.tasks.find((task) => task.id === 'video')?.status;
+      return error;
+    });
+    await checkpointFailed;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(siblingStatusAtRejection).toBeUndefined();
+    } finally {
+      releaseSibling();
+    }
+    expect(await result).toBe(failure);
+    expect(siblingStatusAtRejection).toBe('completed');
+    expect((await runtime.resume(id)).run.status).toBe('completed');
+  });
+
+  it('records a pending review when a parallel task fails before the review is appended', async () => {
+    const id = crypto.randomUUID();
+    const initial = snapshot(id);
+    initial.run.status = 'failed';
+    initial.tasks = [{ ...initial.tasks[0], id: 'video', kind: 'agent_video', status: 'failed', attempt: 1,
+      error: '服务商拒绝视频输入' }];
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => `failed-review-${id}`);
+    await runtime.create(initial);
+    const review: WorkflowTask = { id: 'review', runId: id, kind: 'team_review', input: {},
+      dependsOn: ['video'], status: 'waiting_dependency', attempt: 0, updatedAt: 2 };
+    const updated = await runtime.addTasksOnce(id, 1, [review]);
+    expect(updated.run.status).toBe('failed');
+    expect(updated.tasks.find((task) => task.id === 'review')).toMatchObject({ status: 'waiting_dependency' });
+    expect((await runtime.addTasksOnce(id, 1, [review])).tasks.filter((task) => task.id === 'review')).toHaveLength(1);
+  });
+
+  it('records children of a completed plan when another task has failed', async () => {
+    const id = crypto.randomUUID();
+    const scope = `failed-plan-expansion-${id}`;
+    const initial = snapshot(id);
+    initial.run.status = 'failed';
+    initial.run.planOpen = true;
+    initial.tasks = [
+      { ...initial.tasks[0], id: 'revision', kind: 'team_plan_revision', status: 'completed', attempt: 1, output: '已规划' },
+      { ...initial.tasks[0], id: 'video', kind: 'agent_video', status: 'failed', attempt: 1, error: '视频输入参数无效' },
+    ];
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn() }, () => scope);
+    await runtime.create(initial);
+    const child: WorkflowTask = { id: 'next-shot', runId: id, kind: 'agent_video', input: '补做镜头',
+      dependsOn: ['revision'], status: 'waiting_dependency', attempt: 0, updatedAt: 2 };
+
+    const expanded = await runtime.expandPlanOnce(id, 1, 'revision', [child]);
+    expect(expanded.run.status).toBe('failed');
+    expect(expanded.tasks.find((task) => task.id === 'next-shot')).toMatchObject({ status: 'waiting_dependency', attempt: 0 });
+    const repeated = await runtime.expandPlanOnce(id, 1, 'revision', [child]);
+    expect(repeated.run.planVersion).toBe(expanded.run.planVersion);
+    expect(repeated.tasks.filter((task) => task.id === 'next-shot')).toHaveLength(1);
+  });
+
+  it('uses a completed recovery proposal to retry only the rejected image while preserving completed work', async () => {
+    const id = crypto.randomUUID();
+    const scope = `image-recovery-${id}`;
+    const plan = snapshot(id);
+    plan.run.status = 'failed';
+    plan.tasks = [
+      { ...plan.tasks[0], id: 'script', status: 'completed', output: '已完成脚本', attempt: 1 },
+      { ...plan.tasks[0], id: 'image', kind: 'agent_image', dependsOn: ['script'], status: 'failed', attempt: 1,
+        error: '图片提示词被服务商内容审核拒绝', updatedAt: 2 },
+    ];
+    const execute = vi.fn(async (task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => {
+      if (task.kind === 'team_recovery') {
+        await context.beginModelInvocation();
+        return { output: { action: 'retry', prompt: '同一森林小径，圆胖蓝色机器猫奔跑，绿色霸王龙在后方追逐，暖色卡通电影风格。' } };
+      }
+      return { output: '新图片已保存' };
+    });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { tracksModelInvocations: true, execute }, () => scope);
+    await runtime.create(plan);
+    let current = await runtime.scheduleFailedTaskRecovery(id, 1, 'image');
+    expect(current.tasks[0]).toMatchObject({ status: 'completed', output: '已完成脚本' });
+    current = await runtime.resume(id);
+    expect(current.tasks.find((task) => task.kind === 'team_recovery')).toMatchObject({ status: 'completed', attempt: 1 });
+    current = await runtime.applyFailedTaskRecovery(id, current.run.planVersion, 'recovery_image_1');
+    expect(current.tasks.find((task) => task.id === 'image')).toMatchObject({ status: 'queued', attempt: 1,
+      retryInstruction: '同一森林小径，圆胖蓝色机器猫奔跑，绿色霸王龙在后方追逐，暖色卡通电影风格。' });
+    current = await runtime.resume(id);
+    expect(current.tasks.find((task) => task.id === 'image')).toMatchObject({ status: 'completed', attempt: 2 });
+    expect(current.tasks.find((task) => task.id === 'script')).toMatchObject({ status: 'completed', attempt: 1 });
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+  it('keeps the rejected image blocked when the recovery agent decides to stop', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.run.status = 'failed';
+    plan.tasks = [{ ...plan.tasks[0], id: 'image', kind: 'agent_image', status: 'failed', attempt: 1,
+      error: '图片提示词被服务商内容审核拒绝' }];
+    const execute = vi.fn(async (_task: WorkflowTask, _signal: AbortSignal, context: WorkflowExecutionContext) => {
+      await context.beginModelInvocation();
+      return { output: { action: 'stop', reason: '需要用户调整目标' } };
+    });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository,
+      { tracksModelInvocations: true, execute }, () => `image-stop-${id}`);
+    await runtime.create(plan);
+    let current = await runtime.scheduleFailedTaskRecovery(id, 1, 'image');
+    current = await runtime.resume(id);
+    current = await runtime.applyFailedTaskRecovery(id, current.run.planVersion, 'recovery_image_1');
+    expect(current.run.status).toBe('failed');
+    expect(current.tasks.find((task) => task.id === 'image')).toMatchObject({ status: 'failed', attempt: 1 });
+    expect(current.tasks.find((task) => task.kind === 'team_recovery')).toMatchObject({ status: 'completed',
+      output: { action: 'stop', reason: '需要用户调整目标' } });
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+  it('replans after a definite failure while preserving finished work and failure history', async () => {
+    const id = crypto.randomUUID();
+    const scope = `task-replan-${id}`;
+    const plan = snapshot(id);
+    plan.run.status = 'failed';
+    plan.tasks = [
+      { ...plan.tasks[0], id: 'script', kind: 'agent_text', status: 'completed', output: '已完成脚本', attempt: 1 },
+      { ...plan.tasks[0], id: 'inspect', kind: 'agent_image_inspection', input: { task: { goal: '检查图片' }, role: {} },
+        dependsOn: ['script'], status: 'failed', attempt: 1, error: '读取图片失败' },
+      { ...plan.tasks[1], id: 'video', kind: 'agent_video', dependsOn: ['inspect'], status: 'waiting_dependency' },
+    ];
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+      tracksModelInvocations: true,
+      execute: async (_task, _signal, context) => {
+        await context.beginModelInvocation();
+        return { output: { action: 'replan', request: '保留已完成剧本，重新获取可读取的图片素材，再检查并完成视频', reason: '原图片无法读取' } };
+      },
+    }, () => scope);
+    await runtime.create(plan);
+    let current = await runtime.scheduleFailedTaskRecovery(id, 1, 'inspect');
+    current = await runtime.resume(id);
+    current = await runtime.applyFailedTaskReplan(id, current.run.planVersion, 'recovery_inspect_1');
+    expect(current.run.status).toBe('paused');
+    expect(current.tasks.find((task) => task.id === 'script')).toMatchObject({ status: 'completed', output: '已完成脚本' });
+    expect(current.tasks.find((task) => task.id === 'inspect')).toMatchObject({ status: 'abandoned', error: '读取图片失败' });
+    expect(current.tasks.find((task) => task.id === 'video')).toMatchObject({ status: 'abandoned' });
+    expect(current.tasks.find((task) => task.id === 'replan_inspect_1')).toMatchObject({ kind: 'team_plan_revision', dependsOn: ['script'] });
+  });
+  it('rejects automatic replan when an affected downstream request has started', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.run.status = 'failed';
+    plan.tasks = [
+      { ...plan.tasks[0], id: 'inspect', kind: 'agent_image_inspection', status: 'failed', attempt: 1, error: '检查失败' },
+      { ...plan.tasks[1], id: 'video', kind: 'agent_video', dependsOn: ['inspect'], status: 'waiting_external', attempt: 1 },
+      { ...plan.tasks[0], id: 'recovery_inspect_1', kind: 'team_recovery', input: { targetTaskId: 'inspect', failedAttempt: 1 },
+        output: { action: 'replan', request: '重新检查素材并生成安全的视频片段', reason: '原检查失败' }, status: 'completed', attempt: 1 },
+    ];
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: async () => ({ output: '' }) }, () => `replan-started-${id}`);
+    await runtime.create(plan);
+    await expect(runtime.applyFailedTaskReplan(id, 1, 'recovery_inspect_1')).rejects.toThrow('受影响的后续任务已开始');
+  });
   it.each(['model', 'tool'] as const)('persists the %s invocation before sending a request', async (kind) => {
     const id = crypto.randomUUID();
     const scope = `checkpoint-before-${kind}-${id}`;
@@ -617,11 +818,11 @@ describe('workflow run runtime', () => {
     expect(countWorkflowModelCalls(completed)).toBe(3);
   });
 
-  it.each(['success', 'preflight', 'unknown', 'invalid-response', 'duplicate'] as const)('journals model request boundaries: %s', async (outcome) => {
+  it.each(['success', 'preflight', 'unknown', 'invalid-response', 'duplicate', 'retry'] as const)('journals model request boundaries: %s', async (outcome) => {
     const id = crypto.randomUUID();
     const scope = `invocation-${id}`;
     const plan = snapshot(id);
-    plan.run.maxModelCalls = 1;
+    plan.run.maxModelCalls = outcome === 'retry' ? 2 : 1;
     plan.tasks = [{ ...plan.tasks[0], kind: 'agent_text' }];
     const request = describeWorkflowModelRequest({ provider: 'openai', model: 'test', apiKey: 'secret', baseUrl: '' }, 'private prompt', []);
     const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
@@ -635,6 +836,7 @@ describe('workflow run runtime', () => {
         expect(attempts[0].modelInvocation?.state).toBe('started');
         expect(attempts[0].modelInvocation?.request).toEqual(request);
         if (outcome === 'duplicate') await expect(context.beginModelInvocation()).rejects.toThrow('已失效或已开始');
+        if (outcome === 'retry') await context.beginModelInvocation({ ...request, sha256: 'e'.repeat(64) });
         if (outcome === 'unknown') throw new Error('连接中断');
         if (outcome === 'invalid-response') throw new WorkflowPreflightError('响应格式错误');
         return { output: '结果' };
@@ -645,7 +847,8 @@ describe('workflow run runtime', () => {
     const expected = outcome === 'preflight' ? 'not_started' : outcome === 'unknown' ? 'result_unknown' : outcome === 'invalid-response' ? 'failed' : 'succeeded';
     expect(result.tasks[0].modelInvocation?.state).toBe(expected);
     expect(result.tasks[0].modelInvocation?.request).toEqual(outcome === 'preflight' ? undefined : request);
-    expect(countWorkflowModelCalls(result)).toBe(outcome === 'preflight' ? 0 : 1);
+    expect(countWorkflowModelCalls(result)).toBe(outcome === 'preflight' ? 0 : outcome === 'retry' ? 2 : 1);
+    if (outcome === 'retry') expect(result.tasks[0].modelInvocation?.requests).toEqual([request, { ...request, sha256: 'e'.repeat(64) }]);
     expect((await indexedDbWorkflowRepository.listTaskAttempts(scope, id, plan.tasks[0].id))[0].modelInvocation).toEqual(result.tasks[0].modelInvocation);
   });
 
@@ -893,6 +1096,39 @@ describe('workflow run runtime', () => {
     expect(result.tasks[0]).toMatchObject({ status: 'completed', externalTaskId: 'task-saved', output: '已保存的视频', attempt: 1 });
     expect(execute).not.toHaveBeenCalled();
     expect(reconcileInterrupted).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconciles a persisted unknown media result and continues without resubmitting it', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.tasks = [
+      { ...plan.tasks[0], id: 'image', kind: 'agent_image', status: 'result_unknown', attempt: 1, error: '运行权续期超时' },
+      { ...plan.tasks[0], id: 'next', dependsOn: ['image'], status: 'waiting_dependency' },
+    ];
+    const execute = vi.fn(async () => ({ output: '后续任务完成' }));
+    const reconcileInterrupted = vi.fn(async () => ({ status: 'completed' as const, output: '图片已保存' }));
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute, reconcileInterrupted }, () => `unknown-media-${id}`);
+    await runtime.create(plan);
+    const result = await runtime.resume(id);
+    expect(result.tasks.map((task) => task.status)).toEqual(['completed', 'completed']);
+    expect(result.tasks[0].attempt).toBe(1);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(reconcileInterrupted).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps an unknown media result blocked when only a queued attachment is known', async () => {
+    const id = crypto.randomUUID();
+    const plan = snapshot(id);
+    plan.tasks = [{ ...plan.tasks[0], kind: 'agent_image', status: 'result_unknown', attempt: 1 }];
+    const execute = vi.fn();
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, {
+      execute, reconcileInterrupted: async () => ({ status: 'queued' }),
+    }, () => `uncertain-media-${id}`);
+    await runtime.create(plan);
+    const result = await runtime.resume(id);
+    expect(result.tasks[0].status).toBe('result_unknown');
+    expect(result.tasks[0].error).toContain('尚无完成结果');
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('keeps uncertain results blocked across repeated resume calls', async () => {
@@ -1315,11 +1551,14 @@ describe('workflow run runtime', () => {
     await runtime.create(snapshot(id));
     const pending = runtime.resume(id, abortController.signal);
     await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
-    abortController.abort();
+    abortController.abort(new DOMException('聊天图片读取请求被会话运行权中断', 'AbortError'));
     rejectExecution(new Error('已中断'));
     const result = await pending;
     expect(result.run.status).toBe('paused');
-    expect(result.tasks[0].status).toBe('result_unknown');
+    expect(result.tasks[0]).toMatchObject({
+      status: 'result_unknown',
+      error: expect.stringContaining('聊天图片读取请求被会话运行权中断'),
+    });
     await runtime.resume(id);
     expect(execute).toHaveBeenCalledTimes(1);
   });
@@ -1333,6 +1572,16 @@ describe('workflow run runtime', () => {
     expect(result.run.status).toBe('failed');
     expect(result.tasks[0]).toMatchObject({ status: 'failed', error: '原始消息已删除' });
     expect(result.tasks[0].capabilityIssue).toBeUndefined();
+  });
+
+  it('keeps attachment preparation failures definite when no model request was dispatched', async () => {
+    const id = crypto.randomUUID();
+    const failure = Object.assign(new Error('读取聊天图片失败（HTTP 404）'), { requestNotDispatched: true as const });
+    const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: vi.fn().mockRejectedValue(failure) }, () => `image-preflight-${id}`);
+    await runtime.create(snapshot(id));
+    const result = await runtime.resume(id);
+    expect(result.run.status).toBe('failed');
+    expect(result.tasks[0]).toMatchObject({ status: 'failed', error: '读取聊天图片失败（HTTP 404）' });
   });
 
   it('persists capability recovery and retries only the blocked step after explicit repair', async () => {
@@ -1360,8 +1609,10 @@ describe('workflow run runtime', () => {
     repaired = true;
     await restored.resume(id);
     expect(execute).toHaveBeenCalledTimes(1);
-    const retried = await restored.retryFailedTeamTask(id, 1, 'video');
+    const originalInput = failed.tasks[1].input;
+    const retried = await restored.retryFailedTeamTask(id, 1, 'video', '使用配置好的视频模型重试');
     expect(retried.tasks[1].capabilityIssue).toBeUndefined();
+    expect(retried.tasks[1]).toMatchObject({ input: originalInput, retryInstruction: '使用配置好的视频模型重试' });
     const completed = await restored.resume(id);
     expect(completed.run.status).toBe('completed');
     expect(completed.tasks[0]).toEqual(failed.tasks[0]);

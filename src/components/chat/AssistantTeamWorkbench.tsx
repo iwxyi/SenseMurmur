@@ -95,6 +95,10 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
   const reviewResult = latestReview?.output && typeof latestReview.output === 'object' && !Array.isArray(latestReview.output)
     ? latestReview.output as { complete?: unknown; reason?: unknown } : null;
   const childTasks = run.tasks.filter((item) => item.kind === 'agent_user_input' || item.kind === 'agent_delegation' || item.kind === 'agent_text' || item.kind === 'agent_web_search' || item.kind === 'agent_image' || item.kind === 'agent_image_inspection' || item.kind === 'agent_video_inspection' || item.kind === 'agent_audio' || item.kind === 'agent_video' || item.kind === 'agent_media_composition');
+  const deliveryTasks = run.tasks.filter((item) => item.kind !== 'team_recovery' && item.status !== 'abandoned');
+  const currentStage = run.tasks.filter((item) => item.kind === 'team_plan_revision' && item.status === 'completed').at(-1);
+  const currentStageSummary = currentStage?.output && typeof currentStage.output === 'object' && !Array.isArray(currentStage.output)
+    && 'summary' in currentStage.output && typeof currentStage.output.summary === 'string' ? currentStage.output.summary : plan?.summary;
   const blocked = summary.blocked.length > 0;
   const deliveryPending = run.run.status === 'completed' && run.run.deliveryStatus !== 'published';
   const deliveryNeedsAttention = deliveryPending && Boolean(run.run.deliveryIssue);
@@ -126,7 +130,7 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
         <Box sx={{ display: 'grid', gap: 0.6 }}>
           <Stack direction="row" spacing={0.8} sx={{ alignItems: 'center' }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>{run.run.pauseRequested ? '即将暂停' : running ? '正在执行' : deliveryNeedsAttention ? '交付需要处理' : deliveryPending ? '等待交付' : run.run.status === 'completed' ? '已完成' : run.run.status === 'cancelled' ? '已取消' : run.run.status === 'paused' ? '已暂停' : run.run.status === 'failed' ? '执行失败' : '等待执行'}</Typography>
-            <Chip size="small" variant="outlined" label={`${summary.completed.length}/${run.tasks.filter((item) => item.status !== 'abandoned').length} 步`} />
+            <Chip size="small" variant="outlined" label={`${deliveryTasks.filter((item) => item.status === 'completed').length}/${deliveryTasks.length} 步`} />
             {run.run.maxModelCalls ? <Chip size="small" variant="outlined" label={`模型调用 ${countWorkflowModelCalls(run)}/${run.run.maxModelCalls}`} /> : null}
           </Stack>
           {run.run.pauseReason && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">{run.run.pauseReason}</Typography>}
@@ -135,6 +139,10 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
           {deliveryNeedsAttention && <TeamDeliveryConflictPanel key={`${run.run.id}:${run.run.planVersion}`} snapshot={run} canSave={canRun && !running} onSaveCopy={onSaveDeliveryCopy} />}
           {modelCallLimitReached && run.run.status === 'paused' && <Typography variant="body2" color="warning.main">已达到模型调用上限。调整上限后可继续，已有结果会保留。</Typography>}
         </Box>
+        {!task && <Box sx={{ display: 'grid', gap: 0.35, overflowWrap: 'anywhere' }}>
+          <Typography variant="body2"><strong>目标</strong> {run.run.goal}</Typography>
+          {currentStageSummary && <Typography variant="body2" color="text.secondary"><strong>当前计划</strong> {currentStageSummary}</Typography>}
+        </Box>}
         {failedPlan && <Alert severity="error" action={canRun && !running ? <Button color="inherit" size="small" disabled={savingReviewAction} onClick={() => {
           setSavingReviewAction(true);
           setReviewActionRunId(run.run.id);

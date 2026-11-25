@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../types/message';
-import { projectCurrentChatMessages, projectMergedChatMessages } from './currentChatMessages';
+import { pendingAgentTeamMediaMessages, projectCurrentChatMessages, projectMergedChatMessages } from './currentChatMessages';
 
 function message(patch: Partial<Message>): Message {
   return {
@@ -18,6 +18,18 @@ function message(patch: Partial<Message>): Message {
 }
 
 describe('projectCurrentChatMessages', () => {
+  it('retains pending team image bubbles from the local store or cached message window', () => {
+    const queued = message({ id: 'team-image', metadata: { agentTeamMedia: { runId: 'run', taskId: 'frame' },
+      attachments: [{ id: 'image', kind: 'image', status: 'queued', altText: '关键帧', promptText: '丛林', createdAt: 2, updatedAt: 2 }] } });
+    const generating = { ...queued, metadata: { ...queued.metadata, attachments: [{ ...queued.metadata!.attachments![0]!, status: 'generating' as const, updatedAt: 3 }] } };
+    const failed = { ...generating, metadata: { ...generating.metadata, attachments: [{ ...generating.metadata.attachments![0]!, status: 'failed' as const, updatedAt: 4 }] } };
+    const ready = { ...generating, metadata: { ...generating.metadata, attachments: [{ ...generating.metadata.attachments![0]!, status: 'ready' as const, updatedAt: 5 }] } };
+    const hidden = { ...queued, id: 'deleted-image', isDeleted: true };
+
+    expect(pendingAgentTeamMediaMessages('chat-1', [queued, generating, failed, ready, hidden])).toEqual([ready]);
+    expect(pendingAgentTeamMediaMessages('chat-1', [ready])).toEqual([ready]);
+    expect(pendingAgentTeamMediaMessages('other-chat', [queued])).toEqual([]);
+  });
   it('does not deduplicate distinct branch nodes with equal content and timestamps', () => {
     const original = message({ id: 'original', timestamp: 2, metadata: { branching: { nodeId: 'original', parentNodeId: 'root' } } });
     const revision = message({ id: 'revision', timestamp: 2, metadata: { branching: { nodeId: 'revision', parentNodeId: 'root', revisionOfNodeId: 'original' } } });
@@ -30,6 +42,21 @@ describe('projectCurrentChatMessages', () => {
     const cached = Array.from({ length: 5 }, (_, index) => message({ id: `severed-${index}`, timestamp: index,
       metadata: { branching: { nodeId: `severed-${index}`, parentNodeId: null } } }));
     expect(projectCurrentChatMessages({ chatId: 'chat-1', chat, activeMessages: cached.slice(-3), cachedWindow: { messages: cached } }).map((item) => item.id)).toEqual(['severed-2', 'severed-3', 'severed-4']);
+  });
+  it('keeps a new team media placeholder visible when the active message window has not advanced yet', () => {
+    const parent = message({ id: 'team-parent', timestamp: 1,
+      metadata: { branching: { nodeId: 'team-parent', parentNodeId: null, sequence: 1 } } });
+    const image = message({ id: 'team-image', timestamp: 2,
+      metadata: { agentTeamMedia: { runId: 'run', taskId: 'image' },
+        branching: { nodeId: 'team-image', parentNodeId: 'team-parent', sequence: 2 },
+        attachments: [{ id: 'image', kind: 'image', status: 'queued', altText: '参考图', promptText: '森林', createdAt: 2, updatedAt: 2 }] } });
+    const chat = { messageBranchState: { enabled: true, activeBranchName: 'edited', activeLeafNodeId: image.id,
+      refs: { edited: { name: 'edited', headNodeId: image.id, createdAt: 1, updatedAt: 2, version: 2 } } } } as never;
+
+    const projected = projectCurrentChatMessages({ chatId: 'chat-1', chat, activeMessages: [parent],
+      cachedWindow: { messages: [parent, image] } });
+
+    expect(projected.map((item) => item.id)).toEqual(['team-parent', 'team-image']);
   });
   it('preserves branch ancestry for non-render callers even without an explicit cache flag', () => {
     const chat = {

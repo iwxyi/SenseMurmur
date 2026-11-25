@@ -2,6 +2,7 @@ import { api, ApiError } from './api';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import { getChatExecutionFence } from './chatExecutionFence';
+import { refreshChatExecutionLeaseBeforeWrite } from './chatExecutionLease';
 import { workflowJsonDigest } from './workflowToolRequest';
 import { assertWorkflowSnapshot, indexedDbWorkflowRepository, type WorkflowRepositoryCheckpoint } from './workflowRunRuntime';
 import { parseWorkflowTaskAttempt } from './workflowTaskAttempt';
@@ -48,6 +49,7 @@ export function validateWorkflowCheckpoint(raw: unknown, runId: string, chatId: 
 
 export async function saveWorkflowCheckpoint(data: WorkflowRepositoryCheckpoint, expectedRevision: number) {
   const snapshot = data.snapshot;
+  await refreshChatExecutionLeaseBeforeWrite(snapshot.run.chatId);
   const fence = getChatExecutionFence(snapshot.run.chatId);
   if (!fence) throw new Error('同步工作流前必须取得会话运行权');
   const payload = validateWorkflowCheckpoint({ schemaVersion: 1, data }, snapshot.run.id, snapshot.run.chatId);

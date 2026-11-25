@@ -22,7 +22,7 @@ interface AssistantArtifactSnapshot {
 }
 
 interface AssistantArtifactStore extends AssistantArtifactSnapshot {
-  applyWorkflowDelivery: (projections: WorkflowArtifactProjection[]) => AssistantArtifactItem[];
+  applyWorkflowDelivery: (projections: WorkflowArtifactProjection[], options?: { syncToCloud: boolean }) => AssistantArtifactItem[];
   upsertArtifactsFromMessage: (params: {
     chatId: string;
     messageId: string;
@@ -58,6 +58,7 @@ interface AssistantArtifactStore extends AssistantArtifactSnapshot {
   getArtifactsForChat: (chatId: string) => AssistantArtifactItem[];
   refreshArtifactsFromCloud: (chatId: string) => Promise<void>;
   pushArtifactsToCloud: (chatId: string, artifactIds?: string[]) => Promise<void>;
+  confirmWorkflowArtifactsInCloud: (chatId: string, artifactIds: string[]) => Promise<void>;
   createImageArtifactFromAttachment: (params: {
     chatId: string;
     message: Message;
@@ -330,12 +331,12 @@ export const useAssistantArtifactStore = create<AssistantArtifactStore>()(
     (set, get) => ({
       items: [],
 
-      applyWorkflowDelivery: (projections) => {
+      applyWorkflowDelivery: (projections, options) => {
         set((state) => ({ items: projectWorkflowArtifacts(state.items, projections) }));
         const items = projections.map(({ after }) => after);
         for (const chatId of new Set(items.map((item) => item.chatId))) {
           const changed = items.filter((item) => item.chatId === chatId);
-          scheduleArtifactCloudPush(chatId, changed.map((item) => item.id));
+          if (options?.syncToCloud !== false) scheduleArtifactCloudPush(chatId, changed.map((item) => item.id));
           scheduleArtifactLocalWorkspaceWrite(chatId, changed);
         }
         return items;
@@ -626,6 +627,38 @@ export const useAssistantArtifactStore = create<AssistantArtifactStore>()(
         }
         const result = await api.upsertAssistantArtifacts(chatId, items.map(artifactPayloadForCloud));
         mergeCloudArtifacts(result.items);
+      },
+
+      confirmWorkflowArtifactsInCloud: async (chatId, artifactIds) => {
+        if (!artifactIds.length || !shouldSyncAssistantArtifactsToCloud()) return;
+        const storageKey = getAssistantArtifactStorageKey();
+        const assertCurrentAccount = () => {
+          if (getAssistantArtifactStorageKey() !== storageKey || !shouldSyncAssistantArtifactsToCloud()) {
+            throw new Error('账号或产物同步设置已变化，请重新核对产物');
+          }
+        };
+        const current = get().items.filter((item) => item.chatId === chatId && artifactIds.includes(item.id) && item.deletedAt == null);
+        const { items: cloud } = await api.getAssistantArtifacts(chatId);
+        assertCurrentAccount();
+        const cloudById = new Map(cloud.map((item) => [item.id, item]));
+        const confirmed = (local: AssistantArtifactItem, remote?: AssistantArtifactItem) => {
+          const version = local.versions.find((item) => item.id === local.currentVersionId);
+          return Boolean(version && remote && remote.deletedAt == null
+            && remote.versions.some((item) => item.id === version.id && item.content === version.content));
+        };
+        for (const item of current) {
+          assertCurrentAccount();
+          const latest = get().items.find((candidate) => candidate.id === item.id && candidate.chatId === chatId);
+          if (!latest || latest.deletedAt != null || confirmed(latest, cloudById.get(latest.id))) continue;
+          const remote = cloudById.get(latest.id);
+          if (remote && (remote.deletedAt != null || remote.updatedAt > latest.updatedAt)) {
+            throw new Error('云端已有更新的产物版本，请同步后重新核对');
+          }
+          const result = await api.upsertAssistantArtifact(artifactPayloadForCloud(latest));
+          assertCurrentAccount();
+          if (!confirmed(latest, result.item)) throw new Error('云端未确认保存产物版本，请重新核对');
+          mergeCloudArtifacts([result.item]);
+        }
       },
 
       createImageArtifactFromAttachment: ({ chatId, message, attachment, timestamp }) => {

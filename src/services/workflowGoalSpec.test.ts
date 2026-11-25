@@ -41,7 +41,7 @@ describe('workflow goal contract', () => {
   it('keeps the user objective and applies the approved client execution defaults', () => {
     const spec = defaultWorkflowGoalSpec('制作森林短片');
     expect(spec).toMatchObject({ schemaVersion: 1, objective: '制作森林短片', constraints: [], acceptance: [],
-      execution: { location: 'client', recovery: 'safe_steps_only', maxConcurrentTasks: 3, maxAutomaticReviewRounds: 3 } });
+      execution: { location: 'client', recovery: 'safe_steps_only', maxConcurrentTasks: 3, maxAutomaticReviewRounds: 12 } });
     expect(spec.allowedTools).toContain('video_inspection');
     const parsed = parseWorkflowGoalSpec(spec);
     parsed.allowedTools.length = 0;

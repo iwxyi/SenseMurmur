@@ -81,6 +81,33 @@ describe('assistant background reply', () => {
     expect(finalReply?.content).toContain('工作台重试规划');
   });
 
+  it('does not append a second failure reply after a team run records its own failure', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const chatId = crypto.randomUUID();
+    const chat = { ...buildAssistantChatDraft({ agentAvailable: true }), id: chatId, createdAt: 1, updatedAt: 1, lastMessageAt: 1 };
+    const userMessage: Message = { id: crypto.randomUUID(), chatId, type: 'user', senderId: 'user', senderName: '用户',
+      content: '生成图片和视频', emotion: 0, timestamp: Date.now(), isDeleted: false };
+    useChatStore.setState({ chats: [chat] });
+    useMessageStore.setState({ activeChatId: chatId, messages: [userMessage], messageWindowsByChatId: {} });
+    decideRoute.mockResolvedValue({ route: 'team', goal: userMessage.content });
+    const teamRunId = `team-${userMessage.id}`;
+    runTeam.mockImplementation(async () => {
+      await indexedDbWorkflowRepository.transact(currentWorkflowScope(), teamRunId, () => ({ snapshot: {
+        run: { id: teamRunId, chatId, goal: userMessage.content, status: 'failed', generation: 1, planVersion: 1, updatedAt: Date.now() },
+        tasks: [{ id: 'image', runId: teamRunId, kind: 'agent_image', input: {}, dependsOn: [], status: 'failed',
+          error: '图片消息同步超时', attempt: 1, updatedAt: Date.now() }],
+      }, value: undefined }));
+      throw new Error('本次会话仍有待同步结果');
+    });
+
+    await startAssistantBackgroundReply({ chatId, userMessageId: userMessage.id });
+    await vi.waitFor(() => expect(runTeam).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(consoleError).toHaveBeenCalledWith('[assistant-team:run-failed]', expect.any(Error)));
+    await vi.waitFor(() => expect(useMessageStore.getState().messages.some((message) => message.metadata?.assistantReplyToUserMessageId === userMessage.id)).toBe(true));
+    expect(useMessageStore.getState().messages.filter((message) => message.metadata?.assistantTeamFinal)).toEqual([]);
+    consoleError.mockRestore();
+  });
+
   it('keeps a routed team start and failure on the edited message branch', async () => {
     const chatId = crypto.randomUUID();
     const oldUser: Message = { id: 'old-user', chatId, type: 'user', senderId: 'user', senderName: '用户',
