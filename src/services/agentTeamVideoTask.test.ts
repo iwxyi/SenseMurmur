@@ -26,6 +26,20 @@ beforeEach(() => {
 });
 
 describe('agent team video task', () => {
+  it('shows a short task title on the media bubble and attachment', async () => {
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'ready', url: '/uploads/titled.mp4', updatedAt: Date.now() + 1,
+      })) } });
+    });
+    await queueAgentTeamVideo({ runId: 'run', taskId: 'shot', chatId: 'team-video-chat',
+      title: '镜头二：机器猫在雨夜巷道躲避恐龙', prompt: '完整视频生成提示词', signal: new AbortController().signal });
+    expect(useMessageStore.getState().messages[0]).toMatchObject({
+      content: '视频 · 镜头二：机器猫在雨夜巷道躲避恐龙',
+      metadata: { attachments: [expect.objectContaining({ altText: '镜头二：机器猫在雨夜巷道躲避恐龙' })] },
+    });
+  });
+
   it('reuses a persisted budget-rejected placeholder with the new attempt reference', async () => {
     const usageReference = { schemaVersion: 1 as const, runId: 'budget-run', taskId: 'shot', attempt: 2, kind: 'tool' as const };
     const message: Message = { id: 'budget-video', chatId: 'team-video-chat', type: 'ai', senderId: 'assistant', senderName: '助手', content: '视频', emotion: 0,

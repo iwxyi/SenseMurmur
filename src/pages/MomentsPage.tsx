@@ -17,6 +17,8 @@ import type { SocialEventCandidatePayload } from '../types/runtimeEvent';
 import { generateImageWithAdapter, generateTextWithAdapter } from '../services/aiGenerationAdapter';
 import { getPreferredAIProfile, isAIProfileUsable } from '../types/settings';
 import { persistGeneratedMomentMedia, resolveMomentMediaUrl, type StoredMomentMedia } from '../services/momentMediaStorage';
+import { buildMomentPostText } from '../services/momentTextBuilder';
+import { buildMomentImagePrompt } from '../services/momentImagePrompt';
 
 const MOMENT_PAGE_SIZE = 20;
 
@@ -259,7 +261,8 @@ export default function MomentsPage() {
     const shouldGenerateImage = payload.expectedArtifacts?.some((artifact) => artifact !== 'moment_text') && isAIProfileUsable(imageProfile);
     if (shouldGenerateImage) {
       try {
-        const prompt = `${actor.name} posts a natural social media moment image. Context: ${payload.sourceText || payload.seedIntent}. No text, no watermark, candid composition, character-appropriate style.`;
+        payload.momentText = payload.momentText || buildMomentPostText(actor.name, payload);
+        const prompt = buildMomentImagePrompt(actor.name, payload.momentText);
         const images = await generateImageWithAdapter({
           profile: imageProfile,
           prompt,

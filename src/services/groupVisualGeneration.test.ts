@@ -98,4 +98,17 @@ describe('image generation error reporting', () => {
       expect.objectContaining({ id, title: 'Standalone avatar', message: 'Model unavailable' }),
     ]);
   });
+
+  it('does not use the latest assistant-chat message as an image subject', async () => {
+    const { generateImageWithAdapter } = await import('./aiGenerationAdapter');
+    vi.mocked(generateImageWithAdapter).mockRejectedValue(new Error('Model unavailable'));
+    const { enqueueGroupVisualGeneration } = await import('./groupVisualGeneration');
+    const { getChatCompletionSummary } = await import('./chatCompletionQueue');
+    const chat = createTestChat({ id: 'assistant-visual', type: 'assistant', name: '', topic: '',
+      latestMessage: { content: 'PRIVATE_CHAT_HISTORY_SENTINEL' } as never });
+    enqueueGroupVisualGeneration({ chat, members: [], profiles: [DEFAULT_IMAGE_AI_PROFILE],
+      settings: DEFAULT_AVATAR_GENERATION_SETTINGS, language: 'en', kind: 'avatar' });
+    await vi.waitFor(() => expect(getChatCompletionSummary().image.failed).toBe(1));
+    expect(vi.mocked(generateImageWithAdapter).mock.calls[0][0].prompt).not.toContain('PRIVATE_CHAT_HISTORY_SENTINEL');
+  });
 });

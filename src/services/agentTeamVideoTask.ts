@@ -10,6 +10,7 @@ import type { WorkflowGoalSpec } from './workflowGoalSpec';
 import { processRichMessageMedia } from './richMessageMedia';
 import { WorkflowPreflightError } from './workflowRunRuntime';
 import { inspectTeamMediaAdmission, recoverTeamMediaAdmission } from './agentTeamMediaAdmission';
+import { agentTeamMediaTitle } from './agentTeamMediaTitle';
 import { waitForMessageCloudConfirmation } from './messageCloudConfirmation';
 import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { isLocalOnlyMediaMode } from './richMessageMedia';
@@ -44,7 +45,7 @@ export function inspectAgentTeamVideoAttachment(runId: string, taskId: string) {
   return null;
 }
 
-export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; profile?: AIModelProfile; mediaExecution?: PreparedMediaExecution; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; durationSeconds?: number; signal: AbortSignal }): Promise<WorkflowTaskResult> {
+export async function queueAgentTeamVideo(params: { runId: string; taskId: string; chatId: string; prompt: string; title?: string; profile?: AIModelProfile; mediaExecution?: PreparedMediaExecution; usageReference?: WorkflowUsageReference; sourceBranch?: WorkflowGoalSpec['sourceBranch']; referenceImages?: Array<{ url: string; mimeType?: string; label?: string }>; durationSeconds?: number; signal: AbortSignal }): Promise<WorkflowTaskResult> {
   await Promise.all([
     useChatStore.persist.hasHydrated() ? Promise.resolve() : useChatStore.persist.rehydrate(),
     useMessageStore.persist.hasHydrated() ? Promise.resolve() : useMessageStore.persist.rehydrate(),
@@ -81,13 +82,14 @@ export async function queueAgentTeamVideo(params: { runId: string; taskId: strin
     videoDuration: typeof params.mediaExecution.request.duration === 'number' ? params.mediaExecution.request.duration : undefined,
     videoResolution: typeof params.mediaExecution.request.resolution === 'string' ? params.mediaExecution.request.resolution : undefined,
   } : {};
+  const title = agentTeamMediaTitle(params.title || params.prompt, '视频');
   let message = existing || attachMessageToActiveBranch(teamConversationContext(chat, params), known, {
     id: `team-video-${params.runId}-${params.taskId}`, clientKey: `team-video-${params.runId}-${params.taskId}`, chatId: chat.id, type: 'ai' as const,
-    senderId: 'assistant', senderName: '助手', content: '视频', emotion: 0,
+    senderId: 'assistant', senderName: '助手', content: `视频 · ${title}`, emotion: 0,
     timestamp: now, isDeleted: false,
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, workflowUsage: params.usageReference,
       attachments: [{ id: `team-video-${params.taskId}`, kind: 'video' as const, status: 'queued' as const,
-        altText: '团队生成视频', promptText: params.prompt, aspectRatio: profile?.videoDefaults?.aspectRatio,
+        altText: title, promptText: params.prompt, aspectRatio: profile?.videoDefaults?.aspectRatio,
         referenceImages: params.referenceImages, videoDuration: params.durationSeconds,
         videoResolution: profile?.videoDefaults?.resolution, createdAt: now, updatedAt: now, ...executionFields }] },
   }) as Message;

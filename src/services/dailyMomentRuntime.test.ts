@@ -293,10 +293,13 @@ describe('daily moments from character memories', () => {
 
   it('stores real image media on image days', async () => {
     vi.setSystemTime(new Date(2026, 9, 15, 14));
-    actor.layeredMemories = [memory()];
+    actor.layeredMemories = [memory({ text: '群聊长期拉扯：甲与乙争论旧事。' })];
     profiles.push({ ...DEFAULT_IMAGE_AI_PROFILE, model: 'test-image', apiKey: 'test-key' });
     await runDailyMomentFlow('room-a', ops());
     expect(generateImageWithAdapter).toHaveBeenCalledOnce();
+    const imagePrompt = vi.mocked(generateImageWithAdapter).mock.calls[0][0].prompt;
+    expect(imagePrompt).toContain('今天这缕茉莉花香，先记下来');
+    expect(imagePrompt).not.toContain('群聊长期拉扯');
     expect(persistGeneratedMomentMedia).toHaveBeenCalledOnce();
     expect(projectWorldMoments(chats, [actor])[0].media).toMatchObject([{ url: 'local-thumb', fullUrl: 'local-image', assetId: 'local-image' }]);
   });

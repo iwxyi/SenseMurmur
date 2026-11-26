@@ -39,7 +39,7 @@ async function waitForCloudChat(chatId: string) {
 
 function buildSource(chat: GroupChat, members: AICharacter[], requirement: string, language: 'zh' | 'en') {
   const memberHints = members.slice(0, 8).map((member) => [member.name, compact(member.background, 100), (member.expertise || []).slice(0, 3).join('、')].filter(Boolean).join('：')).join('\n');
-  const subject = compact(chat.type === 'assistant' ? (chat.name || chat.topic || chat.latestMessage?.content) : (chat.topic || chat.name), 260);
+  const subject = compact(chat.type === 'assistant' ? (chat.name || chat.topic || '助手会话') : (chat.topic || chat.name), 260);
   if (language === 'zh') return [
     `会话名称：${compact(chat.name, 120)}`, `主题：${compact(chat.topic, 220)}`, `讨论种子：${compact(chat.topicSeed, 180)}`,
     subject ? `视觉主题候选：${subject}` : '',
@@ -57,7 +57,7 @@ function buildSource(chat: GroupChat, members: AICharacter[], requirement: strin
 }
 
 function fallbackPlan(chat: GroupChat, kind: GroupVisualKind, language: 'zh' | 'en'): GroupVisualPlan {
-  const subject = compact(chat.type === 'assistant' ? (chat.name || chat.topic || chat.latestMessage?.content) : (chat.topic || chat.name), 260);
+  const subject = compact(chat.type === 'assistant' ? (chat.name || chat.topic || '助手会话') : (chat.topic || chat.name), 260);
   const conversationLabel = chat.type === 'group' ? (language === 'zh' ? '群聊' : 'group chat') : chat.type === 'ai_direct' ? (language === 'zh' ? '角色私聊' : 'character private chat') : chat.type === 'assistant' ? (language === 'zh' ? '助手会话' : 'assistant chat') : (language === 'zh' ? '单聊' : 'direct chat');
   const style = '';
   if (kind === 'avatar') return {

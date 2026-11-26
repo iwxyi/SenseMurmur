@@ -111,6 +111,20 @@ describe('agent team image task', () => {
     expect(useMessageStore.getState().messages.filter((message) => message.metadata?.agentTeamMedia?.runId === 'run')).toHaveLength(1);
   });
 
+  it('shows a short task title on the media bubble and attachment', async () => {
+    vi.mocked(processRichMessageMedia).mockImplementation(async ({ message, upsertMessage }) => {
+      upsertMessage({ ...message, metadata: { ...message.metadata, attachments: message.metadata!.attachments!.map((item) => ({
+        ...item, status: 'ready', url: '/uploads/titled.png', updatedAt: Date.now() + 1,
+      })) } });
+    });
+    await queueAgentTeamImage({ runId: 'run', taskId: 'shot', chatId: 'team-image-chat',
+      title: '追逐高潮关键帧：机器猫在雨夜巷口避开霸王龙', prompt: '完整画面提示词', signal: new AbortController().signal });
+    expect(useMessageStore.getState().messages[0]).toMatchObject({
+      content: '图片 · 追逐高潮关键帧：机器猫在雨夜巷口避开霸王龙',
+      metadata: { attachments: [expect.objectContaining({ altText: '追逐高潮关键帧：机器猫在雨夜巷口避开霸王龙' })] },
+    });
+  });
+
   it('requeues a failed image on the same chat message with revised prompt and a new attempt key', async () => {
     const failed = imageMessage('failed');
     failed.metadata!.attachments![0] = { ...failed.metadata!.attachments![0], error: 'content rejected', generationJobId: 'old-attempt' };

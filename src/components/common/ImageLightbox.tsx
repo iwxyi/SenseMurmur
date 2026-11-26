@@ -367,10 +367,15 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
               } : {},
             }}
           >
-            <IconButton
+            <Box
+              component="span"
               className="lightbox-edge-icon"
-              tabIndex={-1}
               sx={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: '50%',
+                p: 1,
                 color: (theme) => theme.palette.mode === 'light' ? 'rgba(15,23,42,0.76)' : 'rgba(248,250,252,0.86)',
                 bgcolor: (theme) => theme.palette.mode === 'light' ? 'rgba(255,255,255,0.42)' : 'rgba(15,23,42,0.42)',
                 border: 1,
@@ -385,7 +390,7 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
               }}
             >
               <ChevronLeftIcon />
-            </IconButton>
+            </Box>
           </Box>
         ) : null}
 
@@ -514,10 +519,15 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
               } : {},
             }}
           >
-            <IconButton
+            <Box
+              component="span"
               className="lightbox-edge-icon"
-              tabIndex={-1}
               sx={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: '50%',
+                p: 1,
                 color: (theme) => theme.palette.mode === 'light' ? 'rgba(15,23,42,0.76)' : 'rgba(248,250,252,0.86)',
                 bgcolor: (theme) => theme.palette.mode === 'light' ? 'rgba(255,255,255,0.42)' : 'rgba(15,23,42,0.42)',
                 border: 1,
@@ -532,7 +542,7 @@ export default function ImageLightbox({ open, images, index, onIndexChange, reso
               }}
             >
               <ChevronRightIcon />
-            </IconButton>
+            </Box>
           </Box>
         ) : null}
 

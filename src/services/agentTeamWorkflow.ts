@@ -784,6 +784,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
             ?? (input.sourcePlanTaskId ? delegatedTaskId(input.sourcePlanTaskId, taskId) : taskId), clips.has(taskId) ? 'video' : 'audio')]));
         await context.beginToolInvocation(describeWorkflowToolRequest('media_composition', { plan: input.task.composition, sources }));
         return composeAgentTeamMedia({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          title: input.task.goal,
           sourceBranch: snapshot.run.goalSpec?.sourceBranch,
           plan: input.task.composition, resolveTaskId: (id) => {
             const resolved = sources[id];
@@ -800,6 +801,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         }
         await context.beginToolInvocation(describeWorkflowToolRequest('image_generation', { prompt, referenceImages }));
         return queueAgentTeamImage({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          title: input.task.goal,
           profile: imageProfile,
           mediaExecution,
           usageReference: context.usageReference,
@@ -909,6 +911,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         if (!profile) throw new WorkflowPreflightError('视频模型未配置', { tool: 'video_generation', code: 'model_missing' });
         await context.beginToolInvocation(describeWorkflowToolRequest('video_generation', { prompt, referenceImages, durationSeconds }));
         return queueAgentTeamVideo({ runId: task.runId, taskId: task.id, chatId: snapshot.run.chatId,
+          title: input.task.goal,
           profile,
           mediaExecution,
           usageReference: context.usageReference,

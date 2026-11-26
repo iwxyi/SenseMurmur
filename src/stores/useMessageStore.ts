@@ -969,9 +969,6 @@ export const useMessageStore = create<MessageStore>()(
                 savedMessage = await api.createMessage(localMessage.chatId, messagePayloadForCloud(localMessage, `${operation.id}:recovered`, operation.executionFence));
               }
               const persistedMessage = mergeMessageServerConfirmation(localMessage, savedMessage);
-              if (localMessage.metadata?.agentTeamMedia) {
-                console.info('[message-sync:create-confirmed] 团队图片占位消息已由云端确认保存');
-              }
               set((current) => ({
                 ...localUpsertMessage(current, persistedMessage),
                 pendingOperations: removePendingMessageOperation(current.pendingOperations, operation.id),

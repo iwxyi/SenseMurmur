@@ -12,6 +12,7 @@ import { resolvePostMomentPublishGuard } from './postMomentPublishPolicy';
 import { buildConversationTimeContext } from './conversationTimeContext';
 import { retainRuntimeEvents } from './runtimeEventRetention';
 import { characterPublicationOffset, MOMENT_SPREAD_WINDOW_MS } from './characterPublicationSchedule';
+import { buildMomentImagePrompt } from './momentImagePrompt';
 
 const runningActors = new Set<string>();
 const CHAT_QUIET_PERIOD_MS = 18 * 60_000;
@@ -292,7 +293,7 @@ export async function runDailyMomentFlow(chatId: string, ops: DailyMomentOps) {
       if (imageProfile && imageDay) {
         try {
           const images = await generateImageWithAdapter({ profile: imageProfile,
-            prompt: `Create a candid image illustrating this character's public memory. Do not invent additional people or events. No text, no watermark. Character: ${sanitizeUserFacingText(actor.name, members)}. Memory: ${sourceText}. Post: ${payload.momentText}`,
+            prompt: buildMomentImagePrompt(sanitizeUserFacingText(actor.name, members), payload.momentText),
             count: 1, intent: 'chat-image', character: actor, characters: [actor],
             allowCharacterReferenceImages: true, useCharacterReferenceImages: true,
             negativePrompt: actor.visualIdentity?.negativePrompt, seed: actor.visualIdentity?.seed,

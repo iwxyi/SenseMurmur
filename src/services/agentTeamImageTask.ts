@@ -11,6 +11,7 @@ import { flushBufferedPersistenceWrites } from '../stores/storePersistenceScope'
 import { isLocalOnlyMediaMode, processRichMessageMedia } from './richMessageMedia';
 import { WorkflowPreflightError, type WorkflowTaskResult } from './workflowRunRuntime';
 import { inspectTeamMediaAdmission, recoverTeamMediaAdmission } from './agentTeamMediaAdmission';
+import { agentTeamMediaTitle } from './agentTeamMediaTitle';
 import type { PreparedMediaExecution } from './preparedMediaExecution';
 import { redactAiDiagnosticText } from './aiDiagnosticText';
 import { canAttemptOnlineSync, getCloudSyncSkipDiagnostics } from '../stores/storeSyncHelpers';
@@ -179,6 +180,7 @@ function waitForServerId(runId: string, taskId: string, signal: AbortSignal) {
 }
 
 export async function queueAgentTeamImage(params: { runId: string; taskId: string; chatId: string; prompt: string; sourceBranch?: WorkflowGoalSpec['sourceBranch'];
+  title?: string;
   usageReference?: WorkflowUsageReference;
   profile?: AIModelProfile;
   mediaExecution?: PreparedMediaExecution;
@@ -209,12 +211,13 @@ export async function queueAgentTeamImage(params: { runId: string; taskId: strin
   const known = [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])];
   const executionFields = params.mediaExecution ? { executionQuoteId: params.mediaExecution.quote.id,
     generationJobId: String(params.mediaExecution.request.client_request_key) } : {};
+  const title = agentTeamMediaTitle(params.title || params.prompt, '图片');
   let message = existing || attachMessageToActiveBranch(teamConversationContext(chat, params), known, {
     id: `team-image-${params.runId}-${params.taskId}`, clientKey: `team-image-${params.runId}-${params.taskId}`, chatId: chat.id, type: 'ai' as const,
-    senderId: 'assistant', senderName: '助手', content: '图片', emotion: 0, timestamp: now, isDeleted: false,
+    senderId: 'assistant', senderName: '助手', content: `图片 · ${title}`, emotion: 0, timestamp: now, isDeleted: false,
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, workflowUsage: params.usageReference, attachments: [{
       id: `team-image-${params.taskId}`, kind: 'image' as const, status: 'queued' as const,
-      altText: '团队生成图片', promptText: params.prompt, referenceImages: params.referenceImages, createdAt: now, updatedAt: now, ...executionFields,
+      altText: title, promptText: params.prompt, referenceImages: params.referenceImages, createdAt: now, updatedAt: now, ...executionFields,
     }] },
   }) as Message;
   const failedAttachment = existing?.metadata?.attachments?.find((item) => item.kind === 'image'

@@ -11,6 +11,7 @@ import { assertChatExecutionLease } from './chatExecutionLease';
 import { waitForMessageCloudConfirmation } from './messageCloudConfirmation';
 import { isLocalOnlyMediaMode, uploadLocalMessageMediaToCloud } from './richMessageMedia';
 import { ApiError } from './api';
+import { agentTeamMediaTitle } from './agentTeamMediaTitle';
 
 function teamMediaMessages() {
   const state = useMessageStore.getState();
@@ -68,7 +69,7 @@ async function completedCompositionOutput(runId: string, taskId: string, output:
 }
 
 export async function composeAgentTeamMedia(params: {
-  runId: string; taskId: string; chatId: string; plan: MediaCompositionPlan; sourceBranch?: WorkflowGoalSpec['sourceBranch'];
+  runId: string; taskId: string; chatId: string; plan: MediaCompositionPlan; title?: string; sourceBranch?: WorkflowGoalSpec['sourceBranch'];
   resolveTaskId: (id: string) => string; signal: AbortSignal;
 }) {
   const existing = inspectAgentTeamComposition(params.runId, params.taskId);
@@ -100,12 +101,13 @@ export async function composeAgentTeamMedia(params: {
   const semanticSummary = `按顺序合并 ${params.plan.clips.length} 个片段，叠加 ${params.plan.audioTracks?.length || 0} 条音轨，时长约 ${(result.durationMs / 1000).toFixed(1)} 秒。未进行成片画面检查。`;
   const latestChat = useChatStore.getState().chats.find((item) => item.id === chat.id && item.deletedAt == null);
   if (!latestChat) throw new WorkflowPreflightError('助手会话已删除，合成结果未写入');
+  const title = agentTeamMediaTitle(params.title || '', '合成视频');
   const message = attachMessageToActiveBranch(teamConversationContext(latestChat, params), [...state.messages, ...(state.messageWindowsByChatId[chat.id]?.messages || [])], {
     id: `team-composition-${params.runId}-${params.taskId}`, clientKey: `team-composition-${params.runId}-${params.taskId}`,
-    chatId: chat.id, type: 'ai', senderId: 'assistant', senderName: '助手', content: '合成视频',
+    chatId: chat.id, type: 'ai', senderId: 'assistant', senderName: '助手', content: `合成视频 · ${title}`,
     emotion: 0, timestamp: now, isDeleted: false,
     metadata: { agentTeamMedia: { runId: params.runId, taskId: params.taskId }, attachments: [{
-      id: `team-composition-${params.taskId}`, kind: 'video', status: 'ready', altText: '团队合成视频',
+      id: `team-composition-${params.taskId}`, kind: 'video', status: 'ready', altText: title,
       url, mimeType: 'video/mp4', fileName: '合成视频.mp4', sizeBytes: result.blob.size,
       width: result.width, height: result.height, durationMs: result.durationMs,
       aspectRatio: `${result.width}:${result.height}`, semanticSummary, createdAt: now, updatedAt: now,
