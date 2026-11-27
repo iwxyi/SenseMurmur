@@ -39,7 +39,10 @@ export async function commitGeneratedMessageTurn(params: {
   getCurrentCharacters?: () => AICharacter[];
   shouldContinue?: () => boolean;
 }) {
-  const segments = splitGeneratedRoundMessage(params.message);
+  const directReplyToUserMessageId = params.streamingMessage?.metadata?.directReplyToUserMessageId;
+  const segments = splitGeneratedRoundMessage(params.message).map((segment) => directReplyToUserMessageId
+    ? { ...segment, metadata: { ...segment.metadata, directReplyToUserMessageId } }
+    : segment);
   let workingChat = params.chat;
   let workingCharacters = params.characters;
   let workingMessages = [...params.currentMessages];

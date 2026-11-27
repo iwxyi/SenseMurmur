@@ -6,6 +6,7 @@ import { assertTeamMediaOutput, resolveTeamDelegationMedia, resolveTeamMediaTask
 import { countWorkflowModelCalls, createWorkflowRunRuntime, indexedDbWorkflowRepository, invocationUnstarted, reconcileWorkflowTaskInvocation, rejectWorkflowTaskAdmission, summarizeWorkflowRun, WorkflowPreflightError, type WorkflowTask, type WorkflowSnapshot } from './workflowRunRuntime';
 import { ensureAssistantArtifactStoreHydrated, useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
 import { useChatStore } from '../stores/useChatStore';
+import { useCharacterStore } from '../stores/useCharacterStore';
 import { useMessageStore } from '../stores/useMessageStore';
 import { commitBufferedPersistenceWrites } from '../stores/storePersistenceScope';
 import { scopedStorageKey } from '../constants/brand';
@@ -43,6 +44,7 @@ import type { WorkflowApprovalRequirement } from './workflowApproval';
 import { resolveVideoGenerationParameters } from './aiGenerationAdapter';
 import { canComposeTeamMedia, composeAgentTeamMedia, inspectAgentTeamComposition, syncAgentTeamCompositionToCloud, teamMediaAttachment } from './agentTeamMediaComposition';
 import { hasRepeatedTeamReviewWithoutProgress, hasSemanticallyStalledTeamReview, parseTeamProgressAssessment, teamReviewProgressComparison } from './agentTeamProgress';
+import { buildAgentCharacterContext, describeAgentCharacterOptions } from './agentCharacterContext';
 import { inspectAgentTeamVideo } from './agentTeamVideoInspection';
 import { assertWorkflowToolAuthorized, defaultWorkflowGoalSpec, parseWorkflowGoalSpec, workflowGoalBlockReason, workflowGoalContext, type WorkflowGoalSpec } from './workflowGoalSpec';
 import { describeWorkflowToolRequest, workflowJsonDigest } from './workflowToolRequest';
@@ -153,6 +155,7 @@ interface TeamTaskInput {
   task: AgentTeamTask;
   goal: string;
   role: AgentTeamPlan['roles'][number];
+  characterOverride?: string | null;
   userInstruction?: string;
   sourcePlanTaskId?: string;
   contextTaskIds?: string[];
@@ -245,7 +248,8 @@ function isTeamRevisionInput(value: unknown): value is TeamRevisionInput {
 function isTeamTaskInput(value: unknown): value is TeamTaskInput {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<TeamTaskInput>;
-  return Boolean(candidate.task && candidate.role && typeof candidate.goal === 'string');
+  return Boolean(candidate.task && candidate.role && typeof candidate.goal === 'string')
+    && (candidate.characterOverride === undefined || candidate.characterOverride === null || typeof candidate.characterOverride === 'string');
 }
 
 function delegationAncestors(snapshot: WorkflowSnapshot, task: WorkflowTask): WorkflowTask[] {
@@ -278,6 +282,7 @@ function sameAgentTeamRole(left: AgentTeamPlan['roles'][number], right: AgentTea
     && (left.schemaVersion ?? 1) === (right.schemaVersion ?? 1)
     && (left.contractVersion ?? 1) === (right.contractVersion ?? 1)
     && left.name === right.name
+    && left.characterId === right.characterId
     && left.responsibility === right.responsibility
     && left.method === right.method
     && left.acceptance === right.acceptance
@@ -573,8 +578,10 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
+        if (!useCharacterStore.persist.hasHydrated()) await useCharacterStore.persist.rehydrate();
+        const characters = describeAgentCharacterOptions(useCharacterStore.getState().characters, task.input);
         const priorContext = priorTeamContinuationContext({ goal: task.input, chatId: snapshot.run.chatId, runId: task.runId, runs: await runtime.list() });
-        const plan = await planAgentTeam({ api, goal: task.input, context: `${workflowGoalContext(snapshot.run.goalSpec)}${priorContext}`, chatId: snapshot.run.chatId, webSearch, ...capabilities, rolling: snapshot.run.autoReview === true,
+        const plan = await planAgentTeam({ api, goal: task.input, context: `${workflowGoalContext(snapshot.run.goalSpec)}${priorContext}`, chatId: snapshot.run.chatId, characters, webSearch, ...capabilities, rolling: snapshot.run.autoReview === true,
           delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
         validateAvailableTeamTools(plan, capabilities, webSearch);
         assertGoalPlanAuthorized(snapshot, plan);
@@ -598,6 +605,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const webSearch = Boolean(chat?.modeState && resolveChatAgentCapabilities(chat).webSearch);
         const capabilities = await teamMediaCapabilities();
+        if (!useCharacterStore.persist.hasHydrated()) await useCharacterStore.persist.rehydrate();
+        const characters = describeAgentCharacterOptions(useCharacterStore.getState().characters, task.input.request);
         await ensureAssistantArtifactStoreHydrated();
         const savedMedia = listTeamSavedMedia(snapshot, task.input.sourceTaskIds);
         const savedText = listTeamSavedText(snapshot, task.input.sourceTaskIds, useAssistantArtifactStore.getState().items);
@@ -617,7 +626,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
               && !source.input.userInstruction && sameAgentTeamTask(source.input.task, item)
               && sameAgentTeamRole(source.input.role, sourcePlan.roles.find((role) => role.id === item.roleId)!);
           });
-        const plan = await planAgentTeam({ api, goal: task.input.request, context: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}${revisionContext}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, webSearch, ...capabilities, rolling: snapshot.run.autoReview === true,
+        const plan = await planAgentTeam({ api, goal: task.input.request, context: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n追加要求：${task.input.request}${revisionContext}\n最近交付（共 ${prior.length} 项）：${JSON.stringify(recentPrior)}\n只规划新增且尚未完成的工作。`, chatId: snapshot.run.chatId, characters, webSearch, ...capabilities, rolling: snapshot.run.autoReview === true,
           savedMedia, savedText, ...(canPatch ? { revisionBase: { plan: sourcePlan, targetTaskId: ownerId === 'plan' ? target.id : originalPlanTaskId(ownerId!, target.id), taskSources, savedMedia, savedText } } : {}),
           delegation: !snapshot.run.goalSpec || snapshot.run.goalSpec.allowedTools.includes('delegate_task'), signal, beforeModelRequest: context.beginModelInvocation });
         validateAvailableTeamTools(plan, capabilities, webSearch);
@@ -684,6 +693,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       if (!isAgentTaskKind(task.kind) || !isTeamTaskInput(task.input)) throw new WorkflowPreflightError('团队任务类型无效');
       const input = task.retryInstruction ? { ...task.input, userInstruction: task.retryInstruction } : task.input;
       const role = input.role;
+      const effectiveCharacterId = input.characterOverride !== undefined ? input.characterOverride : role.characterId;
       const snapshot = await runtime.read(task.runId);
       if (!snapshot) throw new WorkflowPreflightError('团队任务记录不存在');
       requireActiveAssistantChat(snapshot.run.chatId);
@@ -734,6 +744,8 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         }
         const chat = requireActiveAssistantChat(snapshot.run.chatId);
         const capabilities = await teamMediaCapabilities();
+        if (!useCharacterStore.persist.hasHydrated()) await useCharacterStore.persist.rehydrate();
+        const characters = describeAgentCharacterOptions(useCharacterStore.getState().characters, [input.task.goal, input.userInstruction].filter(Boolean).join('\n'));
         const can = (tool: AgentTeamPlan['roles'][number]['allowedTools'][number]) => role.allowedTools.includes(tool);
         const contextTaskIds = [...new Set([...task.dependsOn, ...savedText.map((entry) => entry.taskId)])].filter((id) => {
           const source = snapshot.tasks.find((item) => item.id === id);
@@ -744,7 +756,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           userInstruction: input.userInstruction || null, upstream: prior, savedText };
         validateAgentRoleInput(role, roleInput);
         const delegated = await planAgentTeam({ api, goal: input.task.goal, context: `总目标：${snapshot.run.goal}${workflowGoalContext(snapshot.run.goalSpec)}\n只拆分当前子目标：${input.task.goal}\n用户补充指示：${input.userInstruction || '无'}\n验收：${input.task.acceptance}\n${input.task.mediaOutput ? `必须交付一份 ${input.task.mediaOutput} 媒体，计划根字段 resultTaskId 必须指定对应的最终媒体任务。` : ''}\n本岗位可用工具：${role.allowedTools.join('、')}\n已有交付：${JSON.stringify(prior)}\n已绑定的历史文字交付：${JSON.stringify(savedText)}`,
-          chatId: snapshot.run.chatId, ...capabilities,
+          chatId: snapshot.run.chatId, characters, ...capabilities,
           savedMedia: listTeamSavedMedia(snapshot, contextTaskIds),
           savedText: [
             ...listTeamSavedText(snapshot, contextTaskIds, useAssistantArtifactStore.getState().items)
@@ -942,6 +954,17 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
       const roleInput = { overallGoal: input.goal, taskGoal: input.task.goal, acceptance: input.task.acceptance,
         userInstruction: input.userInstruction || null, upstream, savedText };
       validateAgentRoleInput(role, roleInput);
+      let characterContext = '';
+      if (effectiveCharacterId) {
+        const characterStore = useCharacterStore.getState();
+        const cached = characterStore.characters.find((item) => item.id === effectiveCharacterId && item.deletedAt == null);
+        const character = cached?.characterDetailLoaded === false
+          ? await characterStore.loadCharacter(effectiveCharacterId) : cached;
+        if (!character || character.deletedAt != null) throw new WorkflowPreflightError(`岗位“${role.name}”绑定的角色已删除或不可用，请重新规划或改用空白 Agent`);
+        if (character.characterDetailLoaded === false) throw new WorkflowPreflightError(`岗位“${role.name}”绑定的角色详情尚未加载，请检查角色同步状态后继续`);
+        characterContext = buildAgentCharacterContext({ character, chats: useChatStore.getState().chats,
+          taskGoal: input.task.goal, acceptance: input.task.acceptance, userInstruction: input.userInstruction });
+      }
       const output = await generateResponse(api, [
         `岗位：${role.name}`,
         `职责：${role.responsibility}`,
@@ -950,6 +973,7 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         agentRoleContractInstruction(role),
         `本任务验收：${input.task.acceptance}`,
         teamOutputInstruction(input.task),
+        characterContext,
         workflowGoalContext(snapshot.run.goalSpec),
         '只根据提供的目标与上游交付工作；不声称调用了未提供的工具。缺少事实依据时标明不确定性。',
       ].join('\n'), [{ role: 'user', content: `总目标：${input.goal}\n当前任务：${input.task.goal}\n${input.userInstruction ? `用户补充指示：${input.userInstruction}\n` : ''}上游交付：${JSON.stringify(upstream)}\n岗位输入（JSON）：${JSON.stringify(roleInput)}` }], undefined, {
@@ -1089,9 +1113,9 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
         return runtime.decideApproval(runId, taskId, expectedPlanVersion, outcome);
       });
     },
-    async instructQueuedTask(runId: string, taskId: string, expectedPlanVersion: number, instruction: string) {
+    async instructQueuedTask(runId: string, taskId: string, expectedPlanVersion: number, instruction: string, characterId?: string | null) {
       const trimmed = instruction.trim();
-      if (!trimmed || trimmed.length > 4000) throw new Error('补充指示应为 1 到 4000 个字符');
+      if ((!trimmed && characterId === undefined) || trimmed.length > 4000) throw new Error('补充指示应为 1 到 4000 个字符，或至少修改执行角色');
       if (!navigator.locks?.request) throw new Error('此设备不支持安全的团队任务修改');
       const storageScope = scope();
       const snapshot = await navigator.locks.request(workflowRunLockName(storageScope, runId), { ifAvailable: true }, async (lock) => {
@@ -1104,14 +1128,22 @@ export function createAgentTeamWorkflow(api: APIConfig, scope: () => string) {
           const target = current.tasks.find((task) => task.id === taskId);
           if (!target || !isAgentTaskKind(target.kind) || !isTeamTaskInput(target.input) || target.attempt !== 0
             || (target.status !== 'queued' && target.status !== 'waiting_dependency')) throw new Error('只能修改尚未执行的子任务');
+          const targetInput = target.input as TeamTaskInput;
           if (target.approvals?.length) throw new Error('已提出审批的方案不可修改，请追加修订任务');
-          if (target.input.task.tool === 'speech_generation') throw new WorkflowPreflightError('配音正文已确定，请通过追加任务修订正文后重新配音');
+          if (targetInput.task.tool === 'speech_generation') throw new WorkflowPreflightError('配音正文已确定，请通过追加任务修订正文后重新配音');
+          if (characterId && !useCharacterStore.getState().characters.some((character) => character.id === characterId && character.deletedAt == null)) {
+            throw new WorkflowPreflightError('所选角色已删除或不可用，请重新选择');
+          }
           const next: WorkflowSnapshot = {
             ...current,
             run: { ...current.run, planVersion: current.run.planVersion + 1, updatedAt: Date.now() },
             tasks: current.tasks.map((task) => task.id === taskId ? {
               ...task,
-              input: { ...(target.input as TeamTaskInput), userInstruction: trimmed },
+              input: {
+                ...targetInput,
+                ...(trimmed ? { userInstruction: trimmed } : {}),
+                ...(characterId !== undefined ? { characterOverride: characterId } : {}),
+              },
               updatedAt: Date.now(),
             } : task),
           };
@@ -1868,10 +1900,10 @@ export async function decideAgentTeamApproval(params: { runId: string; taskId: s
   return result;
 }
 
-export async function instructAgentTeamTask(params: { runId: string; taskId: string; expectedPlanVersion: number; instruction: string }) {
+export async function instructAgentTeamTask(params: { runId: string; taskId: string; expectedPlanVersion: number; instruction: string; characterId?: string | null }) {
   const auth = readAuthSnapshot();
   if (auth.mode === 'cloud' && auth.user?.agentEntitled !== true) throw new Error('当前账号没有 Agent 权限');
-  const result = await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().instructQueuedTask(params.runId, params.taskId, params.expectedPlanVersion, params.instruction));
+  const result = await changeAgentTeamRun(params.runId, () => currentTeamWorkflow().instructQueuedTask(params.runId, params.taskId, params.expectedPlanVersion, params.instruction, params.characterId));
   notifyTeam();
   return result;
 }

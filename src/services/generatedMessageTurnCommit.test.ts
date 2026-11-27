@@ -222,6 +222,26 @@ describe('commitGeneratedMessageTurn', () => {
     });
   });
 
+  it('keeps direct-reply correlation on every segment when the final reply is split into bubbles', async () => {
+    runSessionCommitPipelineMock.mockImplementation(async (args: { message: Message }) => ({
+      persistedMessage: buildPersistedMessage(args.message.content, runSessionCommitPipelineMock.mock.calls.length),
+      transition: { chatPatch: {}, characterPatches: [], runtimeEvents: [] },
+      nextChat: { id: 'chat-1' },
+      nextCharacters: [],
+    }));
+    const streamingMessage = { ...buildPersistedMessage('', 0), metadata: { directReplyToUserMessageId: 'user-7' } };
+    await commitGeneratedMessageTurn({
+      ...baseParams(),
+      streamingMessage,
+      message: {
+        chatId: 'chat-1', type: 'ai', senderId: 'char-1', senderName: '甲', content: '第一段', emotion: 0,
+        messageParts: [{ content: '第一段' }, { content: '最后一段' }],
+      },
+    } as never);
+    expect(runSessionCommitPipelineMock.mock.calls.map((call) => call[0].message.metadata?.directReplyToUserMessageId))
+      .toEqual(['user-7', 'user-7']);
+  });
+
   it('keeps the existing single-message commit path when no explicit parts are provided', async () => {
     runSessionCommitPipelineMock.mockResolvedValue({
       persistedMessage: buildPersistedMessage('完整回复', 0),

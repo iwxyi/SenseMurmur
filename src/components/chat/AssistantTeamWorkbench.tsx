@@ -161,6 +161,17 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
   const reviewResult = latestReview?.output && typeof latestReview.output === 'object' && !Array.isArray(latestReview.output)
     ? latestReview.output as { complete?: unknown; reason?: unknown } : null;
   const agentTasks = run.tasks.filter((item) => ['agent_user_input', 'agent_delegation', 'agent_text', 'agent_web_search', 'agent_image', 'agent_image_inspection', 'agent_video_inspection', 'agent_audio', 'agent_video', 'agent_media_composition'].includes(item.kind));
+  const collaborators = new Map<string, { role: string; character: string; tasks: WorkflowTask[] }>();
+  for (const item of agentTasks) {
+    if (!navigationTasks.includes(item)) continue;
+    const assignment = taskDetails(item, characters);
+    if (!assignment) continue;
+    const role = (item.input as { role?: { id?: string } }).role;
+    const key = `${role?.id || assignment.role}:${assignment.characterId}`;
+    const group = collaborators.get(key) || { role: assignment.role, character: assignment.character, tasks: [] };
+    group.tasks.push(item);
+    collaborators.set(key, group);
+  }
   const currentStage = run.tasks.filter((item) => item.kind === 'team_plan_revision' && item.status === 'completed').at(-1);
   const currentStageSummary = currentStage?.output && typeof currentStage.output === 'object' && !Array.isArray(currentStage.output)
     && 'summary' in currentStage.output && typeof currentStage.output.summary === 'string' ? currentStage.output.summary : plan?.summary;
@@ -362,6 +373,22 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
               <Typography variant="h6" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{runTitle}</Typography>
               {run.run.goal.trim() !== runTitle.trim() && <Typography variant="body2" sx={{ mt: 1, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{run.run.goal}</Typography>}
               {currentStageSummary && <Typography variant="body2" color="text.secondary" sx={{ mt: 1, overflowWrap: 'anywhere' }}>{currentStageSummary}</Typography>}</Box>
+            {collaborators.size > 0 && <Box component="section" aria-label="协作者分工" sx={{ display: 'grid', gap: 1 }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>协作者</Typography>
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' }, gap: 1 }}>
+                {[...collaborators.entries()].map(([key, collaborator]) => <Box key={key} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1.5, minWidth: 0 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{collaborator.role}</Typography>
+                  <Typography variant="caption" color="text.secondary">{collaborator.character}</Typography>
+                  <Stack sx={{ mt: 1 }}>
+                    {collaborator.tasks.map((item) => <Button key={item.id} size="small" color="inherit" onClick={() => setSelectedTaskId(item.id)}
+                      sx={{ justifyContent: 'space-between', textAlign: 'left', minWidth: 0, gap: 1, px: 0.5 }}>
+                      <Typography component="span" variant="body2" noWrap sx={{ minWidth: 0 }}>{taskTitle(item) || taskDetails(item, characters)?.goal || '执行任务'}</Typography>
+                      <Typography component="span" variant="caption" color={`${statusColor(item.status)}.main`} sx={{ flexShrink: 0 }}>{taskStatus[item.status]}</Typography>
+                    </Button>)}
+                  </Stack>
+                </Box>)}
+              </Box>
+            </Box>}
             {(run.run.maxModelCalls !== undefined || run.run.goalSpec?.deadlineAt) && <Stack direction="row" spacing={2} sx={{ flexWrap: 'wrap' }}>
               {run.run.maxModelCalls !== undefined && <Typography variant="caption" color="text.secondary">模型调用 {countWorkflowModelCalls(run)}/{run.run.maxModelCalls}</Typography>}
               {run.run.goalSpec?.deadlineAt && <Typography variant="caption" color="text.secondary">截止 {new Date(run.run.goalSpec.deadlineAt).toLocaleString()}</Typography>}

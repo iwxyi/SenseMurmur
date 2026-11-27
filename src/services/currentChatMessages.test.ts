@@ -58,6 +58,25 @@ describe('projectCurrentChatMessages', () => {
 
     expect(projected.map((item) => item.id)).toEqual(['team-parent', 'team-image']);
   });
+  it('keeps a completed team media bubble visible after later delivery messages advance the viewport', () => {
+    const root = message({ id: 'root', timestamp: 1,
+      metadata: { branching: { nodeId: 'root', parentNodeId: null, sequence: 1 } } });
+    const media = message({ id: 'team-image', timestamp: 2,
+      metadata: { agentTeamMedia: { runId: 'run', taskId: 'image' },
+        branching: { nodeId: 'team-image', parentNodeId: 'root', sequence: 2 },
+        attachments: [{ id: 'image', kind: 'image', status: 'ready', altText: '成片关键帧', createdAt: 2, updatedAt: 3 }] } });
+    const review = message({ id: 'review', timestamp: 20, content: '验收完成',
+      metadata: { branching: { nodeId: 'review', parentNodeId: 'team-image', sequence: 3 } } });
+    const delivery = message({ id: 'delivery', timestamp: 30, content: '团队交付完成',
+      metadata: { branching: { nodeId: 'delivery', parentNodeId: 'review', sequence: 4 } } });
+    const chat = { messageBranchState: { enabled: true, activeBranchName: 'new', activeLeafNodeId: 'delivery',
+      refs: { new: { name: 'new', headNodeId: 'delivery', createdAt: 1, updatedAt: 30, version: 4 } } } } as never;
+
+    const projected = projectCurrentChatMessages({ chatId: 'chat-1', chat, activeMessages: [review, delivery],
+      cachedWindow: { messages: [root, media, review, delivery] } });
+
+    expect(projected.map((item) => item.id)).toEqual(['team-image', 'review', 'delivery']);
+  });
   it('preserves branch ancestry for non-render callers even without an explicit cache flag', () => {
     const chat = {
       sessionKind: { scenarioId: 'open-chat' },

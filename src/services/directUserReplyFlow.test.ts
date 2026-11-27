@@ -321,9 +321,9 @@ describe('runDirectUserReplyFlow', () => {
     const updateCharacter = vi.fn(() => new Promise<void>((resolve) => {
       releaseUpdateCharacter = resolve;
     }));
-    directFlowMocks.generateAndCommitAiMessage.mockResolvedValueOnce(undefined);
+    directFlowMocks.generateAndCommitAiMessage.mockResolvedValueOnce({ results: [{ persistedMessage: { id: 'reply-1' } }] });
 
-    await runDirectUserReplyFlow({
+    const replyId = await runDirectUserReplyFlow({
       api: DEFAULT_API_CONFIG,
       aiProfiles: [],
       chatId: directChat.id,
@@ -341,6 +341,7 @@ describe('runDirectUserReplyFlow', () => {
     });
 
     expect(updateCharacter).toHaveBeenCalledTimes(1);
+    expect(replyId).toBe('reply-1');
     expect(directFlowMocks.generateAndCommitAiMessage).toHaveBeenCalledTimes(1);
     expect(directFlowMocks.generateAndCommitAiMessage).toHaveBeenCalledWith(expect.objectContaining({
       speaker: expect.objectContaining({

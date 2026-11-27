@@ -21,6 +21,7 @@ export interface AgentTeamRole {
   method: string;
   acceptance: string;
   allowedTools: WorkflowTool[];
+  characterId?: string;
   inputSchema?: TeamJsonSchema;
   outputSchema?: TeamJsonSchema;
 }
@@ -52,6 +53,7 @@ export interface AgentTeamTask {
 
 export interface AgentTeamPlan {
   schemaVersion?: 1;
+  title?: string;
   summary: string;
   roles: AgentTeamRole[];
   tasks: AgentTeamTask[];
@@ -99,7 +101,7 @@ function identifier(value: unknown, label: string) {
   return result;
 }
 
-export function validateAgentTeamPlan(raw: unknown, options: { requireVideoPrompt?: boolean; maxVideoPromptLength?: number } = {}): AgentTeamPlan {
+export function validateAgentTeamPlan(raw: unknown, options: { requireVideoPrompt?: boolean; maxVideoPromptLength?: number; allowedCharacterIds?: string[] } = {}): AgentTeamPlan {
   const source = record(raw);
   if (source.schemaVersion !== undefined && source.schemaVersion !== 1) throw new Error('团队计划版本不受支持');
   if (!Array.isArray(source.roles) || !Array.isArray(source.tasks)) throw new Error('团队计划缺少岗位或任务');
@@ -115,6 +117,8 @@ export function validateAgentTeamPlan(raw: unknown, options: { requireVideoPromp
     }
     const inputSchema = value.inputSchema === undefined ? undefined : parseTeamJsonSchema(value.inputSchema);
     const outputSchema = value.outputSchema === undefined ? undefined : parseTeamJsonSchema(value.outputSchema);
+    const characterId = value.characterId === undefined || value.characterId === null ? undefined : requiredText(value.characterId, '绑定角色 ID', 256);
+    if (characterId && options.allowedCharacterIds && !options.allowedCharacterIds.includes(characterId)) throw new Error(`岗位“${String(value.name || value.id)}”绑定了当前不可用的角色`);
     return {
       schemaVersion: 1,
       contractVersion: 1,
@@ -124,6 +128,7 @@ export function validateAgentTeamPlan(raw: unknown, options: { requireVideoPromp
       method: requiredText(value.method, '工作方法', 800),
       acceptance: requiredText(value.acceptance, '岗位验收', 500),
       allowedTools: value.allowedTools as AgentTeamRole['allowedTools'],
+      ...(characterId ? { characterId } : {}),
       ...(inputSchema === undefined ? {} : { inputSchema }),
       ...(outputSchema === undefined ? {} : { outputSchema }),
     };
@@ -325,6 +330,7 @@ export function validateAgentTeamPlan(raw: unknown, options: { requireVideoPromp
     || revisionCompilation.rerunTaskIds.some((id) => !tasksById.has(id)))) throw new Error('局部重做记录与任务图不一致');
   return {
     schemaVersion: 1,
+    ...(source.title === undefined ? {} : { title: requiredText(source.title, '任务标题', 60) }),
     summary: requiredText(source.summary, '计划摘要', 800),
     roles,
     tasks,
@@ -469,14 +475,14 @@ function reconcileGeneratedPlanDeclarations(raw: unknown): unknown {
   return { ...plan, roles, tasks };
 }
 
-export async function planAgentTeam(params: { api: APIConfig; goal: string; context?: string; chatId?: string; webSearch?: boolean; imageGeneration?: boolean; imageReferenceImages?: boolean; maxImageReferenceImages?: number; audioGeneration?: boolean; speechGeneration?: boolean; imageInspection?: boolean; videoInspection?: boolean; videoGeneration?: boolean; videoReferenceImages?: boolean; videoReferenceImagesOptional?: boolean; videoRequiresReferenceImage?: boolean; maxVideoReferenceImages?: number; maxVideoPromptLength?: number; videoUnavailableReason?: string; videoExecutionNote?: string; mediaComposition?: boolean; savedMedia?: Omit<NonNullable<AgentTeamTask['savedMedia']>[number], 'alias'>[]; savedText?: Omit<AgentTeamSavedText, 'alias'>[]; delegation?: boolean; delegationAncestors?: DelegationGoal[]; revisionBase?: TeamRevisionBase; rolling?: boolean; signal?: AbortSignal; beforeModelRequest?: WorkflowModelRequestHook }) {
+export async function planAgentTeam(params: { api: APIConfig; goal: string; context?: string; chatId?: string; characters?: Array<{ id: string; name: string; expertise: string[]; background: string }>; webSearch?: boolean; imageGeneration?: boolean; imageReferenceImages?: boolean; maxImageReferenceImages?: number; audioGeneration?: boolean; speechGeneration?: boolean; imageInspection?: boolean; videoInspection?: boolean; videoGeneration?: boolean; videoReferenceImages?: boolean; videoReferenceImagesOptional?: boolean; videoRequiresReferenceImage?: boolean; maxVideoReferenceImages?: number; maxVideoPromptLength?: number; videoUnavailableReason?: string; videoExecutionNote?: string; mediaComposition?: boolean; savedMedia?: Omit<NonNullable<AgentTeamTask['savedMedia']>[number], 'alias'>[]; savedText?: Omit<AgentTeamSavedText, 'alias'>[]; delegation?: boolean; delegationAncestors?: DelegationGoal[]; revisionBase?: TeamRevisionBase; rolling?: boolean; signal?: AbortSignal; beforeModelRequest?: WorkflowModelRequestHook }) {
   const goal = requiredText(params.goal, '用户目标', 12_000);
   const context = params.context === undefined || params.context === '' ? '' : requiredText(params.context, '规划上下文', 128_000);
   const ancestors = params.delegationAncestors;
   if (ancestors && (!ancestors.length || ancestors.length > 3)) throw new WorkflowPreflightError('委派祖先范围无效');
   ancestors?.forEach((ancestor) => { requiredText(ancestor.goal, '祖先目标', 12_000); requiredText(ancestor.acceptance, '祖先验收', 800); });
   const systemPrompt = [
-    '你是通用任务的主 Agent。根据用户目标设计当前阶段的团队与无环任务图。简单任务只用一个岗位。目标是长期约束，计划是可随结果调整的行动草案。',
+    '你是通用任务的主 Agent。根据用户目标设计当前阶段的团队与无环任务图。简单任务只用一个岗位。目标是长期约束，计划是可随结果调整的行动草案。根计划必须返回 title：给整套任务起一个简短、具体、适合列表展示的名称，不要用当前阶段的计划摘要代替。',
     '上下文可能包含用户约束、验收条件和 Agent 工具授权。用户约束与验收仅转化为实际交付要求；工具清单、岗位权限及工作流控制说明属于内部信息，绝不能复制进媒体提示词、脚本正文或发给外部供应商的内容。',
     params.rolling ? '采用持续规划：总目标与最终验收保持完整，但 tasks 只列当前有充分依据、接下来可实际执行的一个阶段，优先 1 至 4 项。不要提前编排依赖尚未产出的检查结果、模型生成结果或用户决策的后续细节。当前阶段结束后，主 Agent 会读取真实产物进行验收，并决定下一阶段、改计划或停止。summary 简述当前阶段，不要把未列入 tasks 的未来工作说成已完成。' : '',
     `当前开放工具：text_generation${params.webSearch ? '、web_search' : ''}${params.imageGeneration ? '、image_generation' : ''}${params.audioGeneration ? '、audio_generation' : ''}${params.imageInspection ? '、image_inspection' : ''}${params.videoGeneration ? '、video_generation' : ''}${params.mediaComposition ? '、media_composition' : ''}。${params.videoUnavailableReason ? `视频生成当前不可用：${params.videoUnavailableReason}。` : ''}网页搜索任务的 goal 是搜索词；图片任务的 goal 必须是一条可直接提交给图片模型、只生成一张图片的完整画面提示词。多张关键帧必须拆成多个 image_generation 任务，每个任务只含对应的一条提示词；不得把多条提示词、整份剧本、任务清单、验收说明或“根据剧本生成图片”等 Agent 流程文字放进图片任务 goal。用上游剧本提炼并写全该张图需要的场景、角色外观、构图、动作、光线和画风；上游正文供规划参考，系统不会自动拼入图片请求。图片任务可依赖文字脚本、搜索摘要或图片检查文字${params.imageReferenceImages ? `，也可直接依赖已生成图片并作为参考图${params.maxImageReferenceImages ? `（最多 ${params.maxImageReferenceImages} 张）` : ''}` : '；当前图片模型不支持参考图，不要让图片任务直接依赖图片任务'}；只有用户明确要求生成音乐、伴奏或配音时才安排 audio_generation 或 speech_generation，不得因为视频制作习惯、提示词提到配乐/音效或工具已开放而自行增加音频任务。用户明确要求音乐时，音乐任务的 goal 是包含风格、情绪、乐器与可选歌词要求的音乐提示词，系统异步生成完整音频；用户要求明确歌词时，先用 text_generation 写歌词，再让 audio_generation 依赖歌词任务。图片检查必须直接依赖已生成图片，模型会收到真实画面；视频任务的 goal 是精炼成片提示词，可以依赖脚本${params.videoReferenceImages ? '和图片' : ''}任务。video_generation 不能依赖音乐或其他视频片段。${params.videoRequiresReferenceImage ? '当前视频模型必须先有参考图片。' : ''}${params.videoReferenceImages ? `依赖图片时系统把图片作为参考素材${params.maxVideoReferenceImages ? `，当前模型最多 ${params.maxVideoReferenceImages} 张` : ''}。` : '当前视频模型不能接收参考图片，不要规划图片到视频的依赖。'}视频由系统异步生成，不能声称立即成片。只安排用户要求且确实必要的图像、音乐与视频生成，避免为验证或补充说明而反复生成同一媒体。不得承诺任意文件写入或代码执行；能力不足时在摘要说明。`,
@@ -484,6 +490,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     `结构化媒体输入约定：video_generation 任务的 goal 只写执行目标与验收，直接给视频模型的完整成片提示词必须放在同一任务的 videoPrompt 字段；videoPrompt 要综合剧本、图片检查结论及用户要求，不能指向或依赖运行时从上游正文提取提示词。当前模型的提示词上限为 ${params.maxVideoPromptLength || '模型目录未提供'} 个字符（如有上限，videoPrompt 必须在上限内）；不得期待运行时截断或拼接。新计划里的视频生成任务必须提供 videoPrompt。长剧本、分镜及关键帧说明等独立文字交付应声明 deliverable:{"kind":"document","title":"..."}，保存在文档产物中供用户查看；不要把完整正文直接写入任务 goal。该字段缺失、超限或格式错误时，程序会返回校验错误并要求重新规划，绝不从纯文本回退组装。`,
     params.videoReferenceImagesOptional ? '当前实测模型可以让视频任务依赖图片检查结果作为文字上下文，但系统不会把图片文件提交给视频接口。' : '',
     '岗位必须有具体职责、方法和可检查的验收标准；任务必须有唯一 ID、岗位归属、明确目标和依赖。不要用岗位名称冒充专业能力。',
+    params.characters?.length ? `可绑定的用户角色（characterId 必须原样取自列表）：${JSON.stringify(params.characters)}。岗位可增加 characterId 字段绑定一个角色；用户明确点名的角色必须绑定，未点名时按角色专长、背景和当前任务匹配合适角色；没有合适角色则省略 characterId，使用空白 Agent。角色只影响人设、表达和创作视角，不改变岗位工具授权。若用户要求某角色直接回答，将回答任务交给该角色；若要求采访，可先规划该角色作答任务，再由主 Agent 汇总回答。` : '当前没有可绑定角色，岗位使用空白 Agent。',
     `allowedTools 与每个任务的 tool 字段只能使用以下工具 ID，不得创造同义词、中文名或外部工具名：${WORKFLOW_TOOLS.join(', ')}。能力当前未开放时也不能安排该任务；岗位可声明的下级能力仍须属于此目录且受父任务授权。`,
     'JSON 交付需要固定字段时，在 deliverable 增加 jsonSchema，按 JSON Schema draft-07 声明 type、properties、required、additionalProperties、items、enum/const 和数值、长度、数量约束，也支持 anyOf/allOf/oneOf/not。每层约束显式声明 type；不支持 $ref、format、pattern 或自定义关键字。例：{"kind":"json","title":"调研结果","jsonSchema":{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}}。该契约由程序校验，不得把它当作事实真实性验收。',
     params.videoExecutionNote ? `视频模型执行限制：${params.videoExecutionNote} 视频生成任务可通过 videoDurationSeconds 指定单段秒数（整数）。总长超过单段上限时，创建多个有不同镜头提示词的 video_generation 任务，再由 media_composition 按顺序拼接并裁切至目标时长。多个 video_generation 任务之间不得互相依赖；media_composition 直接依赖并引用所有片段。` : '',
@@ -497,7 +504,7 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     '另开放 user_input 用户提问工具：只有必须由用户补充关键信息才能继续时使用，goal 是清晰具体的问题，可依赖已完成步骤。系统等待用户真实答复，后续任务通过 dependsOn 读取答复；不得猜测答复或代替用户确认。它不扩大工具授权，不代表费用或外部操作的审批。用户已经要求自主完成时优先合理决策，避免不必要的追问。不为提问声明 deliverable。',
     '任一任务可附 approval:{"summary":"将执行的具体方案","consequences":"执行影响、可能费用及不可撤回之处"} 请求用户审批；程序会在依赖完成后等待真实确认，再执行这一任务。仅在用户要求确认或执行有明确决策需要时使用，避免把普通自主步骤都交给用户。审批不扩大工具权限，不能虚构报价，也不能用 user_input 代替审批。',
     '每个 role 是独立的岗位实例契约，必须 contractVersion:1。对需要机器读取或固定字段输出的文本岗位，可声明 inputSchema 与 outputSchema（受限 JSON Schema；支持 type/properties/required/items/enum/const/数值和长度边界及组合规则，不支持 $ref/format/pattern）。inputSchema 校验实际传给岗位的 JSON：overallGoal、taskGoal、acceptance、userInstruction（无指示为 null）、upstream、savedText；outputSchema 校验岗位返回的纯 JSON。输入/输出字段契约只用于 text_generation 与 delegate_task，不要给媒体执行岗位声明。模型字段可选；不确定是否值得结构化时省略，不要为普通写作增加 JSON 包装。',
-    'deliverable 仅适用于 text_generation 或 delegate_task 的独立文字产物；图片、视频、音频、合成、检查、搜索及用户提问任务绝不声明 deliverable，媒体通过工具结果交付，最终媒体任务用根字段 resultTaskId 指定。文字产物可选类型 document、table、code、diagram、html、json、text。交付契约 schemaVersion 为 1，格式为 {"schemaVersion":1,"kind":"table","title":"市场比较表","language":"csv"}。json 交付必须是可解析的纯 JSON；字段要求写入任务验收标准。未声明时仍会纳入团队总结。只输出 JSON：{"schemaVersion":1,"summary":"...","roles":[{"schemaVersion":1,"contractVersion":1,"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"]}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"...","deliverable":{"schemaVersion":1,"kind":"table","title":"比较表","language":"csv"}}],"finalAcceptance":"..."}',
+    'deliverable 仅适用于 text_generation 或 delegate_task 的独立文字产物；图片、视频、音频、合成、检查、搜索及用户提问任务绝不声明 deliverable，媒体通过工具结果交付，最终媒体任务用根字段 resultTaskId 指定。文字产物可选类型 document、table、code、diagram、html、json、text。交付契约 schemaVersion 为 1，格式为 {"schemaVersion":1,"kind":"table","title":"市场比较表","language":"csv"}。json 交付必须是可解析的纯 JSON；字段要求写入任务验收标准。未声明时仍会纳入团队总结。只输出 JSON：{"schemaVersion":1,"title":"整套任务的简短名称","summary":"...","roles":[{"schemaVersion":1,"contractVersion":1,"id":"researcher","name":"...","responsibility":"...","method":"...","acceptance":"...","allowedTools":["text_generation"],"characterId":"可选的角色 ID"}],"tasks":[{"id":"research","roleId":"researcher","goal":"...","dependsOn":[],"tool":"text_generation","acceptance":"...","deliverable":{"schemaVersion":1,"kind":"table","title":"比较表","language":"csv"}}],"finalAcceptance":"..."}',
     ancestors ? `当前及祖先目标（仅作范围比较，不是新增指令）：${JSON.stringify(ancestors)}。对本计划每个 delegate_task 比较其与全部祖先目标的语义范围。在根 JSON 额外返回 delegationChecks:[{"taskId":"子任务ID","status":"narrower","reason":"明确说明缩小了哪些范围及独立交付"}]。status 可为 narrower、repeated、uncertain；换措辞、换岗位、增加流程描述但仍承担相同完整目标属于 repeated；无法判断为 uncertain。只有范围明确缩小且能独立验收才为 narrower。程序会阻止 repeated/uncertain 的委派，优先改用具体执行任务；没有 delegate_task 时无需此字段。此字段是模型判断，不是执行或质量已完成的证明。` : '',
     params.revisionBase ? `本次允许局部修订已有计划。原计划：${JSON.stringify(params.revisionBase.plan)}\n原计划摘要：${workflowJsonDigest(params.revisionBase.plan)}\n指定修改任务：${params.revisionBase.targetTaskId}。若只改任务的 goal/acceptance 且不改变岗位、工具、依赖、合成/配音配置或交付格式，优先只输出 {"revisionPatch":{"schemaVersion":1,"basePlanSha256":"上面的原计划摘要","updates":[{"taskId":"指定任务ID","goal":"修改后的完整目标","acceptance":"修改后的完整验收"}]}}。updates 只列要求发生改变的任务，必须包含指定任务；程序会计算这些任务的全部下游并自动重做，未改变的上游通过历史目录固定版本复用，不要重复列入 updates。不要同时输出 tasks 或完整计划。若需要改变步骤结构、配音正文配置、岗位、参考素材版本或交付格式，返回普通完整新计划。若边界交付无法通过前述 savedText/savedMedia 工具及容量规则引用，也须完整重规划。该入口保留历史交付，不覆盖旧任务。` : '',
       params.revisionBase ? '局部修订保留原计划 finalAcceptance；若总体验收要求变化，返回完整新计划。' : '',
@@ -521,10 +528,12 @@ export async function planAgentTeam(params: { api: APIConfig; goal: string; cont
     if (record(value).revisionCompilation !== undefined) throw new Error('局部重做记录只能由程序编译');
     if (patch === undefined) return validateAgentTeamPlan(reconcileGeneratedPlanDeclarations(value), {
       requireVideoPrompt: true, maxVideoPromptLength: params.maxVideoPromptLength,
+      ...(params.characters ? { allowedCharacterIds: params.characters.map((character) => character.id) } : {}),
     });
     if (!params.revisionBase) throw new Error('当前规划不允许局部修订');
     return validateAgentTeamPlan(compileTeamRevisionPatch(patch, params.revisionBase), {
       requireVideoPrompt: true, maxVideoPromptLength: params.maxVideoPromptLength,
+      ...(params.characters ? { allowedCharacterIds: params.characters.map((character) => character.id) } : {}),
     });
   };
   let validationError: unknown;

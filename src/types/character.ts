@@ -493,6 +493,9 @@ function normalizeRelationshipPreset(input: CharacterRelationshipPreset): Charac
 export function normalizeCharacter(input: Partial<AICharacter> & Pick<AICharacter, 'id' | 'name' | 'avatar' | 'personality' | 'expertise' | 'speakingStyle' | 'background' | 'isPreset' | 'createdAt' | 'updatedAt'>): AICharacter {
   return {
     ...input,
+    expertise: Array.isArray(input.expertise) ? input.expertise.filter((item): item is string => typeof item === 'string') : [],
+    background: typeof input.background === 'string' ? input.background : '',
+    speakingStyle: typeof input.speakingStyle === 'string' ? input.speakingStyle : '',
     personalityDrift: input.personalityDrift || {},
     emotionalState: {
       ...DEFAULT_EMOTIONAL_STATE,

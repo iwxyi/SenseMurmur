@@ -3150,13 +3150,15 @@ export default function ChatDetailPage() {
       if (openedChatWindowRef.current?.chatId === id) openedChatWindowRef.current = null;
       activeChatIdRef.current = null;
       loopTokenRef.current = null;
-      resetRunLoopUiState();
       discardStreamingMessage();
       closeChatWindow(id, { clearActiveOnly: true });
       cancelReplyOperation();
-      stop();
-      if (wasPageLoop) void useChatStore.getState().updateChat(id, { isActive: false })
-        .catch((error) => console.error('[chat-run:page-exit-stop-failed]', error));
+      if (wasPageLoop) {
+        resetRunLoopUiState();
+        stop();
+        void useChatStore.getState().updateChat(id, { isActive: false })
+          .catch((error) => console.error('[chat-run:page-exit-stop-failed]', error));
+      }
     };
   }, [cancelReplyOperation, closeChatWindow, discardStreamingMessage, id, resetRunLoopUiState, stop]);
 
@@ -4721,7 +4723,7 @@ export default function ChatDetailPage() {
             const failures = results.filter((result) => result.status === 'rejected').length;
             if (failures) throw new Error(`${failures} 个团队任务恢复失败，请检查各 Run 状态`);
           }}
-          onInstruct={async (selected, task, instruction) => { await instructAgentTeamTask({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, instruction }); }}
+          onInstruct={async (selected, task, instruction, characterId) => { await instructAgentTeamTask({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, instruction, characterId }); }}
           onAnswer={async (selected, task, answer) => {
             await answerAgentTeamUserInput({ runId: selected.run.id, taskId: task.id, expectedPlanVersion: selected.run.planVersion, answer });
             void runAgentTeam({ chatId: selected.run.chatId, goal: selected.run.goal, runId: selected.run.id }).catch((error) => showErrorToast(error instanceof Error ? error.message : '答复已保存，继续团队任务失败'));

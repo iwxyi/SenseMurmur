@@ -233,9 +233,9 @@ export function projectCurrentChatMessages(params: {
   // timestamp range as the stable viewport boundary after projection.
   return branched.filter((message) => {
     if (message.timestamp >= activeRange.min && message.timestamp <= activeRange.max) return true;
-    // Team media placeholders are appended to the active branch after the
-    // current message window was captured. Keep that new branch tail visible
-    // while the window catches up, or its queued/generating bubble vanishes.
-    return message.timestamp > activeRange.max && Boolean(message.metadata?.agentTeamMedia);
+    // Team media are durable task deliverables. Keep them visible on the
+    // selected branch even after later review and delivery messages move the
+    // paged viewport past them.
+    return Boolean(message.metadata?.agentTeamMedia);
   });
 }

@@ -181,7 +181,7 @@ export async function runDirectUserReplyFlow(params: {
     totalElapsedMs: elapsed(),
   }, 'info', 'chat-run');
 
-  await generateAndCommitAiMessage({
+  const committedTurn = await generateAndCommitAiMessage({
     directReplyToUserMessageId: params.userMessage.id,
     api: textApiConfig,
     aiProfiles: params.aiProfiles,
@@ -229,6 +229,7 @@ export async function runDirectUserReplyFlow(params: {
     },
   });
   ensureDirectReplyStillCurrent(params);
+  const committedReplyId = committedTurn?.results?.at(-1)?.persistedMessage.id;
   if (params.deferRuntimePersistenceUntilCommit) persistDirectRuntimePatch();
   logDeveloperDiagnostic('direct-reply:finished', {
     chatId: params.chatId,
@@ -236,4 +237,5 @@ export async function runDirectUserReplyFlow(params: {
     totalElapsedMs: elapsed(),
   }, 'info', 'chat-run');
   scheduleDirectRuntimeAssessment();
+  return committedReplyId;
 }

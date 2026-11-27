@@ -9,6 +9,7 @@ import { useMessageStore } from '../stores/useMessageStore';
 import { useAssistantArtifactStore } from '../stores/useAssistantArtifactStore';
 import { api as appApi } from './api';
 import { useSettingsStore } from '../stores/useSettingsStore';
+import { useCharacterStore } from '../stores/useCharacterStore';
 import { inspectAgentTeamVideoAttachment, queueAgentTeamVideo } from './agentTeamVideoTask';
 import { inspectAgentTeamImageAttachment, queueAgentTeamImage, teamImageReference } from './agentTeamImageTask';
 import { inspectAgentTeamImages } from './agentTeamImageInspection';
@@ -159,6 +160,33 @@ beforeEach(() => {
 });
 
 describe('agent team workflow', () => {
+  it('binds an explicitly requested character and gives only that character relevant, authorized cross-chat memories', async () => {
+    const runId = `team-character-${crypto.randomUUID()}`;
+    const character = { id: 'lu-xun', name: '鲁迅', background: '作家角色', expertise: ['写作', '文学'], speakingStyle: '冷峻简洁',
+      coreProfile: { coreDesire: '观察现实' }, deletedAt: null, layeredMemories: [] } as unknown as import('../types/character').AICharacter;
+    const publicMemory = { id: 'lu-public-writing', scope: 'conversation', layer: 'episodic', kind: 'artifact', ownerId: 'lu-xun',
+      subjectIds: ['lu-xun'], relatedConversationId: 'literature-room', text: '鲁迅在读书群谈过，写作要观察真实生活，不粉饰现实。',
+      salience: 0.9, confidence: 0.9, recency: 1, reinforcementCount: 1, sourceEventIds: [], visibility: 'public_safe', validity: 'active', createdAt: 1, updatedAt: 1 };
+    const privateMemory = { ...publicMemory, id: 'lu-pair-secret', scope: 'conversation', visibility: 'private', text: '私聊中的私人秘密' };
+    useCharacterStore.setState({ characters: [character] } as Partial<ReturnType<typeof useCharacterStore.getState>>);
+    useChatStore.setState((state) => ({ chats: [...state.chats.filter((chat) => chat.id !== 'literature-room'),
+      { id: 'literature-room', name: '文学读书群', type: 'group', memberIds: ['lu-xun', 'friend'], deletedAt: null,
+        layeredMemories: [publicMemory, privateMemory] } as unknown as (typeof state.chats)[number]] }));
+    generate.mockResolvedValueOnce(JSON.stringify({ summary: '由角色直接作答', roles: [{ id: 'writer', name: '编剧', responsibility: '回答创作问题',
+      method: '以角色自身观点回答', acceptance: '回答完整', allowedTools: ['text_generation'], characterId: 'lu-xun' }],
+      tasks: [{ id: 'answer', roleId: 'writer', goal: '鲁迅直接回答：如果重写《朝花夕拾》会调整什么', dependsOn: [], acceptance: '清楚说明创作选择' }], finalAcceptance: '回答已交付' }))
+      .mockResolvedValueOnce('我会删去粉饰，把生活里被忽略的细节写得更清楚。')
+      .mockResolvedValueOnce(JSON.stringify({ complete: true, reason: '角色回答了问题' }));
+    const result = await createAgentTeamWorkflow({ provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, () => `character-${runId}`)
+      .start(runId, 'chat', '鲁迅直接回答朝花夕拾如何修改');
+    expect(result.snapshot.run.status, JSON.stringify(result.snapshot.tasks.map((task) => ({ id: task.id, status: task.status, error: task.error })))).toBe('completed');
+    expect(generate.mock.calls[0][1]).toContain('鲁迅');
+    expect(generate.mock.calls[1][1]).toContain('协作者角色：鲁迅');
+    expect(generate.mock.calls[1][1]).toContain('文学读书群');
+    expect(generate.mock.calls[1][1]).toContain('观察真实生活');
+    expect(generate.mock.calls[1][1]).not.toContain('私聊中的私人秘密');
+  });
+
   it('does not expand a completed run when background recovery sees a stale snapshot', async () => {
     const runId = `completed-recovery-${crypto.randomUUID()}`;
     const scope = `completed-recovery-${runId}`;
@@ -2684,7 +2712,7 @@ describe('agent team workflow', () => {
     const runId = `team-${crypto.randomUUID()}`;
     const plan = {
       summary: '写报告',
-      roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理材料', acceptance: '成稿', allowedTools: ['text_generation'] }],
+      roles: [{ id: 'writer', name: '写作者', responsibility: '撰写', method: '整理材料', acceptance: '成稿', allowedTools: ['text_generation'], characterId: 'char-one' }],
       tasks: [{ id: 'write', roleId: 'writer', goal: '写报告', dependsOn: [], acceptance: '成稿' }],
       finalAcceptance: '可阅读',
     };
@@ -2695,26 +2723,37 @@ describe('agent team workflow', () => {
         run: { id: runId, chatId: 'chat', goal: '写报告', status: 'paused', generation: 1, planVersion: 2, planOpen: true, updatedAt: now },
         tasks: [
           { id: 'plan', runId, kind: 'team_plan', input: '写报告', output: plan, dependsOn: [], status: 'completed', attempt: 1, updatedAt: now },
-          { id: 'write', runId, kind: 'agent_text', input: { task: plan.tasks[0], role: plan.roles[0], goal: '写报告' }, dependsOn: ['plan'], status: 'queued', attempt: 0, updatedAt: now },
+          { id: 'write', runId, kind: 'agent_text', input: { task: plan.tasks[0], role: { ...plan.roles[0], characterId: 'char-one' }, goal: '写报告' }, dependsOn: ['plan'], status: 'queued', attempt: 0, updatedAt: now },
         ],
       }, value: undefined,
     }));
     await expect(scoped.instructQueuedTask(runId, 'write', 1, '用简体中文')).rejects.toThrow('团队计划已更新');
-    const updated = await scoped.instructQueuedTask(runId, 'write', 2, '用简体中文');
+    const updated = await scoped.instructQueuedTask(runId, 'write', 2, '用简体中文', null);
     expect(updated.run.planVersion).toBe(3);
-    expect(updated.tasks[1].input).toMatchObject({ userInstruction: '用简体中文' });
+    expect(updated.tasks[1].input).toMatchObject({ userInstruction: '用简体中文', role: { name: '写作者' } });
+    expect((updated.tasks[1].input as { role: { characterId?: string }; characterOverride?: string | null }).role.characterId).toBe('char-one');
+    expect((updated.tasks[1].input as { characterOverride?: string | null }).characterOverride).toBeNull();
+    useCharacterStore.setState({ characters: [{ id: 'char-two', name: '新角色', background: '写作者', expertise: ['写作'], speakingStyle: '简洁',
+      coreProfile: { coreDesire: '清楚表达' }, layeredMemories: [], deletedAt: null }] } as Partial<ReturnType<typeof useCharacterStore.getState>>);
+    const rebound = await scoped.instructQueuedTask(runId, 'write', 3, '', 'char-two');
+    expect(rebound.run.planVersion).toBe(4);
+    expect((rebound.tasks[1].input as { role: { characterId?: string }; characterOverride?: string | null }).role.characterId).toBe('char-one');
+    expect((rebound.tasks[1].input as { characterOverride?: string | null }).characterOverride).toBe('char-two');
     await indexedDbWorkflowRepository.transact('team-instruction-test', runId, (current) => {
       if (!current) throw new Error('测试任务不存在');
       return { snapshot: { ...current, run: { ...current.run, status: 'active' } }, value: undefined };
     });
-    await expect(scoped.instructQueuedTask(runId, 'write', 3, '执行中修改')).rejects.toThrow('请先暂停整个团队任务');
+    await expect(scoped.instructQueuedTask(runId, 'write', 4, '执行中修改')).rejects.toThrow('请先暂停整个团队任务');
     await indexedDbWorkflowRepository.transact('team-instruction-test', runId, (current) => {
       if (!current) throw new Error('测试任务不存在');
       return { snapshot: { ...current, run: { ...current.run, status: 'paused' } }, value: undefined };
     });
+    await useCharacterStore.persist.rehydrate();
+    useCharacterStore.setState({ characters: [{ id: 'char-two', name: '新角色', background: '写作者', expertise: ['写作'], speakingStyle: '简洁',
+      coreProfile: { coreDesire: '清楚表达' }, layeredMemories: [], deletedAt: null }] } as Partial<ReturnType<typeof useCharacterStore.getState>>);
     generate.mockResolvedValueOnce('中文报告');
     const result = await scoped.resume(runId);
-    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.run.status, result.snapshot.tasks.find((task) => task.id === 'write')?.error).toBe('completed');
     expect(generate.mock.calls[0][2][0].content).toContain('用户补充指示：用简体中文');
     await expect(scoped.instructQueuedTask(runId, 'write', 3, '再次修改')).rejects.toThrow('请先暂停整个团队任务');
   });

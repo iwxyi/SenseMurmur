@@ -68,7 +68,7 @@ async function executeDirectReply(task: WorkflowTask, signal: AbortSignal) {
     if (alreadyCommitted) return { output: alreadyCommitted.id };
     const { runDirectUserReplyFlow } = await import('./directUserReplyFlow');
     const settings = useSettingsStore.getState();
-    await runDirectUserReplyFlow({
+    const committedReplyId = await runDirectUserReplyFlow({
       api: settings.api, aiProfiles: settings.aiProfiles, chatId, chat, userMessage,
       content: userMessage.content, characters: useCharacterStore.getState().characters,
       historyCutoffTimestamp: userMessage.timestamp,
@@ -101,9 +101,10 @@ async function executeDirectReply(task: WorkflowTask, signal: AbortSignal) {
       shouldContinue: () => !signal.aborted && useChatStore.getState().chats.some((item) => item.id === chatId && item.type === 'direct' && item.deletedAt == null),
     });
     const reply = committedReply(chatId, userMessageId);
-    if (!reply) throw new Error('单聊生成返回后未找到已提交回复，结果需要核对');
+    const replyId = reply?.id || committedReplyId;
+    if (!replyId) throw new Error('单聊生成返回后未找到已提交回复，结果需要核对');
     flushBufferedPersistenceWrites();
-    return { output: reply.id };
+    return { output: replyId };
 }
 
 const runtime = createWorkflowRunRuntime(indexedDbWorkflowRepository, { execute: executeDirectReply });

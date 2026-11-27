@@ -6,6 +6,7 @@ vi.mock('./aiClient', () => ({ generateResponse: vi.fn() }));
 beforeEach(() => vi.mocked(generateResponse).mockReset());
 
 const valid = () => ({
+  title: '需求分析与报告',
   summary: '先研究，再写报告',
   roles: [{ id: 'researcher', name: '研究员', responsibility: '收集问题线索', method: '逐项比较并注明假设', acceptance: '列出证据与不确定性', allowedTools: ['text_generation'] }],
   tasks: [
@@ -16,6 +17,13 @@ const valid = () => ({
 });
 
 describe('agent team plan', () => {
+  it('preserves a concise task title independently from the changing stage summary', () => {
+    const plan = validateAgentTeamPlan({ ...valid(), title: '15秒恐龙追逐短片', summary: '先写剧本并确认视觉方向' });
+    expect(plan.title).toBe('15秒恐龙追逐短片');
+    expect(plan.summary).toBe('先写剧本并确认视觉方向');
+    expect(() => validateAgentTeamPlan({ ...valid(), title: ' ' })).toThrow('任务标题无效');
+  });
+
   it('treats the visible plan as the next executable stage in rolling mode', async () => {
     vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(valid()));
     await planAgentTeam({ api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '完成复杂目标', rolling: true });
@@ -23,6 +31,16 @@ describe('agent team plan', () => {
     expect(prompt).toContain('持续规划');
     expect(prompt).toContain('只列当前有充分依据');
     expect(prompt).toContain('主 Agent 会读取真实产物');
+    expect(prompt).toContain('根计划必须返回 title');
+  });
+  it('offers existing characters to the planner and accepts only supplied character bindings', async () => {
+    const candidate = { ...valid(), roles: [{ ...valid().roles[0], characterId: 'lu' }] };
+    vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(candidate));
+    const plan = await planAgentTeam({ api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '鲁迅角色直接回答',
+      characters: [{ id: 'lu', name: '鲁迅', expertise: ['写作'], background: '作家角色' }] });
+    expect(plan.roles[0].characterId).toBe('lu');
+    expect(vi.mocked(generateResponse).mock.calls[0][1]).toContain('用户明确点名的角色必须绑定');
+    expect(() => validateAgentTeamPlan(candidate, { allowedCharacterIds: ['other'] })).toThrow('绑定了当前不可用的角色');
   });
   it('tells the planner to add audio generation only when the user asks for audio', async () => {
     vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(valid()));
@@ -61,7 +79,7 @@ describe('agent team plan', () => {
   it('normalizes serial video dependencies into independent clips and direct composition inputs', async () => {
     const role = { id: 'editor', name: '剪辑师', responsibility: '制作视频', method: '逐段生成并合成', acceptance: '成片可播放',
       allowedTools: ['video_generation', 'media_composition'] };
-    const candidate = { summary: '生成独立片段后合成', roles: [role], finalAcceptance: '成片可播放', resultTaskId: 'film', tasks: [
+    const candidate = { title: '恐龙追逐短片', summary: '生成独立片段后合成', roles: [role], finalAcceptance: '成片可播放', resultTaskId: 'film', tasks: [
       { id: 'shot_a', roleId: role.id, goal: '生成追逐开场', videoPrompt: '雨夜街巷中霸王龙冲入画面，机器猫开始奔跑。', tool: 'video_generation', videoDurationSeconds: 4, dependsOn: [], acceptance: '片段可播放' },
       { id: 'shot_b', roleId: role.id, goal: '生成追逐结尾', videoPrompt: '同一雨夜街巷中恐龙滑倒，机器猫冲出巷口。', tool: 'video_generation', videoDurationSeconds: 4, dependsOn: ['shot_a'], acceptance: '片段可播放' },
       { id: 'film', roleId: role.id, goal: '合成15秒成片', tool: 'media_composition', dependsOn: ['shot_b'],
@@ -355,7 +373,6 @@ describe('agent team plan', () => {
     const shot = { id: 'shot', roleId: role.id, goal: '生成视频', videoPrompt: '森林中恐龙追赶机器猫。', dependsOn: ['script', 'image'], acceptance: '视频可播放', tool: 'video_generation' };
     const film = { id: 'film', roleId: role.id, goal: '合成成片', dependsOn: ['image', 'shot'], acceptance: '成片可播放', tool: 'media_composition', composition: { clips: [{ taskId: 'image' }] } };
     const invalid = { ...valid(), roles: [role], tasks: [script, image, shot, film], resultTaskId: 'film' };
-    const repaired = { ...invalid, tasks: [script, image, shot, { ...film, dependsOn: ['shot'], composition: { clips: [{ taskId: 'shot' }] } }] };
     const params = { api: { provider: 'openai', apiKey: 'test', baseUrl: '', model: 'test' }, goal: '剧本、图片、视频成片',
       imageGeneration: true, videoGeneration: true, videoReferenceImages: true, mediaComposition: true };
     vi.mocked(generateResponse).mockResolvedValueOnce(JSON.stringify(invalid));

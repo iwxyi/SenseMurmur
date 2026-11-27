@@ -100,6 +100,18 @@ describe('direct background reply', () => {
     expect(flow).not.toHaveBeenCalled();
   });
 
+  it('uses the commit result when a segmented final bubble lacks legacy correlation metadata', async () => {
+    const { chatId, userMessage } = setup();
+    flow.mockImplementation(async (params: { upsertMessage: (message: Message) => void }) => {
+      params.upsertMessage({ id: 'final-segment', chatId, type: 'ai', senderId: 'character', senderName: '角色',
+        content: '最后一段回复', emotion: 0, timestamp: userMessage.timestamp + 1, isDeleted: false });
+      return 'final-segment';
+    });
+    const result = await startDirectBackgroundReply(chatId, userMessage.id);
+    expect(result.snapshot.run.status).toBe('completed');
+    expect(result.snapshot.tasks[0]?.output).toBe('final-segment');
+  });
+
   it('does not complete an interrupted segmented reply from its first bubble', async () => {
     const { chatId, userMessage } = setup();
     const runId = directReplyRunId(chatId, userMessage.id);
