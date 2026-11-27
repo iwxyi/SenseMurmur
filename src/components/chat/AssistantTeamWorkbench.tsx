@@ -66,7 +66,7 @@ function taskDetails(task: WorkflowTask, characters: ReturnType<typeof useCharac
     acceptance: typeof value.task.acceptance === 'string' ? value.task.acceptance : '',
     role: typeof value.role?.name === 'string' ? value.role.name : '子 Agent',
     characterId,
-    character: characterId ? characters.find((item) => item.id === characterId)?.name || '已绑定角色不可用' : '空白 Agent',
+    character: characterId ? characters.find((item) => item.id === characterId)?.name || '已绑定角色不可用' : '',
     responsibility: typeof value.role?.responsibility === 'string' ? value.role.responsibility : '',
     method: typeof value.role?.method === 'string' ? value.role.method : '',
   };
@@ -292,7 +292,7 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
           {task && <Box sx={{ display: 'grid', gap: 2, maxWidth: 960, mx: 'auto', overflowWrap: 'anywhere' }}>
             {(taskTitle(task) || details) && <Box>
               {taskTitle(task) && <Typography variant="h6" sx={{ fontWeight: 750, overflowWrap: 'anywhere' }}>{taskTitle(task)}</Typography>}
-              {details && <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{details.role} · {details.character}</Typography>}
+              {details && <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{details.character ? `${details.role} · ${details.character}` : details.role}</Typography>}
             </Box>}
             {details && <Box sx={{ display: 'grid', gap: 1.25 }}>
               <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>{details.goal}</Typography>
@@ -348,7 +348,7 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
               <Typography variant="subtitle2">调整此任务</Typography>
               {editable && <TextField select size="small" label="执行角色" value={characterOverrides[task.id] ?? details.characterId}
                 onChange={(event) => setCharacterOverrides((current) => ({ ...current, [task.id]: event.target.value }))} disabled={savingInstruction}>
-                <MenuItem value="">空白 Agent</MenuItem>
+                <MenuItem value=""> </MenuItem>
                 {characters.filter((item) => item.deletedAt == null).map((item) => <MenuItem key={item.id} value={item.id}>{item.name}</MenuItem>)}
               </TextField>}
               <TextField multiline minRows={2} fullWidth size="small" label={editable ? '修改前补充执行要求' : '交给主 Agent 追加修订'} value={instruction}
@@ -378,7 +378,7 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
               <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' }, gap: 1 }}>
                 {[...collaborators.entries()].map(([key, collaborator]) => <Box key={key} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1.5, minWidth: 0 }}>
                   <Typography variant="subtitle2" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{collaborator.role}</Typography>
-                  <Typography variant="caption" color="text.secondary">{collaborator.character}</Typography>
+                  {collaborator.character && <Typography variant="caption" color="text.secondary">{collaborator.character}</Typography>}
                   <Stack sx={{ mt: 1 }}>
                     {collaborator.tasks.map((item) => <Button key={item.id} size="small" color="inherit" onClick={() => setSelectedTaskId(item.id)}
                       sx={{ justifyContent: 'space-between', textAlign: 'left', minWidth: 0, gap: 1, px: 0.5 }}>
