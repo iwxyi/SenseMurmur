@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Accordion, AccordionDetails, AccordionSummary, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControl, List, ListItemButton, MenuItem, Select, Stack, TextField, Typography } from '@mui/material';
+import { Alert, Accordion, AccordionDetails, AccordionSummary, Avatar, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControl, List, ListItemButton, MenuItem, Select, Stack, TextField, Typography } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import type { WorkflowSnapshot, WorkflowTask } from '../../services/workflowRunRuntime';
@@ -18,6 +18,8 @@ import TeamBudgetPanel from './TeamBudgetPanel';
 import { pendingWorkflowApproval } from '../../services/workflowApproval';
 import { WORKFLOW_CAPABILITY_RECOVERY } from '../../services/workflowCapability';
 import { useCharacterStore } from '../../stores/useCharacterStore';
+import ProfilePreviewOverlay from './ProfilePreviewOverlay';
+import { isImageAvatar } from '../../utils/avatar';
 
 interface Props {
   open: boolean;
@@ -100,6 +102,7 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
   const scrollFrameRef = useRef<number | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [characterPreview, setCharacterPreview] = useState<{ characterId: string; anchorRect: DOMRect } | null>(null);
   const [instruction, setInstruction] = useState('');
   const [characterOverrides, setCharacterOverrides] = useState<Record<string, string>>({});
   const [savingInstruction, setSavingInstruction] = useState(false);
@@ -155,20 +158,21 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
   const task = selectedTaskId === OVERVIEW_ID || !selectedTaskId ? null
     : navigationTasks.find((item) => item.id === selectedTaskId) || null;
   const details = task ? taskDetails(task, characters) : null;
+  const previewCharacter = characterPreview && characters.find((item) => item.id === characterPreview.characterId && item.deletedAt == null);
   const reviewReason = task?.kind === 'team_review' && task.output && typeof task.output === 'object'
     && !Array.isArray(task.output) && 'reason' in task.output ? String(task.output.reason) : null;
   const latestReview = run.tasks.filter((item) => item.kind === 'team_review' && item.status === 'completed' && !isPartialTeamReview(item)).at(-1);
   const reviewResult = latestReview?.output && typeof latestReview.output === 'object' && !Array.isArray(latestReview.output)
     ? latestReview.output as { complete?: unknown; reason?: unknown } : null;
   const agentTasks = run.tasks.filter((item) => ['agent_user_input', 'agent_delegation', 'agent_text', 'agent_web_search', 'agent_image', 'agent_image_inspection', 'agent_video_inspection', 'agent_audio', 'agent_video', 'agent_media_composition'].includes(item.kind));
-  const collaborators = new Map<string, { role: string; character: string; tasks: WorkflowTask[] }>();
+  const collaborators = new Map<string, { role: string; character: string; characterId: string; tasks: WorkflowTask[] }>();
   for (const item of agentTasks) {
     if (!navigationTasks.includes(item)) continue;
     const assignment = taskDetails(item, characters);
     if (!assignment) continue;
     const role = (item.input as { role?: { id?: string } }).role;
     const key = `${role?.id || assignment.role}:${assignment.characterId}`;
-    const group = collaborators.get(key) || { role: assignment.role, character: assignment.character, tasks: [] };
+    const group = collaborators.get(key) || { role: assignment.role, character: assignment.character, characterId: assignment.characterId, tasks: [] };
     group.tasks.push(item);
     collaborators.set(key, group);
   }
@@ -206,17 +210,18 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
     : run.tasks.some((item) => item.kind === 'agent_media_composition' && (item.status === 'failed' || item.status === 'result_unknown')) ? '重试合成并继续'
       : blocked || modelCallLimitReached ? '核对媒体结果' : '继续任务';
 
-  return <Dialog open={open} onClose={onClose} fullWidth maxWidth="xl" aria-labelledby="team-workbench-title"
+  return <><Dialog open={open} onClose={() => { setCharacterPreview(null); onClose(); }} disableEnforceFocus={Boolean(previewCharacter)} fullWidth maxWidth="xl" aria-labelledby="team-workbench-title"
     sx={{ '& .MuiDialog-paper': { height: { xs: 'calc(100dvh - 16px)', md: 'min(90dvh, 920px)' }, maxHeight: 'none' } }}>
     <DialogTitle sx={{ px: { xs: 2, md: 3 }, pt: 2.5, pb: 1.5 }}>
-      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between' }}>
-        <Box sx={{ minWidth: 0 }}>
-          <Typography id="team-workbench-title" variant="h6" sx={{ fontWeight: 750 }}>团队工作台</Typography>
+      <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ alignItems: { sm: 'center' }, justifyContent: 'space-between', flexWrap: 'wrap', gap: 1.5 }}>
+        <Box sx={{ flexShrink: 0 }}>
+          <Typography id="team-workbench-title" variant="h6" sx={{ fontWeight: 750, whiteSpace: 'nowrap' }}>团队工作台</Typography>
         </Box>
-        {runs.length > 1 && <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 300 }, maxWidth: 480 }}>
+        {runs.length > 1 && <FormControl size="small" sx={{ width: { xs: '100%', sm: 'auto' }, minWidth: { xs: 0, sm: 220 }, maxWidth: 360, flex: { sm: '1 1 220px' } }}>
           <Select value={run.run.id} aria-label="选择团队任务" onChange={(event) => {
             setSelectedRunId(event.target.value);
             setSelectedTaskId(null);
+            setCharacterPreview(null);
             setReviewActionError(null);
           }}>
             {runs.map((item) => <MenuItem key={item.run.id} value={item.run.id}>
@@ -292,7 +297,18 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
           {task && <Box sx={{ display: 'grid', gap: 2, maxWidth: 960, mx: 'auto', overflowWrap: 'anywhere' }}>
             {(taskTitle(task) || details) && <Box>
               {taskTitle(task) && <Typography variant="h6" sx={{ fontWeight: 750, overflowWrap: 'anywhere' }}>{taskTitle(task)}</Typography>}
-              {details && <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{details.character ? `${details.role} · ${details.character}` : details.role}</Typography>}
+              {details && <Stack direction="row" spacing={0.75} sx={{ mt: 0.5, alignItems: 'center' }}>
+                <Typography variant="body2" color="text.secondary">{details.role}</Typography>
+                {details.characterId && <Typography variant="body2" color="text.secondary">·</Typography>}
+                {details.characterId && characters.some((item) => item.id === details.characterId && item.deletedAt == null)
+                  ? <Button size="small" color="inherit" onClick={(event) => setCharacterPreview({ characterId: details.characterId, anchorRect: event.currentTarget.getBoundingClientRect() })}
+                    sx={{ p: 0.25, minWidth: 0, gap: 0.75, textTransform: 'none' }}>
+                    <Avatar src={isImageAvatar(characters.find((item) => item.id === details.characterId)?.avatar) ? characters.find((item) => item.id === details.characterId)?.avatar : undefined}
+                      sx={{ width: 24, height: 24, fontSize: 12 }}>{details.character.slice(0, 1)}</Avatar>
+                    {details.character}
+                  </Button>
+                  : details.characterId && <Typography variant="body2" color="text.secondary">{details.character}</Typography>}
+              </Stack>}
             </Box>}
             {details && <Box sx={{ display: 'grid', gap: 1.25 }}>
               <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>{details.goal}</Typography>
@@ -378,7 +394,14 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
               <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' }, gap: 1 }}>
                 {[...collaborators.entries()].map(([key, collaborator]) => <Box key={key} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1.5, minWidth: 0 }}>
                   <Typography variant="subtitle2" sx={{ fontWeight: 700, overflowWrap: 'anywhere' }}>{collaborator.role}</Typography>
-                  {collaborator.character && <Typography variant="caption" color="text.secondary">{collaborator.character}</Typography>}
+                  {collaborator.characterId && characters.some((item) => item.id === collaborator.characterId && item.deletedAt == null)
+                    ? <Button size="small" color="inherit" onClick={(event) => setCharacterPreview({ characterId: collaborator.characterId, anchorRect: event.currentTarget.getBoundingClientRect() })}
+                      sx={{ justifyContent: 'flex-start', width: 'fit-content', minWidth: 0, gap: 0.75, px: 0.5, textTransform: 'none' }}>
+                      <Avatar src={isImageAvatar(characters.find((item) => item.id === collaborator.characterId)?.avatar) ? characters.find((item) => item.id === collaborator.characterId)?.avatar : undefined}
+                        sx={{ width: 24, height: 24, fontSize: 12 }}>{collaborator.character.slice(0, 1)}</Avatar>
+                      {collaborator.character}
+                    </Button>
+                    : collaborator.character && <Typography variant="caption" color="text.secondary">{collaborator.character}</Typography>}
                   <Stack sx={{ mt: 1 }}>
                     {collaborator.tasks.map((item) => <Button key={item.id} size="small" color="inherit" onClick={() => setSelectedTaskId(item.id)}
                       sx={{ justifyContent: 'space-between', textAlign: 'left', minWidth: 0, gap: 1, px: 0.5 }}>
@@ -437,12 +460,17 @@ export default function AssistantTeamWorkbench({ open, onClose, runs, canRun, is
         </Box>
     </DialogContent>
     <DialogActions sx={{ px: { xs: 2, md: 3 }, py: 1.5, borderTop: '1px solid', borderColor: 'divider', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1 }}>
-      <Button onClick={onClose}>关闭</Button>
+      <Button onClick={() => { setCharacterPreview(null); onClose(); }}>关闭</Button>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
         {canRun && running && !run.run.pauseRequested && <Button onClick={() => { void onPause(run).then(() => setPauseError(null)).catch((error: unknown) => setPauseError(error instanceof Error ? error.message : '暂停任务失败')); }}>当前步骤完成后暂停</Button>}
         {canResume && <Button variant="contained" onClick={() => onResume(run)}>{primaryActionLabel}</Button>}
       </Stack>
       {resumeAllError && <Typography role="alert" variant="caption" color="error.main" sx={{ flexBasis: '100%', textAlign: 'right' }}>{resumeAllError}</Typography>}
     </DialogActions>
-  </Dialog>;
+  </Dialog>
+    {open && previewCharacter && characterPreview && <ProfilePreviewOverlay open kind="character" anchorRect={characterPreview.anchorRect}
+      character={previewCharacter} actionLabel="角色详情" actionTiming="immediate"
+      onAction={() => window.open(`/characters/${encodeURIComponent(previewCharacter.id)}/edit`, '_blank', 'noopener,noreferrer')}
+      onClose={() => setCharacterPreview(null)} />}
+  </>;
 }
